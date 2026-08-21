@@ -3,11 +3,11 @@
   "note": "Loop-Dee-Loup's own backlog of process/tooling items about the Loop itself, never a target repository's product backlog (e.g. Covenant's) — see docs/burn-order.md. Edited through tools/burn-order (see its README); safe to hand-edit, which is the only way to edit it from a phone. Finished work goes in the Done band with a done:{} block, never by deleting it from the bands; run `node tools/burn-order/verify.mjs` to check that every claim still resolves. SEEDED 2026-08-21 from issue #9 (LouPineWays/Loop-Dee-Loup): the tool itself (server.mjs, verify.mjs, this file's shape) copied from Covenant/Word_Burner's tools/burn-order, adapted for this repo's own lane taxonomy (process, tooling, templates, docs). This replaces issue #6 as the pinned tracking issue's body being the source of truth; issue #6 is updated to point here instead. No candidates existed in issue #6 at seed time, so every band below starts empty.",
   "order": {
     "Now": [],
-    "Soon": ["audit-template-format", "subagent-chat-discipline", "audit-issue-reuse-guard"],
+    "Soon": ["audit-template-format", "audit-issue-reuse-guard"],
     "Later": [],
     "Wishes": [],
     "Blocked": [],
-    "Done": []
+    "Done": ["subagent-chat-discipline"]
   },
   "items": {
     "audit-template-format": {
@@ -22,7 +22,8 @@
       "title": "AGENTS.md requires implementation work between issues/PRs to be delegated to subagents by default, so top-level chat stays to the fixed kickoff/decision/question/completion/blocked lines",
       "lane": "process",
       "note": "From issue #14 item 2: founder is still seeing step-by-step process chatter in Claude Code chat. AGENTS.md already has a Subagent dispatch section and fixed chat report formats, but frames delegation as merely 'approved,' not default/required for implementation work itself. Tighten the language so internal implementation steps are subagent-dispatched by default and top-level chat is limited to the fixed one-line formats already defined in AGENTS.md. Tracked in issue #16, PR #17.",
-      "blockedBy": ""
+      "blockedBy": "",
+      "done": { "on": "2026-08-21", "ref": "f8ba00a", "evidence": "AGENTS.md Subagent dispatch section tightened; see PR #17" }
     },
     "audit-issue-reuse-guard": {
       "id": "audit-issue-reuse-guard",
