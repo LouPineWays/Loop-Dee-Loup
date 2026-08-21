@@ -4,11 +4,11 @@
 
 Loop-Dee-Loup is the founder's hyper-lean agentic loop for vibecoding. It is not a simulation of a conventional software organization.
 
-The founder starts a Claude Code session with a short issue reference. The session executes one small, independently verifiable packet without routine involvement, records durable state in GitHub, prepares the next packet, and stops. A later session resumes from that durable state.
+The founder starts a Claude Code session with a short issue reference. That issue defines one subagent-sized vertical slice. The session completes the outcome across every necessary layer without routine involvement, records durable state in GitHub, prepares the next vertical slice, and stops.
 
 ## Hypothesis
 
-Issue-dispatched, low-chatter sessions will reduce message/context token consumption and founder coordination without weakening correctness.
+Issue-dispatched, low-chatter vertical slices will reduce message/context token consumption and founder coordination without weakening correctness.
 
 The optimization target is **validated product progress per token and substantive founder interruption**, not minimum tokens in isolation. One-line session dispatches are measured separately from judgment requests.
 
@@ -25,31 +25,36 @@ Covenant PR #94 must first close its existing bounded inline-review round. Its t
 
 Those corrections belong to PR #94's consolidated correction pass, not to the pilot.
 
-### Pilot scope after PR #94
+### First execution slice after PR #94
 
-1. Build the Buttondown signup form into `covenant.wolfscairn.com` from the settled Story 3.3 contract.
-2. Emit the documented GitHub Pages-compatible CSP through `site/build.py`.
-3. Preserve the no-JavaScript rule, graceful failure, CTA hierarchy, brand-wide list positioning, privacy link, IP boundary, and existing Covenant requirements.
-4. Run required local checks.
-5. Open the implementation PR and conduct Covenant's one bounded inline review.
-6. Verify and batch-fix every valid finding, then merge after all required gates pass.
-7. Run the exact-commit post-merge acceptance audit and create a correction packet only if it returns NOT CLEAN.
-8. Once live, interrupt the founder only for the manual Buttondown email flow: submit, confirm, receive a test broadcast, and unsubscribe.
-9. Verify that evidence, close FR-24 and `wolfscairn-list-and-privacy`, then finish the parent loop.
+**Outcome:** ship the complete Buttondown signup surface on `covenant.wolfscairn.com`.
+
+The single slice includes:
+
+- form markup from the settled Story 3.3 contract;
+- GitHub Pages-compatible CSP emitted through `site/build.py`;
+- no-JavaScript behavior and graceful Buttondown failure;
+- required CTA hierarchy, brand-wide positioning, privacy link, and presentation;
+- affected tests, fixtures, documentation, and generated output;
+- local verification, PR creation, one bounded inline review, consolidated valid fixes, and merge after all gates pass.
+
+Do not split form, CSP, presentation, tests, documentation, or review corrections into separate execution issues. They are layers and activities serving one shippable outcome.
+
+After merge, the required exact-commit acceptance audit is a control issue. The live Buttondown email flow is a founder-only external verification boundary: submit, confirm, receive a test broadcast, and unsubscribe. Verified evidence closes FR-24 and `wolfscairn-list-and-privacy`.
 
 ## Issue-dispatched loop
 
 1. **INTAKE:** record an accepted feature proposal and its outcome.
 2. **SNAPSHOT:** compress current truth into the parent issue.
-3. **SELECT:** derive exactly one next packet.
-4. **DISPATCH:** founder starts a fresh session with the issue reference.
-5. **EXECUTE:** session completes the packet without routine founder involvement.
-6. **VERIFY:** independently check code, tests, diff, and claimed state.
+3. **SLICE:** derive exactly one next subagent-sized vertical slice.
+4. **DISPATCH:** founder starts a fresh session with the slice issue reference.
+5. **EXECUTE:** session completes the entire slice without routine founder involvement.
+6. **VERIFY:** independently check the integrated outcome.
 7. **INTEGRATE:** use the target repository's PR, review, merge, and audit rules.
-8. **REFRESH:** update the parent snapshot and designate one next packet.
-9. **STOP:** end at the clean packet boundary.
+8. **REFRESH:** update the parent snapshot and designate one next slice.
+9. **STOP:** end at the clean slice boundary.
 10. **RESUME:** a later terse dispatch starts from GitHub state.
-11. **CLOSE:** finish only from verified acceptance evidence.
+11. **CLOSE:** finish only from verified feature acceptance evidence.
 
 ## State model
 
@@ -66,7 +71,7 @@ Those corrections belong to PR #94's consolidated correction pass, not to the pi
 - READY_NEXT_SESSION
 - DONE
 
-Only one packet may be NEXT. State transitions require evidence, not prose claims.
+Only one slice may be NEXT. State transitions require evidence, not prose claims.
 
 ## Measurements
 
@@ -79,8 +84,9 @@ Record for the experimental item and a comparable recent baseline where availabl
 - one-line dispatch messages;
 - substantive founder questions and manual actions;
 - unnecessary founder approval requests;
-- work packets created;
-- rework and correction packets;
+- vertical slices created;
+- control issues created;
+- rework and correction slices;
 - elapsed time to validated completion;
 - review and acceptance-audit outcomes.
 
@@ -94,7 +100,8 @@ The trial succeeds only if:
 - no routine in-session transition requires founder approval;
 - founder involvement beyond terse dispatch is limited to genuine judgment or manual-action boundaries;
 - issue maintenance costs less effort than the context it replaces;
-- a fresh session can act without reconstructing conversation history.
+- a fresh session can complete its slice without reconstructing conversation history;
+- execution issues remain vertical rather than multiplying by implementation layer.
 
 No target percentage is fixed before a baseline is measured.
 
@@ -102,10 +109,11 @@ No target percentage is fixed before a baseline is measured.
 
 Stop or redesign if:
 
-- sessions routinely need comments or prior children;
+- sessions routinely need comments or prior slices;
 - the parent becomes an append-only transcript;
 - decomposition predicts a large hierarchy before evidence requires it;
-- packet creation becomes clerical work;
+- one outcome is fragmented into research, backend, UI, test, or documentation issues;
+- issue creation becomes clerical work;
 - state is duplicated between Covenant's Burn Order and Loop-Dee-Loup;
 - agents cross scope or safety boundaries in the name of autonomy;
 - sessions request approval for routine technical transitions;
@@ -118,6 +126,7 @@ Stop or redesign if:
 - No general multi-repository platform.
 - No simulated company hierarchy or ceremony layer.
 - No comprehensive roadmap decomposition.
+- No horizontal ticket breakdown.
 - No replacement of Covenant's source of truth.
 - No weakening of repository review or merge gates.
 - No optimization of tokens at the expense of validated progress.
@@ -127,5 +136,5 @@ Stop or redesign if:
 After the stopping audit and live test:
 
 - **ADOPT:** use the loop for additional feature-sized work.
-- **REVISE:** change the state, packet, or interrupt contract and repeat once.
+- **REVISE:** change the state, slice, or interrupt contract and repeat once.
 - **REJECT:** retain only components proven better than the existing workflow.
