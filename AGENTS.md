@@ -59,7 +59,7 @@ After the founder returns the whole form:
 - record dependencies and proposed priority without duplicating the parent snapshot;
 - discard rejected options and unaccepted suggestions.
 
-A subsequent form is allowed only when the completed answers expose a new founder-level blocker that could not reasonably have been batched earlier. If two consecutive form rounds still produce no implementable vertical slice, stop and report a defective proposal, missing authority, or bad decomposition instead of continuing the questionnaire.
+A subsequent form is allowed only when the completed answers expose a new founder-level blocker that could not reasonably have been batched earlier. If two consecutive form rounds still produce no implementable vertical slice, diagnose a defective proposal, missing authority, or bad decomposition before generating the next consolidated form. Do not repeat questions already answered.
 
 If exactly one unforeseeable founder question blocks an in-progress slice, a direct concise question is allowed. Do not artificially hold it for a future batch.
 
