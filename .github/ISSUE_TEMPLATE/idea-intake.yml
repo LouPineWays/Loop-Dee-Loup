@@ -1,0 +1,31 @@
+name: Idea intake
+description: Log something you want added to Loop-Dee-Loup without free-form writing. Gets ironed out and folded into the Loop-Dee-Loup Burn Order.
+title: "[Idea] "
+labels: ["idea-intake"]
+body:
+  - type: markdown
+    attributes:
+      value: "For items about the Loop itself (process, tooling, templates). Not for target-repository product features — those go through that repository's own intake."
+  - type: textarea
+    id: idea
+    attributes:
+      label: What do you want added or changed?
+      description: A sentence or two is enough.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why (optional)
+    validations:
+      required: false
+  - type: dropdown
+    id: urgency
+    attributes:
+      label: Urgency
+      options:
+        - Whenever
+        - Soon
+        - Blocking something now
+    validations:
+      required: false

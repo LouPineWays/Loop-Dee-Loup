@@ -55,7 +55,7 @@ After the founder returns the whole form:
 
 - normalize the answers into settled parent-snapshot decisions;
 - derive implementable vertical slices from the critical path;
-- convert only founder-accepted independent outcomes into Burn Order candidates (the target repository's own prioritized backlog, e.g. Covenant's — never a Loop-Dee-Loup-owned artifact);
+- convert only founder-accepted independent outcomes into Burn Order candidates. A target repository's Burn Order (e.g. Covenant's) is that repository's own prioritized backlog; Loop-Dee-Loup does not create or own it. Loop-Dee-Loup separately maintains its own Burn Order for items about the Loop itself — see `docs/burn-order.md`. Never merge the two;
 - record dependencies and proposed priority without duplicating the parent snapshot;
 - discard rejected options and unaccepted suggestions.
 
@@ -86,6 +86,14 @@ After dispatch, the session must:
 
 Do not ask whether to proceed with mechanically determined implementation, checks, verified review corrections, or handoff preparation. A new session start may be required to continue, but that is scheduling rather than approval.
 
+Once the founder has responded in an active session (e.g. answering review questions, completing a decision form, or clarifying an issue), continue mechanically through the resulting work — implementation, checks, fixes, PR — without pausing for routine confirmation. Stop only at a genuine completion, a founder interrupt condition, or a real blocker, and say which.
+
+## Subagent dispatch
+
+Within a session the founder has already started, delegating read-heavy or exploratory work (issue/PR reads, research, the Stage 2 audit trigger/wait/extract) to subagents is an approved way to keep the primary session's context lean. It is a context-isolation technique, not a control boundary, and does not require separate founder approval.
+
+It becomes the automatic session launcher the Prototype guardrail defers only if a session uses subagent dispatch to originate work on new issues or PRs on its own initiative, without the founder having started that session in the first place. The gate that must never be bypassed is *who starts the session*, not *what the session delegates internally once running*.
+
 ## Session communication budget
 
 Keep Claude Code messages deliberately terse. Normally send only:
@@ -95,6 +103,20 @@ Keep Claude Code messages deliberately terse. Normally send only:
 - a bounded completion or blocked handoff.
 
 Do not narrate repository exploration, repeat issue contents, provide speculative plans already settled by the slice, or use chat as the durable log. Put evidence and current state in GitHub.
+
+### Fixed chat report formats
+
+Use these exact one-line formats for the terminal chat message of each communication type above; do not expand them into prose. Full evidence stays in the linked issue or PR, not in chat.
+
+- Kickoff: `Starting #<issue>.`
+- Decision needed: `Decision needed: #<form-issue>.`
+- Direct question: `Question: <one clause>?` — for the single unforeseeable founder question the decision-form rule allows mid-slice; do not open a decision-form issue for it.
+- Clean completion: `CLEAN — <what merged/closed>. Next: #<slice>` (or `Next: None`).
+- Blocked: `BLOCKED — <one clause>. Next: <manual action>` (or `Next: None`).
+
+An ad-hoc issue — one not created from a structured template (`parent-execution`, `work-packet`, `founder-decision-form`, `audit-control-issue`, `idea-intake`) — gets a single terse line for a body, not prose paragraphs. Templates keep their required fields.
+
+When babysitting a PR or issue between events, prefer a short self-check-in (about 10–15 minutes) over a long one (e.g. an hour). A long gap does not save tokens here: it forces a full state reload of the PR/issue on wake instead of a cheap incremental check, and the event subscription already covers most updates — the check-in is only a fallback.
 
 ## Founder interrupt conditions
 
@@ -124,6 +146,10 @@ A parent issue body is a mutable current-state snapshot, not an append-only diar
 - next slice.
 
 History may remain in comments for auditability, but executors must not normally read it.
+
+## Loop-Dee-Loup Burn Order
+
+Loop-Dee-Loup maintains its own Burn Order — a prioritized backlog of process/tooling items about the Loop itself, distinct from and never merged with any target repository's own Burn Order. Full spec, artifact location, and the idea-intake-to-Burn-Order conversion procedure are in `docs/burn-order.md`.
 
 ## Slice handoff
 
@@ -172,17 +198,19 @@ Once a bounded review cycle is authorized and underway, continue through verifie
 
 For review-worthy work, preserve any stricter target-repository policy and follow `docs/bounded-review-cycle.md` otherwise:
 
-1. one inline independent PR review at a frozen head;
+1. one inline independent PR review at a frozen head, requested by posting `@codex review` as a PR comment;
 2. verify and deduplicate all findings;
 3. batch all valid fixes and rerun checks;
 4. merge without a second inline invocation only when no known blocker remains;
 5. run one holistic, read-only issue audit of the exact merge commit;
-6. trigger Codex from a separate issue comment, not from the issue body, after checking that no trigger already exists;
+6. trigger Codex from a separate issue comment containing `@codex review`, not from the issue body, after checking that no trigger already exists;
 7. treat posting the issue trigger and arranging its bounded follow-up as one atomic action;
 8. extract only the compact verdict needed by the controlling session;
 9. close on CLEAN, or create one consolidated correction outcome on NOT CLEAN.
 
 “One inline round” limits reviewer invocations; it never authorizes merging a known defect. The post-merge audit is a control issue and the stopping review for that cycle.
+
+**Codex, triggered by `@codex review` in a comment, is the only reviewer for both stages.** Never substitute or supplement it with another review-request tool or mechanism (e.g. a native "request Copilot review" action) — if Codex is silent or slow, that is latency to wait out via event subscription and short check-ins, not a reason to reach for a different reviewer.
 
 ## Prototype guardrail
 

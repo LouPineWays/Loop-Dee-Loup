@@ -70,7 +70,7 @@ assignees: ""
 
 ## Burn Order authorization
 
-<!-- The Burn Order is the target repository's own prioritized backlog (e.g. Covenant's). Loop-Dee-Loup does not own or create it. -->
+<!-- A target repository's Burn Order (e.g. Covenant's) is that repository's own prioritized backlog. If this form's outcomes are about Loop-Dee-Loup itself, route them to Loop-Dee-Loup's own Burn Order (docs/burn-order.md) instead — never merge the two. -->
 <!-- Mark one. -->
 
 - [ ] Treat accepted independent outcomes above as Burn Order candidates.

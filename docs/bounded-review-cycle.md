@@ -12,7 +12,7 @@ Do not attach this cycle to trivial work merely because the mechanism exists. Pr
 
 1. Complete the slice and required local checks.
 2. Freeze and record the PR head SHA.
-3. Request exactly one independent inline review at that head. Check first whether it was already requested; duplicate invocations at the same head are parallel opinions in one round, not new rounds.
+3. Request exactly one independent inline review at that head by posting a PR comment containing `@codex review` — the same trigger mechanism as Stage 2. Check first whether it was already requested at this head. Never use a different reviewer tool or mechanism (e.g. GitHub's own Copilot-review request) as a substitute or supplement — that is not the documented reviewer and its silence or delay does not license falling back to one. Duplicate `@codex review` invocations at the same head are parallel opinions in one round, not new rounds.
 4. Require complete-change inspection, actionable defects only, and separation of defects from scope expansion, preference, deliberate deferral, or superseded material.
 5. Verify every finding. Reject false positives with a recorded reason and deduplicate valid findings by root cause.
 6. Batch all valid findings into one consolidated correction pass and rerun required checks.
@@ -28,7 +28,7 @@ Once Stage 1 has been requested, the PR body is the durable checkpoint. Make it 
 1. Record the exact merge commit on the target branch, not merely the PR head.
 2. Start the audit from a fresh independent context. Open one control issue containing the complete read-only audit specification, using the `audit-control-issue` issue template.
 3. Verify the created issue body by direct read. It must survive transport intact and name the exact commit.
-4. Check whether an invocation already exists, then post one separate issue comment to trigger the reviewer. An invocation in the issue body is specification only and does not reliably start Codex. Never invoke from both places.
+4. Check whether an invocation already exists, then post one separate issue comment containing `@codex review` to trigger the reviewer — never any other reviewer tool or mechanism. An invocation in the issue body is specification only and does not reliably start Codex. Never invoke from both places.
 5. Treat posting the trigger and arranging its bounded follow-up as one atomic action. Issue audit responses are not covered by PR-only subscriptions.
 6. Keep the controlling session lean. Delegate the trigger, wait, and response extraction to one disposable worker or successor context when available. It reads the issue response in its own context and returns only the verdict, severity counts, and finding text required for action. Do not load the full audit transcript, verification-command list, or evidence prose into the orchestrator merely to learn whether Codex replied.
 7. Audit the exact merged commit and complete current files, applicable instructions, source-of-truth hierarchy, merged PR, and its single inline review.
