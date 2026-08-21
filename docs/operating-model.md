@@ -76,7 +76,7 @@ A decision is not itself a Burn Order item. Only an accepted outcome requiring i
 
 Another form is permitted only when an answer exposes a genuinely new blocker or dependency that was not reasonably visible earlier. Forms follow the critical path until at least one vertical slice is implementable.
 
-Two consecutive completed forms without an implementable slice trigger diagnosis. The session must identify whether the proposal is incoherent, authority is missing, or decomposition is too horizontal rather than continuing form generation indefinitely.
+Two consecutive completed forms without an implementable slice trigger diagnosis before another form. The session must identify whether the proposal is incoherent, authority is missing, or decomposition is too horizontal, then use that result to redirect the next critical-path form.
 
 ## Founder role
 
