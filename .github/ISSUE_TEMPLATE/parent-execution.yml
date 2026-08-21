@@ -1,0 +1,93 @@
+name: Parent execution
+description: Current-state controller for one founder-approved feature
+title: "[Loop] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: "Keep this body as compressed current truth. Resume it from a fresh session with: Run Loop-Dee-Loup issue #X."
+  - type: input
+    id: source
+    attributes:
+      label: Source item
+      description: Link or stable identifier for the originating proposal or source-queue item.
+    validations:
+      required: true
+  - type: dropdown
+    id: state
+    attributes:
+      label: State
+      options:
+        - PROPOSED
+        - NEEDS_FOUNDER
+        - READY
+        - EXECUTING
+        - VERIFYING
+        - REVIEW
+        - AUDIT
+        - CORRECTION
+        - BLOCKED_FAILURE
+        - BLOCKED_EXTERNAL
+        - READY_NEXT_SESSION
+        - DONE
+    validations:
+      required: true
+  - type: textarea
+    id: objective
+    attributes:
+      label: Accepted outcome
+      description: State the user or business result, not an implementation activity.
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Current state
+      description: Current verified facts only.
+    validations:
+      required: true
+  - type: textarea
+    id: decisions
+    attributes:
+      label: Settled decisions
+      description: State decisions only; do not reproduce their discussion.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals
+    validations:
+      required: true
+  - type: textarea
+    id: authority
+    attributes:
+      label: Minimum authority
+      description: List only the issue bodies and repository files required for the next transition.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Feature acceptance
+    validations:
+      required: true
+  - type: textarea
+    id: completed
+    attributes:
+      label: Completed packets
+      description: One-line verified outcomes and links.
+  - type: textarea
+    id: interrupt
+    attributes:
+      label: Founder interrupt
+      description: Write None, or one concise unresolved question/manual action and why existing authority cannot settle it.
+    validations:
+      required: true
+  - type: textarea
+    id: next
+    attributes:
+      label: Next work packet
+      description: Exactly one issue link or None. A fresh session can resume from this reference without reading history.
+    validations:
+      required: true

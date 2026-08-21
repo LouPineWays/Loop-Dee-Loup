@@ -1,0 +1,73 @@
+name: Vertical slice
+description: One subagent-sized, independently verifiable product outcome
+title: "[Slice] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: "This issue must own one coherent outcome across every layer it requires. Do not split internal implementation steps into sibling issues."
+  - type: input
+    id: parent
+    attributes:
+      label: Parent loop
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Observable outcome
+      description: State the capability, correction, or closure result. Do not state an activity such as research, backend work, tests, or documentation.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Minimum required context
+      description: Point to the parent snapshot and essential repository files. Do not require comment history.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Required layers and activities
+      description: Include all code, UI, configuration, tests, documentation, generated output, review fixes, and verification needed for the outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Integrated acceptance criteria
+      description: Criteria must verify the complete slice rather than isolated layers.
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Required checks
+    validations:
+      required: true
+  - type: textarea
+    id: interrupt
+    attributes:
+      label: Interrupt conditions
+      description: List only slice-specific additions to the operating model's founder interrupt conditions.
+    validations:
+      required: true
+  - type: textarea
+    id: stop
+    attributes:
+      label: Session stopping condition
+      description: The slice is complete only when its outcome is integrated and verified, or when an interrupt condition blocks it.
+    validations:
+      required: true
+  - type: textarea
+    id: handoff
+    attributes:
+      label: Durable completion handoff
+      description: "Use STATUS, OUTCOME, CHANGED, VERIFIED, DECISIONS, NEW RISKS, NEXT, PR. Keep this within 1,000–1,500 tokens; keep the chat summary much shorter."
