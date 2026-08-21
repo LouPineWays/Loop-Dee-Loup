@@ -4,7 +4,14 @@ Read this file before acting in this repository.
 
 ## Purpose
 
-Loop-Dee-Loup is a control plane for disposable agent sessions. Durable state belongs in concise, authoritative artifacts. Conversation history and issue comments are not the source of truth.
+Loop-Dee-Loup is a hyper-lean autonomous execution loop. Durable state belongs in concise, authoritative artifacts. Conversation history and issue comments are not the source of truth.
+
+The controller and executor have different lifetimes:
+
+- An executor handles one bounded packet, records evidence, and stops.
+- The controller refreshes durable state, selects the next transition, and starts a fresh executor automatically.
+
+An executor stopping is not the loop stopping.
 
 ## Authority
 
@@ -12,21 +19,47 @@ Use this order when claims conflict:
 
 1. The active work packet's explicit scope and acceptance criteria.
 2. The current parent issue snapshot.
-3. Repository documentation.
-4. Issue comments and historical discussion.
+3. The target repository's governing instructions and source of truth.
+4. Loop-Dee-Loup documentation.
+5. Issue comments and historical discussion.
 
 Escalate unresolved contradictions. Do not silently reconcile them.
 
-## Required execution behavior
+## Lean operating rules
 
-- Execute one bounded work packet per session.
-- Read only the repository files and issue bodies needed for that packet.
-- Do not read issue comments, closed child issues, old PR discussions, or logs by default.
-- Do not recursively retrieve context. A packet must contain or link to a compact current snapshot.
+- Use the smallest independently verifiable increment that advances the accepted feature.
+- Decompose only enough to identify the next safe packet.
+- Do not manufacture epics, sprints, ceremonies, departments, personas, or role handoffs unless they solve an observed control problem.
+- Do not create a child issue merely because another conversation turn or agent session is needed.
+- Read only the files and issue bodies needed for the active packet.
+- Do not recursively retrieve comments, closed children, old PR discussions, or logs by default.
 - Do not expand scope merely because adjacent work is visible.
-- Stop for a genuine founder decision, authority conflict, safety risk, or failed required check.
-- Otherwise finish the packet, record its result, and stop. Do not continue into the next packet.
-- Preserve the target repository's own branching, testing, review, and merge rules.
+- Preserve the target repository's IP boundary, branching, testing, review, merge, release, and destructive-action rules.
+
+## Autonomous continuation
+
+After a packet completes, the controller must:
+
+1. independently verify the claimed result;
+2. update the parent snapshot with durable facts only;
+3. determine the next state transition from current evidence;
+4. create or designate exactly one next packet when work remains;
+5. dispatch a fresh executor without founder confirmation when no interrupt condition applies.
+
+Routine implementation choices, test fixes, verified review corrections, packet handoffs, and merges after all repository gates pass do not require founder approval.
+
+## Founder interrupt conditions
+
+Stop the loop and ask a concise question only when existing authority cannot resolve:
+
+- product intent or the desired user/business outcome;
+- a material scope, UX, monetization, legal, privacy, security, or irreversible tradeoff;
+- required credentials or an external action that only the founder can perform;
+- a failed safety/correctness gate with no authorized recovery path;
+- whether a newly discovered opportunity belongs inside the approved feature;
+- a direct contradiction between controlling sources.
+
+Record the decision in the parent snapshot, then resume autonomously.
 
 ## Parent snapshots
 
@@ -46,9 +79,7 @@ History may remain in comments for auditability, but executors must not normally
 
 ## Work packets
 
-Create a child only at a meaningful context boundary: an independently completable unit, a founder decision, a different repository area, a merged PR boundary, or a distinct audit correction. Do not create children as substitutes for conversational turns.
-
-A completed packet must report, concisely:
+A packet must have one required outcome, bounded scope, explicit checks, and a stopping condition. A completed packet reports:
 
 - STATUS
 - CHANGED
@@ -62,4 +93,4 @@ Target at most 1,000–1,500 tokens for the complete handoff unless the packet d
 
 ## Prototype guardrail
 
-Do not integrate Loop-Dee-Loup into a production repository until the experiment contract explicitly authorizes it. The first trial is Covenant's remaining `wolfscairn-list-and-privacy` work after PR #94: build the Buttondown signup surface, then verify the live flow end to end.
+The first trial is Covenant's remaining `wolfscairn-list-and-privacy` work after PR #94: build the Buttondown signup surface, pass Covenant's existing gates, then verify the live flow end to end. Do not generalize the controller or change production-repository process rules until evidence from this trial justifies it.
