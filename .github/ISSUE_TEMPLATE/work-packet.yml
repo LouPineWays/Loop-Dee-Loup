@@ -1,11 +1,11 @@
-name: Work packet
-description: One independently verifiable Claude Code transaction
-title: "[Packet] "
+name: Vertical slice
+description: One subagent-sized, independently verifiable product outcome
+title: "[Slice] "
 labels: []
 body:
   - type: markdown
     attributes:
-      value: "Run this packet in one low-chatter session. Record evidence and the next state in GitHub, then stop."
+      value: "This issue must own one coherent outcome across every layer it requires. Do not split internal implementation steps into sibling issues."
   - type: input
     id: parent
     attributes:
@@ -15,20 +15,22 @@ body:
   - type: textarea
     id: outcome
     attributes:
-      label: Required outcome
+      label: Observable outcome
+      description: State the capability, correction, or closure result. Do not state an activity such as research, backend work, tests, or documentation.
     validations:
       required: true
   - type: textarea
     id: context
     attributes:
       label: Minimum required context
-      description: Point to the current parent snapshot and essential repository files. Do not require comment history.
+      description: Point to the parent snapshot and essential repository files. Do not require comment history.
     validations:
       required: true
   - type: textarea
     id: scope
     attributes:
-      label: In scope
+      label: Required layers and activities
+      description: Include all code, UI, configuration, tests, documentation, generated output, review fixes, and verification needed for the outcome.
     validations:
       required: true
   - type: textarea
@@ -40,7 +42,8 @@ body:
   - type: textarea
     id: acceptance
     attributes:
-      label: Acceptance criteria
+      label: Integrated acceptance criteria
+      description: Criteria must verify the complete slice rather than isolated layers.
     validations:
       required: true
   - type: textarea
@@ -53,18 +56,18 @@ body:
     id: interrupt
     attributes:
       label: Interrupt conditions
-      description: List only packet-specific additions to the operating model's founder interrupt conditions.
+      description: List only slice-specific additions to the operating model's founder interrupt conditions.
     validations:
       required: true
   - type: textarea
     id: stop
     attributes:
       label: Session stopping condition
-      description: Define completion or escalation. Prepare the next packet but do not absorb a distinct context boundary.
+      description: The slice is complete only when its outcome is integrated and verified, or when an interrupt condition blocks it.
     validations:
       required: true
   - type: textarea
     id: handoff
     attributes:
       label: Durable completion handoff
-      description: "Use STATUS, CHANGED, VERIFIED, DECISIONS, NEW RISKS, NEXT, PR. Keep this within 1,000–1,500 tokens; keep the chat summary much shorter."
+      description: "Use STATUS, OUTCOME, CHANGED, VERIFIED, DECISIONS, NEW RISKS, NEXT, PR. Keep this within 1,000–1,500 tokens; keep the chat summary much shorter."
