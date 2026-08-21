@@ -60,7 +60,7 @@ After the completed form returns:
 
 1. write settled answers into the parent snapshot;
 2. convert the critical-path outcome into implementable vertical slices;
-3. identify accepted independent outcomes that belong in the Burn Order (the target repository's own prioritized backlog, not something Loop-Dee-Loup creates or owns);
+3. identify accepted independent outcomes and route them to the correct Burn Order: a target repository's own (not something Loop-Dee-Loup creates or owns), or Loop-Dee-Loup's own (`docs/burn-order.md`) when the outcome is about the Loop itself;
 4. discard rejected options and avoid turning every suggestion into backlog work;
 5. generate another form only if the answers expose new founder-level blockers that could not reasonably have been included earlier.
 
