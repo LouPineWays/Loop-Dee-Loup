@@ -12,6 +12,21 @@ Issue-dispatched, low-chatter vertical slices will reduce message/context token 
 
 The optimization target is **validated product progress per token and substantive founder interruption**, not minimum tokens in isolation. One-line session dispatches are measured separately from judgment requests.
 
+## Decision-form cycle
+
+When the accepted outcome does not yet support an implementable vertical slice:
+
+1. inspect the repository and map the currently visible critical path;
+2. batch all founder-level blocking decisions into one form;
+3. include recommendations, tradeoffs, suggested defaults, per-question comments, and a general comments field;
+4. accept the completed form as one durable response;
+5. write settled decisions into the parent snapshot;
+6. add only founder-accepted independent outcomes as Burn Order candidates;
+7. generate another form only for newly exposed critical blockers;
+8. diagnose the proposal or decomposition if two completed forms still yield no implementable slice.
+
+For the Covenant pilot, the Story 3.3 contract already settles the implementation path, so no decision form should be generated unless repository inspection exposes a genuine unresolved founder choice.
+
 ## First trial
 
 Run Covenant's active `wolfscairn-list-and-privacy` Burn Order item through the full loop.
@@ -46,15 +61,17 @@ After merge, the required exact-commit acceptance audit is a control issue. The 
 
 1. **INTAKE:** record an accepted feature proposal and its outcome.
 2. **SNAPSHOT:** compress current truth into the parent issue.
-3. **SLICE:** derive exactly one next subagent-sized vertical slice.
-4. **DISPATCH:** founder starts a fresh session with the slice issue reference.
-5. **EXECUTE:** session completes the entire slice without routine founder involvement.
-6. **VERIFY:** independently check the integrated outcome.
-7. **INTEGRATE:** use the target repository's PR, review, merge, and audit rules.
-8. **REFRESH:** update the parent snapshot and designate one next slice.
-9. **STOP:** end at the clean slice boundary.
-10. **RESUME:** a later terse dispatch starts from GitHub state.
-11. **CLOSE:** finish only from verified feature acceptance evidence.
+3. **CRITICAL PATH:** identify founder decisions blocking implementable slices.
+4. **FORM:** batch those decisions when needed and incorporate the completed response.
+5. **SLICE:** derive exactly one next subagent-sized vertical slice.
+6. **DISPATCH:** founder starts a fresh session with the slice issue reference.
+7. **EXECUTE:** session completes the entire slice without routine founder involvement.
+8. **VERIFY:** independently check the integrated outcome.
+9. **INTEGRATE:** use the target repository's PR, review, merge, and audit rules.
+10. **REFRESH:** update the parent snapshot and designate one next slice.
+11. **STOP:** end at the clean slice boundary.
+12. **RESUME:** a later terse dispatch starts from GitHub state.
+13. **CLOSE:** finish only from verified feature acceptance evidence.
 
 ## State model
 
@@ -82,6 +99,8 @@ Record for the experimental item and a comparable recent baseline where availabl
 - repository/context rereading tokens;
 - fresh Claude Code sessions;
 - one-line dispatch messages;
+- decision forms generated and completed;
+- questions per form and form rounds before an implementable slice;
 - substantive founder questions and manual actions;
 - unnecessary founder approval requests;
 - vertical slices created;
@@ -116,6 +135,9 @@ Stop or redesign if:
 - issue creation becomes clerical work;
 - state is duplicated between Covenant's Burn Order and Loop-Dee-Loup;
 - agents cross scope or safety boundaries in the name of autonomy;
+- sessions ask foreseeable founder questions serially instead of batching them;
+- decision-form answers create speculative or duplicate Burn Order items;
+- two completed forms fail to produce an implementable slice;
 - sessions request approval for routine technical transitions;
 - chat narration remains the dominant token category;
 - compressed context causes defects or rework.
