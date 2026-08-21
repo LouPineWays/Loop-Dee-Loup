@@ -1,0 +1,88 @@
+name: Parent execution
+description: Current-state control plane for one active source-queue item
+title: "[Execution] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: "Keep this body as the compressed current truth. Do not turn comments into required reading."
+  - type: input
+    id: source
+    attributes:
+      label: Source item
+      description: Link or stable identifier for the originating Burn Order item.
+    validations:
+      required: true
+  - type: dropdown
+    id: state
+    attributes:
+      label: State
+      options:
+        - PROPOSED
+        - READY
+        - IN_PROGRESS
+        - BLOCKED_DECISION
+        - BLOCKED_FAILURE
+        - REVIEW
+        - AUDIT
+        - CORRECTION
+        - DONE
+    validations:
+      required: true
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Current state
+    validations:
+      required: true
+  - type: textarea
+    id: decisions
+    attributes:
+      label: Settled decisions
+      description: State decisions only; do not reproduce their discussion.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals
+    validations:
+      required: true
+  - type: textarea
+    id: authority
+    attributes:
+      label: Authoritative files
+      description: List only material the executor must read.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+    validations:
+      required: true
+  - type: textarea
+    id: completed
+    attributes:
+      label: Completed packets
+      description: One-line verified outcomes and links.
+  - type: textarea
+    id: blocker
+    attributes:
+      label: Current blocker
+      description: Write None when unblocked.
+    validations:
+      required: true
+  - type: textarea
+    id: next
+    attributes:
+      label: Next work packet
+      description: Exactly one issue link or None.
+    validations:
+      required: true
