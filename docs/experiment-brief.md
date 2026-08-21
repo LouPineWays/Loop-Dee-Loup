@@ -23,7 +23,7 @@ When the accepted outcome does not yet support an implementable vertical slice:
 5. write settled decisions into the parent snapshot;
 6. add only founder-accepted independent outcomes as Burn Order candidates;
 7. generate another form only for newly exposed critical blockers;
-8. diagnose the proposal or decomposition if two completed forms still yield no implementable slice.
+8. diagnose and redirect the critical path before a third form if two completed forms still yield no implementable slice.
 
 For the Covenant pilot, the Story 3.3 contract already settles the implementation path, so no decision form should be generated unless repository inspection exposes a genuine unresolved founder choice.
 
