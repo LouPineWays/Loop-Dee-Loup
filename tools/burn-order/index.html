@@ -740,9 +740,14 @@
 
     if (panel.editId) {
       var it = state.items[panel.editId];
-      it.title = title; it.lane = lane; it.blockedBy = block; it.note = note;
-      if (done) it.done = done; else delete it.done;
       var oldB = bucketOf(panel.editId);
+      it.title = title; it.lane = lane; it.blockedBy = block; it.note = note;
+      // Editing while staying in (or entering) Done applies the form's done fields directly.
+      // Editing while leaving Done for a different bucket must NOT touch it.done here: doMove
+      // below is what captures the real block onto the ranking-session origin so a cancel can
+      // restore it, and deleting it first (as this used to do) hands doMove a null block,
+      // producing the exact fabricated-blank-on-cancel bug this comment now prevents.
+      if (bucket === "Done") { it.done = done; } else if (oldB !== "Done") { delete it.done; }
       closePanel();
       if (oldB !== bucket) { doMove(it.id, bucket); } else { save(); render(); }
     } else {
