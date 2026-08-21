@@ -66,7 +66,7 @@ Completed answers are routed by meaning:
 
 - **Settled decision:** compress into the parent snapshot.
 - **Current vertical slice:** place in the slice contract and acceptance criteria.
-- **Accepted independent outcome:** create a Burn Order candidate with dependencies and proposed position.
+- **Accepted independent outcome:** create a candidate for the Burn Order — the target repository's own prioritized backlog (e.g. Covenant's), not a Loop-Dee-Loup artifact — with dependencies and proposed position.
 - **Rejected option:** retain only if necessary to prevent the same question recurring; do not create work.
 - **Unclear answer:** include with any other newly exposed blockers in the next consolidated form.
 

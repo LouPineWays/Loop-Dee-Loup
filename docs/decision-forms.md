@@ -55,7 +55,7 @@ After return:
 | Rejected option | Minimal decision record only when needed to prevent repetition |
 | Unresolved or contradictory answer | Next consolidated form if it blocks the critical path |
 
-Do not put raw form discussion into the Burn Order. The Burn Order contains outcomes and priority, not decision transcripts.
+Do not put raw form discussion into the Burn Order. The Burn Order is the target repository's own prioritized backlog (e.g. Covenant's), not a Loop-Dee-Loup artifact, and it contains outcomes and priority, not decision transcripts.
 
 ## Round discipline
 

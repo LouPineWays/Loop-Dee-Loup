@@ -55,7 +55,7 @@ After the founder returns the whole form:
 
 - normalize the answers into settled parent-snapshot decisions;
 - derive implementable vertical slices from the critical path;
-- convert only founder-accepted independent outcomes into Burn Order candidates;
+- convert only founder-accepted independent outcomes into Burn Order candidates (the target repository's own prioritized backlog, e.g. Covenant's — never a Loop-Dee-Loup-owned artifact);
 - record dependencies and proposed priority without duplicating the parent snapshot;
 - discard rejected options and unaccepted suggestions.
 

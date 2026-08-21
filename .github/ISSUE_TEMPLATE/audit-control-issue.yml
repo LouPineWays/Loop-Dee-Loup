@@ -1,0 +1,59 @@
+name: Post-merge audit
+description: Stage 2 read-only audit of one exact merge commit
+title: "[Audit] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: "This issue is a read-only control boundary. Modify nothing in the target repository from this issue. See docs/bounded-review-cycle.md Stage 2."
+  - type: input
+    id: merged_pr
+    attributes:
+      label: Merged PR
+      description: Link to the merged pull request being audited.
+    validations:
+      required: true
+  - type: input
+    id: merge_commit
+    attributes:
+      label: Exact merge commit
+      description: The exact commit SHA on the target branch, not merely the PR head.
+    validations:
+      required: true
+  - type: textarea
+    id: inline_review
+    attributes:
+      label: Stage 1 inline review disposition
+      description: Link the single inline review round and state how each valid finding was fixed.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Audit scope
+      description: Complete current files, applicable instructions, and source-of-truth hierarchy covered by this audit.
+    validations:
+      required: true
+  - type: textarea
+    id: findings
+    attributes:
+      label: Findings
+      description: Deduplicate by root cause. For each finding give exact evidence, consequence, smallest correction, and whether founder judgment is required.
+    validations:
+      required: true
+  - type: dropdown
+    id: verdict
+    attributes:
+      label: Verdict
+      options:
+        - CLEAN
+        - NOT CLEAN
+    validations:
+      required: true
+  - type: textarea
+    id: next
+    attributes:
+      label: Next authorized action
+      description: On NOT CLEAN, link the one consolidated correction PR. On CLEAN, write None.
+    validations:
+      required: true

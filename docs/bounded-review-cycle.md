@@ -26,7 +26,7 @@ Once Stage 1 has been requested, the PR body is the durable checkpoint. Make it 
 ## Stage 2: one post-merge issue audit
 
 1. Record the exact merge commit on the target branch, not merely the PR head.
-2. Start the audit from a fresh independent context. Open one control issue containing the complete read-only audit specification.
+2. Start the audit from a fresh independent context. Open one control issue containing the complete read-only audit specification, using the `audit-control-issue` issue template.
 3. Verify the created issue body by direct read. It must survive transport intact and name the exact commit.
 4. Check whether an invocation already exists, then post one separate issue comment to trigger the reviewer. An invocation in the issue body is specification only and does not reliably start Codex. Never invoke from both places.
 5. Treat posting the trigger and arranging its bounded follow-up as one atomic action. Issue audit responses are not covered by PR-only subscriptions.
