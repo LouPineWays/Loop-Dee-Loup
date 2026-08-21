@@ -1,0 +1,63 @@
+name: Work packet
+description: One independently completable agent transaction
+title: "[Packet] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: "Execute only this packet. Record the bounded handoff and stop."
+  - type: input
+    id: parent
+    attributes:
+      label: Parent execution issue
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Required outcome
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Minimum required context
+      description: Point to the current parent snapshot and only essential repository files. Do not require comment history.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: In scope
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Required checks
+    validations:
+      required: true
+  - type: textarea
+    id: stop
+    attributes:
+      label: Stopping condition
+      description: Define completion and conditions that require escalation.
+    validations:
+      required: true
+  - type: textarea
+    id: handoff
+    attributes:
+      label: Completion handoff
+      description: "Use STATUS, CHANGED, VERIFIED, DECISIONS, NEW RISKS, NEXT, PR. Keep the complete handoff within 1,000–1,500 tokens unless justified."
