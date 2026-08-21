@@ -1,62 +1,72 @@
 # Initial experiment brief
 
+## Product intent
+
+Loop-Dee-Loup is the founder's own hyper-lean agentic loop for vibecoding. It is not a simulation of a conventional software organization.
+
+A founder-approved feature is decomposed just in time into small, independently verifiable packets. Fresh agents execute those packets. The controller verifies results and advances automatically. The founder is interrupted only for unresolved product judgment, material risk or tradeoffs, credentials/manual external actions, or genuine exceptions.
+
 ## Hypothesis
 
-Replacing persistent agent conversations with compact GitHub state snapshots and bounded work packets will reduce message/context token consumption without reducing correctness or increasing human coordination.
+A compact autonomous loop will reduce message/context token consumption and founder coordination without weakening correctness.
 
-The optimization target is **validated Burn Order progress per token**, not minimum tokens in isolation.
+The optimization target is **validated product progress per token and founder interruption**, not minimum tokens or maximum autonomous activity in isolation.
 
 ## First trial
 
-Run Covenant's active `wolfscairn-list-and-privacy` Burn Order item through the full control-plane loop.
+Run Covenant's active `wolfscairn-list-and-privacy` Burn Order item through the full loop.
 
 ### Entry gate
 
-Covenant PR #94 must first close its one bounded inline-review round. Its two current P1 findings are documentation corrections:
+Covenant PR #94 must first close its existing bounded inline-review round. Its two current P1 findings are documentation corrections:
 
 1. Reconcile published source-label claims with Buttondown tags being unavailable and unset.
 2. Update the decision checklist so steps 1–7 are complete and step 8 is the sole outstanding item.
 
-Those corrections belong to PR #94's existing consolidated correction pass, not to the Loop-Dee-Loup pilot.
+Those corrections belong to PR #94's consolidated correction pass, not to the pilot.
 
 ### Pilot scope after PR #94
 
-The remaining product work is:
+1. Build the Buttondown signup form into `covenant.wolfscairn.com` from the settled Story 3.3 contract.
+2. Emit the documented GitHub Pages-compatible CSP through `site/build.py`.
+3. Preserve the no-JavaScript rule, graceful failure, CTA hierarchy, brand-wide list positioning, privacy link, IP boundary, and existing Covenant requirements.
+4. Run required local checks.
+5. Open the implementation PR and conduct Covenant's one bounded inline review.
+6. Verify and batch-fix every valid finding, then merge after all required gates pass.
+7. Run the exact-commit post-merge acceptance audit and create a correction packet only if it returns NOT CLEAN.
+8. Once live, interrupt the founder only for the manual Buttondown email flow: submit, confirm, receive a test broadcast, and unsubscribe.
+9. Verify that evidence, close FR-24 and `wolfscairn-list-and-privacy`, then finish the parent loop.
 
-1. Build the Buttondown signup form into the Covenant publication site at `covenant.wolfscairn.com`, using the settled Story 3.3 integration contract.
-2. Emit the documented CSP through `site/build.py` as a `<meta http-equiv>` policy compatible with GitHub Pages.
-3. Preserve the no-JavaScript rule, graceful failure behavior, CTA hierarchy, brand-wide list positioning, and privacy-policy link.
-4. Publish through Covenant's existing branch, test, PR, bounded inline-review, merge, and acceptance-audit rules.
-5. Once live, perform the human end-to-end test: submit, receive confirmation, confirm, receive a test broadcast, and unsubscribe.
-6. Close `wolfscairn-list-and-privacy` only when that live evidence proves FR-24.
+## Autonomous control loop
 
-### Control-plane loop
+1. **INTAKE:** record an accepted feature proposal and its outcome.
+2. **SNAPSHOT:** compress current truth into the parent issue.
+3. **SELECT:** derive exactly one next packet from current evidence.
+4. **EXECUTE:** run a fresh agent session for that packet.
+5. **VERIFY:** independently check code, tests, diff, and claimed state.
+6. **INTEGRATE:** use the target repository's PR, review, merge, and audit rules.
+7. **REFRESH:** update the parent snapshot without appending a transcript.
+8. **CONTINUE:** dispatch the next packet automatically.
+9. **INTERRUPT:** ask the founder only when an enumerated interrupt condition applies.
+10. **CLOSE:** finish only from verified acceptance evidence.
 
-1. Link the Covenant Burn Order item to one durable parent execution issue in Loop-Dee-Loup.
-2. Maintain current truth in the parent body.
-3. Create only the bounded work packets required by meaningful context boundaries.
-4. Execute each packet in a fresh Claude Code session.
-5. Preserve Covenant's own source-of-truth hierarchy, IP boundary, checks, and review gates.
-6. Close the parent only after the merged result passes its stopping review and the live test passes.
-7. Advance Covenant's Burn Order separately.
-
-Loop-Dee-Loup does not replace Covenant's source of truth or safety rules.
+The controller may repeat SELECT through CONTINUE without founder confirmation.
 
 ## State model
 
-A parent may be in one of these states:
-
 - PROPOSED
+- NEEDS_FOUNDER
 - READY
-- IN_PROGRESS
-- BLOCKED_DECISION
-- BLOCKED_FAILURE
+- EXECUTING
+- VERIFYING
 - REVIEW
 - AUDIT
 - CORRECTION
+- BLOCKED_FAILURE
+- BLOCKED_EXTERNAL
 - DONE
 
-Every state transition must be supported by recorded evidence. Only one work packet may be designated NEXT.
+Only one packet may be NEXT. State transitions require evidence, not prose claims.
 
 ## Measurements
 
@@ -65,52 +75,54 @@ Record for the experimental item and a comparable recent baseline where availabl
 - total input and output tokens;
 - message/conversation tokens;
 - repository/context rereading tokens;
-- number of fresh agent sessions;
-- number of user interventions;
+- number of fresh executor sessions;
+- founder questions and manual actions;
+- unnecessary founder approval requests;
 - work packets created;
 - rework and correction packets;
 - elapsed time to validated completion;
-- acceptance-audit outcome.
+- review and acceptance-audit outcomes.
 
 ## Success criteria
 
-The experiment succeeds only if:
+The trial succeeds only if:
 
 - message/context tokens decline materially;
-- total tokens per validated item do not increase materially;
-- no correctness or acceptance gate is weakened;
-- user intervention does not increase;
-- the issue structure remains faster to maintain than the context it replaces;
-- a fresh executor can start from the parent snapshot and active packet without reconstructing history.
+- total tokens per validated outcome do not increase materially;
+- no correctness, IP, privacy, security, or acceptance gate is weakened;
+- no routine transition requires founder approval;
+- founder interruptions are limited to genuine judgment or manual-action boundaries;
+- issue maintenance costs less effort than the context it replaces;
+- a fresh executor can act without reconstructing conversation history.
 
-No target percentage is fixed before the baseline is measured.
+No target percentage is fixed before a baseline is measured.
 
 ## Failure signals
 
-Stop or redesign the experiment if:
+Stop or redesign if:
 
-- executors routinely need comments or prior child issues;
-- the parent snapshot grows as an append-only transcript;
-- packet creation becomes clerical overhead;
-- state is duplicated between Covenant's Burn Order and parent issues;
-- failures arise from missing compressed context;
-- agents proceed across packet boundaries without explicit authorization.
+- executors routinely need comments or prior children;
+- the parent becomes an append-only transcript;
+- decomposition predicts a large hierarchy before evidence requires it;
+- packet creation becomes clerical work;
+- state is duplicated between Covenant's Burn Order and Loop-Dee-Loup;
+- agents cross scope or safety boundaries in the name of autonomy;
+- the controller requests approval for routine transitions;
+- compressed context causes defects or rework.
 
-## Explicit non-goals
+## Non-goals for the first trial
 
-The first trial will not:
-
-- build a general autonomous orchestrator;
-- automatically modify Covenant's Burn Order;
-- trigger or merge production changes without existing approvals;
-- treat GitHub comments as an execution database;
-- create one child issue per conversational step;
-- optimize token count at the expense of verified progress.
+- No general multi-repository platform.
+- No simulated company hierarchy or ceremony layer.
+- No comprehensive roadmap decomposition.
+- No replacement of Covenant's source of truth.
+- No weakening of repository review or merge gates.
+- No optimization of tokens at the expense of validated progress.
 
 ## Decision after trial
 
-After the stopping audit and live signup test, compare the experiment with the baseline and choose one:
+After the stopping audit and live test:
 
-- ADOPT: use for additional medium or large items;
-- REVISE: change the packet/state contract and repeat once;
-- REJECT: return to the existing workflow and retain only proven components.
+- **ADOPT:** use the loop for additional feature-sized work.
+- **REVISE:** change the state, packet, or interrupt contract and repeat once.
+- **REJECT:** retain only components proven better than the existing workflow.
