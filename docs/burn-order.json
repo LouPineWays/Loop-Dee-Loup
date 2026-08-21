@@ -23,7 +23,7 @@
       "lane": "process",
       "note": "From issue #14 item 2: founder is still seeing step-by-step process chatter in Claude Code chat. AGENTS.md already has a Subagent dispatch section and fixed chat report formats, but frames delegation as merely 'approved,' not default/required for implementation work itself. Tighten the language so internal implementation steps are subagent-dispatched by default and top-level chat is limited to the fixed one-line formats already defined in AGENTS.md. Tracked in issue #16, PR #17.",
       "blockedBy": "",
-      "done": { "on": "2026-08-21", "ref": "f8ba00a", "evidence": "AGENTS.md Subagent dispatch section tightened; see PR #17" }
+      "done": { "on": "2026-08-21", "ref": "#17", "evidence": "AGENTS.md Subagent dispatch section tightened; see PR #17" }
     },
     "audit-issue-reuse-guard": {
       "id": "audit-issue-reuse-guard",
