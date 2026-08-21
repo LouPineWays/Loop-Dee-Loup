@@ -1,11 +1,11 @@
 name: Work packet
-description: One independently verifiable agent transaction
+description: One independently verifiable Claude Code transaction
 title: "[Packet] "
 labels: []
 body:
   - type: markdown
     attributes:
-      value: "Execute only this packet. Record evidence and stop. The controller, not the founder, determines and dispatches the next packet."
+      value: "Run this packet in one low-chatter session. Record evidence and the next state in GitHub, then stop."
   - type: input
     id: parent
     attributes:
@@ -59,12 +59,12 @@ body:
   - type: textarea
     id: stop
     attributes:
-      label: Executor stopping condition
-      description: Define completion or escalation. The executor must not begin the next packet.
+      label: Session stopping condition
+      description: Define completion or escalation. Prepare the next packet but do not absorb a distinct context boundary.
     validations:
       required: true
   - type: textarea
     id: handoff
     attributes:
-      label: Completion handoff
-      description: "Use STATUS, CHANGED, VERIFIED, DECISIONS, NEW RISKS, NEXT, PR. Keep the complete handoff within 1,000–1,500 tokens unless justified."
+      label: Durable completion handoff
+      description: "Use STATUS, CHANGED, VERIFIED, DECISIONS, NEW RISKS, NEXT, PR. Keep this within 1,000–1,500 tokens; keep the chat summary much shorter."
