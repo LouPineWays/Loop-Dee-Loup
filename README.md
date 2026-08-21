@@ -64,7 +64,7 @@ After the completed form returns:
 4. discard rejected options and avoid turning every suggestion into backlog work;
 5. generate another form only if the answers expose new founder-level blockers that could not reasonably have been included earlier.
 
-If two decision-form rounds produce no implementable slice, stop and diagnose the proposal or decomposition rather than continuing an endless questionnaire.
+If two decision-form rounds produce no implementable slice, diagnose the proposal or decomposition before generating the next form. Use that diagnosis to consolidate or redirect the critical path rather than repeating the same questionnaire.
 
 ## Core loop
 
