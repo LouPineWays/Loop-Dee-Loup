@@ -78,6 +78,13 @@ body:
       label: Completed packets
       description: One-line verified outcomes and links.
   - type: textarea
+    id: blocker
+    attributes:
+      label: Current blocker
+      description: Write None, or the current blocking condition — a failed gate, an external dependency, or a founder decision — regardless of whether it needs founder action.
+    validations:
+      required: true
+  - type: textarea
     id: interrupt
     attributes:
       label: Founder interrupt
