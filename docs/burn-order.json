@@ -21,7 +21,7 @@
       "id": "subagent-chat-discipline",
       "title": "AGENTS.md requires implementation work between issues/PRs to be delegated to subagents by default, so top-level chat stays to the fixed kickoff/decision/question/completion/blocked lines",
       "lane": "process",
-      "note": "From issue #14 item 2: founder is still seeing step-by-step process chatter in Claude Code chat. AGENTS.md already has a Subagent dispatch section and fixed chat report formats, but frames delegation as merely 'approved,' not default/required for implementation work itself. Tighten the language so internal implementation steps are subagent-dispatched by default and top-level chat is limited to the fixed one-line formats already defined in AGENTS.md.",
+      "note": "From issue #14 item 2: founder is still seeing step-by-step process chatter in Claude Code chat. AGENTS.md already has a Subagent dispatch section and fixed chat report formats, but frames delegation as merely 'approved,' not default/required for implementation work itself. Tighten the language so internal implementation steps are subagent-dispatched by default and top-level chat is limited to the fixed one-line formats already defined in AGENTS.md. Tracked in issue #16, PR #17.",
       "blockedBy": ""
     },
     "audit-issue-reuse-guard": {
