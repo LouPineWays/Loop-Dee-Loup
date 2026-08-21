@@ -36,6 +36,33 @@ Do not create separate execution issues for exploration, implementation layer, t
 
 A founder decision, external manual action, post-merge audit, or genuinely independent correction may create a separate control boundary. Label it by its actual purpose rather than pretending it is a product slice.
 
+## Founder decision-form rule
+
+Serial founder interrogation is prohibited.
+
+Before requesting product input:
+
+1. inspect the proposal, parent snapshot, target repository authority, and currently visible critical path;
+2. distinguish founder decisions from technical choices the session should make autonomously;
+3. collect every currently knowable founder question that blocks forming or completing vertical slices;
+4. generate one self-contained decision form rather than asking those questions sequentially.
+
+Every form question must state the blocking consequence, offer two or three mutually exclusive options where appropriate, recommend one option with tradeoffs, provide a suggested default, and include free-comment space. The form must end with a general comments field.
+
+Do not use a decision form for technical choices already governed by repository authority. Do not ask speculative downstream questions that do not affect a currently visible slice.
+
+After the founder returns the whole form:
+
+- normalize the answers into settled parent-snapshot decisions;
+- derive implementable vertical slices from the critical path;
+- convert only founder-accepted independent outcomes into Burn Order candidates;
+- record dependencies and proposed priority without duplicating the parent snapshot;
+- discard rejected options and unaccepted suggestions.
+
+A subsequent form is allowed only when the completed answers expose a new founder-level blocker that could not reasonably have been batched earlier. If two consecutive form rounds still produce no implementable vertical slice, stop and report a defective proposal, missing authority, or bad decomposition instead of continuing the questionnaire.
+
+If exactly one unforeseeable founder question blocks an in-progress slice, a direct concise question is allowed. Do not artificially hold it for a future batch.
+
 ## Lean operating rules
 
 - Decompose only enough to identify the next safe vertical slice.
@@ -64,7 +91,7 @@ Do not ask whether to proceed with mechanically determined implementation, check
 Keep Claude Code messages deliberately terse. Normally send only:
 
 - a brief kickoff acknowledgement;
-- a concise founder question or manual-action request when blocked;
+- a link to one complete decision form, or one concise unforeseeable question/manual-action request when blocked;
 - a bounded completion or blocked handoff.
 
 Do not narrate repository exploration, repeat issue contents, provide speculative plans already settled by the slice, or use chat as the durable log. Put evidence and current state in GitHub.
