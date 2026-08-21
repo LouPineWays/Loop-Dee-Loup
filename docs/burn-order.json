@@ -3,11 +3,33 @@
   "note": "Loop-Dee-Loup's own backlog of process/tooling items about the Loop itself, never a target repository's product backlog (e.g. Covenant's) — see docs/burn-order.md. Edited through tools/burn-order (see its README); safe to hand-edit, which is the only way to edit it from a phone. Finished work goes in the Done band with a done:{} block, never by deleting it from the bands; run `node tools/burn-order/verify.mjs` to check that every claim still resolves. SEEDED 2026-08-21 from issue #9 (LouPineWays/Loop-Dee-Loup): the tool itself (server.mjs, verify.mjs, this file's shape) copied from Covenant/Word_Burner's tools/burn-order, adapted for this repo's own lane taxonomy (process, tooling, templates, docs). This replaces issue #6 as the pinned tracking issue's body being the source of truth; issue #6 is updated to point here instead. No candidates existed in issue #6 at seed time, so every band below starts empty.",
   "order": {
     "Now": [],
-    "Soon": [],
+    "Soon": ["audit-template-format", "subagent-chat-discipline", "audit-issue-reuse-guard"],
     "Later": [],
     "Wishes": [],
     "Blocked": [],
     "Done": []
   },
-  "items": {}
+  "items": {
+    "audit-template-format": {
+      "id": "audit-template-format",
+      "title": "Stage 2 audit-control-issue template requires a spec-tailored verification checklist and a structured report format (severity table, per-finding evidence, verification-performed checklist, explicit verdict)",
+      "lane": "templates",
+      "note": "From issue #14 item 1: the audit template is unstandardized and Codex's responses can come back too short to trust. Model it on Covenant issue #88 (https://github.com/LouPineWays/Covenant/issues/88), whose audit-control-issue body carried a numbered, change-specific verification checklist and required-output spec, and whose Codex response (https://github.com/LouPineWays/Covenant/issues/88#issuecomment-5351402128) returned a severity table, per-finding evidence, and a verification-performed checklist. This repo's own .github/ISSUE_TEMPLATE/audit-control-issue.yml scope/findings fields are currently generic prose prompts, not that structure.",
+      "blockedBy": ""
+    },
+    "subagent-chat-discipline": {
+      "id": "subagent-chat-discipline",
+      "title": "AGENTS.md requires implementation work between issues/PRs to be delegated to subagents by default, so top-level chat stays to the fixed kickoff/decision/question/completion/blocked lines",
+      "lane": "process",
+      "note": "From issue #14 item 2: founder is still seeing step-by-step process chatter in Claude Code chat. AGENTS.md already has a Subagent dispatch section and fixed chat report formats, but frames delegation as merely 'approved,' not default/required for implementation work itself. Tighten the language so internal implementation steps are subagent-dispatched by default and top-level chat is limited to the fixed one-line formats already defined in AGENTS.md.",
+      "blockedBy": ""
+    },
+    "audit-issue-reuse-guard": {
+      "id": "audit-issue-reuse-guard",
+      "title": "Bounded-review-cycle guards against reusing a non-audit issue for the Stage 2 @codex trigger, or declaring a verdict without an actual audit response",
+      "lane": "process",
+      "note": "From issue #14 item 3: on issue #9 (the original feature issue, already closed by PR #10's merge), @codex review was posted directly on it instead of opening a fresh audit-control-issue; Codex replied BLOCKED (no PR-creation tool available in that write-shaped context) and Claude Code then self-declared CLEAN without a real Codex audit response. Issue #11 was then opened properly per docs/bounded-review-cycle.md and found 2 real P2 bugs the sham CLEAN missed. bounded-review-cycle.md already documents the correct Stage 2 procedure (fresh audit-control-issue, never invoke @codex from two places) but has no explicit rule against reusing a non-audit issue as the Stage 2 control boundary, nor against recording a verdict with no actual audit response comment behind it. Add both as explicit guards.",
+      "blockedBy": ""
+    }
+  }
 }
