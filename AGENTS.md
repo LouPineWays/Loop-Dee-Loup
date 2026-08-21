@@ -197,17 +197,19 @@ Once a bounded review cycle is authorized and underway, continue through verifie
 
 For review-worthy work, preserve any stricter target-repository policy and follow `docs/bounded-review-cycle.md` otherwise:
 
-1. one inline independent PR review at a frozen head;
+1. one inline independent PR review at a frozen head, requested by posting `@codex review` as a PR comment;
 2. verify and deduplicate all findings;
 3. batch all valid fixes and rerun checks;
 4. merge without a second inline invocation only when no known blocker remains;
 5. run one holistic, read-only issue audit of the exact merge commit;
-6. trigger Codex from a separate issue comment, not from the issue body, after checking that no trigger already exists;
+6. trigger Codex from a separate issue comment containing `@codex review`, not from the issue body, after checking that no trigger already exists;
 7. treat posting the issue trigger and arranging its bounded follow-up as one atomic action;
 8. extract only the compact verdict needed by the controlling session;
 9. close on CLEAN, or create one consolidated correction outcome on NOT CLEAN.
 
 “One inline round” limits reviewer invocations; it never authorizes merging a known defect. The post-merge audit is a control issue and the stopping review for that cycle.
+
+**Codex, triggered by `@codex review` in a comment, is the only reviewer for both stages.** Never substitute or supplement it with another review-request tool or mechanism (e.g. a native "request Copilot review" action) — if Codex is silent or slow, that is latency to wait out via event subscription and short check-ins, not a reason to reach for a different reviewer.
 
 ## Prototype guardrail
 
