@@ -5,7 +5,7 @@ labels: []
 body:
   - type: markdown
     attributes:
-      value: "Keep this body as compressed current truth. The controller continues automatically unless an interrupt condition applies."
+      value: "Keep this body as compressed current truth. Resume it from a fresh session with: Run Loop-Dee-Loup issue #X."
   - type: input
     id: source
     attributes:
@@ -28,6 +28,7 @@ body:
         - CORRECTION
         - BLOCKED_FAILURE
         - BLOCKED_EXTERNAL
+        - READY_NEXT_SESSION
         - DONE
     validations:
       required: true
@@ -87,6 +88,6 @@ body:
     id: next
     attributes:
       label: Next work packet
-      description: Exactly one issue link or None. The controller dispatches it automatically when no interrupt applies.
+      description: Exactly one issue link or None. A fresh session can resume from this reference without reading history.
     validations:
       required: true
