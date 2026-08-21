@@ -40,17 +40,44 @@ Create an execution issue only when all are true:
 
 Do not split one outcome into separate issues for research, backend, UI, tests, documentation, or PR administration merely because those are different activities. Keep them inside the slice. Create a new issue when the outcome, authority boundary, or required context genuinely changes.
 
+## Founder decision forms
+
+Do not conduct serial one-question-at-a-time discovery.
+
+Before asking for founder input, inspect the proposal, repository authority, and currently visible critical path. If more than one founder-level question is known, generate one self-contained decision form that the founder can complete asynchronously and return as a whole.
+
+Each question must include:
+
+- why the answer blocks or changes a vertical slice;
+- two or three mutually exclusive options when appropriate;
+- a recommended option and its tradeoffs;
+- a suggested default response;
+- a free-comment field.
+
+Finish with a general comments field for constraints or alternatives the form did not anticipate.
+
+After the completed form returns:
+
+1. write settled answers into the parent snapshot;
+2. convert the critical-path outcome into implementable vertical slices;
+3. identify accepted independent outcomes that belong in the Burn Order;
+4. discard rejected options and avoid turning every suggestion into backlog work;
+5. generate another form only if the answers expose new founder-level blockers that could not reasonably have been included earlier.
+
+If two decision-form rounds produce no implementable slice, stop and diagnose the proposal or decomposition rather than continuing an endless questionnaire.
+
 ## Core loop
 
-1. Capture a feature proposal and obtain founder approval when product intent is not already settled.
-2. Create or refresh one parent issue containing the compressed feature truth.
-3. Derive exactly one next vertical slice.
-4. Start a fresh Claude Code session against that slice issue.
-5. Implement and verify the entire slice without routine founder involvement.
-6. Route it through the target repository's required PR and bounded review gates.
-7. Merge when all gates pass, audit when required, and create a correction slice if the audit is not clean.
-8. Refresh the parent snapshot, designate the next slice, and stop at the clean session boundary.
-9. Repeat from a new terse dispatch until done or genuinely blocked.
+1. Capture a feature proposal and create or refresh its compressed parent issue.
+2. Analyze the currently visible critical path.
+3. When founder decisions block slicing, generate one batched decision form and incorporate the completed answers.
+4. Derive exactly one next vertical slice.
+5. Start a fresh Claude Code session against that slice issue.
+6. Implement and verify the entire slice without routine founder involvement.
+7. Route it through the target repository's required PR and bounded review gates.
+8. Merge when all gates pass, audit when required, and create a correction slice if the audit is not clean.
+9. Refresh the parent snapshot, designate the next slice, and stop at the clean session boundary.
+10. Repeat from a new terse dispatch until done or genuinely blocked.
 
 Issues are external state machines, not replacement chat transcripts.
 
