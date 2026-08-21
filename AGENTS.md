@@ -62,4 +62,4 @@ Target at most 1,000–1,500 tokens for the complete handoff unless the packet d
 
 ## Prototype guardrail
 
-Do not integrate Loop-Dee-Loup into a production repository until the experiment contract explicitly authorizes it. The first trial is one medium-sized WordBurner Burn Order item.
+Do not integrate Loop-Dee-Loup into a production repository until the experiment contract explicitly authorizes it. The first trial is Covenant's remaining `wolfscairn-list-and-privacy` work after PR #94: build the Buttondown signup surface, then verify the live flow end to end.
