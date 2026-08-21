@@ -61,7 +61,7 @@ Do not put raw form discussion into the Burn Order. The Burn Order contains outc
 
 Generate another form only for blockers newly exposed by the completed answers. Do not ask a foreseeable follow-up separately.
 
-If two completed form rounds do not yield an implementable vertical slice, stop form generation and diagnose one of:
+If two completed form rounds do not yield an implementable vertical slice, diagnose before generating the next form:
 
 - incoherent or underspecified feature outcome;
 - missing controlling authority;
