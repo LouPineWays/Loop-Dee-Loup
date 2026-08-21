@@ -1,15 +1,15 @@
 name: Work packet
-description: One independently completable agent transaction
+description: One independently verifiable agent transaction
 title: "[Packet] "
 labels: []
 body:
   - type: markdown
     attributes:
-      value: "Execute only this packet. Record the bounded handoff and stop."
+      value: "Execute only this packet. Record evidence and stop. The controller, not the founder, determines and dispatches the next packet."
   - type: input
     id: parent
     attributes:
-      label: Parent execution issue
+      label: Parent loop
     validations:
       required: true
   - type: textarea
@@ -22,7 +22,7 @@ body:
     id: context
     attributes:
       label: Minimum required context
-      description: Point to the current parent snapshot and only essential repository files. Do not require comment history.
+      description: Point to the current parent snapshot and essential repository files. Do not require comment history.
     validations:
       required: true
   - type: textarea
@@ -50,10 +50,17 @@ body:
     validations:
       required: true
   - type: textarea
+    id: interrupt
+    attributes:
+      label: Interrupt conditions
+      description: List only packet-specific additions to the operating model's founder interrupt conditions.
+    validations:
+      required: true
+  - type: textarea
     id: stop
     attributes:
-      label: Stopping condition
-      description: Define completion and conditions that require escalation.
+      label: Executor stopping condition
+      description: Define completion or escalation. The executor must not begin the next packet.
     validations:
       required: true
   - type: textarea
