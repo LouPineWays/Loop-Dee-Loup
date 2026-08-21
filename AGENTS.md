@@ -140,6 +140,37 @@ A completed slice reports:
 
 Target at most 1,000–1,500 tokens for the complete durable handoff. The chat summary should be much shorter and link to that record.
 
+
+## Operational skills
+
+Repository-local skills support the Loop without replacing the active issue or target-repository authority:
+
+- `model-check` selects the cheapest safe model, effort, and execution shape before dispatch;
+- `sift` screens external tools and workflows before adoption;
+- `skill-observer` captures proven defects in skills and operating rules;
+- `retro` converts completed-cycle evidence into at most three process corrections;
+- `spend` attributes token cost to validated progress and identifies avoidable waste.
+
+Invoke only the skill relevant to the current control problem. A skill run is normally an internal activity, not a separate issue or conversational ceremony. Do not run every skill on every slice.
+
+Treat token use as an observable operating metric. Optimize validated progress per token, not raw token minimization. Preserve correctness and safety gates. Prefer built-in usage/context reports, bounded reads, deterministic checks, compressed current truth, and fresh-session application of process corrections. Distinguish observed waste from hypothesized waste.
+
+When a workflow failure is systemic, make the smallest governing correction at the earliest safe boundary. Do not change rules underneath an in-flight correctness-sensitive step. Prefer updating the authoritative skill, checklist, script, or gate over relying on memory or creating a vague future process backlog.
+
+## Bounded review cycle
+
+For review-worthy work, preserve any stricter target-repository policy and follow `docs/bounded-review-cycle.md` otherwise:
+
+1. one inline independent PR review at a frozen head;
+2. verify and deduplicate all findings;
+3. batch all valid fixes and rerun checks;
+4. merge without a second inline invocation only when no known blocker remains;
+5. run one holistic, read-only issue audit of the exact merge commit;
+6. trigger Codex from a separate issue comment, not from the issue body;
+7. close on CLEAN, or create one consolidated correction outcome on NOT CLEAN.
+
+“One inline round” limits reviewer invocations; it never authorizes merging a known defect. The post-merge audit is a control issue and the stopping review for that cycle.
+
 ## Prototype guardrail
 
 The first trial is Covenant's remaining `wolfscairn-list-and-privacy` work after PR #94. The execution slice ships the complete Buttondown signup surface, including form, CSP, presentation, tests, documentation, and integration. Do not split those layers into separate issues. Do not build an automatic session launcher or generalize the controller until evidence from this trial justifies it.
