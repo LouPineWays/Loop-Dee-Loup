@@ -41,6 +41,43 @@ Separate control issues are allowed for:
 
 Do not describe those control boundaries as product slices when they are not.
 
+## Critical-path decision forms
+
+The Loop resolves product uncertainty in batches, not through a serial dialogue.
+
+Before interrupting the founder, the session maps the currently visible path from the accepted outcome to the next implementable vertical slice. It gathers all founder-level choices on that path into one decision form. Technical choices already settled by repository authority remain with the agent.
+
+A generated form contains:
+
+- feature outcome and current verified state;
+- the critical-path consequence of leaving the questions unanswered;
+- all currently knowable blocking questions;
+- mutually exclusive options;
+- a recommendation and explicit tradeoffs for each question;
+- a prefilled suggested answer the founder can accept or replace;
+- per-question comments;
+- one unrestricted final comments field.
+
+The founder completes and returns the form as one unit. The session must not respond to each answer with another question that was already foreseeable.
+
+### Form results
+
+Completed answers are routed by meaning:
+
+- **Settled decision:** compress into the parent snapshot.
+- **Current vertical slice:** place in the slice contract and acceptance criteria.
+- **Accepted independent outcome:** create a Burn Order candidate with dependencies and proposed position.
+- **Rejected option:** retain only if necessary to prevent the same question recurring; do not create work.
+- **Unclear answer:** include with any other newly exposed blockers in the next consolidated form.
+
+A decision is not itself a Burn Order item. Only an accepted outcome requiring independent future work belongs there.
+
+### Multiple forms
+
+Another form is permitted only when an answer exposes a genuinely new blocker or dependency that was not reasonably visible earlier. Forms follow the critical path until at least one vertical slice is implementable.
+
+Two consecutive completed forms without an implementable slice trigger diagnosis. The session must identify whether the proposal is incoherent, authority is missing, or decomposition is too horizontal rather than continuing form generation indefinitely.
+
 ## Founder role
 
 The founder owns:
@@ -105,7 +142,8 @@ A failed gate changes the state. It does not justify silently lowering the gate.
 Claude Code chat is ephemeral and expensive. Use it only for control:
 
 - acknowledge the issue briefly;
-- ask one concise question when blocked on founder input;
+- link one consolidated decision form when founder input is required;
+- ask a direct concise question only for a single unforeseeable blocker discovered mid-slice;
 - report completion or the stopping state briefly.
 
 GitHub holds detailed evidence, decisions, links, and the next slice. Avoid progress narration that duplicates durable state.
