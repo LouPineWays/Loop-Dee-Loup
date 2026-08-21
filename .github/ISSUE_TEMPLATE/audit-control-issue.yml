@@ -38,22 +38,27 @@ body:
     id: findings
     attributes:
       label: Findings
-      description: Deduplicate by root cause. For each finding give exact evidence, consequence, smallest correction, and whether founder judgment is required.
+      description: Left as "Pending" when the issue is opened; the audit response fills this in. Deduplicate by root cause. For each finding give exact evidence, consequence, smallest correction, and whether founder judgment is required.
+      value: "Pending — awaiting Stage 2 audit response."
     validations:
-      required: true
+      required: false
   - type: dropdown
     id: verdict
     attributes:
       label: Verdict
+      description: Starts PENDING at issue creation; set by the audit response.
       options:
+        - PENDING
         - CLEAN
         - NOT CLEAN
+      default: 0
     validations:
       required: true
   - type: textarea
     id: next
     attributes:
       label: Next authorized action
-      description: On NOT CLEAN, link the one consolidated correction PR. On CLEAN, write None.
+      description: Pending audit before a verdict lands. On NOT CLEAN, first record "verify findings and prepare one consolidated correction PR," then replace with the PR link once it exists. On CLEAN, write None.
+      value: "Pending audit."
     validations:
-      required: true
+      required: false
