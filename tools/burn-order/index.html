@@ -435,7 +435,10 @@
       var it = p.items[id];
       if (!it || typeof it !== "object") { delete p.items[id]; return; }
       if (it.id !== id) it.id = id;
-      if (!LANES[it.lane]) it.lane = "product";
+      if (!LANES[it.lane]) {
+        repairLog.push('item "' + id + '" had an unrecognized lane ("' + it.lane + '") and was reset to process');
+        it.lane = "process";
+      }
       if (typeof it.title !== "string" || !it.title) it.title = "(untitled)";
       if (typeof it.note !== "string") it.note = "";
       if (typeof it.blockedBy !== "string") it.blockedBy = "";
@@ -613,10 +616,11 @@
   function cancelSession() {
     if (session && session.origin) { // restore a moved/re-ranked item
       state.order[session.origin.bucket].splice(session.origin.index, 0, session.id);
-      // doMove strips the done block on the way out of Done; if the move is then abandoned
-      // the item lands back in Done and needs it again, or it re-enters as an empty claim.
-      if (session.origin.bucket === "Done" && !state.items[session.id].done) {
-        state.items[session.id].done = { on: todayISO(), ref: "", evidence: "" };
+      // doMove strips the done block on the way out of Done but hands it to us via
+      // session.origin.done; if the move is then abandoned the item lands back in Done with
+      // its real date/ref/evidence restored, not a fabricated blank one.
+      if (session.origin.bucket === "Done") {
+        state.items[session.id].done = session.origin.done || { on: todayISO(), ref: "", evidence: "" };
       }
     } else if (session && session.origin === null && session.wasAdd) {
       delete state.items[session.id];
@@ -635,8 +639,11 @@
     var b = bucketOf(id); if (b === target) return;
     var idx = state.order[b].indexOf(id);
     state.order[b].splice(idx, 1);
-    // Reopening something drops its completion evidence, because it is no longer true.
-    if (b === "Done") delete state.items[id].done;
+    // Reopening something drops its completion evidence, because it is no longer true. Kept
+    // on the origin (not just deleted) so cancelSession can restore the real block rather
+    // than fabricating a blank one if the move is abandoned.
+    var doneBlock = null;
+    if (b === "Done") { doneBlock = state.items[id].done || null; delete state.items[id].done; }
     if (target === "Done") {
       // Newest first, and no matchups: you rank what you might do next, not what you
       // already did. Stamp the date now so the common case needs no typing; the ref is
@@ -646,7 +653,7 @@
     } else if (isUnranked(target) || state.order[target].length === 0) {
       state.order[target].push(id); save(); render();
     } else {
-      beginRanking(id, target, { bucket: b, index: idx });
+      beginRanking(id, target, { bucket: b, index: idx, done: doneBlock });
     }
   }
   function todayISO() {
@@ -743,8 +750,11 @@
       state.items[id] = { id: id, title: title, lane: lane, note: note, blockedBy: block };
       if (done) state.items[id].done = done;
       closePanel();
-      if (bucket === "Blocked" || state.order[bucket].length === 0) {
-        state.order[bucket].push(id); save(); render();
+      if (isUnranked(bucket) || state.order[bucket].length === 0) {
+        // Neither Blocked nor Done is ranked, so a new item there never enters a matchup;
+        // Done additionally goes newest-first, matching doMove's own Done insertion.
+        if (bucket === "Done") state.order.Done.unshift(id); else state.order[bucket].push(id);
+        save(); render();
       } else {
         var s = { id: id, bucket: bucket, lo: 0, hi: state.order[bucket].length, count: 0, est: Math.ceil(Math.log2(state.order[bucket].length + 1)), origin: null, wasAdd: true };
         session = s; render();

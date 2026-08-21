@@ -89,6 +89,17 @@ async function writeState(state) {
   return (await stat(DATA_FILE)).mtimeMs;
 }
 
+// Serializes every mtime-check-then-write onto one chain, so two PUTs racing from separate
+// tabs/sessions can't both pass the check before either writes (they'd otherwise share one
+// .tmp path and one of the two acknowledged writes would be silently overwritten by the
+// other). Each task still returns its own {status, body}; only the ordering is shared.
+let writeChain = Promise.resolve();
+function serialized(task) {
+  const result = writeChain.then(task, task);
+  writeChain = result.then(() => {}, () => {});
+  return result;
+}
+
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://localhost");
@@ -116,15 +127,19 @@ const server = createServer(async (req, res) => {
       if (problem) return send(res, 400, { ok: false, error: problem });
 
       // Optimistic concurrency: refuse the write if the file moved underneath us, so a
-      // hand-edit or another session's change is never silently overwritten.
-      const current = await stat(DATA_FILE);
-      if (typeof parsed.baseMtimeMs === "number" && parsed.baseMtimeMs !== current.mtimeMs) {
-        const { state, mtimeMs } = await readState();
-        return send(res, 409, { ok: false, error: "changed on disk", state, mtimeMs });
-      }
-
-      const mtimeMs = await writeState(parsed.state);
-      return send(res, 200, { ok: true, mtimeMs });
+      // hand-edit or another session's change is never silently overwritten. Serialized
+      // (see serialized() above) so two concurrent PUTs can't both pass this check before
+      // either has written.
+      const outcome = await serialized(async () => {
+        const current = await stat(DATA_FILE);
+        if (typeof parsed.baseMtimeMs === "number" && parsed.baseMtimeMs !== current.mtimeMs) {
+          const { state, mtimeMs } = await readState();
+          return { status: 409, body: { ok: false, error: "changed on disk", state, mtimeMs } };
+        }
+        const mtimeMs = await writeState(parsed.state);
+        return { status: 200, body: { ok: true, mtimeMs } };
+      });
+      return send(res, outcome.status, outcome.body);
     }
 
     send(res, 404, { ok: false, error: "not found" });
