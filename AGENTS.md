@@ -110,10 +110,11 @@ Use these exact one-line formats for the terminal chat message of each communica
 
 - Kickoff: `Starting #<issue>.`
 - Decision needed: `Decision needed: #<form-issue>.`
+- Direct question: `Question: <one clause>?` — for the single unforeseeable founder question the decision-form rule allows mid-slice; do not open a decision-form issue for it.
 - Clean completion: `CLEAN — <what merged/closed>. Next: #<slice>` (or `Next: None`).
 - Blocked: `BLOCKED — <one clause>. Next: <manual action>` (or `Next: None`).
 
-An ad-hoc issue — one not created from a structured template (`parent-execution`, `work-packet`, `founder-decision-form`, `audit-control-issue`) — gets a single terse line for a body, not prose paragraphs. Templates keep their required fields.
+An ad-hoc issue — one not created from a structured template (`parent-execution`, `work-packet`, `founder-decision-form`, `audit-control-issue`, `idea-intake`) — gets a single terse line for a body, not prose paragraphs. Templates keep their required fields.
 
 When babysitting a PR or issue between events, prefer a short self-check-in (about 10–15 minutes) over a long one (e.g. an hour). A long gap does not save tokens here: it forces a full state reload of the PR/issue on wake instead of a cheap incremental check, and the event subscription already covers most updates — the check-in is only a fallback.
 
