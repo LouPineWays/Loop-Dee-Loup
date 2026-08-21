@@ -14,38 +14,41 @@ The founder owns:
 - acceptance of initial feature proposals when intent is not already settled;
 - answers to material product questions;
 - decisions involving meaningful scope, UX, monetization, legal, privacy, security, reputation, cost, or irreversibility;
-- credentials and manual actions that cannot be delegated.
+- credentials and manual actions that cannot be delegated;
+- starting or resuming a Claude Code session with a short issue reference.
 
-The founder is not a dispatcher, status relay, prompt router, test runner, or routine approval gate.
+The final item is lightweight scheduling. The founder is not a status relay, prompt router, test runner, or routine approval gate.
 
-## Controller role
+## Version-one runner
 
-The controller owns continuity:
+GitHub is the persistent controller state. Claude Code is a disposable runner.
 
-- maintain the compressed parent snapshot;
-- select exactly one next packet;
-- dispatch a fresh executor;
-- independently verify completion claims;
-- route changes through existing repository gates;
-- update state from evidence;
-- continue automatically;
-- interrupt the founder only under the defined conditions.
+A normal invocation is:
 
-## Executor role
+> Run Loop-Dee-Loup issue #X.
 
-An executor owns one transaction:
+The session reads the issue body and minimum repository authority, executes the current packet, records verified state and the next packet, then stops. A later session resumes from GitHub rather than from conversation history.
 
-- read the active packet and minimum authoritative context;
-- produce its required outcome;
+Version one deliberately does not include a daemon, queue worker, webhook dispatcher, or automatic session launcher. Those are infrastructure hypotheses to test only after the manual-dispatch loop proves useful.
+
+## Session role
+
+One Claude Code session owns one bounded transaction:
+
+- load the parent snapshot and active packet;
+- produce the required outcome;
 - run specified checks;
-- report a bounded evidence handoff;
+- independently verify completion claims;
+- route the change through available repository gates;
+- refresh durable state;
+- prepare exactly one next packet;
 - stop.
 
-The executor does not need project continuity and must not begin the next packet.
+The session may complete several tightly coupled technical actions inside one packet. It must not absorb a distinct context boundary merely to avoid ending.
 
 ## Just-in-time decomposition
 
-The controller decomposes only until one safe next packet exists. Later packets remain hypotheses until current work produces evidence.
+Decompose only until one safe next packet exists. Later packets remain hypotheses until current work produces evidence.
 
 Create a new packet when there is a meaningful boundary, such as:
 
@@ -60,9 +63,9 @@ Do not create packets to mimic conversational turns or organizational roles.
 
 ## Verification and autonomy
 
-Autonomy means continuing without routine founder intervention. It does not mean bypassing controls.
+Autonomy begins after the founder dispatches the issue. It means completing the packet without routine questions or approvals. It does not mean bypassing controls.
 
-The controller may advance automatically only when:
+A session may advance its packet only when:
 
 - acceptance criteria are satisfied;
 - required checks pass;
@@ -71,6 +74,16 @@ The controller may advance automatically only when:
 - no interrupt condition applies.
 
 A failed gate changes the state. It does not justify silently lowering the gate.
+
+## Communication discipline
+
+Claude Code chat is ephemeral and expensive. Use it only for control:
+
+- acknowledge the issue briefly;
+- ask one concise question when blocked on founder input;
+- report completion or the stopping state briefly.
+
+GitHub holds detailed evidence, decisions, links, and the next packet. Avoid progress narration that duplicates durable state.
 
 ## Durable state
 
