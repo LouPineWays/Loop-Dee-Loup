@@ -2,11 +2,13 @@
 
 A hyper-lean agentic execution loop for vibecoding.
 
-Loop-Dee-Loup turns a founder-approved feature proposal into small, verified changes while keeping agent sessions disposable and founder interruptions rare. GitHub carries continuity between sessions; Claude executes the current packet; repository checks and bounded reviews provide control.
+Loop-Dee-Loup turns a founder-approved feature proposal into verified vertical slices while keeping agent sessions disposable and founder interruptions rare. GitHub carries continuity between sessions; Claude executes the current slice; repository checks and bounded reviews provide control.
 
 ## Design doctrine
 
-- The work unit is the smallest independently verifiable product increment, not an epic, sprint, department, or simulated job role.
+- The execution issue is a subagent-sized vertical slice: one coherent outcome, implemented through every layer it requires.
+- A slice must be independently verifiable and leave the product and repository in a valid state.
+- Internal steps such as inspect, implement, test, document, and review stay inside the slice.
 - Decompose just in time. Do not predict an entire project hierarchy before current evidence exists.
 - Agent sessions are disposable. The founder starts or resumes one with a short issue reference.
 - Durable state is a compact snapshot, not a transcript.
@@ -22,20 +24,32 @@ The founder starts a fresh Claude Code session with a terse instruction such as:
 
 > Run Loop-Dee-Loup issue #12.
 
-The issue and repository provide the context. Claude executes autonomously until the packet is complete or a genuine interrupt condition is reached. It updates durable GitHub state, identifies the next packet, and ends the session. The founder can later start another fresh session with the next issue reference.
+The issue and repository provide the context. Claude executes autonomously until the vertical slice is complete or a genuine interrupt condition is reached. It updates durable GitHub state, identifies the next slice, and ends the session. The founder can later start another fresh session with the next issue reference.
 
 This single-line dispatch is scheduling, not a routine approval gate.
+
+## Vertical-slice test
+
+Create an execution issue only when all are true:
+
+- it produces one observable capability, correction, or closure outcome;
+- one agent session can own it with bounded context;
+- it includes the code, tests, configuration, documentation, and verification needed for that outcome;
+- it can be evaluated without completing a sibling issue first;
+- merging it leaves the target repository coherent.
+
+Do not split one outcome into separate issues for research, backend, UI, tests, documentation, or PR administration merely because those are different activities. Keep them inside the slice. Create a new issue when the outcome, authority boundary, or required context genuinely changes.
 
 ## Core loop
 
 1. Capture a feature proposal and obtain founder approval when product intent is not already settled.
-2. Create or refresh one parent issue containing the compressed current truth.
-3. Derive exactly one next work packet.
-4. Start a fresh Claude Code session against that issue.
-5. Execute and verify the packet without routine founder involvement.
-6. Route the change through the target repository's required PR and bounded review gates.
-7. Merge when all gates pass, audit when required, and create a correction packet if the audit is not clean.
-8. Refresh the parent snapshot, designate the next packet, and stop at the clean session boundary.
+2. Create or refresh one parent issue containing the compressed feature truth.
+3. Derive exactly one next vertical slice.
+4. Start a fresh Claude Code session against that slice issue.
+5. Implement and verify the entire slice without routine founder involvement.
+6. Route it through the target repository's required PR and bounded review gates.
+7. Merge when all gates pass, audit when required, and create a correction slice if the audit is not clean.
+8. Refresh the parent snapshot, designate the next slice, and stop at the clean session boundary.
 9. Repeat from a new terse dispatch until done or genuinely blocked.
 
 Issues are external state machines, not replacement chat transcripts.
@@ -60,10 +74,10 @@ Stop and ask only when the available authority cannot safely determine:
 - how to proceed after a failed safety or correctness gate;
 - whether a newly discovered opportunity belongs in the approved feature.
 
-Do not request routine permission to implement an accepted approach, run checks, address verified defects, prepare the next packet, or merge after every required gate passes.
+Do not request routine permission to implement an accepted approach, run checks, address verified defects, prepare the next slice, or merge after every required gate passes.
 
 ## First trial
 
-The first controlled trial is Covenant's remaining `wolfscairn-list-and-privacy` work after PR #94: build the Buttondown signup surface, take it through Covenant's bounded review cycle, and verify the live signup flow end to end.
+The first controlled trial is Covenant's remaining `wolfscairn-list-and-privacy` work after PR #94. Its first execution slice is to ship the complete Buttondown signup surface on `covenant.wolfscairn.com`, including form behavior, CSP, presentation, tests, documentation, and repository integration. The live email interaction remains a founder-only external verification boundary.
 
 See `docs/operating-model.md` and `docs/experiment-brief.md`.
