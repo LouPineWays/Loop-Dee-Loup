@@ -90,7 +90,9 @@ Once the founder has responded in an active session (e.g. answering review quest
 
 ## Subagent dispatch
 
-Within a session the founder has already started, delegating read-heavy or exploratory work (issue/PR reads, research, the Stage 2 audit trigger/wait/extract) to subagents is an approved way to keep the primary session's context lean. It is a context-isolation technique, not a control boundary, and does not require separate founder approval.
+Within a session the founder has already started, delegating work to subagents is the default way to keep the primary session's context lean — not merely approved for read-heavy or exploratory work (issue/PR reads, research, the Stage 2 audit trigger/wait/extract), but expected for implementation work between issues and PRs too: writing or editing files, running commands, committing, and opening PRs. It is a context-isolation technique, not a control boundary, and does not require separate founder approval.
+
+The reason is chat discipline: top-level session chat should stay limited to the fixed one-line formats in "Fixed chat report formats" below, with step-by-step mechanics happening inside subagent dispatches rather than being narrated in the top-level chat.
 
 It becomes the automatic session launcher the Prototype guardrail defers only if a session uses subagent dispatch to originate work on new issues or PRs on its own initiative, without the founder having started that session in the first place. The gate that must never be bypassed is *who starts the session*, not *what the session delegates internally once running*.
 
