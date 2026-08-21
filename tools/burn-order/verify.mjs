@@ -31,7 +31,20 @@ const CLAIMS_DONE = /^\s*(DONE|SHIPPED|COMPLETED?)\b/i;
 
 const SHA = /^[0-9a-f]{7,40}$/;
 const PR = /^#\d+$/;
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+// Date.parse silently normalizes impossible calendar dates instead of rejecting them
+// (2026-02-31 becomes 2026-03-03), so it can't tell a real date from a rolled-over one.
+// Re-derive year/month/day from the parsed UTC instant and compare against what was typed.
+function isRealCalendarDate(s) {
+  const m = ISO_DATE.exec(s);
+  if (!m) return false;
+  const [, y, mo, d] = m.map(Number);
+  const t = Date.UTC(y, mo - 1, d);
+  if (Number.isNaN(t)) return false;
+  const check = new Date(t);
+  return check.getUTCFullYear() === y && check.getUTCMonth() === mo - 1 && check.getUTCDate() === d;
+}
 
 const fails = [];
 const warns = [];
@@ -121,8 +134,8 @@ for (const id of state.order[DONE] || []) {
     fail(id, "is in Done but has no done:{} block saying when, and on what evidence");
     continue;
   }
-  if (!ISO_DATE.test(d.on || "") || Number.isNaN(Date.parse(d.on))) {
-    fail(id, `done.on is "${d.on ?? ""}", which is not a YYYY-MM-DD date`);
+  if (!isRealCalendarDate(d.on || "")) {
+    fail(id, `done.on is "${d.on ?? ""}", which is not a real YYYY-MM-DD date`);
   }
   const ref = (d.ref || "").trim();
   const evidence = (d.evidence || "").trim();
