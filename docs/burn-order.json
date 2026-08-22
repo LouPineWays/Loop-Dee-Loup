@@ -3,11 +3,11 @@
   "note": "Loop-Dee-Loup's own backlog of process/tooling items about the Loop itself, never a target repository's product backlog (e.g. Covenant's) — see docs/burn-order.md. Edited through tools/burn-order (see its README); safe to hand-edit, which is the only way to edit it from a phone. Finished work goes in the Done band with a done:{} block, never by deleting it from the bands; run `node tools/burn-order/verify.mjs` to check that every claim still resolves. SEEDED 2026-08-21 from issue #9 (LouPineWays/Loop-Dee-Loup): the tool itself (server.mjs, verify.mjs, this file's shape) copied from Covenant/Word_Burner's tools/burn-order, adapted for this repo's own lane taxonomy (process, tooling, templates, docs). This replaces issue #6 as the pinned tracking issue's body being the source of truth; issue #6 is updated to point here instead. No candidates existed in issue #6 at seed time, so every band below starts empty.",
   "order": {
     "Now": [],
-    "Soon": ["audit-template-format", "audit-issue-reuse-guard"],
+    "Soon": ["audit-issue-reuse-guard"],
     "Later": [],
     "Wishes": [],
     "Blocked": [],
-    "Done": ["subagent-chat-discipline", "stage2-audit-push-notify", "burn-order-issue-per-item"]
+    "Done": ["subagent-chat-discipline", "stage2-audit-push-notify", "burn-order-issue-per-item", "audit-template-format"]
   },
   "items": {
     "audit-template-format": {
@@ -15,7 +15,8 @@
       "title": "Stage 2 audit-control-issue template requires a spec-tailored verification checklist and a structured report format (severity table, per-finding evidence, verification-performed checklist, explicit verdict)",
       "lane": "templates",
       "note": "From issue #14 item 1: the audit template is unstandardized and Codex's responses can come back too short to trust. Model it on Covenant issue #88 (https://github.com/LouPineWays/Covenant/issues/88), whose audit-control-issue body carried a numbered, change-specific verification checklist and required-output spec, and whose Codex response (https://github.com/LouPineWays/Covenant/issues/88#issuecomment-5351402128) returned a severity table, per-finding evidence, and a verification-performed checklist. This repo's own .github/ISSUE_TEMPLATE/audit-control-issue.yml scope/findings fields are currently generic prose prompts, not that structure.",
-      "blockedBy": ""
+      "blockedBy": "",
+      "done": { "on": "2026-08-22", "ref": "3b78f47a08ba7a3b8a29c649488eda0b62bf5da3", "evidence": "PR #26: audit-control-issue.yml now requires a verification_checklist field and a structured findings response (severity table, per-finding evidence, verification-performed checklist, explicit verdict), and bounded-review-cycle.md Stage 2 steps 2/9 updated to match. Stage 1 @codex review caught one real P1 (issue-form field `description` text never renders into the created issue body, so the instructions must live in `markdown` blocks instead) — fixed and thread resolved before merge." }
     },
     "subagent-chat-discipline": {
       "id": "subagent-chat-discipline",
