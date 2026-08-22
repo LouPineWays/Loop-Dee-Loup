@@ -34,11 +34,44 @@ body:
       description: Complete current files, applicable instructions, and source-of-truth hierarchy covered by this audit.
     validations:
       required: true
+  - type: markdown
+    attributes:
+      value: |
+        **Verification checklist instructions:** fill in the field below now, before triggering
+        `@codex review` — a numbered, change-specific list of concrete checks against the exact
+        merge commit above, derived from the actual diff and its acceptance criteria. Not generic
+        prose ("review the code for bugs"); each item names a specific file/behavior/invariant to
+        confirm, e.g. "1. Confirm `parseInput()` (src/foo.ts:42) rejects an empty string instead
+        of throwing." The audit response must work through this list item by item — this
+        paragraph renders permanently in the issue body (unlike field `description` text, which
+        GitHub shows only in the authoring form and drops from the created issue) so the
+        instructions reach the audit response even when it is triggered from a separate comment.
+  - type: textarea
+    id: verification_checklist
+    attributes:
+      label: Verification checklist
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        **Required findings structure:** the audit response must replace "Pending" below with:
+        (1) a severity table with a count per severity (e.g. Critical/High/Medium/Low or P0-P3);
+        (2) one entry per finding, deduplicated by root cause, each with exact evidence (file/line,
+        command output, or quoted text), consequence, and smallest correction; (3) a
+        verification-performed checklist that works through every item in the Verification
+        checklist field above and states its result; (4) whether founder judgment is required for
+        any finding. A report that nothing material remains is a successful audit — state it in
+        this structure rather than a bare "looks fine."
   - type: textarea
     id: findings
     attributes:
       label: Findings
-      description: Left as "Pending" when the issue is opened; the audit response fills this in. Deduplicate by root cause. For each finding give exact evidence, consequence, smallest correction, and whether founder judgment is required.
+      description: Left as "Pending" when the issue is opened; the audit response fills this in per the required structure above.
       value: "Pending — awaiting Stage 2 audit response."
     validations:
       required: false
