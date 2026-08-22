@@ -26,14 +26,14 @@ Once Stage 1 has been requested, the PR body is the durable checkpoint. Make it 
 ## Stage 2: one post-merge issue audit
 
 1. Record the exact merge commit on the target branch, not merely the PR head.
-2. Start the audit from a fresh independent context. Open one control issue containing the complete read-only audit specification, using the `audit-control-issue` issue template.
+2. Start the audit from a fresh independent context. Open one control issue containing the complete read-only audit specification, using the `audit-control-issue` issue template, filling in its verification-checklist field with a numbered, change-specific list of checks derived from the actual diff and acceptance criteria — not generic prose.
 3. Verify the created issue body by direct read. It must survive transport intact and name the exact commit.
 4. Check whether an invocation already exists, then post one separate issue comment containing `@codex review` to trigger the reviewer — never any other reviewer tool or mechanism. An invocation in the issue body is specification only and does not reliably start Codex. Never invoke from both places.
 5. Treat posting the trigger and arranging its bounded follow-up as one atomic action. Issue audit responses are not covered by PR-only subscriptions.
 6. Keep the controlling session lean. Delegate the trigger, wait, and response extraction to one disposable worker or successor context when available. It reads the issue response in its own context and returns only the verdict, severity counts, and finding text required for action. Do not load the full audit transcript, verification-command list, or evidence prose into the orchestrator merely to learn whether Codex replied. The moment that worker extracts the verdict, it must call a push-notification tool with the terse CLEAN/NOT CLEAN line, independent of whether the controlling session is still live — issue-comment audit replies have no event/webhook delivery, and the controlling session is expected to have already cleared per `AGENTS.md`'s Context-cost boundaries, so a chat message alone is not a reliable notification path.
 7. Audit the exact merged commit and complete current files, applicable instructions, source-of-truth hierarchy, merged PR, and its single inline review.
 8. Verify every valid inline finding's disposition and search for cross-file contradictions, regressions, missing transitions, authority conflicts, unhandled boundaries, and traps exposed by the consolidated fix.
-9. Deduplicate by root cause. Report severity counts, exact evidence, consequence, smallest correction, whether founder judgment is required, and end with CLEAN or NOT CLEAN. Modify nothing.
+9. Deduplicate by root cause. Report in the template's required structure: a severity table, one entry per finding with exact evidence, consequence, and smallest correction, a verification-performed checklist working through every item in the control issue's verification checklist with its result, whether founder judgment is required, and an explicit CLEAN or NOT CLEAN verdict. Modify nothing.
 
 A report that nothing material remains is a successful audit. State anything the environment could not verify instead of implying it passed.
 
