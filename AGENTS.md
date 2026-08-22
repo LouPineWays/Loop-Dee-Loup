@@ -118,7 +118,13 @@ Use these exact one-line formats for the terminal chat message of each communica
 
 An ad-hoc issue — one not created from a structured template (`parent-execution`, `work-packet`, `founder-decision-form`, `audit-control-issue`, `idea-intake`) — gets a single terse line for a body, not prose paragraphs. Templates keep their required fields.
 
-When babysitting a PR or issue between events, prefer a short self-check-in (about 10–15 minutes) over a long one (e.g. an hour). A long gap does not save tokens here: it forces a full state reload of the PR/issue on wake instead of a cheap incremental check, and the event subscription already covers most updates — the check-in is only a fallback.
+Before placing any self-check-in wakeup call (`ScheduleWakeup`, `send_later`, or a self-bound trigger) while babysitting a PR or issue between events, work through this checklist and do not place the call until every item holds:
+
+1. An event subscription already covers this PR/issue, so the check-in is a fallback, not the primary signal.
+2. The delay is 10–15 minutes — not a round default (30 minutes, an hour) reached for out of habit or because generic scheduling guidance elsewhere suggests it. This repo's bound is stricter and controls per the Authority order above, even over a tool's own generic "check in about an hour" suggestion.
+3. If the delay must exceed 15 minutes, the call's reason/name states the specific external wait it is bounded by (e.g. a stated CI duration). "Fewer interruptions" or "save tokens" are not valid reasons: a long gap does not save tokens here — a stale wake forces a full state reload of the PR/issue instead of a cheap incremental check.
+
+Defaulting to an hour, or skipping this checklist, is the exact failure this rule exists to prevent.
 
 ## Founder interrupt conditions
 
