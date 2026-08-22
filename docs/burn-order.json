@@ -3,11 +3,11 @@
   "note": "Loop-Dee-Loup's own backlog of process/tooling items about the Loop itself, never a target repository's product backlog (e.g. Covenant's) — see docs/burn-order.md. Edited through tools/burn-order (see its README); safe to hand-edit, which is the only way to edit it from a phone. Finished work goes in the Done band with a done:{} block, never by deleting it from the bands; run `node tools/burn-order/verify.mjs` to check that every claim still resolves. SEEDED 2026-08-21 from issue #9 (LouPineWays/Loop-Dee-Loup): the tool itself (server.mjs, verify.mjs, this file's shape) copied from Covenant/Word_Burner's tools/burn-order, adapted for this repo's own lane taxonomy (process, tooling, templates, docs). This replaces issue #6 as the pinned tracking issue's body being the source of truth; issue #6 is updated to point here instead. No candidates existed in issue #6 at seed time, so every band below starts empty.",
   "order": {
     "Now": [],
-    "Soon": ["audit-template-format", "audit-issue-reuse-guard", "burn-order-issue-per-item", "stage2-audit-push-notify"],
+    "Soon": ["audit-template-format", "audit-issue-reuse-guard", "burn-order-issue-per-item"],
     "Later": [],
     "Wishes": [],
     "Blocked": [],
-    "Done": ["subagent-chat-discipline"]
+    "Done": ["subagent-chat-discipline", "stage2-audit-push-notify"]
   },
   "items": {
     "audit-template-format": {
@@ -44,7 +44,8 @@
       "title": "Stage 2 audit disposable worker push-notifies the founder with the verdict directly, instead of relying on the controlling session staying alive to relay it in chat",
       "lane": "process",
       "note": "From issue #20 part B. Founder reported not being notified after clean audit cycles; root cause is the controlling session clearing (per AGENTS.md Context-cost boundaries) before the disposable worker's issue-comment wait resolves (no event delivery for issue comments), so the eventual verdict has no live session to land in. Fix: worker calls PushNotification with the terse verdict on extraction. Founder chose this over keeping the top-level session resident through every audit wait, to avoid that token cost. Tracked in issue #22.",
-      "blockedBy": ""
+      "blockedBy": "",
+      "done": { "on": "2026-08-22", "ref": "#23", "evidence": "docs/bounded-review-cycle.md Stage 2 step 6 now requires the disposable worker to call PushNotification with the terse CLEAN/NOT CLEAN line on verdict extraction, independent of whether the controlling session is still live; see PR #23." }
     }
   }
 }
