@@ -43,8 +43,9 @@ When a session is dispatched on (or resumes chat about) an open `idea-intake` is
 1. Read the raw idea. If it is genuinely ambiguous, ask one direct concise question in chat per the founder interrupt conditions — do not open a full decision form for a single-item backlog entry unless it exposes a real multi-option founder decision.
 2. Once clear, write it as one ironed-out outcome line (not an activity, not raw founder wording).
 3. Add it to `docs/burn-order.json`, either by running the tool (`node tools/burn-order/server.mjs`, then use "+ Add item") or by hand-editing the JSON directly — pick a lane, place it in the requested band (append at the bottom of that band by default), and give it a short id and title. Run `node tools/burn-order/verify.mjs` after a hand-edit. Do not ask the founder to copy it in themselves.
-4. Close the intake issue with `state_reason: completed`, labeled `converted`, linking to the new item (or to issue #6 as the pinned index).
-5. Report the fixed `CLEAN` chat line per `AGENTS.md` § Fixed chat report formats.
+4. Open a GitHub tracking issue for the new item, tagged by its lane (and a `burn-order` label), and record the issue number in the item's `note` field. This step applies going forward only — do not backfill issues for items already sitting in the Burn Order without one.
+5. Close the intake issue with `state_reason: completed`, labeled `converted`, linking to the new item's tracking issue (or to issue #6 as the pinned index).
+6. Report the fixed `CLEAN` chat line per `AGENTS.md` § Fixed chat report formats.
 
 ## Prioritization
 
