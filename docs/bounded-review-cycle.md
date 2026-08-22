@@ -8,6 +8,8 @@ Before review, verify the complete slice against its acceptance criteria and con
 
 Do not attach this cycle to trivial work merely because the mechanism exists. Preserve any target-repository rule that mandates review for a category of change.
 
+Within Loop-Dee-Loup's own repository, a PR that touches a control-plane path — `AGENTS.md`, any `docs/*.md`, `.github/ISSUE_TEMPLATE/*`, `.github/workflows/*.yml`, `.claude/skills/**`, or `tools/burn-order/**` including `docs/burn-order.json` — is never trivial for this test, regardless of diff size. These paths govern the Loop's own rules, CI gates, session skills, backlog state, and audit machinery; a one-line error in them (a stale `done.ref`, a disabled integrity check, a loosened rule) corrupts control state silently instead of failing loudly. Such a PR always gets the full cycle: Stage 1 inline review and, once merged, its own Stage 2 issue audit, matching the `audit-control-issue` template's one-PR, one-merge-commit fields — never both stages skipped, never merged clean-by-assumption without either, and never two merges sharing one Stage 2 issue.
+
 ## Stage 1: one inline PR review round
 
 1. Complete the slice and required local checks.
