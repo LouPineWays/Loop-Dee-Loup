@@ -26,7 +26,7 @@ Once Stage 1 has been requested, the PR body is the durable checkpoint. Make it 
 ## Stage 2: one post-merge issue audit
 
 1. Record the exact merge commit on the target branch, not merely the PR head.
-2. Start the audit from a fresh independent context. Open one control issue containing the complete read-only audit specification, using the `audit-control-issue` issue template, filling in its verification-checklist field with a numbered, change-specific list of checks derived from the actual diff and acceptance criteria — not generic prose.
+2. Start the audit from a fresh independent context. Open one control issue containing the complete read-only audit specification, using the `audit-control-issue` issue template, filling in its verification-checklist field with a numbered, change-specific list of checks derived from the actual diff and acceptance criteria — not generic prose. Never reuse an existing non-audit issue — the original feature or slice issue, a decision form, or any other control issue, closed or open — as the Stage 2 control boundary. A prior invocation on the wrong issue is not a completed audit; open the fresh `audit-control-issue` regardless.
 3. Verify the created issue body by direct read. It must survive transport intact and name the exact commit.
 4. Check whether an invocation already exists, then post one separate issue comment containing `@codex review` to trigger the reviewer — never any other reviewer tool or mechanism. An invocation in the issue body is specification only and does not reliably start Codex. Never invoke from both places.
 5. Treat posting the trigger and arranging its bounded follow-up as one atomic action. Issue audit responses are not covered by PR-only subscriptions.
@@ -34,8 +34,9 @@ Once Stage 1 has been requested, the PR body is the durable checkpoint. Make it 
 7. Audit the exact merged commit and complete current files, applicable instructions, source-of-truth hierarchy, merged PR, and its single inline review.
 8. Verify every valid inline finding's disposition and search for cross-file contradictions, regressions, missing transitions, authority conflicts, unhandled boundaries, and traps exposed by the consolidated fix.
 9. Deduplicate by root cause. Report in the template's required structure: a severity table, one entry per finding with exact evidence, consequence, and smallest correction, a verification-performed checklist working through every item in the control issue's verification checklist with its result, whether founder judgment is required, and an explicit CLEAN or NOT CLEAN verdict. Modify nothing.
+10. Never record a CLEAN or NOT CLEAN verdict without an actual audit response comment behind it. If Codex does not respond, replies BLOCKED, or the trigger otherwise fails, the verdict stays PENDING — that is a blocker to retry, re-trigger, or escalate to the founder, not license for the controlling session or extracting worker to self-declare a verdict from its own read of the diff.
 
-A report that nothing material remains is a successful audit. State anything the environment could not verify instead of implying it passed.
+A report that nothing material remains is a successful audit. State anything the environment could not verify instead of implying it passed. PENDING is not a verdict: an audit issue with no genuine Codex response is an unfinished audit, not a clean one.
 
 ## Verdict handling
 
