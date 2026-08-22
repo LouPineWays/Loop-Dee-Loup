@@ -45,7 +45,7 @@
       "lane": "process",
       "note": "From issue #20 part B. Founder reported not being notified after clean audit cycles; root cause is the controlling session clearing (per AGENTS.md Context-cost boundaries) before the disposable worker's issue-comment wait resolves (no event delivery for issue comments), so the eventual verdict has no live session to land in. Fix: worker calls PushNotification with the terse verdict on extraction. Founder chose this over keeping the top-level session resident through every audit wait, to avoid that token cost. Tracked in issue #22.",
       "blockedBy": "",
-      "done": { "on": "2026-08-22", "ref": "#23", "evidence": "docs/bounded-review-cycle.md Stage 2 step 6 now requires the disposable worker to call PushNotification with the terse CLEAN/NOT CLEAN line on verdict extraction, independent of whether the controlling session is still live; see PR #23." }
+      "done": { "on": "2026-08-22", "ref": "7a32a5280fe7e9d8546c04a55ac5894029d5b8ba", "evidence": "docs/bounded-review-cycle.md Stage 2 step 6 now requires the disposable worker to call PushNotification with the terse CLEAN/NOT CLEAN line on verdict extraction, independent of whether the controlling session is still live; see PR #23 (merge-committed, not squashed, so the ref is the content commit sha rather than a #23-suffixed subject)." }
     }
   }
 }
