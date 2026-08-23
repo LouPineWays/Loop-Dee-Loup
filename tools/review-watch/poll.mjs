@@ -24,6 +24,12 @@
 // --since must be the trigger time (when `@codex review` was posted), so a stale prior
 // comment from an earlier round can never be mistaken for the new response.
 //
+// A match reports every post-trigger bot item found across all checked endpoints in the
+// sweep that found one, not just the first — one invocation can post a review body plus
+// several inline comments, or (per docs/bounded-review-cycle.md, "multiple comments
+// produced by one invocation are one round") several standalone comments, and a caller
+// that only saw the first would under-verify the rest of the round.
+//
 // Exit codes: 0 = matched (match JSON on stdout), 2 = timed out with no match,
 // 1 = operational error (bad args, `gh` failure).
 //
@@ -57,24 +63,27 @@ export function endpointsFor(kind, repo, number) {
   throw new Error(`--kind must be "pr" or "issue", got: ${kind}`);
 }
 
-// Pure — no I/O — so tests can exercise it without a network call or `gh`.
-export function findMatch(items, { bot, sinceMs, endpointName }) {
+// Pure — no I/O — so tests can exercise it without a network call or `gh`. Returns every
+// post-`sinceMs` item authored by `bot` in `items`, not just the first, so one invocation's
+// full round of comments/reviews is captured in a single sweep.
+export function findAllMatches(items, { bot, sinceMs, endpointName }) {
+  const matches = [];
   for (const item of items) {
     const login = item?.user?.login;
     if (login !== bot) continue;
     const timestamp = item.submitted_at || item.created_at;
     if (!timestamp) continue;
     if (new Date(timestamp).getTime() < sinceMs) continue; // stale response from an earlier round
-    return {
+    matches.push({
       endpoint: endpointName,
       id: item.id,
       login,
       created_at: timestamp,
       url: item.html_url ?? null,
       body_excerpt: (item.body ?? "").slice(0, 200),
-    };
+    });
   }
-  return null;
+  return matches;
 }
 
 function sleep(ms) {
@@ -85,11 +94,19 @@ function sleep(ms) {
 // touching the real network or waiting on real timers.
 export async function run(args, { ghApiImpl = defaultGhApi, sleepImpl = sleep } = {}) {
   const { repo, kind, number, since, bot } = args;
-  const interval = Number(args.interval);
-  const timeout = Number(args.timeout);
 
   if (!repo || !kind || !number || !since) {
     return { exitCode: 1, message: "Missing required args: --repo, --kind, --number, --since are all required." };
+  }
+
+  const interval = Number(args.interval);
+  if (!Number.isFinite(interval) || interval <= 0) {
+    return { exitCode: 1, message: `--interval must be a positive number, got: ${args.interval}` };
+  }
+
+  const timeout = Number(args.timeout);
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    return { exitCode: 1, message: `--timeout must be a positive number, got: ${args.timeout}` };
   }
 
   const sinceMs = new Date(since).getTime();
@@ -107,6 +124,7 @@ export async function run(args, { ghApiImpl = defaultGhApi, sleepImpl = sleep } 
   const deadline = Date.now() + timeout * 1000;
 
   while (Date.now() <= deadline) {
+    const matches = [];
     for (const endpoint of endpoints) {
       let items;
       try {
@@ -114,12 +132,14 @@ export async function run(args, { ghApiImpl = defaultGhApi, sleepImpl = sleep } 
       } catch (err) {
         return { exitCode: 1, message: `gh api call failed for ${endpoint.path}: ${err.message}` };
       }
-      const match = findMatch(items, { bot, sinceMs, endpointName: endpoint.name });
-      if (match) {
-        return { exitCode: 0, message: JSON.stringify({ matched: true, ...match }) };
-      }
+      matches.push(...findAllMatches(items, { bot, sinceMs, endpointName: endpoint.name }));
     }
-    await sleepImpl(interval * 1000);
+    if (matches.length > 0) {
+      return { exitCode: 0, message: JSON.stringify({ matched: true, count: matches.length, matches }) };
+    }
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    await sleepImpl(Math.min(interval * 1000, remainingMs));
   }
 
   return {
@@ -129,7 +149,11 @@ export async function run(args, { ghApiImpl = defaultGhApi, sleepImpl = sleep } 
 }
 
 function defaultGhApi(path) {
-  const raw = execFileSync("gh", ["api", path], { encoding: "utf8" });
+  // --paginate: a busy PR/issue thread can push the post-trigger response past the
+  // default single-page result, which would otherwise be silently missed on every sweep
+  // until the whole poll times out. Recent `gh` versions auto-concatenate paginated list
+  // responses into one JSON array, so the parse below still sees a single array either way.
+  const raw = execFileSync("gh", ["api", path, "--paginate"], { encoding: "utf8" });
   return JSON.parse(raw);
 }
 
