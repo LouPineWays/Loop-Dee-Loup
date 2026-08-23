@@ -205,7 +205,6 @@ Repository-local skills support the Loop without replacing the active issue or t
 
 - `model-check` selects the cheapest safe model, effort, and execution shape before dispatch;
 - `sift` screens external tools and workflows before adoption;
-- `skill-observer` captures proven defects in skills and operating rules;
 - `retro` converts completed-cycle evidence into at most three process corrections;
 - `spend` attributes token cost to validated progress and identifies avoidable waste;
 - `context-clearing` verifies that a PR or issue is a self-sufficient durable handoff before a session clears or yields;
