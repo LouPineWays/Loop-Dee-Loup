@@ -113,14 +113,18 @@ One Claude Code session owns one vertical slice:
 - independently verify completion claims;
 - route the change through available repository gates;
 - refresh durable state;
-- prepare exactly one next slice;
+- when this slice's completion exposes new follow-on work not already foreseeable at dispatch, prepare at most one next slice — see Decomposition boundary for issues that require multiple slices;
 - stop.
 
-## Just-in-time decomposition
+## Decomposition boundary
 
-Decompose only until one safe next vertical slice exists. Later slices remain hypotheses until current work produces evidence.
+Decomposition and execution are separate control boundaries. An issue completable as one bounded vertical slice executes normally under Session role above.
 
-Do not create issues to mimic implementation steps, conversational turns, or organizational roles.
+An issue that genuinely requires multiple independently executable slices instead triggers a decomposition session: determine every currently foreseeable, implementation-ready slice, create a durable execution issue for each, record real dependencies between them, close the source issue as a decomposition record, and stop — without beginning any resulting slice. See `AGENTS.md` § Decomposition boundary for the exact contract.
+
+Do not create issues to mimic implementation steps, conversational turns, or organizational roles. Do not manufacture speculative future slices whose shape depends on an outcome not yet known — "every currently foreseeable slice" is not "every slice that might eventually exist."
+
+A resulting slice begins only when the founder explicitly dispatches it in a fresh session. Completing one dispatched slice does not authorize starting a sibling from the same decomposition; the founder chooses what runs next.
 
 ## Verification and autonomy
 

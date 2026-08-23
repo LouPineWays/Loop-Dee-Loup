@@ -9,7 +9,7 @@ Loop-Dee-Loup turns a founder-approved feature proposal into verified vertical s
 - The execution issue is a subagent-sized vertical slice: one coherent outcome, implemented through every layer it requires.
 - A slice must be independently verifiable and leave the product and repository in a valid state.
 - Internal steps such as inspect, implement, test, document, and review stay inside the slice.
-- Decompose just in time. Do not predict an entire project hierarchy before current evidence exists.
+- Decomposition and execution are separate control boundaries: materialize every currently foreseeable slice when an issue genuinely needs several, but do not predict an entire project hierarchy before current evidence exists.
 - Agent sessions are disposable. The founder starts or resumes one with a short issue reference.
 - Durable state is a compact snapshot, not a transcript.
 - Verification evidence advances the loop. Status prose does not.
@@ -24,7 +24,7 @@ The founder starts a fresh Claude Code session with a terse instruction such as:
 
 > Run Loop-Dee-Loup issue #12.
 
-The issue and repository provide the context. Claude executes autonomously until the vertical slice is complete or a genuine interrupt condition is reached. It updates durable GitHub state, identifies the next slice, and ends the session. The founder can later start another fresh session with the next issue reference.
+The issue and repository provide the context. If the issue is one bounded vertical slice, Claude executes autonomously until it is complete or a genuine interrupt condition is reached, updates durable GitHub state, and ends the session. If the issue genuinely requires multiple slices, Claude instead decomposes it — creating a durable issue for every currently foreseeable slice and closing the source — without executing any of them. The founder starts another fresh session to dispatch whichever slice runs next.
 
 This single-line dispatch is scheduling, not a routine approval gate.
 
@@ -39,6 +39,14 @@ Create an execution issue only when all are true:
 - merging it leaves the target repository coherent.
 
 Do not split one outcome into separate issues for research, backend, UI, tests, documentation, or PR administration merely because those are different activities. Keep them inside the slice. Create a new issue when the outcome, authority boundary, or required context genuinely changes.
+
+## Decomposition boundary
+
+When one issue turns out to require multiple independently executable vertical slices, decomposition and execution are separate control boundaries.
+
+The session determining that becomes a decomposition session: it creates a durable execution issue for every currently foreseeable, implementation-ready slice (not speculative ones whose shape depends on an outcome not yet known), records genuine dependencies between them, closes the source issue as a decomposition record, and stops — without implementing any resulting slice.
+
+A resulting slice begins only when the founder explicitly dispatches it in a fresh session. Creating a slice, even in the same decomposition session, does not authorize starting it. CLEAN completion of one dispatched slice does not authorize starting a sibling from the same decomposition; the founder chooses what runs next. See `AGENTS.md` § Decomposition boundary.
 
 ## Founder decision forms
 
@@ -71,13 +79,13 @@ If two decision-form rounds produce no implementable slice, diagnose the proposa
 1. Capture a feature proposal and create or refresh its compressed parent issue.
 2. Analyze the currently visible critical path.
 3. When founder decisions block slicing, generate one batched decision form and incorporate the completed answers.
-4. Derive exactly one next vertical slice.
-5. Start a fresh Claude Code session against that slice issue.
-6. Implement and verify the entire slice without routine founder involvement.
+4. Derive an implementable vertical slice — when the outcome genuinely needs several, materialize every currently foreseeable one and close the source as a decomposition record instead of executing any of them (see Decomposition boundary).
+5. The founder starts a fresh Claude Code session dispatching one specific slice issue.
+6. Implement and verify that entire slice without routine founder involvement.
 7. Route it through the target repository's required PR and bounded review gates.
 8. Merge when all gates pass, audit when required, and create a correction slice if the audit is not clean.
-9. Refresh the parent snapshot, designate the next slice, and stop at the clean session boundary.
-10. Repeat from a new terse dispatch until done or genuinely blocked.
+9. Refresh the parent snapshot; designate at most one next slice only when this slice's completion exposes new follow-on work not already known at dispatch. Stop at the clean session boundary without starting a sibling slice.
+10. Repeat from a new terse founder dispatch until done or genuinely blocked.
 
 Issues are external state machines, not replacement chat transcripts.
 
