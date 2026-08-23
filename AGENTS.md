@@ -188,6 +188,7 @@ Repository-local skills support the Loop without replacing the active issue or t
 - `persona-maker` creates a durable, reusable expertise profile (`.claude/personas/*.md`) for a recurring class of subagent work;
 - `script-maker` converts a demonstrated, repeated deterministic repository operation into a checked, documented script;
 - `skill-maker` creates a new narrowly-triggered skill when a recurring judgment-dependent workflow has become stable enough to encode.
+- `local-worker` invokes a configured local LLM for bounded, cheaply-verifiable subtasks that `model-check` routes to local execution; its output is candidate work requiring independent Claude verification before acceptance.
 
 Durable personas live under `.claude/personas/*.md`, one file per recurring subagent role (see `persona-maker`). Dispatch a subagent by pointing it at the matching persona file instead of restating its expertise in the prompt.
 
