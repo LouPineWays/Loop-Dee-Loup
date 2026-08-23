@@ -29,6 +29,7 @@ body:
         - BLOCKED_FAILURE
         - BLOCKED_EXTERNAL
         - READY_NEXT_SESSION
+        - DECOMPOSED
         - DONE
     validations:
       required: true
@@ -94,7 +95,15 @@ body:
   - type: textarea
     id: next
     attributes:
-      label: Next work packet
-      description: Exactly one issue link or None. A fresh session can resume from this reference without reading history.
+      label: Next slice / resulting slices
+      description: >-
+        Write None, or the single next slice this issue's own completion exposed as genuinely new
+        follow-on work. If this issue required decomposition instead, list every currently
+        foreseeable execution issue created from it plus a brief summary of dependencies between
+        them (record those dependencies natively via GitHub's Blocked by/Blocking too, but
+        summarize them here as well so a fresh reader of this closed issue is not forced to
+        traverse every child), and set State to DECOMPOSED — this issue then closes as the durable
+        decomposition record, not as a sequential pointer to "the next" child. Do not name only the
+        first known slice while leaving others uncreated.
     validations:
       required: true

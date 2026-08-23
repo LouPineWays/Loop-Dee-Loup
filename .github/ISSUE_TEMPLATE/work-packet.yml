@@ -10,6 +10,10 @@ body:
     id: parent
     attributes:
       label: Parent loop
+      description: >-
+        Link the source/parent issue for provenance. It may already be closed as a decomposition
+        record — this slice must still be executable from its own fields below without reopening
+        or reconstructing that conversation.
     validations:
       required: true
   - type: textarea

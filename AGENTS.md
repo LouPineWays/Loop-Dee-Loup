@@ -6,7 +6,7 @@ Read this file before acting in this repository.
 
 Loop-Dee-Loup is a hyper-lean, issue-dispatched execution loop. Durable state belongs in concise, authoritative artifacts. Conversation history and issue comments are not the source of truth.
 
-Version one has no persistent controller daemon. The founder starts or resumes a Claude Code session with a terse issue reference. The session autonomously executes one vertical slice, verifies it, updates durable state, prepares the next slice, and stops at a clean boundary.
+Version one has no persistent controller daemon. The founder starts or resumes a Claude Code session with a terse issue reference. When the issue is one bounded vertical slice, the session autonomously executes it, verifies it, updates durable state, and stops at a clean boundary. When the issue instead requires multiple independently executable slices, the session performs decomposition — materializing every currently foreseeable slice as its own durable issue — and stops without executing any of them; see Decomposition boundary.
 
 ## Authority
 
@@ -35,6 +35,28 @@ It must:
 Do not create separate execution issues for exploration, implementation layer, tests, documentation, review response, or session continuation when they serve the same outcome. Those are steps inside the slice.
 
 A founder decision, external manual action, post-merge audit, or genuinely independent correction may create a separate control boundary. Label it by its actual purpose rather than pretending it is a product slice.
+
+## Decomposition boundary
+
+Decomposition and execution are separate control boundaries.
+
+If an issue is completable as one bounded vertical slice under the rule above, execute it normally under Session execution.
+
+If it genuinely requires multiple independently executable vertical slices, the current session becomes a decomposition session. Once that determination is made, the session must not begin implementing any resulting slice — not even the first one, and not "to save a session."
+
+Before a decomposition session ends, it must:
+
+1. determine every currently foreseeable, implementation-ready vertical slice — not speculative work whose need depends on discoveries not yet made by an earlier slice;
+2. create one self-sufficient execution issue for each slice (the vertical-slice template), containing enough of the outcome, constraints, acceptance criteria, and dependencies that a fresh session can execute it without reconstructing this conversation;
+3. record genuine dependencies between those slices using GitHub's native issue relationships (Blocked by / Blocking), not free-text cross-references alone;
+4. close the source issue as a durable decomposition record — retaining its objective, settled decisions, scope and non-goals, the resulting slice list, dependencies, and any unresolved external dependency — rather than leaving it open to sequentially point from one child to the next;
+5. stop.
+
+Do not manufacture speculative future slices merely to complete a project tree: create only slices that are currently foreseeable and implementation-ready, not branches whose shape depends on an outcome not yet known.
+
+A resulting slice begins only when the founder explicitly dispatches it in a fresh session (e.g. "Work on #123"). Creating a slice — including during the same decomposition session that just created it — does not authorize beginning it. Do not infer dispatch from having just created the issue.
+
+Once dispatched, a slice runs autonomously per Session execution and the bounded review cycle until it reaches CLEAN completion or a genuine founder interrupt or unrecoverable blocker applies. CLEAN completion of one slice does not authorize beginning a sibling slice created in the same decomposition, even one that is now unblocked, obviously next, or has no remaining founder decision. The founder chooses which executable issue to dispatch next.
 
 ## Founder decision-form rule
 
@@ -65,7 +87,7 @@ If exactly one unforeseeable founder question blocks an in-progress slice, a dir
 
 ## Lean operating rules
 
-- Decompose only enough to identify the next safe vertical slice.
+- When an issue is one bounded vertical slice, decompose no further than that slice. When it genuinely requires multiple slices, materialize every currently foreseeable one in the same decomposition session — see Decomposition boundary — rather than creating only the next and deferring the rest.
 - Do not manufacture epics, sprints, ceremonies, departments, personas, or role handoffs unless they solve an observed control problem.
 - Do not create an issue merely because another conversation turn is needed.
 - Read only the files and issue bodies needed for the active slice.
@@ -75,13 +97,15 @@ If exactly one unforeseeable founder question blocks an in-progress slice, a dir
 
 ## Session execution
 
-After dispatch, the session must:
+After dispatch, first apply the Decomposition boundary: determine whether the active issue is one bounded vertical slice or genuinely requires decomposition into multiple. A multi-slice determination ends the session there, per that section.
+
+For a single bounded vertical slice, the session must:
 
 1. load the parent snapshot and active slice;
 2. complete all internal steps required by the slice without routine founder confirmation;
 3. independently verify the claimed outcome;
 4. update the parent snapshot with durable facts only;
-5. create or designate exactly one next vertical slice when product work remains;
+5. create or designate at most one next vertical slice, and only when completing this slice exposes genuinely new follow-on work that was not already foreseeable at dispatch;
 6. stop at the slice boundary with a concise handoff.
 
 Do not ask whether to proceed with mechanically determined implementation, checks, verified review corrections, or handoff preparation. A new session start may be required to continue, but that is scheduling rather than approval.
@@ -151,7 +175,7 @@ A parent issue body is a mutable current-state snapshot, not an append-only diar
 - acceptance criteria;
 - completed slices;
 - current blocker;
-- next slice.
+- next slice, or, once decomposed, the resulting slice list and their dependencies.
 
 History may remain in comments for auditability, but executors must not normally read it.
 

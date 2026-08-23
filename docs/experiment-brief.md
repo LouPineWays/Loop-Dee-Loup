@@ -4,7 +4,7 @@
 
 Loop-Dee-Loup is the founder's hyper-lean agentic loop for vibecoding. It is not a simulation of a conventional software organization.
 
-The founder starts a Claude Code session with a short issue reference. That issue defines one subagent-sized vertical slice. The session completes the outcome across every necessary layer without routine involvement, records durable state in GitHub, prepares the next vertical slice, and stops.
+The founder starts a Claude Code session with a short issue reference. When that issue is one subagent-sized vertical slice, the session completes the outcome across every necessary layer without routine involvement, records durable state in GitHub, and stops. When the issue instead requires multiple slices, the session decomposes it — materializing every currently foreseeable slice as its own issue and closing the source — without executing any of them; see `AGENTS.md` § Decomposition boundary.
 
 ## Hypothesis
 
@@ -63,12 +63,12 @@ After merge, the required exact-commit acceptance audit is a control issue. The 
 2. **SNAPSHOT:** compress current truth into the parent issue.
 3. **CRITICAL PATH:** identify founder decisions blocking implementable slices.
 4. **FORM:** batch those decisions when needed and incorporate the completed response.
-5. **SLICE:** derive exactly one next subagent-sized vertical slice.
-6. **DISPATCH:** founder starts a fresh session with the slice issue reference.
-7. **EXECUTE:** session completes the entire slice without routine founder involvement.
+5. **SLICE:** derive an implementable subagent-sized vertical slice — when the outcome genuinely needs several, materialize every currently foreseeable one and close the source as a decomposition record instead of executing any of them.
+6. **DISPATCH:** founder starts a fresh session naming the one slice issue to execute.
+7. **EXECUTE:** session completes that entire slice without routine founder involvement.
 8. **VERIFY:** independently check the integrated outcome.
 9. **INTEGRATE:** use the target repository's PR, review, merge, and audit rules.
-10. **REFRESH:** update the parent snapshot and designate one next slice.
+10. **REFRESH:** update the parent snapshot; designate at most one next slice only when this slice's completion exposes new follow-on work not already known at dispatch.
 11. **STOP:** end at the clean slice boundary.
 12. **RESUME:** a later terse dispatch starts from GitHub state.
 13. **CLOSE:** finish only from verified feature acceptance evidence.
@@ -86,9 +86,10 @@ After merge, the required exact-commit acceptance audit is a control issue. The 
 - BLOCKED_FAILURE
 - BLOCKED_EXTERNAL
 - READY_NEXT_SESSION
+- DECOMPOSED
 - DONE
 
-Only one slice may be NEXT. State transitions require evidence, not prose claims.
+Multiple resulting slices may exist as durable issues once a source is decomposed; only the founder-dispatched slice is EXECUTING at a time. State transitions require evidence, not prose claims.
 
 ## Measurements
 
