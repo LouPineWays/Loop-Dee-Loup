@@ -53,13 +53,29 @@ const requiredLiterals = [
 
 const failures = [];
 
+// Anchors bound the specific enumeration sentence, not the whole document — a docs-wide
+// substring search would still find e.g. "AGENTS.md" mentioned elsewhere in the file even
+// after it was removed from the actual control-plane list, missing the exact drift this
+// check exists to catch.
+const ENUM_START = "a control-plane path";
+const ENUM_END = "is never trivial";
+
 if (!existsSync(DOC_PATH)) {
   failures.push(`missing governing doc: docs/bounded-review-cycle.md`);
 } else {
   const docText = readFileSync(DOC_PATH, "utf8");
-  for (const literal of requiredLiterals) {
-    if (!docText.includes(literal)) {
-      failures.push(`docs/bounded-review-cycle.md no longer mentions: ${literal}`);
+  const startIdx = docText.indexOf(ENUM_START);
+  const endIdx = docText.indexOf(ENUM_END);
+  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) {
+    failures.push(
+      "docs/bounded-review-cycle.md: could not locate the control-plane path enumeration (anchor phrasing changed)",
+    );
+  } else {
+    const enumeration = docText.slice(startIdx, endIdx);
+    for (const literal of requiredLiterals) {
+      if (!enumeration.includes(literal)) {
+        failures.push(`docs/bounded-review-cycle.md control-plane enumeration no longer mentions: ${literal}`);
+      }
     }
   }
 }
