@@ -9,6 +9,8 @@ The local-worker adapter (`tools/local-worker/adapter.mjs`) lets a Claude subage
 
 ## When to use it
 
+A local LLM is not another rung in the deterministic-mechanism hierarchy (`script-maker` → `skill-maker` → `persona-maker` → ordinary instructions). If deterministic code can safely perform the operation, use a script instead — see `.claude/skills/script-maker/SKILL.md` — rather than spending any model inference, local or hosted, on it. Local delegation applies only to work that still requires model judgment: deterministic mechanism where possible → local LLM when suitable → hosted Claude when needed.
+
 Only after `model-check` (or the dispatching subagent's own equivalent judgment) has determined the task is a good local-delegation candidate.
 
 Good candidates: localized implementation from settled requirements; boilerplate; straightforward tests; fixture/test-data generation; mundane documentation derived from settled facts; bounded transformations or classifications; first-pass analysis that's cheap for Claude to check.
