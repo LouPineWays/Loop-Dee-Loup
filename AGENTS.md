@@ -184,7 +184,12 @@ Repository-local skills support the Loop without replacing the active issue or t
 - `skill-observer` captures proven defects in skills and operating rules;
 - `retro` converts completed-cycle evidence into at most three process corrections;
 - `spend` attributes token cost to validated progress and identifies avoidable waste;
-- `context-clearing` verifies that a PR or issue is a self-sufficient durable handoff before a session clears or yields.
+- `context-clearing` verifies that a PR or issue is a self-sufficient durable handoff before a session clears or yields;
+- `persona-maker` creates a durable, reusable expertise profile (`.claude/personas/*.md`) for a recurring class of subagent work;
+- `script-maker` converts a demonstrated, repeated deterministic repository operation into a checked, documented script;
+- `skill-maker` creates a new narrowly-triggered skill when a recurring judgment-dependent workflow has become stable enough to encode.
+
+Durable personas live under `.claude/personas/*.md`, one file per recurring subagent role (see `persona-maker`). Dispatch a subagent by pointing it at the matching persona file instead of restating its expertise in the prompt.
 
 Invoke only the skill relevant to the current control problem. A skill run is normally an internal activity, not a separate issue or conversational ceremony. Do not run every skill on every slice.
 

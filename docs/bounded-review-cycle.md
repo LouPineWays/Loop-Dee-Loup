@@ -10,6 +10,8 @@ Do not attach this cycle to trivial work merely because the mechanism exists. Pr
 
 Within Loop-Dee-Loup's own repository, a PR that touches a control-plane path — any root-level `*.md` file (currently `AGENTS.md`, `CLAUDE.md`, `README.md`), any `docs/*.md`, `.github/ISSUE_TEMPLATE/*`, `.github/workflows/*.yml`, anything under `.claude/**` (session skills, launch configuration, settings — the whole directory, not an enumerated subset), or `tools/burn-order/**` including `docs/burn-order.json` — is never trivial for this test, regardless of diff size. These paths govern the Loop's own rules, CI gates, session skills, backlog state, and audit machinery; a one-line error in them (a stale `done.ref`, a disabled integrity check, a loosened rule) corrupts control state silently instead of failing loudly. Such a PR always gets the full cycle: Stage 1 inline review and, once merged, its own Stage 2 issue audit, matching the `audit-control-issue` template's one-PR, one-merge-commit fields — never both stages skipped, never merged clean-by-assumption without either, and never two merges sharing one Stage 2 issue.
 
+`node tools/check-control-plane-paths.mjs` (wired into CI as the `control-plane-paths` workflow) deterministically verifies every path already listed above still resolves against the repository, guarding against the exact silent drift found by three consecutive Stage 2 audits (issues #37, #39, #41). It cannot decide whether a brand-new top-level location belongs on this list — that remains a judgment call for whoever adds it.
+
 ## Stage 1: one inline PR review round
 
 1. Complete the slice and required local checks.

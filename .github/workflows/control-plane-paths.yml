@@ -1,0 +1,34 @@
+name: Control-plane paths
+
+# Guards against the exact drift found by three consecutive Stage 2 audits (issues
+# #37, #39, #41): a real control-plane path silently missing from the enumeration in
+# docs/bounded-review-cycle.md. No build step and no dependencies, so it stays cheap
+# to run on every PR that could plausibly move a control-plane path.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "README.md"
+      - "docs/*.md"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/workflows/**"
+      - ".claude/**"
+      - "tools/burn-order/**"
+      - "docs/burn-order.json"
+      - "tools/check-control-plane-paths.mjs"
+
+concurrency:
+  group: control-plane-paths-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify control-plane path list
+        run: node tools/check-control-plane-paths.mjs
