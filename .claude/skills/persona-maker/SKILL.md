@@ -18,7 +18,9 @@ Reject the proposal instead of creating it when:
 - it is too broad to add expertise beyond "write code" (e.g. "Coder", "Engineer");
 - it is too narrow to reuse beyond the current slice (e.g. tied to one file, one color, one ticket);
 - it duplicates an existing persona, skill, or governing rule — point to the duplicate instead;
-- reuse is asserted but not evidenced.
+- reuse is asserted but not evidenced;
+- the recurring need is actually a deterministic operation, not an expertise profile — route to `script-maker` instead;
+- the recurring need requires fresh judgment on each invocation rather than a fixed, reusable profile — route to `skill-maker` instead.
 
 A persona file lives at `.claude/personas/<kebab-name>.md` and contains only:
 

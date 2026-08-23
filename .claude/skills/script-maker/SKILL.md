@@ -9,7 +9,7 @@ Only for operations a computer can already judge correctly — parsing, validati
 
 Before writing anything:
 
-1. Confirm the operation is deterministic — no founder decision, ambiguous product judgment, or safety/correctness call embedded in it. If judgment is required, this belongs to `skill-maker`, not here.
+1. Confirm the operation is deterministic — no founder decision, ambiguous product judgment, or safety/correctness call embedded in it. If judgment is required, this belongs to `skill-maker`, not here. If the recurring need is actually a fixed expertise/decision profile for a role — not an operation to execute — this belongs to `persona-maker` instead.
 2. Confirm it has actually recurred — point to at least two real prior instances, not a hypothesis. One occurrence is not a pattern.
 3. Search existing repository tooling (e.g. `tools/**`, CI workflows) for something that already does this or is trivially extended to. Prefer extending over duplicating.
 
