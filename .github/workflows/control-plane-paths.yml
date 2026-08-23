@@ -17,6 +17,7 @@ on:
       - "docs/burn-order.json"
       - "tools/check-control-plane-paths.mjs"
       - "tools/local-worker/**"
+      - "tools/review-watch/**"
 
 concurrency:
   group: control-plane-paths-${{ github.ref }}
@@ -34,3 +35,6 @@ jobs:
 
       - name: Local-worker adapter tests
         run: node --test tools/local-worker/adapter.test.mjs
+
+      - name: Review-watch poll tests
+        run: node --test tools/review-watch/poll.test.mjs
