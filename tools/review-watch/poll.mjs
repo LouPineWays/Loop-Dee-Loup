@@ -148,13 +148,21 @@ export async function run(args, { ghApiImpl = defaultGhApi, sleepImpl = sleep } 
   };
 }
 
+// `gh api --paginate` prints each page as its own separate JSON document, not one combined
+// document — `gh api --help` states this explicitly ("Each page is a separate JSON array or
+// object. Pass --slurp to wrap all pages ... into an outer JSON array"). A single JSON.parse
+// on raw multi-page --paginate output throws on a busy thread. --slurp gives one JSON array
+// of per-page arrays, which this flattens into one flat array of items.
+export function parsePaginatedOutput(raw) {
+  return JSON.parse(raw).flat();
+}
+
 function defaultGhApi(path) {
   // --paginate: a busy PR/issue thread can push the post-trigger response past the
   // default single-page result, which would otherwise be silently missed on every sweep
-  // until the whole poll times out. Recent `gh` versions auto-concatenate paginated list
-  // responses into one JSON array, so the parse below still sees a single array either way.
-  const raw = execFileSync("gh", ["api", path, "--paginate"], { encoding: "utf8" });
-  return JSON.parse(raw);
+  // until the whole poll times out.
+  const raw = execFileSync("gh", ["api", path, "--paginate", "--slurp"], { encoding: "utf8" });
+  return parsePaginatedOutput(raw);
 }
 
 async function main() {
