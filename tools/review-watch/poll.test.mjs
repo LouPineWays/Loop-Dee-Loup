@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { findAllMatches, endpointsFor, parseArgs, run } from "./poll.mjs";
+import { findAllMatches, endpointsFor, parseArgs, run, parsePaginatedOutput } from "./poll.mjs";
 
 const BOT = "chatgpt-codex-connector[bot]";
 const SINCE = "2026-08-23T14:00:00Z";
@@ -61,6 +61,28 @@ test("findAllMatches: returns every genuine match, not just the first — one in
     matches.map((m) => m.id),
     [6, 7],
   );
+});
+
+test("parsePaginatedOutput: flattens multiple `gh api --paginate --slurp` pages into one flat array", () => {
+  // --slurp wraps each page's own JSON array into one outer array, so 3 items spread across
+  // 2 pages arrive as [[{id:1},{id:2}],[{id:3}]] on stdout, not as one flat 3-item array.
+  const raw = JSON.stringify([
+    [{ id: 1 }, { id: 2 }],
+    [{ id: 3 }],
+  ]);
+  const result = parsePaginatedOutput(raw);
+  assert.deepEqual(result.map((i) => i.id), [1, 2, 3]);
+});
+
+test("parsePaginatedOutput: a single page still arrives wrapped in --slurp's outer array", () => {
+  const raw = JSON.stringify([[{ id: 1 }]]);
+  const result = parsePaginatedOutput(raw);
+  assert.deepEqual(result.map((i) => i.id), [1]);
+});
+
+test("parsePaginatedOutput: an endpoint with no items yields an empty flat array", () => {
+  const raw = JSON.stringify([[]]);
+  assert.deepEqual(parsePaginatedOutput(raw), []);
 });
 
 test("endpointsFor: pr kind checks the three endpoints from issue #53's incident", () => {
