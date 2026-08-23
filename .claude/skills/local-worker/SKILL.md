@@ -39,32 +39,39 @@ node tools/local-worker/adapter.mjs packet.json
 
 Parse the printed JSON result (`{ ok, status, output, detail }`) from stdout. `LDL_LOCAL_BASE_URL` and `LDL_LOCAL_MODEL` env vars point the adapter at a different local runtime/model than the default (`http://localhost:11434`, `gpt-oss:20b`).
 
-### Worked example
+### Worked examples
+
+Each block below is one complete, independently runnable packet — save either one alone as `packet.json` and run it as shown above. The adapter accepts exactly one packet object per invocation, not an array; delegate a batch of subtasks as separate invocations, not one packet holding several.
+
+**Example A — fixture generation:**
 
 ```json
-[
-  {
-    "task": "Generate 5 fixture objects representing Loop-Dee-Loup GitHub issues for a parser test. Each object needs fields: number (integer), title (string), state (\"OPEN\" or \"CLOSED\"), labels (array of strings, may be empty).",
-    "constraints": [
-      "Output must be a single JSON array of exactly 5 objects.",
-      "No markdown fences, no commentary.",
-      "Numbers must be distinct integers between 1 and 999.",
-      "At least one object must have an empty labels array and at least one must have two or more labels."
-    ],
-    "context": "",
-    "expectedShape": "A JSON array of 5 objects, each with number, title, state, labels fields, parseable by JSON.parse with no surrounding text."
-  },
-  {
-    "task": "Write one paragraph documenting that Loop-Dee-Loup's control-plane path checker (tools/check-control-plane-paths.mjs) verifies the path list in docs/bounded-review-cycle.md still resolves against the repository, and that it cannot detect a brand-new top-level location that should be added to that list.",
-    "constraints": [
-      "One paragraph, 3-5 sentences.",
-      "No markdown fences, no heading, no commentary before or after.",
-      "State only the two facts given; do not invent additional behavior."
-    ],
-    "context": "tools/check-control-plane-paths.mjs exists and is wired into CI as the control-plane-paths workflow.",
-    "expectedShape": "A single plain-text paragraph, 3-5 sentences, no markdown."
-  }
-]
+{
+  "task": "Generate 5 fixture objects representing Loop-Dee-Loup GitHub issues for a parser test. Each object needs fields: number (integer), title (string), state (\"OPEN\" or \"CLOSED\"), labels (array of strings, may be empty).",
+  "constraints": [
+    "Output must be a single JSON array of exactly 5 objects.",
+    "No markdown fences, no commentary.",
+    "Numbers must be distinct integers between 1 and 999.",
+    "At least one object must have an empty labels array and at least one must have two or more labels."
+  ],
+  "context": "",
+  "expectedShape": "A JSON array of 5 objects, each with number, title, state, labels fields, parseable by JSON.parse with no surrounding text."
+}
+```
+
+**Example B — mundane settled-fact documentation:**
+
+```json
+{
+  "task": "Write one paragraph documenting that Loop-Dee-Loup's control-plane path checker (tools/check-control-plane-paths.mjs) verifies the path list in docs/bounded-review-cycle.md still resolves against the repository, and that it cannot detect a brand-new top-level location that should be added to that list.",
+  "constraints": [
+    "One paragraph, 3-5 sentences.",
+    "No markdown fences, no heading, no commentary before or after.",
+    "State only the two facts given; do not invent additional behavior."
+  ],
+  "context": "tools/check-control-plane-paths.mjs exists and is wired into CI as the control-plane-paths workflow.",
+  "expectedShape": "A single plain-text paragraph, 3-5 sentences, no markdown."
+}
 ```
 
 (These two packets were drafted by Claude after a real dogfood attempt against Ollama/gpt-oss:20b hit the timeout-then-fallback path described below — see PR history for the full transcript. They illustrate realistic shapes, not a guarantee any given local runtime will complete them quickly.)

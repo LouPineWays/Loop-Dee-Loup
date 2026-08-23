@@ -16,6 +16,7 @@ on:
       - "tools/burn-order/**"
       - "docs/burn-order.json"
       - "tools/check-control-plane-paths.mjs"
+      - "tools/local-worker/**"
 
 concurrency:
   group: control-plane-paths-${{ github.ref }}
@@ -30,3 +31,6 @@ jobs:
 
       - name: Verify control-plane path list
         run: node tools/check-control-plane-paths.mjs
+
+      - name: Local-worker adapter tests
+        run: node --test tools/local-worker/adapter.test.mjs

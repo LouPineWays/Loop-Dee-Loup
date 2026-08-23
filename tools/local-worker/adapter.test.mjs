@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { runLocalTask } from "./adapter.mjs";
 
 const VALID_PACKET = {
@@ -139,6 +140,61 @@ test("HTTP error status returns ok:false, status:error", async () => {
   assert.equal(result.status, "error");
   assert.match(result.detail, /500/);
   assert.match(result.detail, /boom/);
+});
+
+test("baseUrl with trailing slash and with trailing /v1 both normalize to the same endpoint", async () => {
+  const seenUrls = [];
+  const fetchImpl = async (url) => {
+    seenUrls.push(url);
+    return jsonResponse({ choices: [{ message: { content: "ok" } }] });
+  };
+
+  await runLocalTask(VALID_PACKET, { fetchImpl, baseUrl: "http://localhost:11434/" });
+  await runLocalTask(VALID_PACKET, { fetchImpl, baseUrl: "http://localhost:11434/v1" });
+  await runLocalTask(VALID_PACKET, { fetchImpl, baseUrl: "http://localhost:11434/v1/" });
+  await runLocalTask(VALID_PACKET, { fetchImpl, baseUrl: "http://localhost:11434" });
+
+  for (const url of seenUrls) {
+    assert.equal(url, "http://localhost:11434/v1/chat/completions");
+  }
+});
+
+test("stall during body read after headers arrive is classified timeout, not malformed", async () => {
+  const fetchImpl = async (_url, init) => {
+    return {
+      ok: true,
+      status: 200,
+      json: () =>
+        new Promise((_resolve, reject) => {
+          const onAbort = () => {
+            const err = new Error("The operation was aborted");
+            err.name = "AbortError";
+            reject(err);
+          };
+          if (init.signal.aborted) onAbort();
+          else init.signal.addEventListener("abort", onAbort);
+        }),
+      text: async () => "",
+    };
+  };
+
+  const result = await runLocalTask(VALID_PACKET, { fetchImpl, timeoutMs: 10 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "timeout");
+});
+
+test("CLI: unreadable packet file path produces a structured invalid_packet result, not a crash", () => {
+  const adapterPath = join(dirname(fileURLToPath(import.meta.url)), "adapter.mjs");
+  const missingPath = join(dirname(fileURLToPath(import.meta.url)), "does-not-exist.json");
+
+  const proc = spawnSync(process.execPath, [adapterPath, missingPath], { encoding: "utf8" });
+
+  assert.equal(proc.status, 1);
+  const parsed = JSON.parse(proc.stdout.trim());
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.status, "invalid_packet");
+  assert.match(parsed.detail, /could not read packet input/);
 });
 
 test("authority boundary: adapter source performs no unauthorized durable action", () => {

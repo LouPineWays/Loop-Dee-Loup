@@ -22,6 +22,17 @@ function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+// Accepts a base URL with or without a trailing slash and with or without a trailing `/v1`
+// (both are conventional spellings for an OpenAI-compatible server's base URL) and always
+// returns the form this module can safely append `/v1/chat/completions` to.
+function normalizeBaseUrl(url) {
+  let normalized = url.replace(/\/+$/, "");
+  if (normalized.endsWith("/v1")) {
+    normalized = normalized.slice(0, -3).replace(/\/+$/, "");
+  }
+  return normalized;
+}
+
 function buildMessages(packet) {
   const constraints = Array.isArray(packet.constraints) ? packet.constraints : [];
   let systemContent = SYSTEM_PREAMBLE;
@@ -65,7 +76,7 @@ export async function runLocalTask(packet, options = {}) {
     };
   }
 
-  const baseUrl = options.baseUrl || process.env.LDL_LOCAL_BASE_URL || DEFAULT_BASE_URL;
+  const baseUrl = normalizeBaseUrl(options.baseUrl || process.env.LDL_LOCAL_BASE_URL || DEFAULT_BASE_URL);
   const model = options.model || process.env.LDL_LOCAL_MODEL || DEFAULT_MODEL;
   const timeoutMs = options.timeoutMs ?? packet.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = options.fetchImpl || fetch;
@@ -79,82 +90,94 @@ export async function runLocalTask(packet, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  let res;
-  try {
-    res = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    if (err && (err.name === "AbortError" || controller.signal.aborted)) {
-      return {
-        ok: false,
-        status: "timeout",
-        output: null,
-        detail: `local worker did not respond within ${timeoutMs}ms (baseUrl: ${baseUrl})`,
-      };
-    }
+  // The timer (and therefore the abort signal) must stay live until the response body has
+  // been fully consumed, not just until fetch() resolves with headers — otherwise a runtime
+  // that returns headers promptly but then stalls the body can hang this call indefinitely
+  // instead of ever reaching the documented `timeout` classification and Claude fallback.
+  function timeoutResult() {
     return {
       ok: false,
-      status: "unavailable",
+      status: "timeout",
       output: null,
-      detail: `local runtime appears unreachable at ${baseUrl}: ${err && err.message ? err.message : String(err)}`,
+      detail: `local worker did not respond within ${timeoutMs}ms (baseUrl: ${baseUrl})`,
+    };
+  }
+
+  try {
+    let res;
+    try {
+      res = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (controller.signal.aborted || (err && err.name === "AbortError")) {
+        return timeoutResult();
+      }
+      return {
+        ok: false,
+        status: "unavailable",
+        output: null,
+        detail: `local runtime appears unreachable at ${baseUrl}: ${err && err.message ? err.message : String(err)}`,
+      };
+    }
+
+    if (!res.ok) {
+      let bodyText = "";
+      try {
+        bodyText = await res.text();
+      } catch (err) {
+        if (controller.signal.aborted) return timeoutResult();
+        bodyText = "";
+      }
+      const truncated = bodyText.length > 500 ? `${bodyText.slice(0, 500)}...` : bodyText;
+      return {
+        ok: false,
+        status: "error",
+        output: null,
+        detail: `local runtime returned HTTP ${res.status}: ${truncated}`,
+      };
+    }
+
+    let json;
+    try {
+      json = await res.json();
+    } catch (err) {
+      if (controller.signal.aborted) return timeoutResult();
+      return {
+        ok: false,
+        status: "malformed",
+        output: null,
+        detail: `response body was not parseable JSON: ${err && err.message ? err.message : String(err)}`,
+      };
+    }
+
+    const content = json?.choices?.[0]?.message?.content;
+    if (typeof content !== "string" || content.trim().length === 0) {
+      return {
+        ok: false,
+        status: "malformed",
+        output: null,
+        detail: "response JSON lacked a non-empty choices[0].message.content",
+      };
+    }
+
+    let detail = "completed";
+    if (json.usage) {
+      detail = `completed (usage: ${JSON.stringify(json.usage)})`;
+    }
+
+    return {
+      ok: true,
+      status: "completed",
+      output: content.trim(),
+      detail,
     };
   } finally {
     clearTimeout(timer);
   }
-
-  if (!res.ok) {
-    let bodyText = "";
-    try {
-      bodyText = await res.text();
-    } catch {
-      bodyText = "";
-    }
-    const truncated = bodyText.length > 500 ? `${bodyText.slice(0, 500)}...` : bodyText;
-    return {
-      ok: false,
-      status: "error",
-      output: null,
-      detail: `local runtime returned HTTP ${res.status}: ${truncated}`,
-    };
-  }
-
-  let json;
-  try {
-    json = await res.json();
-  } catch (err) {
-    return {
-      ok: false,
-      status: "malformed",
-      output: null,
-      detail: `response body was not parseable JSON: ${err && err.message ? err.message : String(err)}`,
-    };
-  }
-
-  const content = json?.choices?.[0]?.message?.content;
-  if (typeof content !== "string" || content.trim().length === 0) {
-    return {
-      ok: false,
-      status: "malformed",
-      output: null,
-      detail: "response JSON lacked a non-empty choices[0].message.content",
-    };
-  }
-
-  let detail = "completed";
-  if (json.usage) {
-    detail = `completed (usage: ${JSON.stringify(json.usage)})`;
-  }
-
-  return {
-    ok: true,
-    status: "completed",
-    output: content.trim(),
-    detail,
-  };
 }
 
 async function readStdin() {
@@ -165,7 +188,22 @@ async function readStdin() {
 
 async function main() {
   const path = process.argv[2];
-  const raw = path ? readFileSync(path, "utf8") : await readStdin();
+
+  let raw;
+  try {
+    raw = path ? readFileSync(path, "utf8") : await readStdin();
+  } catch (err) {
+    console.log(
+      JSON.stringify({
+        ok: false,
+        status: "invalid_packet",
+        output: null,
+        detail: `could not read packet input: ${err && err.message ? err.message : String(err)}`,
+      }),
+    );
+    process.exitCode = 1;
+    return;
+  }
 
   let packet;
   try {
@@ -179,12 +217,16 @@ async function main() {
         detail: `packet input was not valid JSON: ${err.message}`,
       }),
     );
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   const result = await runLocalTask(packet);
   console.log(JSON.stringify(result));
-  process.exit(result.ok ? 0 : 1);
+  // Set exitCode and let the event loop drain naturally rather than calling process.exit()
+  // immediately after console.log() — a large result can still be draining to a slow stdout
+  // pipe, and process.exit() can truncate it before the write completes.
+  process.exitCode = result.ok ? 0 : 1;
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
