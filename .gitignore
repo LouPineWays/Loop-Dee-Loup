@@ -1,0 +1,3 @@
+# Raw and reduced session telemetry (tools/telemetry) is transient local evidence, never
+# durable repository state — see tools/telemetry/README.md.
+.claude/telemetry/

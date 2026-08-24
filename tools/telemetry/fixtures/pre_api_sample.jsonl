@@ -1,0 +1,2 @@
+{"kind":"hook","event":"SessionStart","ts":"2026-08-24T14:00:00.000Z","session_id":"fixture-preapi-0001","repo":{"owner":"LouPineWays","name":"example-repo"},"cwd_basename":"example-repo","reason":"startup"}
+{"kind":"statusline_sample","ts":"2026-08-24T14:00:01.000Z","session_id":"fixture-preapi-0001","repo":{"owner":"LouPineWays","name":"example-repo"},"cwd_basename":"example-repo","model_id":"claude-sonnet-5","model_display_name":"Sonnet 5","cost":null,"context_window":null,"exceeds_200k_tokens":null}
