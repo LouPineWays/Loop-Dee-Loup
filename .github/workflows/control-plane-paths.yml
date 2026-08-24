@@ -8,7 +8,9 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "/*.md"
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "README.md"
       - "docs/*.md"
       - ".github/ISSUE_TEMPLATE/**"
       - ".github/workflows/**"

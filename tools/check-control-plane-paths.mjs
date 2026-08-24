@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DOC_PATH = join(ROOT, "docs", "bounded-review-cycle.md");
+const WORKFLOW_PATH = join(ROOT, ".github", "workflows", "control-plane-paths.yml");
 
 function dirHasFiles(relPath, predicate = () => true) {
   const abs = join(ROOT, relPath);
@@ -90,6 +91,26 @@ if (!existsSync(DOC_PATH)) {
 
 for (const { label, ok } of pathChecks) {
   if (!ok()) failures.push(`control-plane path missing or empty: ${label}`);
+}
+
+// Regression guard for issue #93: a glob like "/*.md" (a leading slash GitHub Actions path
+// filters do not support) silently never matches, so the CI trigger can list a root-level
+// control-plane file's family without that file ever actually firing the workflow. Root files
+// have no safe glob shorthand here, so each one must appear as its own literal path entry.
+const ROOT_MD_LITERALS = ["AGENTS.md", "CLAUDE.md", "README.md"];
+
+if (!existsSync(WORKFLOW_PATH)) {
+  failures.push("missing control-plane-paths workflow: .github/workflows/control-plane-paths.yml");
+} else {
+  const workflowText = readFileSync(WORKFLOW_PATH, "utf8");
+  for (const literal of ROOT_MD_LITERALS) {
+    if (!workflowText.includes(`"${literal}"`)) {
+      failures.push(
+        `.github/workflows/control-plane-paths.yml pull_request.paths no longer lists root file "${literal}" ` +
+          `as its own literal entry (a glob does not reliably trigger on root-level files)`,
+      );
+    }
+  }
 }
 
 if (failures.length > 0) {
