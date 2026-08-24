@@ -48,12 +48,15 @@ body:
         instructions reach the audit response even when it is triggered from a separate comment.
         If this PR touches a control-plane path (see `docs/bounded-review-cycle.md`'s Entry
         check), the checklist must include an item confirming that every workflow whose `paths:`
-        trigger should match the diff actually shows a completed run against the merge commit's
-        SHA — e.g. "N. Confirm `gh api repos/<owner>/<repo>/actions/runs?head_sha=<sha>` shows a
-        completed run of `<workflow>.yml` for the merge commit." — not merely that the file
-        contents are correct. A workflow whose trigger silently never matches (e.g. a broken
-        `paths:` glob) will pass a content-only audit; this item exists to catch that class of
-        defect.
+        trigger should match the diff actually shows a completed run — e.g. "N. Confirm
+        `gh api repos/<owner>/<repo>/actions/runs?head_sha=<sha>` shows a completed run of
+        `<workflow>.yml`." — not merely that the file contents are correct. Use the PR's frozen
+        reviewed head SHA (Stage 1 step 2) for `<sha>`, not the merge commit recorded above:
+        control-plane workflows trigger only on `pull_request`, so their runs are keyed to the PR
+        branch's head SHA, and the merge commit created on `main` never appears as a `head_sha`
+        even when CI ran and passed. A workflow whose trigger silently never matches (e.g. a
+        broken `paths:` glob) will pass a content-only audit; this item exists to catch that class
+        of defect.
   - type: textarea
     id: verification_checklist
     attributes:
