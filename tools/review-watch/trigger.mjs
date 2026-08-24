@@ -146,19 +146,41 @@ function defaultGhApi(path) {
   return JSON.parse(raw).flat();
 }
 
+// `gh pr comment` / `gh issue comment` print the URL of the just-created comment
+// (".../issuecomment-NNNN") to stdout on success. Parsing that id is how the freshly
+// posted comment is identified after the re-read below — `findExistingTrigger`'s
+// earliest-match semantics are for dedup, not for locating a comment just posted, and
+// would return a pre-existing older trigger instead of this one on a `--force` retry.
+export function extractCommentId(ghCommentOutput) {
+  const match = String(ghCommentOutput).match(/#issuecomment-(\d+)/);
+  if (!match) throw new Error(`could not parse comment id from gh output: ${ghCommentOutput}`);
+  return match[1];
+}
+
+// Pure — no I/O. Finds the comment with the given id, or null. Used instead of
+// `findExistingTrigger` to identify a just-posted comment by its own identity rather
+// than by trigger-text dedup semantics.
+export function findCommentById(comments, id) {
+  return comments.find((c) => String(c.id) === String(id)) ?? null;
+}
+
 // Posts the trigger via `gh pr comment` / `gh issue comment` (not a raw POST to the
 // comments endpoint) so it is authored as the authenticated `gh` user, then reads the
-// thread back to obtain the freshly created comment's authoritative timestamp/url rather
-// than scraping the CLI's plain-text URL output.
+// thread back and picks out that exact comment by id to obtain its authoritative
+// timestamp/url — never re-derived via trigger-text dedup, which would return a stale
+// pre-existing trigger instead of the one just posted.
 function defaultGhPost({ repo, kind, number, head }) {
   const sub = kind === "pr" ? "pr" : "issue";
   const body = triggerCommentBody(head);
-  execFileSync("gh", [sub, "comment", String(number), "--repo", repo, "--body", body], { encoding: "utf8" });
+  const output = execFileSync("gh", [sub, "comment", String(number), "--repo", repo, "--body", body], {
+    encoding: "utf8",
+  });
+  const commentId = extractCommentId(output);
   const path = endpointsFor(kind, repo, number).find((e) => e.name === "issue-comments").path;
   const raw = execFileSync("gh", ["api", path, "--paginate", "--slurp"], { encoding: "utf8" });
   const comments = JSON.parse(raw).flat();
-  const posted = findExistingTrigger(comments, { head });
-  if (!posted) throw new Error("posted comment not found on re-read");
+  const posted = findCommentById(comments, commentId);
+  if (!posted) throw new Error(`posted comment id ${commentId} not found on re-read`);
   return posted;
 }
 

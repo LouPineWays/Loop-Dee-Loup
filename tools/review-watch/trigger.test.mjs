@@ -4,7 +4,15 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseArgs, headMarker, triggerCommentBody, findExistingTrigger, run } from "./trigger.mjs";
+import {
+  parseArgs,
+  headMarker,
+  triggerCommentBody,
+  findExistingTrigger,
+  extractCommentId,
+  findCommentById,
+  run,
+} from "./trigger.mjs";
 
 test("parseArgs: reads flags", () => {
   const args = parseArgs(["--repo", "owner/repo", "--kind", "pr", "--number", "50", "--head", "abc123"]);
@@ -64,6 +72,29 @@ test("findExistingTrigger: with a head, matches a trigger comment scoped to that
     { head: "abc123" },
   );
   assert.equal(match.id, 1);
+});
+
+test("extractCommentId: parses the id from gh pr/issue comment's printed URL", () => {
+  assert.equal(extractCommentId("https://github.com/owner/repo/pull/50#issuecomment-123456789\n"), "123456789");
+});
+
+test("extractCommentId: throws on unparseable output instead of silently returning garbage", () => {
+  assert.throws(() => extractCommentId("not a url"), /could not parse comment id/);
+});
+
+test("findCommentById: selects the comment matching the given id, not merely the earliest trigger match — reproduces the audit's forced-retry scenario (issue #85)", () => {
+  const comments = [
+    { id: 1, body: "@codex review", created_at: "2026-08-24T08:00:00Z", html_url: "https://github.com/owner/repo/issues/53#issuecomment-1" },
+    { id: 2, body: "@codex review", created_at: "2026-08-24T09:00:00Z", html_url: "https://github.com/owner/repo/issues/53#issuecomment-2" },
+  ];
+  const newId = extractCommentId("https://github.com/owner/repo/issues/53#issuecomment-2");
+  const found = findCommentById(comments, newId);
+  assert.equal(found.id, 2, "must select the just-posted comment by id, not findExistingTrigger's earliest match");
+  assert.equal(found.created_at, "2026-08-24T09:00:00Z");
+});
+
+test("findCommentById: returns null when no comment matches the id", () => {
+  assert.equal(findCommentById([{ id: 1 }], "999"), null);
 });
 
 test("run: exits 1 when required args are missing", async () => {
