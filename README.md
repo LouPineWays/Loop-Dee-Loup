@@ -115,21 +115,7 @@ Do not request routine permission to implement an accepted approach, run checks,
 
 Loop-Dee-Loup is the source/distribution repository for its own reusable machinery — skills, personas, scripts, and operating-model documentation. A project adopting LDL should remain its own authoritative execution environment rather than being run from inside this repository.
 
-From a local clone of Loop-Dee-Loup, install that machinery into an existing project with:
-
-```bash
-node <path-to-loop-dee-loup-clone>/tools/ldl-init/index.mjs --dest <path-to-your-project>
-```
-
-This is safe to run against a non-empty, already-in-progress repository and safe to run again — see `docs/consumer-contract.md` for the full ownership boundary (what gets installed, what is left alone, and how the installed `.ldl/manifest.json` records provenance) and `tools/ldl-init/index.mjs` for usage details.
-
-To move an already-initialized repository to a newer Loop-Dee-Loup revision, run the same way from a clone checked out at that newer revision:
-
-```bash
-node <path-to-loop-dee-loup-clone>/tools/ldl-update/index.mjs --dest <path-to-your-project>
-```
-
-It updates only unmodified LDL-managed files, is a no-op when already current, and refuses to overwrite a managed file that was locally modified in a way it can't safely reconcile — see `docs/consumer-contract.md` for the full conflict-safe update contract.
+See `docs/consumer-quickstart.md` for the installation quickstart: how to obtain LDL, initialize your project, what gets installed vs. what stays yours, where to start your coding-agent session afterward, how to update, and what remains authoritative in your own repository. `docs/consumer-contract.md` has the full ownership-boundary and conflict-safe update contract behind that quickstart.
 
 ## First trial
 
