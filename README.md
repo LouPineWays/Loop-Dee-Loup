@@ -54,7 +54,8 @@ LDL is one specific, opinionated way of organizing agentic development. Its prop
 
 1. Clone this repository.
 2. From the clone, run the bootstrap tool against your own project (it doesn't need to be empty or fresh): `node tools/ldl-init/index.mjs --dest <path-to-your-project>`.
-3. From inside your project, dispatch one issue with a one-line reference, e.g. `Run Loop-Dee-Loup issue #12.`
+3. If your project already had its own `AGENTS.md`, the installer parks the derived LDL contract at `.ldl/AGENTS.template.md` instead of overwriting it — review and merge that template into your `AGENTS.md` by hand before dispatching anything, or a session will run under your old instructions without LDL's contract. If you had no `AGENTS.md`, the installer wrote one directly and you can skip this step.
+4. From inside your project, dispatch one issue with a one-line reference, e.g. `Run Loop-Dee-Loup issue #12.`
 
 See `docs/consumer-quickstart.md` for the full quickstart — obtaining LDL, what gets installed vs. what stays yours, where to start your agent session, how to update, and what remains authoritative in your own repository — and `docs/consumer-contract.md` for the exact ownership boundary. Version one is written against Claude Code sessions; Covenant, used as the worked example throughout this README, is the founder's own separate product and not a dependency — you don't need to reproduce that exact stack to use LDL.
 
