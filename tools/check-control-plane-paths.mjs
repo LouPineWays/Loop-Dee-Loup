@@ -37,6 +37,7 @@ const pathChecks = [
   { label: "docs/burn-order.json", ok: () => existsSync(join(ROOT, "docs", "burn-order.json")) },
   { label: "tools/local-worker/**", ok: () => dirHasFiles("tools/local-worker") },
   { label: "tools/review-watch/**", ok: () => dirHasFiles("tools/review-watch") },
+  { label: "tools/telemetry/**", ok: () => dirHasFiles("tools/telemetry") },
   { label: "tools/ldl-init/**", ok: () => dirHasFiles("tools/ldl-init") },
   { label: "tools/ldl-update/**", ok: () => dirHasFiles("tools/ldl-update") },
 ];
@@ -56,6 +57,7 @@ const requiredLiterals = [
   "docs/burn-order.json",
   "tools/local-worker/**",
   "tools/review-watch/**",
+  "tools/telemetry/**",
   "tools/ldl-init/**",
   "tools/ldl-update/**",
 ];

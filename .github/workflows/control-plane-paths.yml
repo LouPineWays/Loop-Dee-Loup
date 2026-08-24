@@ -18,6 +18,7 @@ on:
       - "tools/check-control-plane-paths.mjs"
       - "tools/local-worker/**"
       - "tools/review-watch/**"
+      - "tools/telemetry/**"
       - "tools/ldl-init/**"
       - "tools/ldl-update/**"
 
@@ -40,6 +41,9 @@ jobs:
 
       - name: Review-watch tests
         run: node --test tools/review-watch/*.test.mjs
+
+      - name: Telemetry collector/reducer tests
+        run: node --test tools/telemetry/*.test.mjs
 
       - name: LDL-init bootstrap tests
         run: node --test tools/ldl-init/index.test.mjs

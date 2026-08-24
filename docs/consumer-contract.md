@@ -40,6 +40,17 @@ Nothing else in this repository is installed. In particular, `tools/burn-order/`
 its GitHub issue/PR history are Loop-Dee-Loup's own development state, not
 reusable machinery, and are never installed into a consumer repository.
 
+`tools/telemetry/` (the deterministic session-telemetry collector/reducer the installed
+`spend` skill can use, see `tools/telemetry/README.md`) and the `statusLine`/`hooks` wiring
+in this repository's own `.claude/settings.json` are, unlike the paths above, reusable
+machinery in principle — but issue #45 scoped their delivery to this repository only.
+`tools/ldl-init` does not currently install either one. A consumer repository's installed
+`spend` skill degrades to its `/usage`/`/context` fallback when `tools/telemetry/` is
+absent, so this gap does not break an installed consumer repository; it only means that
+repository is not yet collecting the deterministic evidence `spend` prefers. Extending
+`tools/ldl-init`'s manifest to install `tools/telemetry/` and a merge-safe
+`.claude/settings.json` is unstarted follow-on work, not part of issue #45.
+
 ### Consumer-owned (never overwritten)
 
 Everything else in the consumer repository: project source, project issues
