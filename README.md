@@ -1,8 +1,63 @@
 # Loop-Dee-Loup
 
-A hyper-lean agentic execution loop for vibecoding.
+An opinionated, token-lean execution loop for autonomous coding agents.
 
-Loop-Dee-Loup turns a founder-approved feature proposal into verified vertical slices while keeping agent sessions disposable and founder interruptions rare. GitHub carries continuity between sessions; Claude executes the current slice; repository checks and bounded reviews provide control.
+## The problem
+
+Long-running agentic coding sessions get expensive in a predictable way: context balloons, the founder becomes a message bus relaying status between themselves and an agent that already has the answer, and review turns into serial back-and-forth. Loop-Dee-Loup treats agent sessions as disposable and GitHub (issues, PRs, compact snapshots) as the durable state, so a founder can dispatch one bounded unit of work with a single line, let the agent run autonomously to a clean stop, and resume later from GitHub instead of from a long-lived conversation.
+
+## What it is
+
+The founder starts or resumes a Claude Code session with a terse issue reference:
+
+> Run Loop-Dee-Loup issue #12.
+
+If the issue is one bounded vertical slice, the session executes it autonomously, verifies the result, updates durable GitHub state, and stops. If it genuinely needs multiple independently executable slices, the session decomposes it into durable issues instead of executing any of them, and the founder dispatches whichever runs next.
+
+```mermaid
+flowchart LR
+    A["Founder: one-line dispatch"] --> B{"Bounded vertical slice?"}
+    B -- yes --> C["Session executes autonomously"]
+    C --> D["Verify + update GitHub state"]
+    D --> E["Stop at clean boundary"]
+    B -- "no, needs several" --> F["Decomposition session:\ncreate every foreseeable slice issue"]
+    F --> G["Close source issue, stop"]
+    E -.founder dispatches next slice.-> A
+    G -.founder dispatches one slice.-> A
+```
+
+See [Version-one dispatch](#version-one-dispatch) below for the full contract.
+
+## Who it's for
+
+LDL fits you if you want:
+
+- low token/context cost prioritized over conversational hand-holding;
+- disposable agent sessions rather than long-lived chats kept alive for context;
+- durable state in GitHub — issues, PRs, repository docs — instead of chat transcripts;
+- high agent autonomy once an outcome is authorized;
+- founder interruptions reserved for genuine judgment, credentials, or manual-action calls;
+- batched decisions instead of serial one-question-at-a-time discovery;
+- bounded reviews with explicit stopping conditions instead of open-ended review tennis.
+
+LDL is probably not for you if you want heavyweight upfront planning before any execution, a highly conversational or long-lived working session, or a general-purpose multi-agent orchestration platform — LDL deliberately has no daemon, queue, or automatic session launcher (see Non-goals in `docs/experiment-brief.md`). Those are reasonable preferences; they're just not what this repository optimizes for.
+
+## Relationship to Vibecoding Common Sense
+
+Loop-Dee-Loup (LDL) is not Vibecoding Common Sense (VCS), and isn't a replacement for it.
+
+VCS is a set of broadly applicable safeguards for anyone using AI coding agents — whatever methodology you use, avoid these predictable mistakes. It's meant to stay compatible with BMAD, ad-hoc agent use, long-running sessions, other orchestration systems, or whatever workflow you already run.
+
+LDL is one specific, opinionated way of organizing agentic development. Its proposition is narrower: if you value low token/context cost, high agent autonomy, minimal founder interruption, disposable sessions, and an execution model that scales without turning the founder into a message bus, this is that way of working. These are optimization choices, not universal truths — someone who prefers BMAD, heavyweight upfront planning, highly conversational development, or long-lived sessions may reasonably prefer those instead. LDL is for people whose priorities already align with its own.
+
+## Try it
+
+1. Clone this repository.
+2. From the clone, run the bootstrap tool against your own project (it doesn't need to be empty or fresh): `node tools/ldl-init/index.mjs --dest <path-to-your-project>`.
+3. If your project already had its own `AGENTS.md`, the installer parks the derived LDL contract at `.ldl/AGENTS.template.md` instead of overwriting it — review and merge that template into your `AGENTS.md` by hand before dispatching anything, or a session will run under your old instructions without LDL's contract. If you had no `AGENTS.md`, the installer wrote one directly and you can skip this step.
+4. From inside your project, dispatch one issue with a one-line reference, e.g. `Run Loop-Dee-Loup issue #12.`
+
+See `docs/consumer-quickstart.md` for the full quickstart — obtaining LDL, what gets installed vs. what stays yours, where to start your agent session, how to update, and what remains authoritative in your own repository — and `docs/consumer-contract.md` for the exact ownership boundary. Version one is written against Claude Code sessions; Covenant, used as the worked example throughout this README, is the founder's own separate product and not a dependency — you don't need to reproduce that exact stack to use LDL.
 
 ## Design doctrine
 
@@ -113,12 +168,16 @@ Do not request routine permission to implement an accepted approach, run checks,
 
 ## Using LDL from another repository
 
-Loop-Dee-Loup is the source/distribution repository for its own reusable machinery — skills, personas, scripts, and operating-model documentation. A project adopting LDL should remain its own authoritative execution environment rather than being run from inside this repository.
+Loop-Dee-Loup is the source/distribution repository for its own reusable machinery — skills, personas, scripts, and operating-model documentation. A project adopting LDL should remain its own authoritative execution environment rather than being run from inside this repository. See [Try it](#try-it) above for the install steps and where the full contract lives.
 
-See `docs/consumer-quickstart.md` for the installation quickstart: how to obtain LDL, initialize your project, what gets installed vs. what stays yours, where to start your coding-agent session afterward, how to update, and what remains authoritative in your own repository. `docs/consumer-contract.md` has the full ownership-boundary and conflict-safe update contract behind that quickstart.
+## Evidence status
 
-## First trial
+Loop-Dee-Loup is a methodology developed from, and currently being validated against, real repository work — not a theoretical framework. It is not claimed to be universally superior or proven at scale; the trial below is ongoing evidence, not a finished result.
 
-The first controlled trial is Covenant's remaining `wolfscairn-list-and-privacy` work after PR #94. Its first execution slice is to ship the complete Buttondown signup surface on `covenant.wolfscairn.com`, including form behavior, CSP, presentation, tests, documentation, and repository integration. The live email interaction remains a founder-only external verification boundary.
+The first controlled trial is Covenant's remaining `wolfscairn-list-and-privacy` work after PR #94. Covenant is the founder's own separate product repository, used here as a real-world dogfooding target — LDL does not depend on it, and using LDL elsewhere does not require Covenant's stack. That trial's first execution slice is to ship the complete Buttondown signup surface on `covenant.wolfscairn.com`, including form behavior, CSP, presentation, tests, documentation, and repository integration. The live email interaction remains a founder-only external verification boundary.
 
-See `docs/operating-model.md` and `docs/experiment-brief.md`.
+See `docs/operating-model.md` and `docs/experiment-brief.md` for the full trial design and success/failure criteria.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
