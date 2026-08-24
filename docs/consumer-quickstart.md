@@ -58,10 +58,22 @@ build/test/verification commands — is untouched and remains yours. See
 ## 4. Where to start your coding-agent session
 
 Once installed, work from your own project repository, not from this one.
-Your installed `AGENTS.md` (or `.ldl/AGENTS.template.md`, if you already had
-your own `AGENTS.md` and need to merge it in by hand) is now your operating
-contract. Start a fresh Claude Code session inside your project and dispatch
-one issue with a terse reference, for example:
+
+If `tools/ldl-init` installed straight to `AGENTS.md` (you had none before),
+that file is already your operating contract and you can dispatch a session
+now.
+
+If you already had your own `AGENTS.md`, the derived contract was parked at
+`.ldl/AGENTS.template.md` instead of overwriting it. Review and merge that
+template into your own `AGENTS.md` by hand **before** dispatching any
+session — nothing rewrote your existing file for you, so a session started
+against the unmerged original runs under your prior instructions without
+LDL's execution rules. See `docs/consumer-contract.md` for why this file is
+handled differently from LDL's other managed paths.
+
+Once your `AGENTS.md` reflects LDL's operating contract, start a fresh Claude
+Code session inside your project and dispatch one issue with a terse
+reference, for example:
 
 > Run Loop-Dee-Loup issue #12.
 

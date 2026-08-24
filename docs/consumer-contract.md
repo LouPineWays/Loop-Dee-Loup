@@ -220,5 +220,6 @@ revision:
 - Removing a managed path that a newer Loop-Dee-Loup revision no longer
   distributes — `tools/ldl-update` only ever installs or safely refuses, and
   leaves such a path (and its manifest record) untouched.
-- End-to-end dogfooding inside a real named consumer project, and
-  public-facing quickstart documentation aimed at strangers — later slices.
+- End-to-end dogfooding inside a real named consumer project — a later
+  slice. (Public-facing quickstart documentation aimed at strangers has
+  shipped as `docs/consumer-quickstart.md`.)
