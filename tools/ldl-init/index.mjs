@@ -233,12 +233,70 @@ export function defaultResolveRevision(root) {
   return sha;
 }
 
+const SHA256_HEX = /^[0-9a-f]{64}$/i;
+
 // A pre-existing .ldl/manifest.json that isn't in the shape this script writes (absent,
 // truncated, or from something else entirely) must not be trusted as a record of what is
 // LDL-managed — treating it as absent falls back to safe fresh-install semantics instead
-// of either crashing on an unexpected shape or silently trusting arbitrary JSON.
+// of either crashing on an unexpected shape or silently trusting arbitrary JSON. Every
+// `files` entry must carry a complete, plausible record (a non-empty `dest` and a real
+// sha256 hex digest), not just pass a loose type check: an incomplete entry like
+// `{"dest":"AGENTS.md"}` would otherwise be accepted as an LDL ownership claim over
+// AGENTS.md, and this script would then treat a consumer's own untouched AGENTS.md as
+// safe to overwrite — the exact thing the AGENTS.md special case exists to prevent.
 function isValidManifest(value) {
-  return Boolean(value) && typeof value === "object" && value.schemaVersion === 1 && Array.isArray(value.files);
+  if (!value || typeof value !== "object" || value.schemaVersion !== 1 || !Array.isArray(value.files)) {
+    return false;
+  }
+  return value.files.every(
+    (f) =>
+      f &&
+      typeof f === "object" &&
+      typeof f.dest === "string" &&
+      f.dest.length > 0 &&
+      typeof f.sha256 === "string" &&
+      SHA256_HEX.test(f.sha256),
+  );
+}
+
+// lstatSync wrapped to distinguish "genuinely nothing there" (ENOENT) from every other
+// outcome, including a dangling symlink: lstatSync succeeds on a dangling symlink (it
+// stats the link itself, not its missing target), so using existsSync — which follows
+// symlinks and reports false for a dangling one — to decide whether to lstat at all would
+// let a dangling symlink slip through as "absent" and be silently written through anyway.
+function lstatOrNull(absPath) {
+  try {
+    return lstatSync(absPath);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+// .ldl/ is LDL's own managed namespace (the manifest, and sometimes the derived AGENTS.md
+// template) — findUnsafeDestReason() above only guards the MANAGED_ITEMS-derived ops, so
+// without this separate check a pre-existing .ldl symlink (dangling or not) or a symlinked
+// manifest.json leaf could redirect the manifest write or the stale-template delete
+// outside --dest, and a pre-existing .ldl *file* would only be discovered when the final
+// mkdirSync() throws, after every other managed file had already been written — a
+// partial, unmanifested install. Checking this once, before anything else runs, fails the
+// whole run closed instead of partially.
+function findUnsafeLdlDirReason(destRoot) {
+  const dirAbs = join(destRoot, ".ldl");
+  const dirSt = lstatOrNull(dirAbs);
+  if (dirSt) {
+    if (dirSt.isSymbolicLink()) {
+      return "existing symlink at .ldl — refusing to write LDL's own managed state through it";
+    }
+    if (!dirSt.isDirectory()) {
+      return "existing non-directory at .ldl — cannot use it as LDL's managed directory";
+    }
+  }
+  const manifestSt = lstatOrNull(join(dirAbs, "manifest.json"));
+  if (manifestSt && manifestSt.isSymbolicLink()) {
+    return "existing symlink at .ldl/manifest.json — refusing to write LDL's own manifest through it";
+  }
+  return null;
 }
 
 // `resolveRevisionImpl` and `now` are injected so tests get deterministic manifest output
@@ -255,6 +313,11 @@ export async function run(args, deps = {}) {
 
   if (!existsSync(destRoot) || !statSync(destRoot).isDirectory()) {
     return { exitCode: 1, message: `--dest does not exist or is not a directory: ${destRoot}` };
+  }
+
+  const unsafeLdlReason = findUnsafeLdlDirReason(destRoot);
+  if (unsafeLdlReason) {
+    return { exitCode: 1, message: `Refusing to run: ${unsafeLdlReason}` };
   }
 
   const manifestPath = join(destRoot, ".ldl", "manifest.json");
