@@ -103,7 +103,9 @@ export function deriveConsumerAgents(sourceText) {
   return result.trimEnd() + "\n";
 }
 
-function sha256(content) {
+// Exported so tools/ldl-update can hash on-disk content against recorded/target hashes
+// using the exact same digest this script's own manifest entries are computed with.
+export function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
 }
 
@@ -151,7 +153,9 @@ export function buildOps(root) {
 //   - an existing plain file where a directory needs to be (e.g. a file literally named
 //     `tools`) would otherwise make mkdirSync throw mid-run, leaving a partially applied,
 //     unmanifested install instead of a clean skip.
-function findUnsafeDestReason(destRoot, destRel) {
+// Exported so tools/ldl-update can apply the exact same write-through-symlink /
+// write-through-non-directory guard when re-planning an update.
+export function findUnsafeDestReason(destRoot, destRel) {
   const segments = destRel.split("/");
   const leaf = segments.pop();
   let current = destRoot;
@@ -244,7 +248,9 @@ const SHA256_HEX = /^[0-9a-f]{64}$/i;
 // `{"dest":"AGENTS.md"}` would otherwise be accepted as an LDL ownership claim over
 // AGENTS.md, and this script would then treat a consumer's own untouched AGENTS.md as
 // safe to overwrite — the exact thing the AGENTS.md special case exists to prevent.
-function isValidManifest(value) {
+// Exported so tools/ldl-update applies this exact same shape check to the manifest it
+// reads, rather than trusting or re-implementing a slightly different validation.
+export function isValidManifest(value) {
   if (!value || typeof value !== "object" || value.schemaVersion !== 1 || !Array.isArray(value.files)) {
     return false;
   }
@@ -281,7 +287,9 @@ function lstatOrNull(absPath) {
 // mkdirSync() throws, after every other managed file had already been written — a
 // partial, unmanifested install. Checking this once, before anything else runs, fails the
 // whole run closed instead of partially.
-function findUnsafeLdlDirReason(destRoot) {
+// Exported so tools/ldl-update guards its own .ldl/manifest.json read+rewrite against the
+// same symlink/non-directory hazards, before reading any existing provenance.
+export function findUnsafeLdlDirReason(destRoot) {
   const dirAbs = join(destRoot, ".ldl");
   const dirSt = lstatOrNull(dirAbs);
   if (dirSt) {

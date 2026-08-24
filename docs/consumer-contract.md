@@ -2,10 +2,11 @@
 
 This document defines the ownership boundary between Loop-Dee-Loup-managed
 machinery and consumer-repository-owned material, and describes the bootstrap
-mechanism (`tools/ldl-init`) that installs the former into an arbitrary
-existing repository. It is itself one of the files that mechanism installs,
-so an installed copy is available in the consumer repository without
-depending on this repository being reachable at runtime.
+mechanism (`tools/ldl-init`) and the update mechanism (`tools/ldl-update`)
+that install and refresh that machinery in an arbitrary existing repository.
+It is itself one of the files those mechanisms install, so an installed copy
+is available in the consumer repository without depending on this repository
+being reachable at runtime.
 
 See `docs/operating-model.md`, `docs/bounded-review-cycle.md`, and
 `docs/decision-forms.md` for how the Loop itself works once installed.
@@ -61,6 +62,46 @@ node <path-to-loop-dee-loup-clone>/tools/ldl-init/index.mjs --dest <path-to-your
 currently no package registry, hosted service, or daemon — a local clone is
 the documented source. See `tools/ldl-init/index.mjs`'s header comment for
 full usage.
+
+## How to update
+
+From a local clone of Loop-Dee-Loup checked out at whatever revision you want
+to move the consumer repository to, run:
+
+```bash
+node <path-to-loop-dee-loup-clone>/tools/ldl-update/index.mjs --dest <path-to-your-project>
+```
+
+`--dest` must already have a valid `.ldl/manifest.json` from a prior
+`tools/ldl-init` run — `tools/ldl-update` has nothing to update from
+otherwise and errors out instructing the caller to bootstrap first. Like
+`tools/ldl-init`, `tools/ldl-update` is not itself installed into a consumer
+repository; it is run from a local Loop-Dee-Loup clone against `--dest`. See
+`tools/ldl-update/index.mjs`'s header comment for full usage.
+
+Each run:
+
+- rebuilds the same target content `tools/ldl-init` would install from the
+  clone's current revision (the same `MANAGED_ITEMS` list and derived
+  `AGENTS.md` logic — see below);
+- for every LDL-managed destination, compares its current on-disk content
+  against both the hash recorded in the existing manifest and the new target
+  content, and updates only the paths that are unmodified since install and
+  whose target content actually changed;
+- refuses the entire run, writing nothing, if any LDL-managed file's on-disk
+  content matches neither the recorded provenance nor the new target content
+  (a local edit), or if an LDL-managed file recorded in the manifest is
+  missing from disk (a local deletion) — see "Conflict-safe updates" below;
+- is a no-op — it does not touch `.ldl/manifest.json` or any managed file at
+  all — when nothing needs to change;
+- otherwise writes the changed/newly-added managed files and rewrites
+  `.ldl/manifest.json` with the new source revision, a fresh install
+  timestamp, and the complete resulting set of managed paths.
+
+A destination not yet recorded as managed (a newly added `MANAGED_ITEMS`
+entry in the newer revision) follows the same pre-existing-file rule as
+`tools/ldl-init`: it installs if the path is free, and is left alone and
+recorded under `skipped` if something unmanaged already occupies it.
 
 ## The AGENTS.md special case
 
@@ -138,11 +179,42 @@ bootstrap deliberately left alone.
   write. `.ldl/manifest.json` is regenerated each run with a fresh
   `installedAt` timestamp but the same `files` set.
 
+## Conflict-safe updates
+
+`tools/ldl-update` (see "How to update" above) extends this same safety
+model to moving an already-initialized repository to a newer Loop-Dee-Loup
+revision:
+
+- A managed file whose on-disk content still matches the hash recorded in
+  `.ldl/manifest.json` (i.e. untouched since install) is safe to overwrite
+  with new content and is updated.
+- A managed file whose on-disk content already matches the new target
+  content needs no write and is left alone; it is still recorded in the
+  rewritten manifest.
+- A managed file whose on-disk content matches neither the recorded
+  provenance nor the new target content — a local edit — is a conflict. So
+  is a managed file recorded in the manifest but missing from disk — a local
+  deletion, which is still a local modification the recorded provenance
+  doesn't explain.
+- If any conflict is found, the entire run refuses to write anything —
+  neither the conflicting file(s), any other managed file, nor
+  `.ldl/manifest.json` — and reports every conflicting path and the reason,
+  rather than guessing which version should win, discarding either version,
+  or partially applying only the safe subset.
+- Consumer-owned material is never evaluated for conflicts and is never
+  touched by an update, exactly as for a fresh bootstrap.
+- Running the update against an already-current repository (nothing to
+  install, nothing in conflict) is a predictable no-op: it does not touch
+  `.ldl/manifest.json` or any managed file at all.
+
 ## Explicitly out of scope for this mechanism
 
-- Detecting and safely resolving a local edit to an already-installed
-  LDL-managed file (conflict-safe update) — the next slice.
-- Updating an already-initialized repository to a newer Loop-Dee-Loup
-  revision — the next slice.
+- A package-registry, dependency-resolution, or semantic-versioning system
+  beyond identifying current vs. newer LDL content.
+- Automatic conflict resolution — `tools/ldl-update` surfaces a conflict; it
+  never guesses which side should win.
+- Removing a managed path that a newer Loop-Dee-Loup revision no longer
+  distributes — `tools/ldl-update` only ever installs or safely refuses, and
+  leaves such a path (and its manifest record) untouched.
 - End-to-end dogfooding inside a real named consumer project, and
   public-facing quickstart documentation aimed at strangers — later slices.

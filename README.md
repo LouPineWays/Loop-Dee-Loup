@@ -121,7 +121,15 @@ From a local clone of Loop-Dee-Loup, install that machinery into an existing pro
 node <path-to-loop-dee-loup-clone>/tools/ldl-init/index.mjs --dest <path-to-your-project>
 ```
 
-This is safe to run against a non-empty, already-in-progress repository and safe to run again — see `docs/consumer-contract.md` for the full ownership boundary (what gets installed, what is left alone, and how the installed `.ldl/manifest.json` records provenance) and `tools/ldl-init/index.mjs` for usage details. Updating an already-initialized repository to a newer Loop-Dee-Loup revision is a separate, not-yet-built mechanism.
+This is safe to run against a non-empty, already-in-progress repository and safe to run again — see `docs/consumer-contract.md` for the full ownership boundary (what gets installed, what is left alone, and how the installed `.ldl/manifest.json` records provenance) and `tools/ldl-init/index.mjs` for usage details.
+
+To move an already-initialized repository to a newer Loop-Dee-Loup revision, run the same way from a clone checked out at that newer revision:
+
+```bash
+node <path-to-loop-dee-loup-clone>/tools/ldl-update/index.mjs --dest <path-to-your-project>
+```
+
+It updates only unmodified LDL-managed files, is a no-op when already current, and refuses to overwrite a managed file that was locally modified in a way it can't safely reconcile — see `docs/consumer-contract.md` for the full conflict-safe update contract.
 
 ## First trial
 

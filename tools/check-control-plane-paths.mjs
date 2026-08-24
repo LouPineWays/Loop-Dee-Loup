@@ -37,6 +37,7 @@ const pathChecks = [
   { label: "tools/local-worker/**", ok: () => dirHasFiles("tools/local-worker") },
   { label: "tools/review-watch/**", ok: () => dirHasFiles("tools/review-watch") },
   { label: "tools/ldl-init/**", ok: () => dirHasFiles("tools/ldl-init") },
+  { label: "tools/ldl-update/**", ok: () => dirHasFiles("tools/ldl-update") },
 ];
 
 // Cross-check: every literal path token this script relies on must still appear
@@ -55,6 +56,7 @@ const requiredLiterals = [
   "tools/local-worker/**",
   "tools/review-watch/**",
   "tools/ldl-init/**",
+  "tools/ldl-update/**",
 ];
 
 const failures = [];
