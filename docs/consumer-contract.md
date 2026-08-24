@@ -127,7 +127,11 @@ to fit LDL.
 
 ## Provenance manifest
 
-Every run writes `.ldl/manifest.json` in the consumer repository:
+Every `tools/ldl-init` bootstrap run writes `.ldl/manifest.json` in the
+consumer repository. A `tools/ldl-update` run writes it only when it
+actually applies a change — see "Conflict-safe updates" below for when an
+update run is a no-op that leaves the manifest untouched, or refuses
+entirely and writes nothing:
 
 ```json
 {

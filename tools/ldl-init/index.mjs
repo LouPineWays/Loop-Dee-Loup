@@ -153,6 +153,12 @@ export function buildOps(root) {
 //   - an existing plain file where a directory needs to be (e.g. a file literally named
 //     `tools`) would otherwise make mkdirSync throw mid-run, leaving a partially applied,
 //     unmanifested install instead of a clean skip.
+// Every existence check here uses lstatOrNull, not existsSync: existsSync follows symlinks
+// and reports false for a dangling one (Node's own documented behavior), which would let a
+// dangling symlink at or above the destination slip through as "absent" — and
+// fs.writeFileSync itself follows symlinks by default, so a dangling leaf symlink left
+// undetected here would have applyInstall() create its write through the link, materializing
+// the write at whatever path the symlink names, possibly outside destRoot entirely.
 // Exported so tools/ldl-update can apply the exact same write-through-symlink /
 // write-through-non-directory guard when re-planning an update.
 export function findUnsafeDestReason(destRoot, destRel) {
@@ -161,8 +167,8 @@ export function findUnsafeDestReason(destRoot, destRel) {
   let current = destRoot;
   for (const segment of segments) {
     current = join(current, segment);
-    if (!existsSync(current)) continue; // will be created by mkdirSync later — fine
-    const st = lstatSync(current);
+    const st = lstatOrNull(current);
+    if (!st) continue; // will be created by mkdirSync later — fine
     if (st.isSymbolicLink()) {
       return `existing symlink at ${relative(destRoot, current).split("\\").join("/")} in the destination path — refusing to write through it`;
     }
@@ -171,7 +177,8 @@ export function findUnsafeDestReason(destRoot, destRel) {
     }
   }
   const absLeaf = join(current, leaf);
-  if (existsSync(absLeaf) && lstatSync(absLeaf).isSymbolicLink()) {
+  const leafSt = lstatOrNull(absLeaf);
+  if (leafSt && leafSt.isSymbolicLink()) {
     return `existing symlink at ${destRel} — refusing to write through it`;
   }
   return null;
@@ -254,7 +261,7 @@ export function isValidManifest(value) {
   if (!value || typeof value !== "object" || value.schemaVersion !== 1 || !Array.isArray(value.files)) {
     return false;
   }
-  return value.files.every(
+  const filesValid = value.files.every(
     (f) =>
       f &&
       typeof f === "object" &&
@@ -263,6 +270,26 @@ export function isValidManifest(value) {
       typeof f.sha256 === "string" &&
       SHA256_HEX.test(f.sha256),
   );
+  if (!filesValid) return false;
+  // `skipped` is optional (an older or hand-authored manifest may omit it entirely), but
+  // when present every entry must carry a real dest/reason pair. tools/ldl-update sorts
+  // this list by comparing `.reason` with String.prototype.localeCompare — an entry with a
+  // missing or non-string reason would pass through undetected here and only surface later
+  // as an uncaught crash mid-comparison, instead of the intended "reinitialize" error.
+  if (value.skipped !== undefined) {
+    if (!Array.isArray(value.skipped)) return false;
+    const skippedValid = value.skipped.every(
+      (s) =>
+        s &&
+        typeof s === "object" &&
+        typeof s.dest === "string" &&
+        s.dest.length > 0 &&
+        typeof s.reason === "string" &&
+        s.reason.length > 0,
+    );
+    if (!skippedValid) return false;
+  }
+  return true;
 }
 
 // lstatSync wrapped to distinguish "genuinely nothing there" (ENOENT) from every other
