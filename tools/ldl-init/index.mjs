@@ -35,7 +35,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const LDL_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -103,7 +103,9 @@ export function deriveConsumerAgents(sourceText) {
   return result.trimEnd() + "\n";
 }
 
-function sha256(content) {
+// Exported so tools/ldl-update can hash on-disk content against recorded/target hashes
+// using the exact same digest this script's own manifest entries are computed with.
+export function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
 }
 
@@ -151,7 +153,9 @@ export function buildOps(root) {
 //   - an existing plain file where a directory needs to be (e.g. a file literally named
 //     `tools`) would otherwise make mkdirSync throw mid-run, leaving a partially applied,
 //     unmanifested install instead of a clean skip.
-function findUnsafeDestReason(destRoot, destRel) {
+// Exported so tools/ldl-update can apply the exact same write-through-symlink /
+// write-through-non-directory guard when re-planning an update.
+export function findUnsafeDestReason(destRoot, destRel) {
   const segments = destRel.split("/");
   const leaf = segments.pop();
   let current = destRoot;
@@ -244,7 +248,9 @@ const SHA256_HEX = /^[0-9a-f]{64}$/i;
 // `{"dest":"AGENTS.md"}` would otherwise be accepted as an LDL ownership claim over
 // AGENTS.md, and this script would then treat a consumer's own untouched AGENTS.md as
 // safe to overwrite — the exact thing the AGENTS.md special case exists to prevent.
-function isValidManifest(value) {
+// Exported so tools/ldl-update applies this exact same shape check to the manifest it
+// reads, rather than trusting or re-implementing a slightly different validation.
+export function isValidManifest(value) {
   if (!value || typeof value !== "object" || value.schemaVersion !== 1 || !Array.isArray(value.files)) {
     return false;
   }
@@ -281,7 +287,9 @@ function lstatOrNull(absPath) {
 // mkdirSync() throws, after every other managed file had already been written — a
 // partial, unmanifested install. Checking this once, before anything else runs, fails the
 // whole run closed instead of partially.
-function findUnsafeLdlDirReason(destRoot) {
+// Exported so tools/ldl-update guards its own .ldl/manifest.json read+rewrite against the
+// same symlink/non-directory hazards, before reading any existing provenance.
+export function findUnsafeLdlDirReason(destRoot) {
   const dirAbs = join(destRoot, ".ldl");
   const dirSt = lstatOrNull(dirAbs);
   if (dirSt) {
@@ -401,7 +409,11 @@ async function main() {
   process.exit(result.exitCode);
 }
 
-// Only run as a CLI when invoked directly, not when the test file imports these functions.
-if (process.argv[1] && process.argv[1].endsWith("index.mjs")) {
+// Only run as a CLI when this exact file is the process entrypoint, not merely when some
+// other script's argv[1] happens to end in "index.mjs" — tools/ldl-update/index.mjs is
+// itself invoked as `node .../index.mjs`, so a suffix check here would run this module's
+// own main() (installing/overwriting managed files, then calling process.exit()) as a side
+// effect of tools/ldl-update simply importing this module's helpers.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main();
 }
