@@ -394,13 +394,20 @@ test("run: refuses to run, before writing anything, when --dest/.ldl is a pre-ex
   assert.ok(!existsSync(join(dest, "docs", "operating-model.md")), "must fail closed before installing anything, not partially");
 });
 
-test("run: treats a manifest with a malformed files[] entry as absent instead of crashing on it later", async (t) => {
+const VALID_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85";
+
+test("run: treats a manifest with a null files[] entry as absent instead of crashing on it later", async (t) => {
   const root = makeFixtureRoot(t);
   const dest = tempDir(t);
   mkdirSync(join(dest, ".ldl"), { recursive: true });
   writeFileSync(
     join(dest, ".ldl", "manifest.json"),
-    JSON.stringify({ schemaVersion: 1, installedAt: "x", files: [null, { dest: "docs/operating-model.md", sha256: "x" }], skipped: [] }),
+    JSON.stringify({
+      schemaVersion: 1,
+      installedAt: "x",
+      files: [null, { dest: "docs/operating-model.md", sha256: VALID_SHA256 }],
+      skipped: [],
+    }),
   );
 
   const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
@@ -408,6 +415,66 @@ test("run: treats a manifest with a malformed files[] entry as absent instead of
   assert.equal(result.exitCode, 0);
   const manifest = readManifest(dest);
   assert.ok(manifest.files.some((f) => f.dest === "docs/operating-model.md"));
+});
+
+test("run: an incomplete files[] entry (missing sha256) must not be trusted as an LDL ownership claim over a consumer's own AGENTS.md", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "AGENTS.md"), "MY PROJECT'S OWN AGENTS.md — never installed by LDL\n");
+  mkdirSync(join(dest, ".ldl"), { recursive: true });
+  // A forged/incomplete record falsely claiming AGENTS.md is already LDL-managed, missing
+  // the sha256 a genuine install always writes.
+  writeFileSync(
+    join(dest, ".ldl", "manifest.json"),
+    JSON.stringify({ schemaVersion: 1, installedAt: "x", files: [{ dest: "AGENTS.md" }], skipped: [] }),
+  );
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(
+    readFileSync(join(dest, "AGENTS.md"), "utf8"),
+    "MY PROJECT'S OWN AGENTS.md — never installed by LDL\n",
+    "an incomplete manifest entry must not license overwriting the consumer's real AGENTS.md",
+  );
+  assert.ok(existsSync(join(dest, ".ldl", "AGENTS.template.md")));
+});
+
+test("run: refuses to run when --dest/.ldl is a dangling symlink (lstat, not existsSync, decides absence)", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  const nonexistentTarget = join(tempDir(t), "does-not-exist");
+  try {
+    symlinkSync(nonexistentTarget, join(dest, ".ldl"), "junction");
+  } catch (err) {
+    t.skip(`symlink creation not permitted in this environment: ${err.message}`);
+    return;
+  }
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /\.ldl/);
+  assert.ok(!existsSync(join(dest, "docs", "operating-model.md")), "must fail closed before installing anything, not partially");
+});
+
+test("run: refuses to run when --dest/.ldl is a real directory but .ldl/manifest.json itself is a symlink", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  const escapeTarget = tempDir(t);
+  mkdirSync(join(dest, ".ldl"), { recursive: true });
+  try {
+    symlinkSync(join(escapeTarget, "manifest.json"), join(dest, ".ldl", "manifest.json"));
+  } catch (err) {
+    t.skip(`symlink creation not permitted in this environment: ${err.message}`);
+    return;
+  }
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /manifest\.json/);
+  assert.equal(existsSync(join(escapeTarget, "manifest.json")), false, "must never have written through the symlink");
 });
 
 test("defaultResolveRevision appends -dirty when the working tree has uncommitted changes, and not when it's clean", (t) => {
