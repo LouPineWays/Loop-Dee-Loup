@@ -46,6 +46,14 @@ body:
         paragraph renders permanently in the issue body (unlike field `description` text, which
         GitHub shows only in the authoring form and drops from the created issue) so the
         instructions reach the audit response even when it is triggered from a separate comment.
+        If this PR touches a control-plane path (see `docs/bounded-review-cycle.md`'s Entry
+        check), the checklist must include an item confirming that every workflow whose `paths:`
+        trigger should match the diff actually shows a completed run against the merge commit's
+        SHA — e.g. "N. Confirm `gh api repos/<owner>/<repo>/actions/runs?head_sha=<sha>` shows a
+        completed run of `<workflow>.yml` for the merge commit." — not merely that the file
+        contents are correct. A workflow whose trigger silently never matches (e.g. a broken
+        `paths:` glob) will pass a content-only audit; this item exists to catch that class of
+        defect.
   - type: textarea
     id: verification_checklist
     attributes:
