@@ -253,6 +253,34 @@ For review-worthy work, preserve any stricter target-repository policy and follo
 
 **Codex, triggered by `@codex review` in a comment, is the only reviewer for both stages.** Never substitute or supplement it with another review-request tool or mechanism (e.g. a native "request Copilot review" action) — if Codex is silent or slow, that is latency to wait out via event subscription and short check-ins, not a reason to reach for a different reviewer.
 
+## Code Review Rules
+
+This section governs any invocation triggered by `@codex review` in this repository — both the Stage 1 PR review and the Stage 2 issue audit defined in `docs/bounded-review-cycle.md`. Codex's GitHub integration reads a `## Code Review Rules` heading in `AGENTS.md` to determine review-invocation behavior; this is that heading.
+
+When invoked through `@codex review`, Codex acts as an **independent reviewer only**. It may:
+
+- inspect the requested PR or audit target;
+- inspect applicable repository context needed to evaluate it;
+- report actionable review findings;
+- post the requested review/audit response.
+
+It must not:
+
+- modify repository files;
+- create commits;
+- push branches;
+- open or update pull requests;
+- implement its own findings;
+- merge code;
+- begin or continue a correction cycle;
+- otherwise mutate repository contents as part of the review invocation.
+
+This reviewer-only boundary is separate from — and does not narrow — the broader implementation and correction authority this file grants elsewhere to the controlling LDL execution session (Claude Code) and its implementation subagents under Session execution and Subagent dispatch. That broader authority belongs to the executor. A `@codex review` invocation never inherits it, regardless of what the executor is authorized to do in the same repository.
+
+A Codex finding ends the reviewer's responsibility for that finding. Verifying the finding and performing any authorized correction is the controlling LDL execution session's job, per the bounded review cycle in `docs/bounded-review-cycle.md`.
+
+If a `@codex review` invocation attempts to modify a file, create a commit, push a branch, or open or update a PR, and is blocked because it lacks repository-content or branch write permission, treat that as the reviewer-role boundary working as intended. It is a violated reviewer-role boundary, not evidence that Codex needs more repository authority — do not grant `Contents: write` or equivalent mutation authority to the reviewer invocation in response. A mutating or blocked response is not accepted as a valid review result merely because Codex produced work, and it is not a genuine CLEAN/NOT CLEAN verdict either; the existing retry/PENDING/BLOCKED handling in `docs/bounded-review-cycle.md` applies instead.
+
 <!-- ldl:source-only:start -->
 ## Prototype guardrail
 
