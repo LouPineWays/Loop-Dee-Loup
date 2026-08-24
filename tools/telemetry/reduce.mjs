@@ -40,12 +40,18 @@ function firstNonNull(values) {
 }
 
 function countBy(items, keyFn) {
-  const counts = {};
+  // Accumulate on a null-prototype object: a plain {} would read an inherited
+  // Object.prototype property (e.g. a custom agent type literally named "constructor")
+  // instead of undefined when incrementing, and a key named "__proto__" would vanish into
+  // the prototype chain rather than being counted. Spread the result into a normal object
+  // before returning so the record's JSON shape stays a plain object either way — the
+  // spread only copies the counts' own enumerable keys, so it can't reintroduce either bug.
+  const counts = Object.create(null);
   for (const item of items) {
     const key = keyFn(item);
     counts[key] = (counts[key] || 0) + 1;
   }
-  return counts;
+  return { ...counts };
 }
 
 // Pure function: takes the raw parsed event array for one session and returns the
@@ -120,7 +126,13 @@ export function reduceEvents(events) {
     "monetary_cost_breakdown_by_model_when_multiple_models_used_in_one_session",
     "rate_limit_consumption",
   ];
-  if (samples.length === 0) unknown.push("cost_usd_total", "context_window_size", "token_usage");
+  // Check the actual measured fields, not just whether any sample exists: a sample taken
+  // before the session's first API call (or from a client that omits cost/context_window
+  // entirely) still counts as "a sample", but its cost/context_window sub-fields are null,
+  // and those specific facts were genuinely never measured either way.
+  if (measured.cost_usd_total === null) unknown.push("cost_usd_total");
+  if (measured.context_window_size === null) unknown.push("context_window_size");
+  if (measured.last_token_usage === null) unknown.push("token_usage");
   if (!sessionStart) unknown.push("session_start_ts");
   if (!sessionEnd) unknown.push("session_end_ts", "session_wall_duration_ms");
 

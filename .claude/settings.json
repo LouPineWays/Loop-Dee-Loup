@@ -1,37 +1,37 @@
 {
   "statusLine": {
     "type": "command",
-    "command": "node tools/telemetry/statusline.mjs"
+    "command": "node \"$CLAUDE_PROJECT_DIR/tools/telemetry/statusline.mjs\""
   },
   "hooks": {
     "SessionStart": [
       {
-        "hooks": [{ "type": "command", "command": "node tools/telemetry/hook.mjs" }]
+        "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/tools/telemetry/hook.mjs\"" }]
       }
     ],
     "SessionEnd": [
       {
-        "hooks": [{ "type": "command", "command": "node tools/telemetry/hook.mjs" }]
+        "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/tools/telemetry/hook.mjs\"" }]
       }
     ],
     "PreCompact": [
       {
-        "hooks": [{ "type": "command", "command": "node tools/telemetry/hook.mjs" }]
+        "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/tools/telemetry/hook.mjs\"" }]
       }
     ],
     "PostCompact": [
       {
-        "hooks": [{ "type": "command", "command": "node tools/telemetry/hook.mjs" }]
+        "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/tools/telemetry/hook.mjs\"" }]
       }
     ],
     "SubagentStart": [
       {
-        "hooks": [{ "type": "command", "command": "node tools/telemetry/hook.mjs" }]
+        "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/tools/telemetry/hook.mjs\"" }]
       }
     ],
     "SubagentStop": [
       {
-        "hooks": [{ "type": "command", "command": "node tools/telemetry/hook.mjs" }]
+        "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/tools/telemetry/hook.mjs\"" }]
       }
     ]
   }

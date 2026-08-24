@@ -74,6 +74,29 @@ test("compaction events: PreCompact/PostCompact are recorded and the pre-compact
   assert.equal(record.derived.peak_context_used_percentage, 88.3);
 });
 
+test("statusline sample taken before the first API call: a sample exists but its cost/context fields are still unknown", () => {
+  // Regression test: the reducer must not treat "at least one sample was collected" as
+  // proof cost/context data was measured — a pre-first-API-call statusLine render reports
+  // cost:null/context_window:null even though a sample genuinely fired.
+  const record = reduceEvents(loadFixture("pre_api_sample.jsonl"));
+  assert.equal(record.measured.statusline_sample_count, 1);
+  assert.equal(record.measured.cost_usd_total, null);
+  assert.ok(record.unknown.includes("cost_usd_total"));
+  assert.ok(record.unknown.includes("context_window_size"));
+  assert.ok(record.unknown.includes("token_usage"));
+});
+
+test("subagent_type_counts survives an agent type named like a built-in object property", () => {
+  const record = reduceEvents([
+    { kind: "hook", event: "SubagentStart", session_id: "s-1", agent_type: "constructor", ts: "2026-08-24T00:00:00.000Z" },
+    { kind: "hook", event: "SubagentStart", session_id: "s-1", agent_type: "constructor", ts: "2026-08-24T00:01:00.000Z" },
+    { kind: "hook", event: "SubagentStart", session_id: "s-1", agent_type: "__proto__", ts: "2026-08-24T00:02:00.000Z" },
+  ]);
+  assert.equal(record.derived.subagent_type_counts.constructor, 2);
+  assert.equal(record.derived.subagent_type_counts.__proto__, 1);
+  assert.equal(Object.keys(record.derived.subagent_type_counts).sort().join(","), "__proto__,constructor");
+});
+
 test("empty event log: every measured fact is null and nothing is fabricated", () => {
   const record = reduceEvents([]);
   assert.equal(record.measured.identity.session_id, null);
