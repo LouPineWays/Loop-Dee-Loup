@@ -2,6 +2,8 @@
 
 Read this file before acting in this repository.
 
+If you are reading this file inside a consumer repository rather than Loop-Dee-Loup itself, it was installed by `tools/ldl-init` — see that consumer repository's `docs/consumer-contract.md` for the installed ownership boundary and update path. Sections wrapped in `<!-- ldl:source-only:start/end -->` markers in Loop-Dee-Loup's own copy of this file are Loop-Dee-Loup's own instance state and are stripped before installation; they will not appear here.
+
 ## Purpose
 
 Loop-Dee-Loup is a hyper-lean, issue-dispatched execution loop. Durable state belongs in concise, authoritative artifacts. Conversation history and issue comments are not the source of truth.
@@ -118,7 +120,7 @@ Within a session the founder has already started, delegating work to subagents i
 
 The reason is chat discipline: top-level session chat should stay limited to the fixed one-line formats in "Fixed chat report formats" below, with step-by-step mechanics happening inside subagent dispatches rather than being narrated in the top-level chat.
 
-It becomes the automatic session launcher the Prototype guardrail defers only if a session uses subagent dispatch to originate work on new issues or PRs on its own initiative, without the founder having started that session in the first place. The gate that must never be bypassed is *who starts the session*, not *what the session delegates internally once running*.
+It becomes an automatic session launcher — the thing this repository defers building until evidence justifies it — only if a session uses subagent dispatch to originate work on new issues or PRs on its own initiative, without the founder having started that session in the first place. The gate that must never be bypassed is *who starts the session*, not *what the session delegates internally once running*.
 
 ## Session communication budget
 
@@ -179,9 +181,11 @@ A parent issue body is a mutable current-state snapshot, not an append-only diar
 
 History may remain in comments for auditability, but executors must not normally read it.
 
+<!-- ldl:source-only:start -->
 ## Loop-Dee-Loup Burn Order
 
 Loop-Dee-Loup maintains its own Burn Order — a prioritized backlog of process/tooling items about the Loop itself, distinct from and never merged with any target repository's own Burn Order. Full spec, artifact location, and the idea-intake-to-Burn-Order conversion procedure are in `docs/burn-order.md`.
+<!-- ldl:source-only:end -->
 
 ## Slice handoff
 
@@ -249,6 +253,8 @@ For review-worthy work, preserve any stricter target-repository policy and follo
 
 **Codex, triggered by `@codex review` in a comment, is the only reviewer for both stages.** Never substitute or supplement it with another review-request tool or mechanism (e.g. a native "request Copilot review" action) — if Codex is silent or slow, that is latency to wait out via event subscription and short check-ins, not a reason to reach for a different reviewer.
 
+<!-- ldl:source-only:start -->
 ## Prototype guardrail
 
 The first trial is Covenant's remaining `wolfscairn-list-and-privacy` work after PR #94. The execution slice ships the complete Buttondown signup surface, including form, CSP, presentation, tests, documentation, and integration. Do not split those layers into separate issues. Do not build an automatic session launcher or generalize the controller until evidence from this trial justifies it.
+<!-- ldl:source-only:end -->

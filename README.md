@@ -111,6 +111,18 @@ Stop and ask only when the available authority cannot safely determine:
 
 Do not request routine permission to implement an accepted approach, run checks, address verified defects, prepare the next slice, or merge after every required gate passes.
 
+## Using LDL from another repository
+
+Loop-Dee-Loup is the source/distribution repository for its own reusable machinery — skills, personas, scripts, and operating-model documentation. A project adopting LDL should remain its own authoritative execution environment rather than being run from inside this repository.
+
+From a local clone of Loop-Dee-Loup, install that machinery into an existing project with:
+
+```bash
+node <path-to-loop-dee-loup-clone>/tools/ldl-init/index.mjs --dest <path-to-your-project>
+```
+
+This is safe to run against a non-empty, already-in-progress repository and safe to run again — see `docs/consumer-contract.md` for the full ownership boundary (what gets installed, what is left alone, and how the installed `.ldl/manifest.json` records provenance) and `tools/ldl-init/index.mjs` for usage details. Updating an already-initialized repository to a newer Loop-Dee-Loup revision is a separate, not-yet-built mechanism.
+
 ## First trial
 
 The first controlled trial is Covenant's remaining `wolfscairn-list-and-privacy` work after PR #94. Its first execution slice is to ship the complete Buttondown signup surface on `covenant.wolfscairn.com`, including form behavior, CSP, presentation, tests, documentation, and repository integration. The live email interaction remains a founder-only external verification boundary.

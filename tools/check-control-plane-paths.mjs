@@ -36,6 +36,7 @@ const pathChecks = [
   { label: "docs/burn-order.json", ok: () => existsSync(join(ROOT, "docs", "burn-order.json")) },
   { label: "tools/local-worker/**", ok: () => dirHasFiles("tools/local-worker") },
   { label: "tools/review-watch/**", ok: () => dirHasFiles("tools/review-watch") },
+  { label: "tools/ldl-init/**", ok: () => dirHasFiles("tools/ldl-init") },
 ];
 
 // Cross-check: every literal path token this script relies on must still appear
@@ -53,6 +54,7 @@ const requiredLiterals = [
   "docs/burn-order.json",
   "tools/local-worker/**",
   "tools/review-watch/**",
+  "tools/ldl-init/**",
 ];
 
 const failures = [];
