@@ -153,6 +153,12 @@ export function buildOps(root) {
 //   - an existing plain file where a directory needs to be (e.g. a file literally named
 //     `tools`) would otherwise make mkdirSync throw mid-run, leaving a partially applied,
 //     unmanifested install instead of a clean skip.
+// Every existence check here uses lstatOrNull, not existsSync: existsSync follows symlinks
+// and reports false for a dangling one (Node's own documented behavior), which would let a
+// dangling symlink at or above the destination slip through as "absent" — and
+// fs.writeFileSync itself follows symlinks by default, so a dangling leaf symlink left
+// undetected here would have applyInstall() create its write through the link, materializing
+// the write at whatever path the symlink names, possibly outside destRoot entirely.
 // Exported so tools/ldl-update can apply the exact same write-through-symlink /
 // write-through-non-directory guard when re-planning an update.
 export function findUnsafeDestReason(destRoot, destRel) {
@@ -161,8 +167,8 @@ export function findUnsafeDestReason(destRoot, destRel) {
   let current = destRoot;
   for (const segment of segments) {
     current = join(current, segment);
-    if (!existsSync(current)) continue; // will be created by mkdirSync later — fine
-    const st = lstatSync(current);
+    const st = lstatOrNull(current);
+    if (!st) continue; // will be created by mkdirSync later — fine
     if (st.isSymbolicLink()) {
       return `existing symlink at ${relative(destRoot, current).split("\\").join("/")} in the destination path — refusing to write through it`;
     }
@@ -171,7 +177,8 @@ export function findUnsafeDestReason(destRoot, destRel) {
     }
   }
   const absLeaf = join(current, leaf);
-  if (existsSync(absLeaf) && lstatSync(absLeaf).isSymbolicLink()) {
+  const leafSt = lstatOrNull(absLeaf);
+  if (leafSt && leafSt.isSymbolicLink()) {
     return `existing symlink at ${destRel} — refusing to write through it`;
   }
   return null;

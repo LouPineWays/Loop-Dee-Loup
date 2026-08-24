@@ -314,6 +314,38 @@ test("run: refuses to write through a pre-existing symlink in the destination pa
   assert.ok(manifest.skipped.some((s) => s.dest.startsWith(".claude/skills/sift/") && /symlink/.test(s.reason)));
 });
 
+test("run: refuses to write through a dangling symlink at a managed destination (Stage 2 audit finding on PR #75)", async (t) => {
+  // existsSync() follows symlinks and reports false for a dangling one (Node's own
+  // documented behavior), so a naive existsSync-based check would miss a dangling symlink
+  // entirely and let fs.writeFileSync (which also follows symlinks) write through it,
+  // materializing the write wherever the symlink points — possibly outside --dest. This
+  // regression-tests the fix: findUnsafeDestReason() must use lstat-based detection so a
+  // dangling leaf symlink is caught the same as a live one.
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  mkdirSync(join(dest, ".claude", "personas"), { recursive: true });
+  const danglingTarget = join(dest, ".claude", "personas", "nonexistent-target.md");
+  const danglingLink = join(dest, ".claude", "personas", "audit-verdict-extractor.md");
+  try {
+    symlinkSync(danglingTarget, danglingLink, "file");
+  } catch (err) {
+    t.skip(`symlink creation not permitted in this environment: ${err.message}`);
+    return;
+  }
+  assert.equal(existsSync(danglingLink), false, "sanity check: existsSync must report false for a dangling symlink");
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(existsSync(danglingTarget), false, "must never have written through the dangling symlink");
+  const manifest = readManifest(dest);
+  assert.ok(
+    manifest.skipped.some((s) => s.dest === ".claude/personas/audit-verdict-extractor.md" && /symlink/.test(s.reason)),
+    "the dangling symlink destination must be recorded under skipped, not silently installed",
+  );
+  assert.ok(!manifest.files.some((f) => f.dest === ".claude/personas/audit-verdict-extractor.md"));
+});
+
 test("run: installs .github/ISSUE_TEMPLATE content required by the installed bounded-review-cycle docs", async (t) => {
   const root = makeFixtureRoot(t);
   const dest = tempDir(t);
