@@ -261,7 +261,7 @@ export function isValidManifest(value) {
   if (!value || typeof value !== "object" || value.schemaVersion !== 1 || !Array.isArray(value.files)) {
     return false;
   }
-  return value.files.every(
+  const filesValid = value.files.every(
     (f) =>
       f &&
       typeof f === "object" &&
@@ -270,6 +270,26 @@ export function isValidManifest(value) {
       typeof f.sha256 === "string" &&
       SHA256_HEX.test(f.sha256),
   );
+  if (!filesValid) return false;
+  // `skipped` is optional (an older or hand-authored manifest may omit it entirely), but
+  // when present every entry must carry a real dest/reason pair. tools/ldl-update sorts
+  // this list by comparing `.reason` with String.prototype.localeCompare — an entry with a
+  // missing or non-string reason would pass through undetected here and only surface later
+  // as an uncaught crash mid-comparison, instead of the intended "reinitialize" error.
+  if (value.skipped !== undefined) {
+    if (!Array.isArray(value.skipped)) return false;
+    const skippedValid = value.skipped.every(
+      (s) =>
+        s &&
+        typeof s === "object" &&
+        typeof s.dest === "string" &&
+        s.dest.length > 0 &&
+        typeof s.reason === "string" &&
+        s.reason.length > 0,
+    );
+    if (!skippedValid) return false;
+  }
+  return true;
 }
 
 // lstatSync wrapped to distinguish "genuinely nothing there" (ENOENT) from every other

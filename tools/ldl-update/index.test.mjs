@@ -100,6 +100,25 @@ test("run: exits 1 with a clear message when --dest has no .ldl/manifest.json ye
   assert.match(result.message, /manifest/i);
 });
 
+test("run: rejects a manifest with a malformed skipped[] entry instead of crashing in skipListsEqual", async (t) => {
+  const root = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, root, "rev-1");
+
+  // Two skipped entries recorded under the same dest with a missing reason. isValidManifest
+  // must reject this shape, because skipListsEqual sorts skipped entries by comparing
+  // `.reason` with localeCompare once two entries share a dest — an undefined reason would
+  // otherwise throw an uncaught TypeError mid-run instead of failing with a clear message.
+  const manifest = readManifest(dest);
+  manifest.skipped = [{ dest: "docs/foo.md" }, { dest: "docs/foo.md", reason: "bar" }];
+  writeFileSync(join(dest, ".ldl", "manifest.json"), JSON.stringify(manifest));
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "rev-1" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /expected shape/i);
+});
+
 test("run: updates from one known LDL revision to a newer one, changing only managed content that actually changed", async (t) => {
   const rootV1 = makeFixtureRoot(t, "rev-1");
   const dest = tempDir(t);

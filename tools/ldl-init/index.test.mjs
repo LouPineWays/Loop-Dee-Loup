@@ -394,6 +394,30 @@ test("run: treats a .ldl/manifest.json with an unexpected shape as absent instea
   assert.ok(manifest.files.some((f) => f.dest === "docs/operating-model.md"));
 });
 
+test("run: treats a manifest with a malformed skipped[] entry as absent instead of trusting it", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  mkdirSync(join(dest, ".ldl"), { recursive: true });
+  // Two skipped entries sharing a dest with a missing reason: harmless here since ldl-init
+  // never sorts/compares `skipped`, but tools/ldl-update's skipListsEqual does, and would
+  // crash on the undefined reason if this manifest were trusted instead of rejected.
+  writeFileSync(
+    join(dest, ".ldl", "manifest.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      installedAt: "x",
+      files: [],
+      skipped: [{ dest: "docs/foo.md" }, { dest: "docs/foo.md", reason: "bar" }],
+    }),
+  );
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  const manifest = readManifest(dest);
+  assert.ok(manifest.files.some((f) => f.dest === "docs/operating-model.md"), "must proceed as a fresh install");
+});
+
 test("run: refuses to run, before writing anything, when --dest/.ldl is a pre-existing symlink", async (t) => {
   const root = makeFixtureRoot(t);
   const dest = tempDir(t);
