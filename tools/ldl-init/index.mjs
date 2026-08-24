@@ -33,8 +33,8 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const LDL_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -64,6 +64,7 @@ export const MANAGED_ITEMS = [
   { kind: "file", src: "docs/bounded-review-cycle.md", dest: "docs/bounded-review-cycle.md" },
   { kind: "file", src: "docs/decision-forms.md", dest: "docs/decision-forms.md" },
   { kind: "file", src: "docs/consumer-contract.md", dest: "docs/consumer-contract.md" },
+  { kind: "dir", src: ".github/ISSUE_TEMPLATE", dest: ".github/ISSUE_TEMPLATE" },
 ];
 
 export function parseArgs(argv) {
@@ -140,15 +141,53 @@ export function buildOps(root) {
   return ops;
 }
 
-// Splits ops into what is safe to (re)install versus what must be left alone: a
-// destination path that already exists and is not recorded as LDL-managed in an existing
-// manifest is a pre-existing, unrelated consumer file, not something this bootstrap is
-// allowed to touch.
+// Walks destRoot down to destRel one path segment at a time and returns a reason string
+// the moment it finds something that makes writing there unsafe, or null if the path is
+// clear. Two distinct hazards, checked together because both are "don't trust what's
+// already sitting at or above this destination":
+//   - an existing symlink anywhere on the path (including the leaf) could redirect the
+//     write outside destRoot entirely, e.g. a pre-existing `.claude/skills/sift` symlinked
+//     to somewhere unrelated;
+//   - an existing plain file where a directory needs to be (e.g. a file literally named
+//     `tools`) would otherwise make mkdirSync throw mid-run, leaving a partially applied,
+//     unmanifested install instead of a clean skip.
+function findUnsafeDestReason(destRoot, destRel) {
+  const segments = destRel.split("/");
+  const leaf = segments.pop();
+  let current = destRoot;
+  for (const segment of segments) {
+    current = join(current, segment);
+    if (!existsSync(current)) continue; // will be created by mkdirSync later — fine
+    const st = lstatSync(current);
+    if (st.isSymbolicLink()) {
+      return `existing symlink at ${relative(destRoot, current).split("\\").join("/")} in the destination path — refusing to write through it`;
+    }
+    if (!st.isDirectory()) {
+      return `existing non-directory at ${relative(destRoot, current).split("\\").join("/")} blocks this destination path`;
+    }
+  }
+  const absLeaf = join(current, leaf);
+  if (existsSync(absLeaf) && lstatSync(absLeaf).isSymbolicLink()) {
+    return `existing symlink at ${destRel} — refusing to write through it`;
+  }
+  return null;
+}
+
+// Splits ops into what is safe to (re)install versus what must be left alone. A
+// destination is left alone, and recorded under skipped with a reason, when either:
+//   - some part of its path is unsafe to write through (see findUnsafeDestReason), or
+//   - it already exists and is not recorded as LDL-managed in an existing manifest, i.e.
+//     it is a pre-existing, unrelated consumer file this bootstrap is not allowed to touch.
 export function planInstall({ ops, destRoot, existingManifest }) {
   const managedDestSet = new Set((existingManifest?.files || []).map((f) => f.dest));
   const toInstall = [];
   const toSkip = [];
   for (const op of ops) {
+    const unsafeReason = findUnsafeDestReason(destRoot, op.destRel);
+    if (unsafeReason) {
+      toSkip.push({ dest: op.destRel, reason: unsafeReason });
+      continue;
+    }
     const absDest = join(destRoot, op.destRel);
     const exists = existsSync(absDest);
     if (exists && !managedDestSet.has(op.destRel)) {
@@ -171,12 +210,35 @@ function applyInstall(ops, destRoot) {
   return installed;
 }
 
+// buildOps() copies working-tree bytes, not the committed blob at HEAD, so a dirty
+// Loop-Dee-Loup clone can install content that doesn't match the recorded commit. A
+// "-dirty" suffix (the same convention `git describe --dirty` uses) keeps the recorded
+// revision an honest description of what was actually installed instead of a silently
+// misleading provenance claim.
 export function defaultResolveRevision(root) {
+  let sha;
   try {
-    return execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    sha = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   } catch {
     return "unknown";
   }
+  try {
+    const status = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" });
+    if (status.trim().length > 0) {
+      return `${sha}-dirty`;
+    }
+  } catch {
+    // HEAD resolved but status didn't — still report the sha we do have.
+  }
+  return sha;
+}
+
+// A pre-existing .ldl/manifest.json that isn't in the shape this script writes (absent,
+// truncated, or from something else entirely) must not be trusted as a record of what is
+// LDL-managed — treating it as absent falls back to safe fresh-install semantics instead
+// of either crashing on an unexpected shape or silently trusting arbitrary JSON.
+function isValidManifest(value) {
+  return Boolean(value) && typeof value === "object" && value.schemaVersion === 1 && Array.isArray(value.files);
 }
 
 // `resolveRevisionImpl` and `now` are injected so tests get deterministic manifest output
@@ -198,11 +260,13 @@ export async function run(args, deps = {}) {
   const manifestPath = join(destRoot, ".ldl", "manifest.json");
   let existingManifest = null;
   if (existsSync(manifestPath)) {
+    let parsed;
     try {
-      existingManifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      parsed = JSON.parse(readFileSync(manifestPath, "utf8"));
     } catch (err) {
       return { exitCode: 1, message: `existing .ldl/manifest.json is not valid JSON: ${err.message}` };
     }
+    existingManifest = isValidManifest(parsed) ? parsed : null;
   }
 
   let ops;
@@ -225,6 +289,18 @@ export async function run(args, deps = {}) {
   const destAgentsExists = existsSync(join(destRoot, "AGENTS.md"));
   const agentsDestRel = !destAgentsExists || agentsAlreadyManaged ? "AGENTS.md" : ".ldl/AGENTS.template.md";
   ops.push({ destRel: agentsDestRel, content: Buffer.from(derivedAgents, "utf8") });
+
+  // If a prior run parked the derived template at .ldl/AGENTS.template.md (because the
+  // consumer had its own AGENTS.md at the time) and this run is now installing straight to
+  // AGENTS.md instead (the consumer's own file is gone), the old template is superseded —
+  // remove it so it doesn't linger on disk unrecorded by the new manifest.
+  const previousTemplateFile = existingManifest?.files?.some((f) => f.dest === ".ldl/AGENTS.template.md");
+  if (agentsDestRel === "AGENTS.md" && previousTemplateFile) {
+    const staleTemplatePath = join(destRoot, ".ldl", "AGENTS.template.md");
+    if (existsSync(staleTemplatePath)) {
+      rmSync(staleTemplatePath);
+    }
+  }
 
   const { toInstall, toSkip } = planInstall({ ops, destRoot, existingManifest });
   const installedFiles = applyInstall(toInstall, destRoot).sort((a, b) => a.dest.localeCompare(b.dest));

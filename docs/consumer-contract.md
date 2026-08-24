@@ -26,6 +26,10 @@ Reusable engine/runtime material distributed from this repository:
 - `docs/operating-model.md`, `docs/bounded-review-cycle.md`,
   `docs/decision-forms.md`, `docs/consumer-contract.md` — the operating
   model documentation those skills and the bounded review cycle depend on;
+- `.github/ISSUE_TEMPLATE/` — the issue templates the installed docs
+  reference by name (e.g. `docs/bounded-review-cycle.md` Stage 2 names the
+  `audit-control-issue` template directly), so a consumer repository can
+  actually follow what its own installed documentation instructs it to do;
 - `AGENTS.md` — installed only as described under "The AGENTS.md special
   case" below, since a consumer repository may already have its own.
 
@@ -94,6 +98,14 @@ Every run writes `.ldl/manifest.json` in the consumer repository:
 }
 ```
 
+`ldlSourceRevision` carries a `-dirty` suffix (the `git describe --dirty` convention) when
+the Loop-Dee-Loup clone used to install had uncommitted changes at install time, since
+`tools/ldl-init` copies working-tree bytes rather than committed blobs — the recorded
+revision must describe what was actually installed, not merely what commit was checked
+out. A `.ldl/manifest.json` that exists but is not in this shape (missing, truncated, or
+written by something else entirely) is treated as absent rather than trusted or used to
+crash the run.
+
 `files` is the durable, machine-readable record of exactly which paths in
 the consumer repository are LDL-managed — a fresh coding-agent session can
 read it without any conversation history to determine both the installed
@@ -111,6 +123,15 @@ bootstrap deliberately left alone.
   untouched and recorded under `skipped` instead of being overwritten. This
   is what keeps the bootstrap safe to run against a non-empty, pre-existing
   project repository.
+- If any path component leading to a destination is an existing symlink, or
+  an existing plain file where a directory needs to be, that item is left
+  alone and recorded under `skipped` instead of following the symlink
+  outside the destination repository or crashing mid-install.
+- If a consumer's own `AGENTS.md` (the reason a prior run parked the
+  derived template at `.ldl/AGENTS.template.md` instead of installing to
+  `AGENTS.md`) is later removed, the next run installs straight to
+  `AGENTS.md` and deletes the now-superseded `.ldl/AGENTS.template.md`
+  rather than leaving it behind as an orphaned, unmanifested file.
 - Re-running the bootstrap against an already-initialized repository at the
   same Loop-Dee-Loup source revision reinstalls the same managed paths with
   identical content — a predictable no-op, not a duplicate or a corrupting

@@ -7,7 +7,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -274,6 +275,113 @@ test("run: skips a destination colliding with a pre-existing unmanaged file insi
     { dest: ".claude/skills/context-clearing/SKILL.md", reason: "destination already exists and is not LDL-managed" },
   ]);
   assert.ok(!manifest.files.some((f) => f.dest === ".claude/skills/context-clearing/SKILL.md"));
+});
+
+test("run: skips, without crashing, a destination whose parent already exists as a plain file", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  // tools/local-worker/** and tools/review-watch/** both need "tools" to be a directory.
+  writeFileSync(join(dest, "tools"), "not a directory\n");
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(readFileSync(join(dest, "tools"), "utf8"), "not a directory\n", "the blocking file must be left untouched");
+  const manifest = readManifest(dest);
+  assert.ok(manifest.skipped.some((s) => s.dest.startsWith("tools/")));
+  assert.ok(!manifest.files.some((f) => f.dest.startsWith("tools/")));
+  // Unrelated managed paths still install fine.
+  assert.ok(manifest.files.some((f) => f.dest === "docs/operating-model.md"));
+});
+
+test("run: refuses to write through a pre-existing symlink in the destination path", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  const escapeTarget = tempDir(t);
+  mkdirSync(join(dest, ".claude", "skills"), { recursive: true });
+  try {
+    symlinkSync(escapeTarget, join(dest, ".claude", "skills", "sift"), "junction");
+  } catch (err) {
+    t.skip(`symlink creation not permitted in this environment: ${err.message}`);
+    return;
+  }
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(existsSync(join(escapeTarget, "SKILL.md")), false, "must never have written through the symlink");
+  const manifest = readManifest(dest);
+  assert.ok(manifest.skipped.some((s) => s.dest.startsWith(".claude/skills/sift/") && /symlink/.test(s.reason)));
+});
+
+test("run: installs .github/ISSUE_TEMPLATE content required by the installed bounded-review-cycle docs", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  assert.ok(existsSync(join(dest, ".github", "ISSUE_TEMPLATE", "SKILL.md")));
+  const manifest = readManifest(dest);
+  assert.ok(manifest.files.some((f) => f.dest.startsWith(".github/ISSUE_TEMPLATE/")));
+});
+
+test("run: removes a superseded .ldl/AGENTS.template.md once the consumer's own AGENTS.md is gone and LDL starts managing AGENTS.md directly", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "AGENTS.md"), "MY PROJECT'S OWN AGENTS.md\n");
+
+  const first = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(first.exitCode, 0);
+  assert.ok(existsSync(join(dest, ".ldl", "AGENTS.template.md")));
+
+  // The consumer removes their own AGENTS.md between runs.
+  rmSync(join(dest, "AGENTS.md"));
+
+  const second = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(second.exitCode, 0);
+  assert.ok(existsSync(join(dest, "AGENTS.md")), "AGENTS.md should now be LDL-managed");
+  assert.ok(!existsSync(join(dest, ".ldl", "AGENTS.template.md")), "the superseded template must be removed, not left orphaned");
+  const manifest = readManifest(dest);
+  assert.ok(manifest.files.some((f) => f.dest === "AGENTS.md"));
+  assert.ok(!manifest.files.some((f) => f.dest === ".ldl/AGENTS.template.md"));
+});
+
+test("run: treats a .ldl/manifest.json with an unexpected shape as absent instead of crashing or trusting it", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  mkdirSync(join(dest, ".ldl"), { recursive: true });
+  writeFileSync(join(dest, ".ldl", "manifest.json"), JSON.stringify({ someOtherTool: true }));
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  const manifest = readManifest(dest);
+  assert.equal(manifest.schemaVersion, 1);
+  assert.equal(manifest.skipped.length, 0, "an unrecognized manifest shape must not be read as a managed-file record");
+  assert.ok(manifest.files.some((f) => f.dest === "docs/operating-model.md"));
+});
+
+test("defaultResolveRevision appends -dirty when the working tree has uncommitted changes, and not when it's clean", (t) => {
+  const dir = tempDir(t);
+  const gitEnv = { GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "test@example.com", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "test@example.com" };
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+  } catch (err) {
+    t.skip(`git not available in this environment: ${err.message}`);
+    return;
+  }
+  writeFileSync(join(dir, "file.txt"), "a\n");
+  execFileSync("git", ["add", "."], { cwd: dir });
+  execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir, env: { ...process.env, ...gitEnv } });
+
+  const clean = defaultResolveRevision(dir);
+  assert.doesNotMatch(clean, /-dirty$/);
+
+  writeFileSync(join(dir, "file.txt"), "a\nb\n");
+  const dirty = defaultResolveRevision(dir);
+  assert.match(dirty, /-dirty$/);
+  assert.equal(dirty.replace(/-dirty$/, ""), clean);
 });
 
 test("planInstall: treats a path recorded in an existing manifest as LDL-managed, not a conflict", () => {
