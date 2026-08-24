@@ -38,8 +38,8 @@ jobs:
       - name: Local-worker adapter tests
         run: node --test tools/local-worker/adapter.test.mjs
 
-      - name: Review-watch poll tests
-        run: node --test tools/review-watch/poll.test.mjs
+      - name: Review-watch tests
+        run: node --test tools/review-watch/*.test.mjs
 
       - name: LDL-init bootstrap tests
         run: node --test tools/ldl-init/index.test.mjs
