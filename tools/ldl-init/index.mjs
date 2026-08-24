@@ -236,9 +236,35 @@ export function defaultResolveRevision(root) {
 // A pre-existing .ldl/manifest.json that isn't in the shape this script writes (absent,
 // truncated, or from something else entirely) must not be trusted as a record of what is
 // LDL-managed — treating it as absent falls back to safe fresh-install semantics instead
-// of either crashing on an unexpected shape or silently trusting arbitrary JSON.
+// of either crashing on an unexpected shape or silently trusting arbitrary JSON. Every
+// `files` entry is checked too, not just that `files` is an array: a malformed entry (e.g.
+// `null`) would otherwise pass this check and only crash later, the first time code reads
+// `f.dest` off it.
 function isValidManifest(value) {
-  return Boolean(value) && typeof value === "object" && value.schemaVersion === 1 && Array.isArray(value.files);
+  if (!value || typeof value !== "object" || value.schemaVersion !== 1 || !Array.isArray(value.files)) {
+    return false;
+  }
+  return value.files.every((f) => f && typeof f === "object" && typeof f.dest === "string");
+}
+
+// .ldl/ is LDL's own managed namespace (the manifest, and sometimes the derived AGENTS.md
+// template) — findUnsafeDestReason() above only guards the MANAGED_ITEMS-derived ops, so
+// without this separate check a pre-existing .ldl symlink could redirect the manifest
+// write (or the stale-template delete below) outside --dest, and a pre-existing .ldl
+// *file* would only be discovered when the final mkdirSync() throws, after every other
+// managed file has already been written — a partial, unmanifested install. Checking this
+// once, before anything else runs, fails the whole run closed instead of partially.
+function findUnsafeLdlDirReason(destRoot) {
+  const abs = join(destRoot, ".ldl");
+  if (!existsSync(abs)) return null;
+  const st = lstatSync(abs);
+  if (st.isSymbolicLink()) {
+    return "existing symlink at .ldl — refusing to write LDL's own managed state through it";
+  }
+  if (!st.isDirectory()) {
+    return "existing non-directory at .ldl — cannot use it as LDL's managed directory";
+  }
+  return null;
 }
 
 // `resolveRevisionImpl` and `now` are injected so tests get deterministic manifest output
@@ -255,6 +281,11 @@ export async function run(args, deps = {}) {
 
   if (!existsSync(destRoot) || !statSync(destRoot).isDirectory()) {
     return { exitCode: 1, message: `--dest does not exist or is not a directory: ${destRoot}` };
+  }
+
+  const unsafeLdlReason = findUnsafeLdlDirReason(destRoot);
+  if (unsafeLdlReason) {
+    return { exitCode: 1, message: `Refusing to run: ${unsafeLdlReason}` };
   }
 
   const manifestPath = join(destRoot, ".ldl", "manifest.json");

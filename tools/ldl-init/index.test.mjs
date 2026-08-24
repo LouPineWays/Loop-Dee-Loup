@@ -362,6 +362,54 @@ test("run: treats a .ldl/manifest.json with an unexpected shape as absent instea
   assert.ok(manifest.files.some((f) => f.dest === "docs/operating-model.md"));
 });
 
+test("run: refuses to run, before writing anything, when --dest/.ldl is a pre-existing symlink", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  const escapeTarget = tempDir(t);
+  try {
+    symlinkSync(escapeTarget, join(dest, ".ldl"), "junction");
+  } catch (err) {
+    t.skip(`symlink creation not permitted in this environment: ${err.message}`);
+    return;
+  }
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /\.ldl/);
+  assert.equal(existsSync(join(escapeTarget, "manifest.json")), false, "must never have written through the symlink");
+  assert.ok(!existsSync(join(dest, "docs", "operating-model.md")), "must fail closed before installing anything, not partially");
+});
+
+test("run: refuses to run, before writing anything, when --dest/.ldl is a pre-existing regular file", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  writeFileSync(join(dest, ".ldl"), "not a directory\n");
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /\.ldl/);
+  assert.equal(readFileSync(join(dest, ".ldl"), "utf8"), "not a directory\n");
+  assert.ok(!existsSync(join(dest, "docs", "operating-model.md")), "must fail closed before installing anything, not partially");
+});
+
+test("run: treats a manifest with a malformed files[] entry as absent instead of crashing on it later", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  mkdirSync(join(dest, ".ldl"), { recursive: true });
+  writeFileSync(
+    join(dest, ".ldl", "manifest.json"),
+    JSON.stringify({ schemaVersion: 1, installedAt: "x", files: [null, { dest: "docs/operating-model.md", sha256: "x" }], skipped: [] }),
+  );
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  const manifest = readManifest(dest);
+  assert.ok(manifest.files.some((f) => f.dest === "docs/operating-model.md"));
+});
+
 test("defaultResolveRevision appends -dirty when the working tree has uncommitted changes, and not when it's clean", (t) => {
   const dir = tempDir(t);
   const gitEnv = { GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "test@example.com", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "test@example.com" };
