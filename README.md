@@ -39,13 +39,13 @@ The goal is simple: get more verified work from the same token budget without tu
 
 LDL will probably fit if you want:
 
-- lower token and context costs;
-- fresh sessions instead of one conversation that never dies;
-- GitHub issues, PRs, and repository docs as the durable record;
-- high agent autonomy after you authorize the outcome;
-- interruptions only for real founder decisions, credentials, or manual actions;
-- batched decision forms instead of one question at a time;
-- review cycles with an actual stopping condition.
+* lower token and context costs;
+* fresh sessions instead of one conversation that never dies;
+* GitHub issues, PRs, and repository docs as the durable record;
+* high agent autonomy after you authorize the outcome;
+* interruptions only for real founder decisions, credentials, or manual actions;
+* batched decision forms instead of one question at a time;
+* review cycles with an actual stopping condition.
 
 It probably won't fit if you want heavyweight planning before any code is written, a highly conversational working session, or a general-purpose multi-agent platform. Version one has no daemon, queue, or automatic session launcher. Those aren't bad preferences. They just aren't mine.
 
@@ -90,10 +90,10 @@ An execution issue should produce one observable capability, correction, or clos
 
 It qualifies as a slice when:
 
-- one agent session can own it with bounded context;
-- it includes every layer needed for that outcome, including code, tests, configuration, documentation, and verification;
-- it can be evaluated without finishing a sibling issue first;
-- merging it leaves the repository in a coherent state.
+* one agent session can own it with bounded context;
+* it includes every layer needed for that outcome, including code, tests, configuration, documentation, and verification;
+* it can be evaluated without finishing a sibling issue first;
+* merging it leaves the repository in a coherent state.
 
 Don't split one outcome into separate research, backend, UI, test, documentation, and PR-administration issues just because those are different activities. Keep them working together.
 
@@ -105,10 +105,10 @@ Sometimes an issue that looked like one slice turns out to contain several indep
 
 It must:
 
-- create an implementation-ready issue for every slice whose shape is currently knowable;
-- record real dependencies between those issues;
-- close the source issue as the decomposition record;
-- stop without implementing any resulting slice.
+* create an implementation-ready issue for every slice whose shape is currently knowable;
+* record real dependencies between those issues;
+* close the source issue as the decomposition record;
+* stop without implementing any resulting slice.
 
 Don't create speculative issues whose requirements depend on work that hasn't happened yet.
 
@@ -124,11 +124,11 @@ Before asking me anything, the agent should inspect the proposal, repository rul
 
 Each question includes:
 
-- why the answer changes or blocks the slice;
-- two or three mutually exclusive options when appropriate;
-- a recommended option and its tradeoffs;
-- a suggested default answer;
-- space for comments.
+* why the answer changes or blocks the slice;
+* two or three mutually exclusive options when appropriate;
+* a recommended option and its tradeoffs;
+* a suggested default answer;
+* space for comments.
 
 The form ends with a general comments field for anything it missed.
 
@@ -148,19 +148,19 @@ Once I dispatch a slice, the agent owns routine technical decisions and handoffs
 
 It should not ask permission to:
 
-- implement an accepted approach;
-- run checks;
-- fix a verified defect;
-- prepare required review material;
-- merge after every required gate passes.
+* implement an accepted approach;
+* run checks;
+* fix a verified defect;
+* prepare required review material;
+* merge after every required gate passes.
 
 It should stop and ask when the available authority cannot safely determine:
 
-- the intended user or business outcome;
-- a material scope, UX, monetization, legal, privacy, security, or irreversible tradeoff;
-- credentials or a manual action only I can provide;
-- what to do after a failed safety or correctness gate;
-- whether a newly discovered opportunity belongs in the approved feature.
+* the intended user or business outcome;
+* a material scope, UX, monetization, legal, privacy, security, or irreversible tradeoff;
+* credentials or a manual action only I can provide;
+* what to do after a failed safety or correctness gate;
+* whether a newly discovered opportunity belongs in the approved feature.
 
 That is the distinction LDL cares about. Routine work stays autonomous. Founder judgment stays with the founder.
 
@@ -170,24 +170,24 @@ Claude Code chat is a control surface. It is not the permanent record.
 
 A normal session should need only:
 
-- a short kickoff acknowledgement;
-- a question if real founder judgment or manual action is required;
-- a concise completion or blocked handoff.
+* a short kickoff acknowledgement;
+* a question if real founder judgment or manual action is required;
+* a concise completion or blocked handoff.
 
 Evidence, decisions, status, and future work belong in the issue, PR, or repository docs. There is no reason to narrate the same state in chat several times. Again, there is no reason to narrate the same state in chat several times.
 
 ## Design rules
 
-- One execution issue equals one subagent-sized vertical slice.
-- A slice leaves the product and repository in a valid state.
-- Research, implementation, tests, documentation, and review are activities inside a slice when they serve the same outcome.
-- Decomposition and execution are separate sessions.
-- Create every currently foreseeable slice, but don't invent a whole project hierarchy before the evidence exists.
-- Sessions are disposable.
-- Durable state is a compact snapshot, not a transcript.
-- Verification evidence advances the loop. Status prose does not.
-- Routine decisions become autonomous after dispatch.
-- The target repository's safety, review, merge, and release rules remain authoritative.
+* One execution issue equals one subagent-sized vertical slice.
+* A slice leaves the product and repository in a valid state.
+* Research, implementation, tests, documentation, and review are activities inside a slice when they serve the same outcome.
+* Decomposition and execution are separate sessions.
+* Create every currently foreseeable slice, but don't invent a whole project hierarchy before the evidence exists.
+* Sessions are disposable.
+* Durable state is a compact snapshot, not a transcript.
+* Verification evidence advances the loop. Status prose does not.
+* Routine decisions become autonomous after dispatch.
+* The target repository's safety, review, merge, and release rules remain authoritative.
 
 ## Using LDL in another repository
 
