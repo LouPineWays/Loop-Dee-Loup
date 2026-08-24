@@ -7,11 +7,15 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { MANAGED_ITEMS, run as ldlInit } from "../ldl-init/index.mjs";
 import { parseArgs, planUpdate, run } from "./index.mjs";
+
+const SELF_PATH = fileURLToPath(import.meta.url).replace(/\.test\.mjs$/, ".mjs");
 
 function tempDir(t) {
   const dir = mkdtempSync(join(tmpdir(), "ldl-update-test-"));
@@ -296,6 +300,127 @@ test("planUpdate: classifies unmodified/newly-added/locally-modified/deleted des
   assert.equal(toSkip.length, 0);
   assert.equal(conflicts.length, 0);
   assert.equal(unchangedFiles.length, 0);
+});
+
+test("CLI: invoking tools/ldl-update/index.mjs against an uninitialized --dest fails instead of silently running tools/ldl-init as an import side effect", async (t) => {
+  // Regression test for a Stage 1 P0 finding: tools/ldl-init/index.mjs used to run its own
+  // main() (and process.exit()) whenever *any* script's argv[1] ended in "index.mjs",
+  // including tools/ldl-update's own CLI invocation, silently bootstrapping --dest instead
+  // of updating it and exiting before tools/ldl-update's own logic ever ran.
+  const dest = tempDir(t);
+
+  let stdout = "";
+  let exitCode = 0;
+  try {
+    stdout = execFileSync("node", [SELF_PATH, "--dest", dest], { encoding: "utf8" });
+  } catch (err) {
+    exitCode = err.status;
+    stdout = err.stdout || "";
+  }
+
+  assert.equal(exitCode, 1, "must fail, not silently bootstrap");
+  assert.equal(existsSync(join(dest, ".ldl", "manifest.json")), false, "must not have installed anything");
+  assert.equal(existsSync(join(dest, "AGENTS.md")), false, "must not have installed anything");
+});
+
+test("run: refuses the whole update, as a conflict, when a previously managed file was replaced by a symlink", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, rootV1, "rev-1");
+
+  const conflictPath = join(dest, ".claude", "skills", "sift", "SKILL.md");
+  const escapeTarget = tempDir(t);
+  rmSync(conflictPath);
+  try {
+    symlinkSync(escapeTarget, conflictPath, "junction");
+  } catch (err) {
+    t.skip(`symlink creation not permitted in this environment: ${err.message}`);
+    return;
+  }
+  const beforeManifest = readManifest(dest);
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const result = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /\.claude\/skills\/sift\/SKILL\.md/);
+  assert.match(result.message, /previously LDL-managed/);
+  // Nothing written anywhere, including unrelated managed files and the manifest.
+  assert.deepEqual(readManifest(dest), beforeManifest);
+  assert.equal(
+    readFileSync(join(dest, ".claude/skills/sift/extra.md"), "utf8"),
+    "fixture content (rev-1): .claude/skills/sift/extra.md\n",
+  );
+});
+
+test("run: refuses to discard a locally edited .ldl/AGENTS.template.md when it would otherwise be superseded", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "AGENTS.md"), "MY PROJECT'S OWN AGENTS.md\n");
+  await bootstrap(dest, rootV1, "rev-1");
+  assert.ok(existsSync(join(dest, ".ldl", "AGENTS.template.md")));
+
+  // Consumer edits the parked template while reviewing it, then later removes their own
+  // AGENTS.md so LDL should start managing AGENTS.md directly.
+  writeFileSync(join(dest, ".ldl", "AGENTS.template.md"), "hand-edited template, not from LDL\n");
+  rmSync(join(dest, "AGENTS.md"));
+  const beforeManifest = readManifest(dest);
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const result = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /AGENTS\.template\.md/);
+  assert.match(result.message, /locally modified/);
+  assert.equal(readFileSync(join(dest, ".ldl", "AGENTS.template.md"), "utf8"), "hand-edited template, not from LDL\n");
+  assert.equal(existsSync(join(dest, "AGENTS.md")), false, "must not have installed AGENTS.md either, since the whole run refused");
+  assert.deepEqual(readManifest(dest), beforeManifest);
+});
+
+test("run: an untouched superseded template is removed and dropped from the manifest, not carried over as a stale record", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "AGENTS.md"), "MY PROJECT'S OWN AGENTS.md\n");
+  await bootstrap(dest, rootV1, "rev-1");
+  rmSync(join(dest, "AGENTS.md"));
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const result = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(existsSync(join(dest, ".ldl", "AGENTS.template.md")), false);
+  const manifest = readManifest(dest);
+  assert.ok(manifest.files.some((f) => f.dest === "AGENTS.md"));
+  assert.ok(!manifest.files.some((f) => f.dest === ".ldl/AGENTS.template.md"), "must not carry over a record for a file that was just deleted");
+});
+
+test("run: a newly colliding unmanaged destination is recorded under skipped even when no managed file content changed", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, rootV1, "rev-1");
+
+  // Wipe one path's manifest record (as if a newer MANAGED_ITEMS entry appears) while a
+  // real, unrelated file already occupies the destination, and keep everything else at
+  // byte-identical rev-1 content so no managed file otherwise needs writing.
+  const manifestPath = join(dest, ".ldl", "manifest.json");
+  const manifest = readManifest(dest);
+  manifest.files = manifest.files.filter((f) => f.dest !== "docs/decision-forms.md");
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+  writeFileSync(join(dest, "docs", "decision-forms.md"), "consumer's own unrelated content\n");
+  const beforeMtime = statSync(manifestPath).mtimeMs;
+
+  const result = await run({ dest, root: rootV1 }, { resolveRevisionImpl: () => "rev-1" });
+
+  assert.equal(result.exitCode, 0);
+  const parsed = JSON.parse(result.message);
+  assert.equal(parsed.noop, undefined, "must not report itself as a no-op — the skip set changed");
+  const afterManifest = readManifest(dest);
+  assert.ok(afterManifest.skipped.some((s) => s.dest === "docs/decision-forms.md"));
+  assert.notEqual(statSync(manifestPath).mtimeMs, beforeMtime);
+
+  // A second run with nothing new to report really is a no-op now.
+  const second = await run({ dest, root: rootV1 }, { resolveRevisionImpl: () => "rev-1" });
+  assert.equal(JSON.parse(second.message).noop, true);
 });
 
 test("parseArgs: reads --dest and --root flags", () => {

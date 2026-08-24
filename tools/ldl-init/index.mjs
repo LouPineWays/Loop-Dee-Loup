@@ -35,7 +35,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const LDL_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -409,7 +409,11 @@ async function main() {
   process.exit(result.exitCode);
 }
 
-// Only run as a CLI when invoked directly, not when the test file imports these functions.
-if (process.argv[1] && process.argv[1].endsWith("index.mjs")) {
+// Only run as a CLI when this exact file is the process entrypoint, not merely when some
+// other script's argv[1] happens to end in "index.mjs" — tools/ldl-update/index.mjs is
+// itself invoked as `node .../index.mjs`, so a suffix check here would run this module's
+// own main() (installing/overwriting managed files, then calling process.exit()) as a side
+// effect of tools/ldl-update simply importing this module's helpers.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main();
 }
