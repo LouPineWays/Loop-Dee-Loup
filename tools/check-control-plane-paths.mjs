@@ -93,23 +93,23 @@ for (const { label, ok } of pathChecks) {
   if (!ok()) failures.push(`control-plane path missing or empty: ${label}`);
 }
 
-// Regression guard for issue #93: a glob like "/*.md" (a leading slash GitHub Actions path
-// filters do not support) silently never matches, so the CI trigger can list a root-level
-// control-plane file's family without that file ever actually firing the workflow. Root files
-// have no safe glob shorthand here, so each one must appear as its own literal path entry.
-const ROOT_MD_LITERALS = ["AGENTS.md", "CLAUDE.md", "README.md"];
-
+// Regression guard for issue #93: a leading-slash glob like "/*.md" silently never matches
+// (GitHub Actions path filters don't support a leading "/"), so the CI trigger can carry a
+// root-level control-plane pattern without it ever actually firing the workflow. The safe
+// root-only pattern is "*.md" with no leading slash — "*" doesn't cross "/", so it can't
+// accidentally reach into docs/ or elsewhere. Root files have no per-file literal here on
+// purpose: docs/bounded-review-cycle.md classifies control-plane root-level *.md as an open
+// pattern ("currently AGENTS.md, CLAUDE.md, README.md"), not a closed list, so a future root
+// file must trigger this workflow without a matching edit here too.
 if (!existsSync(WORKFLOW_PATH)) {
   failures.push("missing control-plane-paths workflow: .github/workflows/control-plane-paths.yml");
 } else {
   const workflowText = readFileSync(WORKFLOW_PATH, "utf8");
-  for (const literal of ROOT_MD_LITERALS) {
-    if (!workflowText.includes(`"${literal}"`)) {
-      failures.push(
-        `.github/workflows/control-plane-paths.yml pull_request.paths no longer lists root file "${literal}" ` +
-          `as its own literal entry (a glob does not reliably trigger on root-level files)`,
-      );
-    }
+  if (!workflowText.includes(`"*.md"`)) {
+    failures.push(
+      '.github/workflows/control-plane-paths.yml pull_request.paths no longer lists the root-level ' +
+        '"*.md" pattern (a leading-slash variant like "/*.md" silently never matches anything)',
+    );
   }
 }
 
