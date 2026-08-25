@@ -97,6 +97,19 @@ test("subagent_type_counts survives an agent type named like a built-in object p
   assert.equal(Object.keys(record.derived.subagent_type_counts).sort().join(","), "__proto__,constructor");
 });
 
+test("subagent_type_counts treats an empty-string agent_type as unknown, not a silent separate bucket", () => {
+  // Regression test for issue #103: a genuine SubagentStop hook payload was observed with
+  // agent_type: "" (empty string, not null/undefined). `??` only replaces null/undefined,
+  // so an unguarded `s.agent_type ?? "unknown"` would fragment counts into a silent "" key.
+  const record = reduceEvents([
+    { kind: "hook", event: "SubagentStart", session_id: "s-1", agent_type: "", ts: "2026-08-24T00:00:00.000Z" },
+    { kind: "hook", event: "SubagentStart", session_id: "s-1", agent_type: "  ", ts: "2026-08-24T00:01:00.000Z" },
+    { kind: "hook", event: "SubagentStart", session_id: "s-1", agent_type: "Explore", ts: "2026-08-24T00:02:00.000Z" },
+  ]);
+  assert.deepEqual(record.derived.subagent_type_counts, { unknown: 2, Explore: 1 });
+  assert.equal(Object.prototype.hasOwnProperty.call(record.derived.subagent_type_counts, ""), false);
+});
+
 test("empty event log: every measured fact is null and nothing is fabricated", () => {
   const record = reduceEvents([]);
   assert.equal(record.measured.identity.session_id, null);

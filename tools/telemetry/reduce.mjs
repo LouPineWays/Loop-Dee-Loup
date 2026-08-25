@@ -111,7 +111,7 @@ export function reduceEvents(events) {
       sessionStart?.ts && sessionEnd?.ts ? Date.parse(sessionEnd.ts) - Date.parse(sessionStart.ts) : null,
     compaction_count: preCompactions.length,
     subagent_invocation_count: subagentStarts.length,
-    subagent_type_counts: countBy(subagentStarts, (s) => s.agent_type ?? "unknown"),
+    subagent_type_counts: countBy(subagentStarts, (s) => (s.agent_type && s.agent_type.trim()) || "unknown"),
     peak_context_used_percentage: usedPctSamples.length > 0 ? Math.max(...usedPctSamples) : null,
     cost_usd_peak: costUsdSamples.length > 0 ? Math.max(...costUsdSamples) : null,
   };
