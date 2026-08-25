@@ -75,7 +75,9 @@ const LDL_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 // recorded — a run that finds nothing new to skip is still a true no-op. Compares each entry
 // as a [dest, reason] pair via JSON.stringify rather than joining into one delimited string,
 // so no delimiter choice can ever be ambiguous against arbitrary dest/reason text.
-function skipListsEqual(a, b) {
+// Exported so tools/mcp-server/status.mjs can replicate this exact no-op determination in a
+// read-only status check, instead of re-implementing its own skip-set comparison.
+export function skipListsEqual(a, b) {
   const normalize = (list) =>
     JSON.stringify(
       list
