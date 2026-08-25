@@ -21,8 +21,8 @@ Within Loop-Dee-Loup's own repository, a PR that touches a control-plane path �
 5. Verify every finding. Reject false positives with a recorded reason and deduplicate valid findings by root cause.
 6. Batch all valid findings into one consolidated correction pass and rerun required checks.
 7. Do not request a second inline review on that PR.
-8. Merge only if every valid finding is fixed, required checks and CI pass, the reviewed scope, head, and target are reverified, and no Critical defect, founder decision, security/privacy issue, data-loss risk, migration uncertainty, or other blocker remains.
-9. When the PR body references this PR's work issue, do not use a GitHub auto-close keyword (`Closes #N`, `Fixes #N`, `Resolves #N`, or a case variant) for a review-worthy PR. Reference the work issue non-auto-closing instead (e.g. `Addresses #N` or `Implements #N`). GitHub auto-closes an issue referenced with a closing keyword the moment the PR merges, ahead of the Stage 2 post-merge audit — this bypasses Verdict handling below, under which the work issue is only supposed to close as part of a CLEAN Stage 2 disposition. GitHub does not offer a repository-level setting to disable auto-close-on-merge keywords, so this is a PR-body authorship correction, not a platform configuration one.
+8. Before merging, check that neither the PR body nor any commit message that will land on the target default branch — including the squash-merge commit message GitHub proposes or that the executor types at merge time — uses a GitHub auto-close keyword (`Closes #N`, `Fixes #N`, `Resolves #N`, or a case variant) for this PR's work issue, for a review-worthy PR. Reference the work issue non-auto-closing instead (e.g. `Addresses #N` or `Implements #N`) in the PR body, and edit the squash-merge commit message at merge time if it would otherwise carry a closing keyword — GitHub honors closing keywords found in either location, not the PR body alone. GitHub auto-closes an issue the moment a commit or PR body carrying a closing keyword reaches the default branch, ahead of the Stage 2 post-merge audit — this bypasses Verdict handling below, under which the work issue is only supposed to close as part of a CLEAN Stage 2 disposition. GitHub does not offer a repository-level setting to disable auto-close-on-merge keywords, so this is a PR-body-and-commit-message authorship correction, not a platform configuration one.
+9. Merge only if every valid finding is fixed, required checks and CI pass, the reviewed scope, head, and target are reverified, step 8's closing-keyword check has been performed, and no Critical defect, founder decision, security/privacy issue, data-loss risk, migration uncertainty, or other blocker remains.
 
 Multiple comments produced by one invocation are one round. Fix commits are not another round. A second invocation is another round and is prohibited by default.
 
@@ -45,7 +45,7 @@ A report that nothing material remains is a successful audit. State anything the
 
 ## Verdict handling
 
-CLEAN closes the review cycle. Close the audit issue and implemented work issue where target-repository policy requires it, record the exact merge and audit evidence in the parent snapshot, and stop at this natural fresh-session boundary. The work issue closes here, on a CLEAN Stage 2 verdict — not automatically at merge; see Stage 1 step 9 on avoiding PR-body auto-close keywords that would preempt this.
+CLEAN closes the review cycle. Close the audit issue and implemented work issue where target-repository policy requires it, record the exact merge and audit evidence in the parent snapshot, and stop at this natural fresh-session boundary. The work issue closes here, on a CLEAN Stage 2 verdict — not automatically at merge; see Stage 1 step 8 on avoiding PR-body and commit-message auto-close keywords that would preempt this.
 
 NOT CLEAN starts one consolidated correction outcome:
 
