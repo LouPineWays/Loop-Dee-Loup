@@ -35,17 +35,20 @@ synchronizing:
 
 ## Requirements
 
-- Node.js 18+ (the same runtime `tools/ldl-init`/`tools/ldl-update` already require).
+- Node.js 20+. (`tools/ldl-init`/`tools/ldl-update` themselves only need Node 18, but this
+  server's committed lockfile resolves `@modelcontextprotocol/sdk`'s optional
+  `@hono/node-server` dependency to a version whose declared `engines` require Node 20; on
+  Node 18 with npm's engine-strict behavior, `npm install` fails.)
 - A local clone of Loop-Dee-Loup, checked out at whatever revision you want consumer
   repositories compared against and synchronized to.
 
 ## Setup
 
-From a Loop-Dee-Loup clone:
+From a Loop-Dee-Loup clone's root — every command below is root-relative, so there's no `cd`
+to remember to undo before the next one:
 
 ```bash
-cd tools/mcp-server
-npm install
+npm install --prefix tools/mcp-server
 ```
 
 Run it directly to confirm it starts (it will sit waiting for an MCP client on stdio; exit
@@ -158,7 +161,7 @@ call, instead of loading each repository's full manifest or documentation into c
 ## Tests
 
 ```bash
-cd tools/mcp-server && npm install   # once
+npm install --prefix tools/mcp-server   # once
 node --test tools/mcp-server/*.test.mjs
 ```
 

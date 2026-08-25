@@ -9,7 +9,14 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { buildOps, defaultResolveRevision, deriveConsumerAgents, isValidManifest, sha256 } from "../ldl-init/index.mjs";
+import {
+  buildOps,
+  defaultResolveRevision,
+  deriveConsumerAgents,
+  findUnsafeLdlDirReason,
+  isValidManifest,
+  sha256,
+} from "../ldl-init/index.mjs";
 import { planUpdate, skipListsEqual } from "../ldl-update/index.mjs";
 
 // Mirrors the {toInstall, supersedeTemplate, skipSetChanged} => no-op decision inside
@@ -55,6 +62,18 @@ export async function computeStatus({ dest, root }, deps = {}) {
   }
 
   const sourceRevision = resolveRevisionImpl(root);
+
+  // Same guard tools/ldl-init and tools/ldl-update apply before ever reading provenance: a
+  // symlinked .ldl (or manifest.json), or a non-directory sitting at .ldl, could otherwise
+  // read through to somewhere outside dest. Refusing here keeps status's "safe to
+  // synchronize" claim consistent with what ldl_update would actually do against the same
+  // repository, instead of reporting current/outdated over an unsafe namespace ldl_update
+  // would refuse outright.
+  const unsafeLdlReason = findUnsafeLdlDirReason(dest);
+  if (unsafeLdlReason) {
+    return { dest, status: "error", error: `Refusing to read: ${unsafeLdlReason}` };
+  }
+
   const manifestPath = join(dest, ".ldl", "manifest.json");
 
   if (!existsSync(manifestPath)) {
@@ -110,7 +129,18 @@ export async function computeStatus({ dest, root }, deps = {}) {
   const agentsDestRel = !destAgentsExists || agentsAlreadyManaged ? "AGENTS.md" : ".ldl/AGENTS.template.md";
   ops.push({ destRel: agentsDestRel, content: Buffer.from(derivedAgents, "utf8") });
 
-  const { conflicts, isNoop } = planStatusUpdate({ ops, destRoot: dest, existingManifest: parsedManifest, agentsDestRel });
+  // Wrapped because planUpdate() reads on-disk content for every managed path to compare
+  // hashes (tools/ldl-update/index.mjs's planUpdate), and a managed path unexpectedly
+  // replaced locally by e.g. a directory throws (EISDIR) rather than returning a hash
+  // mismatch. computeStatusAll's Promise.all must never reject on one repository's account —
+  // callers depend on the documented per-repository independence guarantee.
+  let conflicts;
+  let isNoop;
+  try {
+    ({ conflicts, isNoop } = planStatusUpdate({ ops, destRoot: dest, existingManifest: parsedManifest, agentsDestRel }));
+  } catch (err) {
+    return { dest, status: "error", error: `failed comparing on-disk state against source root ${root}: ${err.message}` };
+  }
 
   const status = conflicts.length > 0 ? "conflict" : isNoop ? "current" : "outdated";
   const next = status === "conflict" ? "manual_resolution" : status === "outdated" ? "ldl_update" : "none";

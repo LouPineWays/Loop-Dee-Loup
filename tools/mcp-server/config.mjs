@@ -4,13 +4,16 @@
 
 import { delimiter, isAbsolute, resolve } from "node:path";
 
-// Resolves the set of consumer repositories a status call should check: explicit `repos`
-// wins; otherwise falls back to the LDL_CONSUMER_REPOS environment variable, a
-// path.delimiter-separated list (";" on Windows, ":" elsewhere — the same convention the
-// PATH environment variable already uses on each platform), read fresh on every call so a
-// long-lived server process picks up an updated env var without a restart.
+// Resolves the set of consumer repositories a status call should check: an explicit `repos`
+// array wins, including an explicitly empty one (a caller that deliberately narrowed its
+// scope to nothing should see the normal no-repositories error, not a silent expansion back
+// to every environment-configured repository); the environment fallback applies only when
+// `repos` is omitted entirely. LDL_CONSUMER_REPOS is a path.delimiter-separated list (";" on
+// Windows, ":" elsewhere — the same convention the PATH environment variable already uses on
+// each platform), read fresh on every call so a long-lived server process picks up an
+// updated env var without a restart.
 export function resolveRepos(explicitRepos) {
-  if (Array.isArray(explicitRepos) && explicitRepos.length > 0) {
+  if (Array.isArray(explicitRepos)) {
     return explicitRepos;
   }
   const envVal = process.env.LDL_CONSUMER_REPOS;

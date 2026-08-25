@@ -7,7 +7,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { MANAGED_ITEMS, run as ldlInit } from "../ldl-init/index.mjs";
@@ -140,6 +140,63 @@ test("computeStatus: locally modified managed file against a newer revision is a
   assert.equal(result.status, "conflict");
   assert.equal(result.next, "manual_resolution");
   assert.ok(result.conflicts.some((c) => c.dest === "docs/operating-model.md"));
+});
+
+test("computeStatus: a .ldl replaced by a symlink is refused, not reported current/outdated", async (t) => {
+  // Regression guard for a Stage 1 review finding on PR #110: an initialized repo whose
+  // .ldl directory was replaced by a symlink must not be reported as a safe status
+  // (current/outdated) when ldl_update would refuse the same repository outright.
+  const root = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, root, "rev-1");
+  rmSync(join(dest, ".ldl"), { recursive: true, force: true });
+  const escapeTarget = tempDir(t);
+  try {
+    symlinkSync(escapeTarget, join(dest, ".ldl"), "junction");
+  } catch (err) {
+    t.skip(`symlink creation not permitted in this environment: ${err.message}`);
+    return;
+  }
+
+  const result = await computeStatus({ dest, root }, { resolveRevisionImpl: () => "rev-1" });
+  assert.equal(result.status, "error");
+  assert.match(result.error, /symlink/);
+});
+
+test("computeStatus: a managed file replaced by a directory is a per-repo error, not an unhandled throw", async (t) => {
+  // Regression guard for a Stage 1 review finding on PR #110: readFileSync throwing EISDIR
+  // deep inside planUpdate() must not escape computeStatus as an uncaught rejection.
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, rootV1, "rev-1");
+
+  rmSync(join(dest, "docs", "operating-model.md"), { force: true });
+  mkdirSync(join(dest, "docs", "operating-model.md"), { recursive: true });
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const result = await computeStatus({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+  assert.equal(result.status, "error");
+  assert.ok(result.error);
+});
+
+test("computeStatusAll: one repository throwing does not discard other repositories' healthy results", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+
+  const broken = tempDir(t);
+  await bootstrap(broken, rootV1, "rev-1");
+  rmSync(join(broken, "docs", "operating-model.md"), { force: true });
+  mkdirSync(join(broken, "docs", "operating-model.md"), { recursive: true });
+
+  const healthy = tempDir(t);
+  await bootstrap(healthy, rootV1, "rev-1");
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const results = await computeStatusAll(
+    { repos: [broken, healthy], root: rootV2 },
+    { resolveRevisionImpl: () => "rev-2" },
+  );
+  assert.equal(results[0].status, "error");
+  assert.equal(results[1].status, "outdated");
 });
 
 test("computeStatusAll: resolves each repository independently in the given order", async (t) => {
