@@ -149,6 +149,34 @@ test("computeStatus: reports pendingManualIntegration freshly computed from the 
   assert.equal(result.pendingManualIntegration[0].dest, "CLAUDE.md");
 });
 
+test("computeStatus: a superseded bridge template replaced by a symlink is a conflict, not current/outdated", async (t) => {
+  // Stage 2 audit finding (P1) on PR #131 — mirrors the same fix in tools/ldl-update/index.mjs's
+  // own regression test: a template path replaced by a symlink whose target content coincidentally
+  // hash-matches the recorded template hash must not be silently reported as safely superseded.
+  const root = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md\n");
+  await bootstrap(dest, root, "rev-1");
+  const templatePath = join(dest, ".ldl", "CLAUDE.template.md");
+  const templateContent = readFileSync(templatePath);
+
+  rmSync(join(dest, "CLAUDE.md"));
+  const decoyPath = join(dest, "decoy-template-target.md");
+  writeFileSync(decoyPath, templateContent);
+  rmSync(templatePath);
+  try {
+    symlinkSync(decoyPath, templatePath, "file");
+  } catch (err) {
+    t.skip(`symlink creation not permitted in this environment: ${err.message}`);
+    return;
+  }
+
+  const result = await computeStatus({ dest, root }, { resolveRevisionImpl: () => "rev-1" });
+  assert.equal(result.status, "conflict");
+  assert.equal(result.next, "manual_resolution");
+  assert.ok(result.conflicts.some((c) => c.dest === ".ldl/CLAUDE.template.md"));
+});
+
 test("computeStatus: repo bootstrapped from an older revision is outdated", async (t) => {
   const rootV1 = makeFixtureRoot(t, "rev-1");
   const dest = tempDir(t);

@@ -260,14 +260,27 @@ export async function run(args, deps = {}) {
   // the consumer had its own same-named file at the time) and this run is now installing
   // straight to the bridge's own destRel instead (the consumer's own file is gone since), the
   // old template is superseded. It isn't part of `ops` (its own destination is now the
-  // bridge's root path), so it needs its own hash check here: an untouched template is safe
-  // to remove, but a locally edited one is a conflict just like any other managed file —
-  // deleting it unconditionally would silently discard a local edit the conflict-safe
-  // guarantee exists to protect.
+  // bridge's root path), so it needs its own checks here, mirroring exactly what planUpdate()
+  // does for every other previously-managed destination: a path replaced by a symlink or a
+  // blocking non-directory is a conflict regardless of what content it resolves to (Stage 2
+  // audit finding on PR #131 — reading a symlinked template's target via existsSync/readFileSync
+  // without this check first could hash-match a tampered path and misclassify a locally
+  // replaced managed path as safely superseded); otherwise an untouched template is safe to
+  // remove, but a locally edited one is a conflict just like any other managed file — deleting
+  // it unconditionally would silently discard a local edit the conflict-safe guarantee exists
+  // to protect.
   const supersededTemplates = [];
   for (const { bridge, op } of bridgePlans) {
     const previousTemplateEntry = parsedManifest.files.find((f) => f.dest === bridge.templateDestRel);
     if (op.destRel !== bridge.destRel || !previousTemplateEntry) continue;
+    const unsafeTemplateReason = findUnsafeDestReason(destRoot, bridge.templateDestRel);
+    if (unsafeTemplateReason) {
+      conflicts.push({
+        dest: bridge.templateDestRel,
+        reason: `${unsafeTemplateReason} — this path was previously LDL-managed and is not safe to update`,
+      });
+      continue;
+    }
     const staleTemplatePath = join(destRoot, ...bridge.templateDestRel.split("/"));
     if (!existsSync(staleTemplatePath)) {
       supersededTemplates.push(bridge.templateDestRel); // already gone; just drop the stale manifest record

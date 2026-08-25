@@ -13,6 +13,7 @@ import {
   buildOps,
   defaultResolveRevision,
   derivePendingManualIntegration,
+  findUnsafeDestReason,
   findUnsafeLdlDirReason,
   isValidManifest,
   planBridges,
@@ -32,10 +33,23 @@ function planStatusUpdate({ ops, destRoot, existingManifest, bridgePlans, resolv
     existingManifest: withResolvedBridgesManaged(existingManifest, resolvedManifestPatch),
   });
 
+  // Mirrors tools/ldl-update's own supersession check exactly, including the symlink/blocking-
+  // path guard (Stage 2 audit finding on PR #131): without it, a template path replaced by a
+  // symlink whose target content happens to hash-match the recorded template hash would be
+  // misclassified as safely superseded instead of reported as a conflict, so status would claim
+  // "current"/"outdated" over a repository ldl_update would actually refuse.
   const supersededTemplates = [];
   for (const { bridge, op } of bridgePlans) {
     const previousTemplateEntry = existingManifest.files.find((f) => f.dest === bridge.templateDestRel);
     if (op.destRel !== bridge.destRel || !previousTemplateEntry) continue;
+    const unsafeTemplateReason = findUnsafeDestReason(destRoot, bridge.templateDestRel);
+    if (unsafeTemplateReason) {
+      conflicts.push({
+        dest: bridge.templateDestRel,
+        reason: `${unsafeTemplateReason} — this path was previously LDL-managed and is not safe to update`,
+      });
+      continue;
+    }
     const staleTemplatePath = join(destRoot, ...bridge.templateDestRel.split("/"));
     if (!existsSync(staleTemplatePath)) {
       supersededTemplates.push(bridge.templateDestRel);

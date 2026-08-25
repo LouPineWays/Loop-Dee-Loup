@@ -163,6 +163,24 @@ test("ldl_update reports a superseded AGENTS.template.md in changedPaths, throug
   assert.equal(existsSync(join(dest, ".ldl", "AGENTS.template.md")), false);
 });
 
+test("ldl_update reports manualIntegrationNeeded, matching pendingManualIntegration.length, through the protocol", async (t) => {
+  // Stage 2 audit finding (P2) on PR #131: docs/consumer-contract.md promises this count on
+  // every CLI/MCP run's result, but the ldl_update MCP handler previously dropped it entirely
+  // when building its bespoke response object.
+  const client = await connectedClient(t);
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md\n");
+  await ldlInit({ dest, root: rootV1 });
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const updateResult = await client.callTool({ name: "ldl_update", arguments: { dest, root: rootV2 } });
+  assert.equal(updateResult.isError, false);
+  const payload = JSON.parse(updateResult.content[0].text);
+  assert.equal(payload.manualIntegrationNeeded, 1);
+  assert.equal(payload.manualIntegrationNeeded, payload.pendingManualIntegration.length);
+});
+
 test("ldl_update returns the structured error shape even when the underlying run throws", async (t) => {
   // Regression guard for a Stage 1 review finding on PR #118: ldl-update's run() does not
   // itself catch every exception planUpdate() can raise (e.g. EISDIR for a managed path

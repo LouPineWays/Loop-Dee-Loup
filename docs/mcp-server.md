@@ -122,6 +122,7 @@ what changed:
   "skippedPaths": [],
   "conflicts": [],
   "pendingManualIntegration": [],
+  "manualIntegrationNeeded": 0,
   "noop": false
 }
 ```
