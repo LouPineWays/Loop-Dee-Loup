@@ -26,6 +26,28 @@ Two Claude Code entry points, wired in `.claude/settings.json`:
 Both entry points share `collect.mjs`, which owns the on-disk shape and the privacy rule below,
 and never throw — a telemetry failure must never interrupt or slow down real session use.
 
+## Observed gap: statusLine has not been seen to fire
+
+PR #99 shipped `statusLine` wiring without a live confirmation that Claude Code actually
+invokes it (no interactive `claude` CLI was available in that session to test against the
+real `.claude/settings.json`). Issue #107's dogfood run of `/spend` checked every session log
+present in this repository since — 18 sessions, spanning two calendar days and including
+sessions with multiple subagent dispatches — and found `"kind":"statusline_sample"` in none
+of them, i.e. every record's `measured.statusline_sample_count` is `0`. Hook-based structural
+events (`SessionStart`, `SessionEnd`, `SubagentStart`, `SubagentStop`) fire correctly in the
+same sessions, and `statusline.mjs` itself appends an event correctly when given a realistic
+payload directly on stdin — so the gap is not a script bug, it is the `statusLine` command
+never being invoked in the execution environment(s) these sessions ran in (plausibly: a
+headless/SDK-embedded session has no terminal status line to render, so the harness has no
+reason to invoke the command). This has not been checked against an interactive terminal
+`claude` CLI session in this repository, so it is not yet known whether the gap is universal
+or specific to non-interactive/SDK-embedded sessions.
+
+Practical effect: `cost_usd_total`, `context_window_size`, `last_context_used_percentage`, and
+`last_token_usage` should be assumed unavailable by default — see the `/spend` skill's evidence
+order, which checks `statusline_sample_count` before treating a session's cost/context fields as
+measured rather than falling straight back to `/usage`/`/context`.
+
 ## What it deliberately cannot measure
 
 Claude Code hooks and the statusLine payload do not expose per-turn or per-subagent token/cost
