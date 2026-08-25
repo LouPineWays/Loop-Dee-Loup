@@ -21,6 +21,7 @@ on:
       - "tools/telemetry/**"
       - "tools/ldl-init/**"
       - "tools/ldl-update/**"
+      - "tools/mcp-server/**"
 
 concurrency:
   group: control-plane-paths-${{ github.ref }}
@@ -50,3 +51,10 @@ jobs:
 
       - name: LDL-update tests
         run: node --test tools/ldl-update/index.test.mjs
+
+      - name: Install mcp-server dependencies
+        run: npm ci
+        working-directory: tools/mcp-server
+
+      - name: MCP server tests
+        run: node --test tools/mcp-server/*.test.mjs

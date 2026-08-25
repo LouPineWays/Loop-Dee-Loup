@@ -1,0 +1,19 @@
+{
+  "name": "ldl-mcp-server",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local-first MCP server exposing LDL consumer-repository status, init, and update as bounded tools over stdio. See ../../docs/mcp-server.md.",
+  "type": "module",
+  "main": "server.mjs",
+  "bin": {
+    "ldl-mcp-server": "server.mjs"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test *.test.mjs"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  }
+}
