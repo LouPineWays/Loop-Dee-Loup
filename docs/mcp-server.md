@@ -97,10 +97,30 @@ pre-existing unmanaged path.
 
 ### `ldl_update`
 
-Conflict-safe update of an already-initialized `dest` to `root`'s current revision. Refuses
-the entire update (writes nothing) if any LDL-managed file was locally modified or deleted
-since install. A no-op when already current. Identical behavior to
-`node tools/ldl-update/index.mjs --dest <dest>` directly.
+Conflict-safe update of an already-initialized `dest` to `root`'s current revision. Applies
+the exact same synchronization `node tools/ldl-update/index.mjs --dest <dest>` does — writes
+nothing if any LDL-managed file was locally modified or deleted since install, refusing the
+entire update instead of guessing — and additionally reports compact structured evidence of
+what changed:
+
+```json
+{
+  "status": "updated",
+  "previousRevision": "fcd53c3...",
+  "resultingRevision": "6cda77c...",
+  "changedPaths": ["docs/operating-model.md", "tools/local-worker/adapter.mjs"],
+  "skippedPaths": [],
+  "conflicts": [],
+  "noop": false
+}
+```
+
+`status` is `"updated"`, `"current"` (a no-op — already up to date, nothing written), or
+`"error"` (refused; `conflicts` lists exactly which managed paths could not be safely
+reconciled, matching the CLI's own refusal). `changedPaths`/`skippedPaths` reflect a read-only
+plan captured immediately before the real update runs; if that pre-check itself fails for any
+reason, the update still proceeds using `tools/ldl-update`'s own logic — only the evidence
+degrades, never the safety guarantee.
 
 ## Connecting a consumer-repository agent session
 

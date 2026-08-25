@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { run as ldlInitRun } from "../ldl-init/index.mjs";
 import { run as ldlUpdateRun } from "../ldl-update/index.mjs";
-import { computeStatusAll } from "./status.mjs";
+import { computeStatusAll, computeUpdatePlan } from "./status.mjs";
 import { resolvePathArg, resolveRepos } from "./config.mjs";
 
 export const DEFAULT_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -76,7 +76,9 @@ const TOOLS = [
       "Conflict-safe update of an already-initialized consumer repository to this Loop-Dee-Loup " +
       "checkout's current revision. Refuses the entire update (fails closed, writes nothing) if any " +
       "LDL-managed file was locally modified or deleted since install. A no-op when the repository " +
-      "is already current. Identical to running tools/ldl-update/index.mjs directly.",
+      "is already current. Applies the exact same synchronization tools/ldl-update/index.mjs's CLI " +
+      "uses, and additionally reports compact structured evidence of what changed: previous " +
+      "revision, resulting revision, the changed and skipped path lists, and any conflicts.",
     inputSchema: {
       type: "object",
       properties: {
@@ -139,8 +141,59 @@ export function createServer({ root: rootOverride } = {}) {
 
       if (name === "ldl_update") {
         if (!args.dest) return errorResult("Missing required argument: dest");
-        const result = await ldlUpdateRun({ dest: resolvePathArg(args.dest), root });
-        return cliResult(result);
+        const dest = resolvePathArg(args.dest);
+
+        // Read-only "before" plan, captured immediately ahead of the real update so its
+        // toInstall/toSkip/conflicts reflect the same on-disk state run() is about to act on.
+        // Never lets a failure here block the real update — worst case, the tool result below
+        // just carries less evidence than usual, degrading gracefully rather than refusing an
+        // update the CLI itself would still perform.
+        let before;
+        try {
+          before = computeUpdatePlan({ dest, root });
+        } catch (err) {
+          before = { kind: "error", error: err.message };
+        }
+
+        // ldl-update's run() does not itself catch every exception its internal planUpdate()
+        // can raise (e.g. EISDIR when a managed file was replaced by a directory) — it can
+        // reject rather than resolve with a non-zero exitCode. Caught here, not left to the
+        // handler-wide catch below, so a thrown update failure still gets the same structured
+        // {status, error, conflicts} shape as every other update failure, not a bare {error}.
+        let result;
+        try {
+          result = await ldlUpdateRun({ dest, root });
+        } catch (err) {
+          const conflicts = before.kind === "plan" ? before.conflicts.map((c) => ({ dest: c.dest, reason: c.reason })) : [];
+          return textResult({ status: "error", error: err.message, conflicts }, true);
+        }
+
+        if (result.exitCode !== 0) {
+          const conflicts = before.kind === "plan" ? before.conflicts.map((c) => ({ dest: c.dest, reason: c.reason })) : [];
+          return textResult({ status: "error", error: result.message, conflicts }, true);
+        }
+
+        const payload = JSON.parse(result.message);
+        // A previously LDL-managed .ldl/AGENTS.template.md that this update superseded (see
+        // tools/ldl-update/index.mjs's own supersedeTemplate handling) is a real deletion, not
+        // covered by `toInstall` — include it explicitly so changedPaths reflects every path
+        // the update actually touched, not just the ones planUpdate() itself installs.
+        const changedPaths =
+          before.kind === "plan"
+            ? [...before.toInstall.map((op) => op.destRel), ...(before.supersedeTemplate ? [".ldl/AGENTS.template.md"] : [])]
+            : [];
+        return textResult(
+          {
+            status: payload.noop ? "current" : "updated",
+            previousRevision: before.kind === "plan" ? before.parsedManifest.ldlSourceRevision : null,
+            resultingRevision: payload.revision,
+            changedPaths,
+            skippedPaths: before.kind === "plan" ? before.toSkip.map((s) => ({ dest: s.dest, reason: s.reason })) : [],
+            conflicts: [],
+            noop: Boolean(payload.noop),
+          },
+          false,
+        );
       }
 
       return errorResult(`Unknown tool: ${name}`);

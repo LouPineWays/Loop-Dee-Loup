@@ -142,6 +142,37 @@ test("computeStatus: locally modified managed file against a newer revision is a
   assert.ok(result.conflicts.some((c) => c.dest === "docs/operating-model.md"));
 });
 
+test("computeStatus: a throw before planStatusUpdate is a per-repo error, not an unhandled rejection", async (t) => {
+  // Regression guard for a Stage 2 audit finding on PR #116: the Stage 1 fix only wrapped
+  // planStatusUpdate(); a throw earlier in loadPlan (here, a caller-injected
+  // resolveRevisionImpl that throws) must be caught too, and must not take a healthy sibling
+  // repository down with it in computeStatusAll's batch.
+  const root = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, root, "rev-1");
+  const throwingDeps = {
+    resolveRevisionImpl: () => {
+      throw new Error("injected revision-resolution failure");
+    },
+  };
+
+  const soloResult = await computeStatus({ dest, root }, throwingDeps);
+  assert.equal(soloResult.status, "error");
+  assert.match(soloResult.error, /injected revision-resolution failure/);
+
+  // Same throwing deps apply to every repository in the batch (computeStatusAll takes one
+  // shared deps object), so this doesn't prove one-bad-one-good isolation — the sibling
+  // "one repository throwing does not discard other repositories' healthy results" test
+  // below already covers that, via a throw inside planStatusUpdate. What this proves instead:
+  // computeStatusAll resolves with two per-repository error results rather than rejecting
+  // outright, confirming computeStatus() itself never lets this throw escape as a rejection.
+  const other = tempDir(t);
+  await bootstrap(other, root, "rev-1");
+  const batchResults = await computeStatusAll({ repos: [dest, other], root }, throwingDeps);
+  assert.equal(batchResults.length, 2);
+  assert.ok(batchResults.every((r) => r.status === "error"));
+});
+
 test("computeStatus: a .ldl replaced by a symlink is refused, not reported current/outdated", async (t) => {
   // Regression guard for a Stage 1 review finding on PR #110: an initialized repo whose
   // .ldl directory was replaced by a symlink must not be reported as a safe status
