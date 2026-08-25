@@ -47,18 +47,25 @@ function planStatusUpdate({ ops, destRoot, existingManifest, agentsDestRel }) {
   return { toInstall, toSkip, conflicts, unchangedFiles, isNoop };
 }
 
-// Given one consumer repository path, returns a compact structured status equivalent to
-// what tools/ldl-update would do if run against it right now, without writing anything.
-// `deps.resolveRevisionImpl` is injectable for deterministic tests, matching the pattern
-// tools/ldl-init and tools/ldl-update already use.
-export async function computeStatus({ dest, root }, deps = {}) {
+// Single loader shared by computeStatus() (compact summary) and computeUpdatePlan() (path-
+// level evidence for server.mjs's ldl_update tool) — exactly one place reads a manifest,
+// builds ops, and plans against them, per issue #110's "no second implementation" boundary.
+// Returns a discriminated result instead of throwing: `kind` is "error" (dest missing, unsafe
+// namespace, corrupt manifest, or any other failure), "not_initialized", or "plan" (the full
+// planStatusUpdate() output plus the parsed manifest and target revision). Deliberately does
+// not catch exceptions raised by its own steps (buildOps, readFileSync, planStatusUpdate,
+// etc.) — every caller is required to run this inside its own try/catch, which is what makes
+// the per-repository error isolation guarantee independent of which internal step happens to
+// throw, rather than a list of individually wrapped call sites that a future change could
+// silently fall outside of.
+function loadPlan({ dest, root }, deps = {}) {
   const { resolveRevisionImpl = defaultResolveRevision } = deps;
 
   if (!dest) {
-    return { dest: dest ?? null, status: "error", error: "missing required field: dest" };
+    return { kind: "error", dest: dest ?? null, error: "missing required field: dest" };
   }
   if (!existsSync(dest) || !statSync(dest).isDirectory()) {
-    return { dest, status: "error", error: `dest does not exist or is not a directory: ${dest}` };
+    return { kind: "error", dest, error: `dest does not exist or is not a directory: ${dest}` };
   }
 
   const sourceRevision = resolveRevisionImpl(root);
@@ -71,95 +78,123 @@ export async function computeStatus({ dest, root }, deps = {}) {
   // would refuse outright.
   const unsafeLdlReason = findUnsafeLdlDirReason(dest);
   if (unsafeLdlReason) {
-    return { dest, status: "error", error: `Refusing to read: ${unsafeLdlReason}` };
+    return { kind: "error", dest, error: `Refusing to read: ${unsafeLdlReason}` };
   }
 
   const manifestPath = join(dest, ".ldl", "manifest.json");
-
   if (!existsSync(manifestPath)) {
-    return {
-      dest,
-      status: "not_initialized",
-      installedRevision: null,
-      sourceRevision,
-      updateAvailable: null,
-      managedFileCount: 0,
-      skippedFileCount: 0,
-      conflicts: [],
-      next: "ldl_init",
-    };
+    return { kind: "not_initialized", dest, sourceRevision };
   }
 
   let parsedManifest;
   try {
     parsedManifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   } catch (err) {
-    return { dest, status: "error", error: `existing .ldl/manifest.json is not valid JSON: ${err.message}` };
+    return { kind: "error", dest, error: `existing .ldl/manifest.json is not valid JSON: ${err.message}` };
   }
   if (!isValidManifest(parsedManifest)) {
     return {
+      kind: "not_initialized",
       dest,
-      status: "not_initialized",
-      installedRevision: null,
       sourceRevision,
-      updateAvailable: null,
-      managedFileCount: 0,
-      skippedFileCount: 0,
-      conflicts: [],
-      next: "ldl_init",
       note: "existing .ldl/manifest.json is not in the expected shape — treated as uninitialized",
     };
   }
 
-  let ops;
-  try {
-    ops = buildOps(root);
-  } catch (err) {
-    return { dest, status: "error", error: `failed reading managed items from root ${root}: ${err.message}` };
-  }
-
-  let derivedAgents;
-  try {
-    derivedAgents = deriveConsumerAgents(readFileSync(join(root, "AGENTS.md"), "utf8"));
-  } catch (err) {
-    return { dest, status: "error", error: `failed deriving consumer AGENTS.md from root ${root}: ${err.message}` };
-  }
+  const ops = buildOps(root);
+  const derivedAgents = deriveConsumerAgents(readFileSync(join(root, "AGENTS.md"), "utf8"));
   const agentsAlreadyManaged = parsedManifest.files.some((f) => f.dest === "AGENTS.md");
   const destAgentsExists = existsSync(join(dest, "AGENTS.md"));
   const agentsDestRel = !destAgentsExists || agentsAlreadyManaged ? "AGENTS.md" : ".ldl/AGENTS.template.md";
   ops.push({ destRel: agentsDestRel, content: Buffer.from(derivedAgents, "utf8") });
 
-  // Wrapped because planUpdate() reads on-disk content for every managed path to compare
-  // hashes (tools/ldl-update/index.mjs's planUpdate), and a managed path unexpectedly
-  // replaced locally by e.g. a directory throws (EISDIR) rather than returning a hash
-  // mismatch. computeStatusAll's Promise.all must never reject on one repository's account —
-  // callers depend on the documented per-repository independence guarantee.
-  let conflicts;
-  let isNoop;
+  const { toInstall, toSkip, conflicts, unchangedFiles, isNoop } = planStatusUpdate({
+    ops,
+    destRoot: dest,
+    existingManifest: parsedManifest,
+    agentsDestRel,
+  });
+
+  return { kind: "plan", dest, sourceRevision, parsedManifest, toInstall, toSkip, conflicts, unchangedFiles, isNoop };
+}
+
+// Given one consumer repository path, returns a compact structured status equivalent to
+// what tools/ldl-update would do if run against it right now, without writing anything.
+// `deps.resolveRevisionImpl` is injectable for deterministic tests, matching the pattern
+// tools/ldl-init and tools/ldl-update already use.
+//
+// The entire computation runs inside one try/catch: any exception anywhere in loadPlan() —
+// not merely the couple of call sites a prior fix happened to wrap — becomes this
+// repository's own {status: "error"} result. computeStatusAll() below additionally never
+// lets a per-repository rejection propagate, so the per-repository independence guarantee
+// holds even if a future change to loadPlan introduces a new throwing call this function
+// itself somehow failed to catch.
+export async function computeStatus({ dest, root }, deps = {}) {
+  let plan;
   try {
-    ({ conflicts, isNoop } = planStatusUpdate({ ops, destRoot: dest, existingManifest: parsedManifest, agentsDestRel }));
+    plan = loadPlan({ dest, root }, deps);
   } catch (err) {
-    return { dest, status: "error", error: `failed comparing on-disk state against source root ${root}: ${err.message}` };
+    return { dest: dest ?? null, status: "error", error: err.message };
   }
 
-  const status = conflicts.length > 0 ? "conflict" : isNoop ? "current" : "outdated";
+  if (plan.kind === "error") {
+    return { dest: plan.dest, status: "error", error: plan.error };
+  }
+
+  if (plan.kind === "not_initialized") {
+    return {
+      dest: plan.dest,
+      status: "not_initialized",
+      installedRevision: null,
+      sourceRevision: plan.sourceRevision,
+      updateAvailable: null,
+      managedFileCount: 0,
+      skippedFileCount: 0,
+      conflicts: [],
+      next: "ldl_init",
+      ...(plan.note ? { note: plan.note } : {}),
+    };
+  }
+
+  const status = plan.conflicts.length > 0 ? "conflict" : plan.isNoop ? "current" : "outdated";
   const next = status === "conflict" ? "manual_resolution" : status === "outdated" ? "ldl_update" : "none";
 
   return {
-    dest,
+    dest: plan.dest,
     status,
-    installedRevision: parsedManifest.ldlSourceRevision,
-    sourceRevision,
+    installedRevision: plan.parsedManifest.ldlSourceRevision,
+    sourceRevision: plan.sourceRevision,
     updateAvailable: status === "outdated",
-    managedFileCount: parsedManifest.files.length,
-    skippedFileCount: (parsedManifest.skipped || []).length,
-    conflicts: conflicts.map((c) => ({ dest: c.dest, reason: c.reason })),
+    managedFileCount: plan.parsedManifest.files.length,
+    skippedFileCount: (plan.parsedManifest.skipped || []).length,
+    conflicts: plan.conflicts.map((c) => ({ dest: c.dest, reason: c.reason })),
     next,
   };
 }
 
 // Cheap multi-repository status per issue #110 requirement 5: one bounded call, each
 // repository resolved independently so one bad path doesn't fail the whole batch.
+// Promise.allSettled (rather than Promise.all) is a deliberate second layer of the same
+// guarantee computeStatus()'s own try/catch already provides — even a future computeStatus
+// change that reintroduced an uncaught throw could not take the rest of the batch down with
+// it, because a per-repository rejection is converted to that repository's own error result
+// right here instead of rejecting the whole batch.
 export async function computeStatusAll({ repos, root }, deps = {}) {
-  return Promise.all(repos.map((dest) => computeStatus({ dest, root }, deps)));
+  const settled = await Promise.allSettled(repos.map((dest) => computeStatus({ dest, root }, deps)));
+  return settled.map((outcome, i) =>
+    outcome.status === "fulfilled"
+      ? outcome.value
+      : { dest: repos[i], status: "error", error: outcome.reason?.message ?? String(outcome.reason) },
+  );
+}
+
+// Read-only "would this update do" plan for one repository, exposing the actual changed/
+// skipped path lists (not just counts) so tools/mcp-server/server.mjs's ldl_update tool can
+// report the compact structured evidence issue #110 requirement 3 asks for — previous
+// revision, resulting revision, changed paths, skipped paths, conflicts — without
+// reimplementing planUpdate()/planStatusUpdate() a second time. Runs the same loadPlan() used
+// by computeStatus above; callers are responsible for their own try/catch, matching that
+// function's contract.
+export function computeUpdatePlan({ dest, root }, deps = {}) {
+  return loadPlan({ dest, root }, deps);
 }

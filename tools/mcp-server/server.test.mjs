@@ -120,7 +120,12 @@ test("ldl_init then ldl_status then ldl_update: full lifecycle through the proto
   const updateResult = await client.callTool({ name: "ldl_update", arguments: { dest, root: rootV2 } });
   assert.equal(updateResult.isError, false);
   const updatePayload = JSON.parse(updateResult.content[0].text);
-  assert.ok(updatePayload.updated > 0);
+  assert.equal(updatePayload.status, "updated");
+  assert.equal(updatePayload.noop, false);
+  assert.equal(updatePayload.previousRevision, statusOutdated[0].installedRevision);
+  assert.equal(updatePayload.resultingRevision, statusOutdated[0].sourceRevision);
+  assert.ok(updatePayload.changedPaths.length > 0);
+  assert.deepEqual(updatePayload.conflicts, []);
 
   const statusAfterUpdate = toolJson(await client.callTool({ name: "ldl_status", arguments: { repos: [dest], root: rootV2 } }));
   assert.equal(statusAfterUpdate[0].status, "current");
@@ -130,7 +135,9 @@ test("ldl_init then ldl_status then ldl_update: full lifecycle through the proto
   const noopResult = await client.callTool({ name: "ldl_update", arguments: { dest, root: rootV2 } });
   assert.equal(noopResult.isError, false);
   const noopPayload = JSON.parse(noopResult.content[0].text);
+  assert.equal(noopPayload.status, "current");
   assert.equal(noopPayload.noop, true);
+  assert.deepEqual(noopPayload.changedPaths, []);
 });
 
 test("ldl_update fails closed through the protocol when a managed file was locally modified", async (t) => {
@@ -144,7 +151,10 @@ test("ldl_update fails closed through the protocol when a managed file was local
   const rootV2 = makeFixtureRoot(t, "rev-2");
   const updateResult = await client.callTool({ name: "ldl_update", arguments: { dest, root: rootV2 } });
   assert.equal(updateResult.isError, true);
-  assert.match(updateResult.content[0].text, /Refusing to update/);
+  const updatePayload = JSON.parse(updateResult.content[0].text);
+  assert.equal(updatePayload.status, "error");
+  assert.match(updatePayload.error, /Refusing to update/);
+  assert.ok(updatePayload.conflicts.some((c) => c.dest === "docs/operating-model.md"));
 
   const content = readFileSync(join(dest, "docs", "operating-model.md"), "utf8");
   assert.equal(content, "locally hand-edited, must not be overwritten\n");
