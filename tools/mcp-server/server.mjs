@@ -155,7 +155,18 @@ export function createServer({ root: rootOverride } = {}) {
           before = { kind: "error", error: err.message };
         }
 
-        const result = await ldlUpdateRun({ dest, root });
+        // ldl-update's run() does not itself catch every exception its internal planUpdate()
+        // can raise (e.g. EISDIR when a managed file was replaced by a directory) — it can
+        // reject rather than resolve with a non-zero exitCode. Caught here, not left to the
+        // handler-wide catch below, so a thrown update failure still gets the same structured
+        // {status, error, conflicts} shape as every other update failure, not a bare {error}.
+        let result;
+        try {
+          result = await ldlUpdateRun({ dest, root });
+        } catch (err) {
+          const conflicts = before.kind === "plan" ? before.conflicts.map((c) => ({ dest: c.dest, reason: c.reason })) : [];
+          return textResult({ status: "error", error: err.message, conflicts }, true);
+        }
 
         if (result.exitCode !== 0) {
           const conflicts = before.kind === "plan" ? before.conflicts.map((c) => ({ dest: c.dest, reason: c.reason })) : [];
@@ -163,12 +174,20 @@ export function createServer({ root: rootOverride } = {}) {
         }
 
         const payload = JSON.parse(result.message);
+        // A previously LDL-managed .ldl/AGENTS.template.md that this update superseded (see
+        // tools/ldl-update/index.mjs's own supersedeTemplate handling) is a real deletion, not
+        // covered by `toInstall` — include it explicitly so changedPaths reflects every path
+        // the update actually touched, not just the ones planUpdate() itself installs.
+        const changedPaths =
+          before.kind === "plan"
+            ? [...before.toInstall.map((op) => op.destRel), ...(before.supersedeTemplate ? [".ldl/AGENTS.template.md"] : [])]
+            : [];
         return textResult(
           {
             status: payload.noop ? "current" : "updated",
             previousRevision: before.kind === "plan" ? before.parsedManifest.ldlSourceRevision : null,
             resultingRevision: payload.revision,
-            changedPaths: before.kind === "plan" ? before.toInstall.map((op) => op.destRel) : [],
+            changedPaths,
             skippedPaths: before.kind === "plan" ? before.toSkip.map((s) => ({ dest: s.dest, reason: s.reason })) : [],
             conflicts: [],
             noop: Boolean(payload.noop),

@@ -11,7 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -138,6 +138,51 @@ test("ldl_init then ldl_status then ldl_update: full lifecycle through the proto
   assert.equal(noopPayload.status, "current");
   assert.equal(noopPayload.noop, true);
   assert.deepEqual(noopPayload.changedPaths, []);
+});
+
+test("ldl_update reports a superseded AGENTS.template.md in changedPaths, through the protocol", async (t) => {
+  // Regression guard for a Stage 1 review finding on PR #118: a consumer's own AGENTS.md
+  // being removed causes ldl-update to delete a previously-parked .ldl/AGENTS.template.md
+  // while installing AGENTS.md directly — a real change not covered by planUpdate()'s own
+  // toInstall list, so it must be added to changedPaths explicitly.
+  const client = await connectedClient(t);
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "AGENTS.md"), "MY PROJECT'S OWN AGENTS.md\n");
+  await ldlInit({ dest, root: rootV1 });
+  assert.ok(existsSync(join(dest, ".ldl", "AGENTS.template.md")));
+
+  rmSync(join(dest, "AGENTS.md"));
+
+  const updateResult = await client.callTool({ name: "ldl_update", arguments: { dest, root: rootV1 } });
+  assert.equal(updateResult.isError, false);
+  const updatePayload = JSON.parse(updateResult.content[0].text);
+  assert.ok(updatePayload.changedPaths.includes(".ldl/AGENTS.template.md"));
+  assert.ok(updatePayload.changedPaths.includes("AGENTS.md"));
+  assert.equal(existsSync(join(dest, ".ldl", "AGENTS.template.md")), false);
+});
+
+test("ldl_update returns the structured error shape even when the underlying run throws", async (t) => {
+  // Regression guard for a Stage 1 review finding on PR #118: ldl-update's run() does not
+  // itself catch every exception planUpdate() can raise (e.g. EISDIR for a managed path
+  // replaced by a directory) — it can reject instead of resolving with a non-zero exitCode.
+  // The MCP tool must still return the documented {status, error, conflicts} shape, not the
+  // generic handler-wide {error} fallback.
+  const client = await connectedClient(t);
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await ldlInit({ dest, root: rootV1 });
+
+  rmSync(join(dest, "docs", "operating-model.md"), { force: true });
+  mkdirSync(join(dest, "docs", "operating-model.md"), { recursive: true });
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const updateResult = await client.callTool({ name: "ldl_update", arguments: { dest, root: rootV2 } });
+  assert.equal(updateResult.isError, true);
+  const updatePayload = JSON.parse(updateResult.content[0].text);
+  assert.equal(updatePayload.status, "error");
+  assert.ok(typeof updatePayload.error === "string" && updatePayload.error.length > 0);
+  assert.ok(Array.isArray(updatePayload.conflicts));
 });
 
 test("ldl_update fails closed through the protocol when a managed file was locally modified", async (t) => {

@@ -44,7 +44,7 @@ function planStatusUpdate({ ops, destRoot, existingManifest, agentsDestRel }) {
   const skipSetChanged = !skipListsEqual(toSkip, existingManifest.skipped || []);
   const isNoop = toInstall.length === 0 && !supersedeTemplate && !skipSetChanged;
 
-  return { toInstall, toSkip, conflicts, unchangedFiles, isNoop };
+  return { toInstall, toSkip, conflicts, unchangedFiles, isNoop, supersedeTemplate };
 }
 
 // Single loader shared by computeStatus() (compact summary) and computeUpdatePlan() (path-
@@ -108,14 +108,25 @@ function loadPlan({ dest, root }, deps = {}) {
   const agentsDestRel = !destAgentsExists || agentsAlreadyManaged ? "AGENTS.md" : ".ldl/AGENTS.template.md";
   ops.push({ destRel: agentsDestRel, content: Buffer.from(derivedAgents, "utf8") });
 
-  const { toInstall, toSkip, conflicts, unchangedFiles, isNoop } = planStatusUpdate({
+  const { toInstall, toSkip, conflicts, unchangedFiles, isNoop, supersedeTemplate } = planStatusUpdate({
     ops,
     destRoot: dest,
     existingManifest: parsedManifest,
     agentsDestRel,
   });
 
-  return { kind: "plan", dest, sourceRevision, parsedManifest, toInstall, toSkip, conflicts, unchangedFiles, isNoop };
+  return {
+    kind: "plan",
+    dest,
+    sourceRevision,
+    parsedManifest,
+    toInstall,
+    toSkip,
+    conflicts,
+    unchangedFiles,
+    isNoop,
+    supersedeTemplate,
+  };
 }
 
 // Given one consumer repository path, returns a compact structured status equivalent to
