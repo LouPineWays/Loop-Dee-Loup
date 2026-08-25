@@ -477,6 +477,40 @@ test("run: a pre-existing consumer CLAUDE.md that stays unresolved across an oth
   assert.deepEqual(readManifest(dest), beforeManifest);
 });
 
+test("run: a consumer who manually merges the parked template graduates the bridge to LDL-managed, clearing pendingManualIntegration", async (t) => {
+  // Stage 1 review finding on PR #131: before this fix, planBridgeOp always re-parked a
+  // consumer-owned bridge at its template on every run (since existingManifest never recorded
+  // it as managed), so the documented manual-merge path could never actually resolve
+  // pendingManualIntegration.
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+  await bootstrap(dest, rootV1, "rev-1");
+  assert.equal(readManifest(dest).pendingManualIntegration.length, 1);
+  const templateContent = readFileSync(join(dest, ".ldl", "CLAUDE.template.md"));
+
+  writeFileSync(join(dest, "CLAUDE.md"), templateContent);
+
+  const result = await run({ dest, root: rootV1 }, { resolveRevisionImpl: () => "rev-1" });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(JSON.parse(result.message).manualIntegrationNeeded, 0);
+  const manifest = readManifest(dest);
+  assert.ok(manifest.files.some((f) => f.dest === "CLAUDE.md"));
+  assert.deepEqual(manifest.pendingManualIntegration, []);
+  assert.ok(!existsSync(join(dest, ".ldl", "CLAUDE.template.md")));
+
+  // Now that CLAUDE.md is genuinely LDL-managed, a later hand-edit is a real conflict again —
+  // proving graduation activated the normal conflict-safety machinery for this file, rather
+  // than merely papering over the ownership question for one run.
+  writeFileSync(join(dest, "CLAUDE.md"), "hand-edited after graduation\n");
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const second = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+  assert.equal(second.exitCode, 1);
+  assert.match(second.message, /CLAUDE\.md/);
+  assert.match(second.message, /locally modified/);
+});
+
 test("run: a newly colliding unmanaged destination is recorded under skipped even when no managed file content changed", async (t) => {
   const rootV1 = makeFixtureRoot(t, "rev-1");
   const dest = tempDir(t);

@@ -12,7 +12,18 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BRIDGE_FILES, MANAGED_ITEMS, buildOps, deriveConsumerAgents, defaultResolveRevision, parseArgs, planInstall, run } from "./index.mjs";
+import {
+  BRIDGE_FILES,
+  MANAGED_ITEMS,
+  buildOps,
+  deriveConsumerAgents,
+  defaultResolveRevision,
+  derivePendingManualIntegration,
+  parseArgs,
+  planBridgeOp,
+  planInstall,
+  run,
+} from "./index.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -250,6 +261,154 @@ test("run: AGENTS.md and CLAUDE.md ownership resolve independently of each other
   assert.ok(!manifest.files.some((f) => f.dest === "AGENTS.md"));
   assert.equal(manifest.pendingManualIntegration.length, 1);
   assert.equal(manifest.pendingManualIntegration[0].dest, "AGENTS.md");
+});
+
+// Stage 1 review finding on PR #131: a bridge that resolved to install straight at its root
+// destination but whose write was then skipped for an unrelated reason (an unsafe symlink here)
+// must not be silently reported as active. Before this fix, pendingManualIntegration was
+// derived purely from planBridgeOp's destination *choice*, not from what actually landed on
+// disk, so this case reported manualIntegrationNeeded: 0 despite CLAUDE.md never installing.
+test("run: a bridge whose root install is skipped for an unrelated reason is surfaced in pendingManualIntegration, not reported as active", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  const danglingTarget = join(dest, "does-not-exist.md");
+  try {
+    symlinkSync(danglingTarget, join(dest, "CLAUDE.md"), "file");
+  } catch (err) {
+    t.skip(`symlink creation not permitted in this environment: ${err.message}`);
+    return;
+  }
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(JSON.parse(result.message).manualIntegrationNeeded, 1, "must not report 0 while CLAUDE.md never actually installed");
+  const manifest = readManifest(dest);
+  assert.ok(!manifest.files.some((f) => f.dest === "CLAUDE.md"));
+  assert.ok(manifest.skipped.some((s) => s.dest === "CLAUDE.md" && /symlink/.test(s.reason)));
+  assert.equal(manifest.pendingManualIntegration.length, 1);
+  assert.equal(manifest.pendingManualIntegration[0].dest, "CLAUDE.md");
+  assert.match(manifest.pendingManualIntegration[0].reason, /could not be installed/);
+});
+
+// Stage 1 review finding on PR #131: when a bridge's root is consumer-owned *and* something
+// unmanaged already occupies the template destination too, the resulting pendingManualIntegration
+// entry must not claim a template exists ready to merge — nothing was actually written there.
+test("run: an unmanaged collision at a bridge's template destination gets a distinct pendingManualIntegration reason, not the ordinary merge instruction", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md\n");
+  mkdirSync(join(dest, ".ldl"), { recursive: true });
+  writeFileSync(join(dest, ".ldl", "CLAUDE.template.md"), "unrelated pre-existing file, not from LDL\n");
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(readFileSync(join(dest, "CLAUDE.md"), "utf8"), "MY PROJECT'S OWN CLAUDE.md\n");
+  assert.equal(
+    readFileSync(join(dest, ".ldl", "CLAUDE.template.md"), "utf8"),
+    "unrelated pre-existing file, not from LDL\n",
+    "the unrelated file at the template path must not be overwritten",
+  );
+
+  const manifest = readManifest(dest);
+  assert.ok(!manifest.files.some((f) => f.dest === ".ldl/CLAUDE.template.md"));
+  assert.ok(manifest.skipped.some((s) => s.dest === ".ldl/CLAUDE.template.md"));
+  assert.equal(manifest.pendingManualIntegration.length, 1);
+  assert.match(manifest.pendingManualIntegration[0].reason, /could not be written to \.ldl\/CLAUDE\.template\.md either/);
+});
+
+// Stage 1 review finding on PR #131: the documented manual-merge path (copy the parked
+// template's content into the consumer-owned file) must actually clear pendingManualIntegration,
+// not re-park the same template forever because the file was never marked LDL-managed.
+test("run: a consumer who manually merges the parked template into their own file graduates the bridge to LDL-managed", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+
+  const first = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(first.exitCode, 0);
+  assert.equal(JSON.parse(first.message).manualIntegrationNeeded, 1);
+  const templateContent = readFileSync(join(dest, ".ldl", "CLAUDE.template.md"));
+
+  // The consumer performs the documented manual merge.
+  writeFileSync(join(dest, "CLAUDE.md"), templateContent);
+
+  const second = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(second.exitCode, 0);
+  assert.equal(JSON.parse(second.message).manualIntegrationNeeded, 0);
+  const manifest = readManifest(dest);
+  assert.ok(manifest.files.some((f) => f.dest === "CLAUDE.md"), "the merged file must now be recorded as LDL-managed");
+  assert.deepEqual(manifest.pendingManualIntegration, []);
+  assert.ok(!existsSync(join(dest, ".ldl", "CLAUDE.template.md")), "the now-superseded template must be cleaned up");
+});
+
+test("planBridgeOp: resolves by content match when the consumer's pre-existing root file already equals the target content", (t) => {
+  const dest = tempDir(t);
+  const content = Buffer.from("identical content\n");
+  writeFileSync(join(dest, "CLAUDE.md"), content);
+
+  const result = planBridgeOp({
+    destRel: "CLAUDE.md",
+    templateDestRel: ".ldl/CLAUDE.template.md",
+    content,
+    destRoot: dest,
+    existingManifest: null,
+  });
+
+  assert.equal(result.destRel, "CLAUDE.md");
+  assert.equal(result.resolvedByContentMatch, true);
+});
+
+test("planBridgeOp: parks at the template when the consumer's pre-existing root file differs from the target content", (t) => {
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "different content\n");
+
+  const result = planBridgeOp({
+    destRel: "CLAUDE.md",
+    templateDestRel: ".ldl/CLAUDE.template.md",
+    content: Buffer.from("target content\n"),
+    destRoot: dest,
+    existingManifest: null,
+  });
+
+  assert.equal(result.destRel, ".ldl/CLAUDE.template.md");
+  assert.equal(result.resolvedByContentMatch, false);
+});
+
+test("derivePendingManualIntegration: distinguishes 'consumer owns it, please merge' from 'could not install at all'", () => {
+  const bridgePlans = [
+    { bridge: { destRel: "AGENTS.md", templateDestRel: ".ldl/AGENTS.template.md" }, op: { destRel: ".ldl/AGENTS.template.md" } },
+    { bridge: { destRel: "CLAUDE.md", templateDestRel: ".ldl/CLAUDE.template.md" }, op: { destRel: "CLAUDE.md" } },
+  ];
+  const toSkip = [{ dest: "CLAUDE.md", reason: "existing symlink at CLAUDE.md — refusing to write through it" }];
+
+  const pending = derivePendingManualIntegration(bridgePlans, toSkip);
+
+  assert.equal(pending.length, 2);
+  const agents = pending.find((p) => p.dest === "AGENTS.md");
+  assert.match(agents.reason, /merge \.ldl\/AGENTS\.template\.md into it by hand/);
+  const claude = pending.find((p) => p.dest === "CLAUDE.md");
+  assert.match(claude.reason, /could not be installed/);
+  assert.match(claude.reason, /symlink/);
+});
+
+test("derivePendingManualIntegration: a template also blocked by an unmanaged collision gets a distinct reason from a normal parked template", () => {
+  const bridgePlans = [
+    { bridge: { destRel: "CLAUDE.md", templateDestRel: ".ldl/CLAUDE.template.md" }, op: { destRel: ".ldl/CLAUDE.template.md" } },
+  ];
+  const toSkip = [{ dest: ".ldl/CLAUDE.template.md", reason: "destination already exists and is not LDL-managed" }];
+
+  const pending = derivePendingManualIntegration(bridgePlans, toSkip);
+
+  assert.equal(pending.length, 1);
+  assert.match(pending[0].reason, /could not be written to \.ldl\/CLAUDE\.template\.md either/);
+});
+
+test("derivePendingManualIntegration: a fully installed bridge (root or template) reports nothing pending", () => {
+  const bridgePlans = [{ bridge: { destRel: "AGENTS.md", templateDestRel: ".ldl/AGENTS.template.md" }, op: { destRel: "AGENTS.md" } }];
+  assert.deepEqual(derivePendingManualIntegration(bridgePlans, []), []);
 });
 
 test("run: is idempotent — re-running against an already-initialized dest reinstalls the same paths without duplication", async (t) => {

@@ -59,12 +59,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   buildOps,
   defaultResolveRevision,
+  derivePendingManualIntegration,
   findUnsafeDestReason,
   findUnsafeLdlDirReason,
   isValidManifest,
   parseArgs,
   planBridges,
   sha256,
+  withResolvedBridgesManaged,
 } from "../ldl-init/index.mjs";
 
 export { parseArgs };
@@ -235,15 +237,24 @@ export async function run(args, deps = {}) {
   // AGENTS.md and CLAUDE.md each have a destination that depends on consumer repository
   // state, exactly as in tools/ldl-init — see docs/consumer-contract.md, "The AGENTS.md and
   // CLAUDE.md special case".
-  let bridgePlans, bridgeOps, pendingManualIntegration;
+  let bridgePlans, bridgeOps, resolvedManifestPatch;
   try {
-    ({ bridgePlans, bridgeOps, pendingManualIntegration } = planBridges({ root, destRoot, existingManifest: parsedManifest }));
+    ({ bridgePlans, bridgeOps, resolvedManifestPatch } = planBridges({ root, destRoot, existingManifest: parsedManifest }));
   } catch (err) {
     return { exitCode: 1, message: `failed deriving consumer bridge file: ${err.message}` };
   }
   ops.push(...bridgeOps);
 
-  const { toInstall, toSkip, conflicts, unchangedFiles } = planUpdate({ ops, destRoot, existingManifest: parsedManifest });
+  // Bridges planBridgeOp resolved by content match (see its own comment) must be treated as
+  // LDL-managed by planUpdate's own ownership check even though parsedManifest doesn't yet
+  // record them. Only affects this local copy passed to planUpdate; parsedManifest itself
+  // (already consulted above, and read again below for the template-supersession check) is
+  // left untouched.
+  const { toInstall, toSkip, conflicts, unchangedFiles } = planUpdate({
+    ops,
+    destRoot,
+    existingManifest: withResolvedBridgesManaged(parsedManifest, resolvedManifestPatch),
+  });
 
   // If a prior run parked a bridge's derived/copied content at its templateDestRel (because
   // the consumer had its own same-named file at the time) and this run is now installing
@@ -278,6 +289,11 @@ export async function run(args, deps = {}) {
     };
   }
 
+  // Computed from the actual toInstall/toSkip outcome, not merely from planBridgeOp's
+  // destination choice — see derivePendingManualIntegration's own comment for why a
+  // destRel-only check would miss an uninstalled bridge.
+  const pendingManualIntegration = derivePendingManualIntegration(bridgePlans, toSkip);
+
   // A skip is worth recording even when no managed file's content changed — e.g. a newer
   // MANAGED_ITEMS destination collides with a pre-existing unmanaged consumer file. Compare
   // against what the existing manifest already recorded so a run that finds nothing new
@@ -285,8 +301,9 @@ export async function run(args, deps = {}) {
   const skipSetChanged = !skipListsEqual(toSkip, parsedManifest.skipped || []);
   // Same no-op guard, applied to the set of bridge files still awaiting manual merge: a run
   // that finds the same unresolved set as before must not rewrite the manifest just to say so
-  // again, but a genuinely changed set (a new bridge parked, or one just resolved) does need
-  // to be recorded, even when no managed file content itself changed.
+  // again, but a genuinely changed set (a new bridge parked, one just resolved, or one that
+  // newly failed to install) does need to be recorded, even when no managed file content
+  // itself changed.
   const pendingIntegrationChanged = !pendingIntegrationListsEqual(pendingManualIntegration, parsedManifest.pendingManualIntegration || []);
 
   if (toInstall.length === 0 && supersededTemplates.length === 0 && !skipSetChanged && !pendingIntegrationChanged) {

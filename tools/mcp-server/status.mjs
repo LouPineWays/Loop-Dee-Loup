@@ -9,15 +9,28 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { buildOps, defaultResolveRevision, findUnsafeLdlDirReason, isValidManifest, planBridges, sha256 } from "../ldl-init/index.mjs";
+import {
+  buildOps,
+  defaultResolveRevision,
+  derivePendingManualIntegration,
+  findUnsafeLdlDirReason,
+  isValidManifest,
+  planBridges,
+  sha256,
+  withResolvedBridgesManaged,
+} from "../ldl-init/index.mjs";
 import { pendingIntegrationListsEqual, planUpdate, skipListsEqual } from "../ldl-update/index.mjs";
 
 // Mirrors the {toInstall, supersededTemplates, skipSetChanged, pendingIntegrationChanged} =>
 // no-op decision inside tools/ldl-update's run(), computed here read-only so a status check
 // and a real update agree on what counts as "nothing to do" without a second implementation
 // of that rule.
-function planStatusUpdate({ ops, destRoot, existingManifest, bridgePlans, pendingManualIntegration }) {
-  const { toInstall, toSkip, conflicts, unchangedFiles } = planUpdate({ ops, destRoot, existingManifest });
+function planStatusUpdate({ ops, destRoot, existingManifest, bridgePlans, resolvedManifestPatch }) {
+  const { toInstall, toSkip, conflicts, unchangedFiles } = planUpdate({
+    ops,
+    destRoot,
+    existingManifest: withResolvedBridgesManaged(existingManifest, resolvedManifestPatch),
+  });
 
   const supersededTemplates = [];
   for (const { bridge, op } of bridgePlans) {
@@ -36,11 +49,15 @@ function planStatusUpdate({ ops, destRoot, existingManifest, bridgePlans, pendin
     }
   }
 
+  // Computed from the actual toInstall/toSkip outcome, not merely from planBridgeOp's
+  // destination choice — see derivePendingManualIntegration's own comment.
+  const pendingManualIntegration = derivePendingManualIntegration(bridgePlans, toSkip);
+
   const skipSetChanged = !skipListsEqual(toSkip, existingManifest.skipped || []);
   const pendingIntegrationChanged = !pendingIntegrationListsEqual(pendingManualIntegration, existingManifest.pendingManualIntegration || []);
   const isNoop = toInstall.length === 0 && supersededTemplates.length === 0 && !skipSetChanged && !pendingIntegrationChanged;
 
-  return { toInstall, toSkip, conflicts, unchangedFiles, isNoop, supersededTemplates };
+  return { toInstall, toSkip, conflicts, unchangedFiles, isNoop, supersededTemplates, pendingManualIntegration };
 }
 
 // Single loader shared by computeStatus() (compact summary) and computeUpdatePlan() (path-
@@ -98,15 +115,15 @@ function loadPlan({ dest, root }, deps = {}) {
   }
 
   const ops = buildOps(root);
-  const { bridgePlans, bridgeOps, pendingManualIntegration } = planBridges({ root, destRoot: dest, existingManifest: parsedManifest });
+  const { bridgePlans, bridgeOps, resolvedManifestPatch } = planBridges({ root, destRoot: dest, existingManifest: parsedManifest });
   ops.push(...bridgeOps);
 
-  const { toInstall, toSkip, conflicts, unchangedFiles, isNoop, supersededTemplates } = planStatusUpdate({
+  const { toInstall, toSkip, conflicts, unchangedFiles, isNoop, supersededTemplates, pendingManualIntegration } = planStatusUpdate({
     ops,
     destRoot: dest,
     existingManifest: parsedManifest,
     bridgePlans,
-    pendingManualIntegration,
+    resolvedManifestPatch,
   });
 
   return {
@@ -180,7 +197,14 @@ export async function computeStatus({ dest, root }, deps = {}) {
     // "The AGENTS.md and CLAUDE.md special case". Independent of sync status: a repository can
     // be fully `current` while a bridge sits at its template indefinitely, which is expected
     // steady state, not a defect this field's presence should be read as reporting.
-    pendingManualIntegration: (plan.parsedManifest.pendingManualIntegration || []).map((p) => ({
+    //
+    // Sourced from `plan.pendingManualIntegration` — the freshly recomputed value from this
+    // call's own planStatusUpdate() — never from `plan.parsedManifest.pendingManualIntegration`
+    // (the stale value the *existing* manifest happened to record). The two can legitimately
+    // diverge: a manifest from before this field existed has none recorded at all even though a
+    // bridge is genuinely parked at a template right now, and computeStatus must report that
+    // real, current condition rather than silently reading it as fully resolved.
+    pendingManualIntegration: plan.pendingManualIntegration.map((p) => ({
       dest: p.dest,
       template: p.template,
       reason: p.reason,

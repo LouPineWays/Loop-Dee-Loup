@@ -92,37 +92,112 @@ export const BRIDGE_FILES = [
 // Resolves where one BRIDGE_FILES entry should install for a given consumer repository: its
 // own root destRel when the consumer doesn't already own an unmanaged file there (or a prior
 // LDL run is already recorded as managing it), otherwise its templateDestRel instead of
-// overwriting the consumer's file. Exported so tools/ldl-update and tools/mcp-server/status.mjs
-// resolve this exact same ownership decision rather than a second implementation of it.
+// overwriting the consumer's file — unless the consumer's on-disk root file already matches the
+// target content byte-for-byte, which is the one safe signal LDL can use to recognize the
+// documented manual-merge step (parking a template, then hand-merging it into the consumer's
+// own file) has already been completed: `resolvedByContentMatch` tells callers to treat that
+// destination as LDL-managed going forward even though `existingManifest` doesn't yet record it,
+// so the merge actually clears pendingManualIntegration instead of the bridge being permanently
+// re-parked at its template on every later run because the file was never marked managed.
+// Exported so tools/ldl-update and tools/mcp-server/status.mjs resolve this exact same ownership
+// decision rather than a second implementation of it.
 export function planBridgeOp({ destRel, templateDestRel, content, destRoot, existingManifest }) {
   const alreadyManaged = Boolean(existingManifest?.files?.some((f) => f.dest === destRel));
-  const destExists = existsSync(join(destRoot, destRel));
-  const targetDestRel = !destExists || alreadyManaged ? destRel : templateDestRel;
-  return { destRel: targetDestRel, content };
+  const absDest = join(destRoot, destRel);
+  const destExists = existsSync(absDest);
+  if (!destExists || alreadyManaged) {
+    return { destRel, content, resolvedByContentMatch: false };
+  }
+  let onDiskMatchesTarget = false;
+  try {
+    onDiskMatchesTarget = sha256(readFileSync(absDest)) === sha256(content);
+  } catch {
+    onDiskMatchesTarget = false; // unreadable (e.g. a directory) — fall through to templateDestRel
+  }
+  if (onDiskMatchesTarget) {
+    return { destRel, content, resolvedByContentMatch: true };
+  }
+  return { destRel: templateDestRel, content, resolvedByContentMatch: false };
 }
 
 // Plans every BRIDGE_FILES entry against one consumer repository: reads/derives each entry's
-// source content, resolves its destination via planBridgeOp, and reports both the resulting
-// ops (bridgeOps) and which entries landed at their template path instead of their own root
-// destination (pendingManualIntegration) — the unresolved manual-merge requirement callers
-// must surface rather than silently treat as fully activated. Throws if a BRIDGE_FILES entry's
-// source content cannot be read/derived from `root`; callers translate that into their own
-// exitCode/error-result convention.
+// source content and resolves its destination via planBridgeOp. Returns:
+//   bridgePlans           - {bridge, op, resolvedByContentMatch} per entry, for template
+//                            supersession checks and derivePendingManualIntegration() below;
+//   bridgeOps             - just the {destRel, content} ops, ready to push onto planInstall's/
+//                            planUpdate's own `ops`;
+//   resolvedManifestPatch - synthetic {dest, sha256} records for entries planBridgeOp resolved
+//                            by content match. `existingManifest` genuinely doesn't record these
+//                            as LDL-managed yet, but planInstall/planUpdate's own ownership
+//                            checks must treat them as managed anyway — otherwise "the consumer's
+//                            file already matches" would be classified as an unrelated
+//                            pre-existing file and skipped instead of recorded, and the bridge
+//                            would never actually graduate out of pendingManualIntegration.
+//                            Callers merge this into the `existingManifest` they pass to
+//                            planInstall/planUpdate (never into the one passed back into this
+//                            function, which must keep reading the true recorded state).
+// Throws if a BRIDGE_FILES entry's source content cannot be read/derived from `root`; callers
+// translate that into their own exitCode/error-result convention.
 export function planBridges({ root, destRoot, existingManifest }) {
   const bridgePlans = BRIDGE_FILES.map((bridge) => {
     const content = bridge.readContent(root);
-    const op = planBridgeOp({ ...bridge, content, destRoot, existingManifest });
-    return { bridge, op };
+    const { destRel, resolvedByContentMatch } = planBridgeOp({ ...bridge, content, destRoot, existingManifest });
+    return { bridge, op: { destRel, content }, resolvedByContentMatch };
   });
   const bridgeOps = bridgePlans.map((p) => p.op);
-  const pendingManualIntegration = bridgePlans
-    .filter(({ bridge, op }) => op.destRel === bridge.templateDestRel)
-    .map(({ bridge }) => ({
-      dest: bridge.destRel,
-      template: bridge.templateDestRel,
-      reason: `a pre-existing ${bridge.destRel} was not overwritten — merge ${bridge.templateDestRel} into it by hand to activate the LDL operating contract`,
-    }));
-  return { bridgePlans, bridgeOps, pendingManualIntegration };
+  const resolvedManifestPatch = bridgePlans
+    .filter((p) => p.resolvedByContentMatch)
+    .map((p) => ({ dest: p.op.destRel, sha256: sha256(p.op.content) }));
+  return { bridgePlans, bridgeOps, resolvedManifestPatch };
+}
+
+// Merges resolvedManifestPatch (see planBridges above) into the `files` list of the manifest
+// object passed to planInstall/planUpdate's own ownership checks, without mutating or otherwise
+// altering the caller's real existingManifest/parsedManifest (which planBridgeOp and the
+// template-supersession checks must keep reading unpatched). A no-op passthrough when there is
+// nothing to patch, so callers can always call this rather than conditionally branching.
+export function withResolvedBridgesManaged(existingManifest, resolvedManifestPatch) {
+  if (resolvedManifestPatch.length === 0) return existingManifest;
+  return { ...(existingManifest || {}), files: [...(existingManifest?.files || []), ...resolvedManifestPatch] };
+}
+
+// Derives the durable "still needs a human" signal for every bridge file from the actual
+// planInstall/planUpdate outcome (toSkip), not merely from planBridgeOp's destination choice.
+// Two distinct situations both count:
+//   - a bridge resolved to its templateDestRel (the consumer owns the root file and its content
+//     doesn't match the target) and that template write itself either succeeded (the ordinary,
+//     documented "merge this template into your file by hand" case) or was *also* skipped (an
+//     unrelated file or unsafe path already occupies the template destination too, so there is
+//     no template on disk yet for a human to merge — a materially different situation the
+//     ordinary reason text must not claim);
+//   - a bridge resolved straight to its own destRel but that root write was skipped (e.g. a
+//     dangling symlink or other unsafe path component blocks it) — the bridge is not actually
+//     installed at all, which a destRel-only check would otherwise miss entirely and report as
+//     fully activated.
+// Exported so tools/ldl-update and tools/mcp-server/status.mjs derive this exact same signal
+// from their own toInstall/toSkip outcome instead of a second implementation of it.
+export function derivePendingManualIntegration(bridgePlans, toSkip) {
+  const skipReasonByDest = new Map(toSkip.map((s) => [s.dest, s.reason]));
+  const pending = [];
+  for (const { bridge, op } of bridgePlans) {
+    const skipReason = skipReasonByDest.get(op.destRel);
+    if (op.destRel === bridge.templateDestRel) {
+      pending.push({
+        dest: bridge.destRel,
+        template: bridge.templateDestRel,
+        reason: skipReason
+          ? `a pre-existing ${bridge.destRel} was not overwritten, and its derived template could not be written to ${bridge.templateDestRel} either (${skipReason}) — resolve manually before relying on the LDL operating contract being active`
+          : `a pre-existing ${bridge.destRel} was not overwritten — merge ${bridge.templateDestRel} into it by hand to activate the LDL operating contract`,
+      });
+    } else if (skipReason) {
+      pending.push({
+        dest: bridge.destRel,
+        template: bridge.templateDestRel,
+        reason: `${bridge.destRel} could not be installed (${skipReason}) — the LDL operating contract is not active until this is resolved manually`,
+      });
+    }
+  }
+  return pending;
 }
 
 export function parseArgs(argv) {
@@ -456,9 +531,9 @@ export async function run(args, deps = {}) {
   // destinations depend on consumer repository state (does the consumer already have one, and
   // if so, did LDL install it?) — see docs/consumer-contract.md, "The AGENTS.md and CLAUDE.md
   // special case".
-  let bridgePlans, bridgeOps, pendingManualIntegration;
+  let bridgePlans, bridgeOps, resolvedManifestPatch;
   try {
-    ({ bridgePlans, bridgeOps, pendingManualIntegration } = planBridges({ root, destRoot, existingManifest }));
+    ({ bridgePlans, bridgeOps, resolvedManifestPatch } = planBridges({ root, destRoot, existingManifest }));
   } catch (err) {
     return { exitCode: 1, message: `failed deriving consumer bridge file: ${err.message}` };
   }
@@ -466,8 +541,9 @@ export async function run(args, deps = {}) {
 
   // If a prior run parked a bridge's derived template at its templateDestRel (because the
   // consumer had its own file at the time) and this run is now installing straight to the
-  // bridge's own destRel instead (the consumer's own file is gone), the old template is
-  // superseded — remove it so it doesn't linger on disk unrecorded by the new manifest.
+  // bridge's own destRel instead (the consumer's own file is gone, or its content now matches
+  // the target — see planBridgeOp's resolvedByContentMatch), the old template is superseded —
+  // remove it so it doesn't linger on disk unrecorded by the new manifest.
   for (const { bridge, op } of bridgePlans) {
     const previousTemplateFile = existingManifest?.files?.some((f) => f.dest === bridge.templateDestRel);
     if (op.destRel === bridge.destRel && previousTemplateFile) {
@@ -478,8 +554,21 @@ export async function run(args, deps = {}) {
     }
   }
 
-  const { toInstall, toSkip } = planInstall({ ops, destRoot, existingManifest });
+  // Bridges planBridgeOp resolved by content match must be treated as LDL-managed by
+  // planInstall's own ownership check even though existingManifest doesn't yet record them —
+  // see withResolvedBridgesManaged's own comment. Only affects this local copy; existingManifest
+  // itself (already consulted above) is left untouched.
+  const { toInstall, toSkip } = planInstall({
+    ops,
+    destRoot,
+    existingManifest: withResolvedBridgesManaged(existingManifest, resolvedManifestPatch),
+  });
   const installedFiles = applyInstall(toInstall, destRoot).sort((a, b) => a.dest.localeCompare(b.dest));
+
+  // Computed from the actual install outcome (toSkip), not merely from planBridgeOp's
+  // destination choice — see derivePendingManualIntegration's own comment for why a
+  // destRel-only check would miss an uninstalled bridge.
+  const pendingManualIntegration = derivePendingManualIntegration(bridgePlans, toSkip);
 
   const manifest = {
     schemaVersion: 1,
