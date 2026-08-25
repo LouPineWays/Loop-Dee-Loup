@@ -9,42 +9,38 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import {
-  buildOps,
-  defaultResolveRevision,
-  deriveConsumerAgents,
-  findUnsafeLdlDirReason,
-  isValidManifest,
-  sha256,
-} from "../ldl-init/index.mjs";
-import { planUpdate, skipListsEqual } from "../ldl-update/index.mjs";
+import { buildOps, defaultResolveRevision, findUnsafeLdlDirReason, isValidManifest, planBridges, sha256 } from "../ldl-init/index.mjs";
+import { pendingIntegrationListsEqual, planUpdate, skipListsEqual } from "../ldl-update/index.mjs";
 
-// Mirrors the {toInstall, supersedeTemplate, skipSetChanged} => no-op decision inside
-// tools/ldl-update's run(), computed here read-only so a status check and a real update
-// agree on what counts as "nothing to do" without a second implementation of that rule.
-function planStatusUpdate({ ops, destRoot, existingManifest, agentsDestRel }) {
+// Mirrors the {toInstall, supersededTemplates, skipSetChanged, pendingIntegrationChanged} =>
+// no-op decision inside tools/ldl-update's run(), computed here read-only so a status check
+// and a real update agree on what counts as "nothing to do" without a second implementation
+// of that rule.
+function planStatusUpdate({ ops, destRoot, existingManifest, bridgePlans, pendingManualIntegration }) {
   const { toInstall, toSkip, conflicts, unchangedFiles } = planUpdate({ ops, destRoot, existingManifest });
 
-  let supersedeTemplate = false;
-  const previousTemplateEntry = existingManifest.files.find((f) => f.dest === ".ldl/AGENTS.template.md");
-  if (agentsDestRel === "AGENTS.md" && previousTemplateEntry) {
-    const staleTemplatePath = join(destRoot, ".ldl", "AGENTS.template.md");
+  const supersededTemplates = [];
+  for (const { bridge, op } of bridgePlans) {
+    const previousTemplateEntry = existingManifest.files.find((f) => f.dest === bridge.templateDestRel);
+    if (op.destRel !== bridge.destRel || !previousTemplateEntry) continue;
+    const staleTemplatePath = join(destRoot, ...bridge.templateDestRel.split("/"));
     if (!existsSync(staleTemplatePath)) {
-      supersedeTemplate = true;
+      supersededTemplates.push(bridge.templateDestRel);
     } else if (sha256(readFileSync(staleTemplatePath)) === previousTemplateEntry.sha256) {
-      supersedeTemplate = true;
+      supersededTemplates.push(bridge.templateDestRel);
     } else {
       conflicts.push({
-        dest: ".ldl/AGENTS.template.md",
-        reason: "locally modified since install and now superseded by AGENTS.md — refusing to discard the local edit",
+        dest: bridge.templateDestRel,
+        reason: `locally modified since install and now superseded by ${bridge.destRel} — refusing to discard the local edit`,
       });
     }
   }
 
   const skipSetChanged = !skipListsEqual(toSkip, existingManifest.skipped || []);
-  const isNoop = toInstall.length === 0 && !supersedeTemplate && !skipSetChanged;
+  const pendingIntegrationChanged = !pendingIntegrationListsEqual(pendingManualIntegration, existingManifest.pendingManualIntegration || []);
+  const isNoop = toInstall.length === 0 && supersededTemplates.length === 0 && !skipSetChanged && !pendingIntegrationChanged;
 
-  return { toInstall, toSkip, conflicts, unchangedFiles, isNoop, supersedeTemplate };
+  return { toInstall, toSkip, conflicts, unchangedFiles, isNoop, supersededTemplates };
 }
 
 // Single loader shared by computeStatus() (compact summary) and computeUpdatePlan() (path-
@@ -102,17 +98,15 @@ function loadPlan({ dest, root }, deps = {}) {
   }
 
   const ops = buildOps(root);
-  const derivedAgents = deriveConsumerAgents(readFileSync(join(root, "AGENTS.md"), "utf8"));
-  const agentsAlreadyManaged = parsedManifest.files.some((f) => f.dest === "AGENTS.md");
-  const destAgentsExists = existsSync(join(dest, "AGENTS.md"));
-  const agentsDestRel = !destAgentsExists || agentsAlreadyManaged ? "AGENTS.md" : ".ldl/AGENTS.template.md";
-  ops.push({ destRel: agentsDestRel, content: Buffer.from(derivedAgents, "utf8") });
+  const { bridgePlans, bridgeOps, pendingManualIntegration } = planBridges({ root, destRoot: dest, existingManifest: parsedManifest });
+  ops.push(...bridgeOps);
 
-  const { toInstall, toSkip, conflicts, unchangedFiles, isNoop, supersedeTemplate } = planStatusUpdate({
+  const { toInstall, toSkip, conflicts, unchangedFiles, isNoop, supersededTemplates } = planStatusUpdate({
     ops,
     destRoot: dest,
     existingManifest: parsedManifest,
-    agentsDestRel,
+    bridgePlans,
+    pendingManualIntegration,
   });
 
   return {
@@ -125,7 +119,8 @@ function loadPlan({ dest, root }, deps = {}) {
     conflicts,
     unchangedFiles,
     isNoop,
-    supersedeTemplate,
+    supersededTemplates,
+    pendingManualIntegration,
   };
 }
 
@@ -162,6 +157,7 @@ export async function computeStatus({ dest, root }, deps = {}) {
       managedFileCount: 0,
       skippedFileCount: 0,
       conflicts: [],
+      pendingManualIntegration: [],
       next: "ldl_init",
       ...(plan.note ? { note: plan.note } : {}),
     };
@@ -179,6 +175,16 @@ export async function computeStatus({ dest, root }, deps = {}) {
     managedFileCount: plan.parsedManifest.files.length,
     skippedFileCount: (plan.parsedManifest.skipped || []).length,
     conflicts: plan.conflicts.map((c) => ({ dest: c.dest, reason: c.reason })),
+    // Surfaces any bridge file (AGENTS.md/CLAUDE.md) still parked at its template path
+    // awaiting a manual merge into a consumer-owned file — see docs/consumer-contract.md,
+    // "The AGENTS.md and CLAUDE.md special case". Independent of sync status: a repository can
+    // be fully `current` while a bridge sits at its template indefinitely, which is expected
+    // steady state, not a defect this field's presence should be read as reporting.
+    pendingManualIntegration: (plan.parsedManifest.pendingManualIntegration || []).map((p) => ({
+      dest: p.dest,
+      template: p.template,
+      reason: p.reason,
+    })),
     next,
   };
 }

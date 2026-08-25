@@ -45,6 +45,7 @@ function makeFixtureRoot(t, revisionTag) {
     }
   }
   writeFileSync(join(root, "AGENTS.md"), `# Agent operating contract\n\nGeneric rule (${revisionTag}).\n`);
+  writeFileSync(join(root, "CLAUDE.md"), `# Claude Code instructions\n\n@AGENTS.md\n\n(${revisionTag})\n`);
   return root;
 }
 

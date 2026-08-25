@@ -48,6 +48,7 @@ function makeFixtureRoot(t, revisionTag) {
       "",
     ].join("\n"),
   );
+  writeFileSync(join(root, "CLAUDE.md"), `# Claude Code instructions\n\n@AGENTS.md\n\n(${revisionTag})\n`);
   return root;
 }
 
@@ -111,6 +112,19 @@ test("computeStatus: freshly bootstrapped repo against the same revision is curr
   assert.equal(result.next, "none");
   assert.deepEqual(result.conflicts, []);
   assert.ok(result.managedFileCount > 0);
+});
+
+test("computeStatus: a consumer-owned CLAUDE.md parked at a template is surfaced as pendingManualIntegration, without affecting current/outdated status", async (t) => {
+  const root = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md\n");
+  await bootstrap(dest, root, "rev-1");
+
+  const result = await computeStatus({ dest, root }, { resolveRevisionImpl: () => "rev-1" });
+  assert.equal(result.status, "current");
+  assert.equal(result.pendingManualIntegration.length, 1);
+  assert.equal(result.pendingManualIntegration[0].dest, "CLAUDE.md");
+  assert.equal(result.pendingManualIntegration[0].template, ".ldl/CLAUDE.template.md");
 });
 
 test("computeStatus: repo bootstrapped from an older revision is outdated", async (t) => {

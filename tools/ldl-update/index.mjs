@@ -18,8 +18,8 @@
 // fixture instead of this repository's real, changing content.
 //
 // What it does, each run:
-//   1. Rebuilds the exact same target ops tools/ldl-init would (MANAGED_ITEMS content
-//      plus the derived AGENTS.md), from --root.
+//   1. Rebuilds the exact same target ops tools/ldl-init would (MANAGED_ITEMS content plus
+//      the two BRIDGE_FILES entries — derived AGENTS.md and copied CLAUDE.md), from --root.
 //   2. For every managed destination, compares its current on-disk content hash against
 //      both the hash recorded in the existing manifest and the new target hash:
 //        - on-disk hash == target hash            -> already current, nothing to write;
@@ -35,15 +35,16 @@
 //      something unmanaged is already sitting there.
 //      A managed path replaced locally by a symlink or a blocking non-directory is also a
 //      conflict, not a silent skip — the same as a content edit or a deletion.
-//      A previously LDL-managed .ldl/AGENTS.template.md that this run's AGENTS.md-relocation
-//      logic would supersede gets the same hash check before removal, so a locally edited
-//      template is refused rather than silently discarded.
+//      A previously LDL-managed bridge template (.ldl/AGENTS.template.md or
+//      .ldl/CLAUDE.template.md) that this run's bridge-relocation logic would supersede gets
+//      the same hash check before removal, so a locally edited template is refused rather
+//      than silently discarded.
 //   3. If any conflict is found, the whole run refuses to write anything and reports every
 //      conflicting path and reason — fails safely rather than discarding either version,
 //      partially applying only the safe subset, or guessing which side wins.
-//   4. Otherwise, if there is nothing to install, no template to supersede, and no change to
-//      the recorded `skipped` set, the run is a no-op: it does not touch .ldl/manifest.json
-//      or any managed file at all.
+//   4. Otherwise, if there is nothing to install, no template to supersede, no change to the
+//      recorded `skipped` set, and no change to the recorded `pendingManualIntegration` set,
+//      the run is a no-op: it does not touch .ldl/manifest.json or any managed file at all.
 //   5. Otherwise, it writes every changed/newly-added managed path and rewrites
 //      .ldl/manifest.json with the new source revision, a fresh install timestamp, and the
 //      full resulting set of managed paths (including ones that already matched and so
@@ -58,11 +59,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   buildOps,
   defaultResolveRevision,
-  deriveConsumerAgents,
   findUnsafeDestReason,
   findUnsafeLdlDirReason,
   isValidManifest,
   parseArgs,
+  planBridges,
   sha256,
 } from "../ldl-init/index.mjs";
 
@@ -86,6 +87,19 @@ export function skipListsEqual(a, b) {
     );
   return normalize(a) === normalize(b);
 }
+
+// Same order-independent comparison as skipListsEqual, applied to `pendingManualIntegration`
+// entries instead: lets a run whose set of bridge files awaiting manual merge hasn't changed
+// still count as a true no-op, without a bespoke third comparison for a third array shape.
+// Exported so tools/mcp-server/status.mjs can replicate this exact determination.
+export function pendingIntegrationListsEqual(a, b) {
+  const normalize = (list) =>
+    JSON.stringify(
+      list.map((p) => [p.dest, p.template, p.reason]).sort((x, y) => (x[0] === y[0] ? x[1].localeCompare(y[1]) : x[0].localeCompare(y[0]))),
+    );
+  return normalize(a) === normalize(b);
+}
+
 function applyInstall(ops, destRoot) {
   const installed = [];
   for (const op of ops) {
@@ -218,40 +232,40 @@ export async function run(args, deps = {}) {
     return { exitCode: 1, message: `failed reading managed items from --root ${root}: ${err.message}` };
   }
 
-  // AGENTS.md's destination depends on consumer repository state, exactly as in
-  // tools/ldl-init — see docs/consumer-contract.md, "The AGENTS.md special case".
-  let derivedAgents;
+  // AGENTS.md and CLAUDE.md each have a destination that depends on consumer repository
+  // state, exactly as in tools/ldl-init — see docs/consumer-contract.md, "The AGENTS.md and
+  // CLAUDE.md special case".
+  let bridgePlans, bridgeOps, pendingManualIntegration;
   try {
-    derivedAgents = deriveConsumerAgents(readFileSync(join(root, "AGENTS.md"), "utf8"));
+    ({ bridgePlans, bridgeOps, pendingManualIntegration } = planBridges({ root, destRoot, existingManifest: parsedManifest }));
   } catch (err) {
-    return { exitCode: 1, message: `failed deriving consumer AGENTS.md: ${err.message}` };
+    return { exitCode: 1, message: `failed deriving consumer bridge file: ${err.message}` };
   }
-  const agentsAlreadyManaged = parsedManifest.files.some((f) => f.dest === "AGENTS.md");
-  const destAgentsExists = existsSync(join(destRoot, "AGENTS.md"));
-  const agentsDestRel = !destAgentsExists || agentsAlreadyManaged ? "AGENTS.md" : ".ldl/AGENTS.template.md";
-  ops.push({ destRel: agentsDestRel, content: Buffer.from(derivedAgents, "utf8") });
+  ops.push(...bridgeOps);
 
   const { toInstall, toSkip, conflicts, unchangedFiles } = planUpdate({ ops, destRoot, existingManifest: parsedManifest });
 
-  // If a prior run parked the derived template at .ldl/AGENTS.template.md (because the
-  // consumer had its own AGENTS.md at the time) and this run is now installing straight to
-  // AGENTS.md instead (the consumer's own file is gone since), the old template is
-  // superseded. It isn't part of `ops` (its own destination is now "AGENTS.md"), so it
-  // needs its own hash check here: an untouched template is safe to remove, but a locally
-  // edited one is a conflict just like any other managed file — deleting it unconditionally
-  // would silently discard a local edit the conflict-safe guarantee exists to protect.
-  const previousTemplateEntry = parsedManifest.files.find((f) => f.dest === ".ldl/AGENTS.template.md");
-  let supersedeTemplate = false;
-  if (agentsDestRel === "AGENTS.md" && previousTemplateEntry) {
-    const staleTemplatePath = join(destRoot, ".ldl", "AGENTS.template.md");
+  // If a prior run parked a bridge's derived/copied content at its templateDestRel (because
+  // the consumer had its own same-named file at the time) and this run is now installing
+  // straight to the bridge's own destRel instead (the consumer's own file is gone since), the
+  // old template is superseded. It isn't part of `ops` (its own destination is now the
+  // bridge's root path), so it needs its own hash check here: an untouched template is safe
+  // to remove, but a locally edited one is a conflict just like any other managed file —
+  // deleting it unconditionally would silently discard a local edit the conflict-safe
+  // guarantee exists to protect.
+  const supersededTemplates = [];
+  for (const { bridge, op } of bridgePlans) {
+    const previousTemplateEntry = parsedManifest.files.find((f) => f.dest === bridge.templateDestRel);
+    if (op.destRel !== bridge.destRel || !previousTemplateEntry) continue;
+    const staleTemplatePath = join(destRoot, ...bridge.templateDestRel.split("/"));
     if (!existsSync(staleTemplatePath)) {
-      supersedeTemplate = true; // already gone; just drop the stale manifest record
+      supersededTemplates.push(bridge.templateDestRel); // already gone; just drop the stale manifest record
     } else if (sha256(readFileSync(staleTemplatePath)) === previousTemplateEntry.sha256) {
-      supersedeTemplate = true;
+      supersededTemplates.push(bridge.templateDestRel);
     } else {
       conflicts.push({
-        dest: ".ldl/AGENTS.template.md",
-        reason: "locally modified since install and now superseded by AGENTS.md — refusing to discard the local edit",
+        dest: bridge.templateDestRel,
+        reason: `locally modified since install and now superseded by ${bridge.destRel} — refusing to discard the local edit`,
       });
     }
   }
@@ -269,8 +283,13 @@ export async function run(args, deps = {}) {
   // against what the existing manifest already recorded so a run that finds nothing new
   // still counts as a true no-op instead of rewriting the manifest every time for no reason.
   const skipSetChanged = !skipListsEqual(toSkip, parsedManifest.skipped || []);
+  // Same no-op guard, applied to the set of bridge files still awaiting manual merge: a run
+  // that finds the same unresolved set as before must not rewrite the manifest just to say so
+  // again, but a genuinely changed set (a new bridge parked, or one just resolved) does need
+  // to be recorded, even when no managed file content itself changed.
+  const pendingIntegrationChanged = !pendingIntegrationListsEqual(pendingManualIntegration, parsedManifest.pendingManualIntegration || []);
 
-  if (toInstall.length === 0 && !supersedeTemplate && !skipSetChanged) {
+  if (toInstall.length === 0 && supersededTemplates.length === 0 && !skipSetChanged && !pendingIntegrationChanged) {
     // Nothing to write and nothing to reconcile: a predictable no-op. Leave
     // .ldl/manifest.json and every managed file completely untouched.
     return {
@@ -278,14 +297,15 @@ export async function run(args, deps = {}) {
       message: JSON.stringify({
         updated: 0,
         skipped: toSkip.length,
+        manualIntegrationNeeded: pendingManualIntegration.length,
         revision: parsedManifest.ldlSourceRevision,
         noop: true,
       }),
     };
   }
 
-  if (supersedeTemplate) {
-    const staleTemplatePath = join(destRoot, ".ldl", "AGENTS.template.md");
+  for (const templateDestRel of supersededTemplates) {
+    const staleTemplatePath = join(destRoot, ...templateDestRel.split("/"));
     if (existsSync(staleTemplatePath)) {
       rmSync(staleTemplatePath);
     }
@@ -299,7 +319,7 @@ export async function run(args, deps = {}) {
   // safely refuses, never removes. A superseded template is excluded here since it was just
   // deleted above (or was already gone), so it must not be carried over as a stale record.
   const coveredDests = new Set(ops.map((op) => op.destRel));
-  if (supersedeTemplate) coveredDests.add(".ldl/AGENTS.template.md");
+  for (const templateDestRel of supersededTemplates) coveredDests.add(templateDestRel);
   const carriedOverFiles = parsedManifest.files.filter((f) => !coveredDests.has(f.dest));
 
   const files = [...installedFiles, ...unchangedFiles, ...carriedOverFiles].sort((a, b) => a.dest.localeCompare(b.dest));
@@ -310,6 +330,7 @@ export async function run(args, deps = {}) {
     installedAt: now(),
     files,
     skipped: toSkip,
+    pendingManualIntegration,
   };
 
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
@@ -319,6 +340,7 @@ export async function run(args, deps = {}) {
     message: JSON.stringify({
       updated: installedFiles.length,
       skipped: toSkip.length,
+      manualIntegrationNeeded: manifest.pendingManualIntegration.length,
       revision: manifest.ldlSourceRevision,
       manifestPath: ".ldl/manifest.json",
     }),

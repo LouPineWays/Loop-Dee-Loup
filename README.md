@@ -59,7 +59,7 @@ It probably won't fit if you want heavyweight planning before any code is writte
    node tools/ldl-init/index.mjs --dest <path-to-your-project>
    ```
 
-3. If the project already has an `AGENTS.md`, LDL writes its derived contract to `.ldl/AGENTS.template.md` instead of overwriting your file. Review that template and merge it into `AGENTS.md` by hand before dispatching work. If the project didn't have an `AGENTS.md`, the installer creates one for you.
+3. LDL also installs `CLAUDE.md` — a few lines that `@AGENTS.md`-import the operating contract, so Claude Code loads it automatically at session start (Claude Code reads `CLAUDE.md` for project instructions, not `AGENTS.md`). If the project already has its own `AGENTS.md` and/or `CLAUDE.md`, LDL writes the corresponding derived content to `.ldl/AGENTS.template.md` and/or `.ldl/CLAUDE.template.md` instead of overwriting your file(s) — review and merge the relevant template(s) by hand before dispatching work. If the project had neither file, the installer creates both for you.
 
 4. Start Claude Code from inside the project and dispatch one issue:
 

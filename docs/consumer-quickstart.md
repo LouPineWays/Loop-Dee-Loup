@@ -39,10 +39,12 @@ repository):
 node <path-to-loop-dee-loup-clone>/tools/ldl-init/index.mjs --dest <path-to-your-project>
 ```
 
-This installs LDL's skills, personas, scripts, issue templates, and
-operating-model docs into your repository, and writes `.ldl/manifest.json`
-recording exactly what it installed. It is safe to run against an
-already-in-progress project, and safe to run again.
+This installs LDL's skills, personas, scripts, issue templates,
+operating-model docs, and the `AGENTS.md`/`CLAUDE.md` bridge that makes the
+operating contract active in a fresh Claude Code session (see step 4) into
+your repository, and writes `.ldl/manifest.json` recording exactly what it
+installed. It is safe to run against an already-in-progress project, and
+safe to run again.
 
 ## 3. What gets installed vs. what stays yours
 
@@ -59,21 +61,32 @@ build/test/verification commands — is untouched and remains yours. See
 
 Once installed, work from your own project repository, not from this one.
 
-If `tools/ldl-init` installed straight to `AGENTS.md` (you had none before),
-that file is already your operating contract and you can dispatch a session
-now.
+`tools/ldl-init` installs two files whose destination depends on whether you
+already owned a same-named file: `AGENTS.md` (the operating contract) and
+`CLAUDE.md` (a few lines that `@AGENTS.md`-import it, so a fresh Claude Code
+session loads the contract automatically at session start — Claude Code
+reads `CLAUDE.md` for project instructions, not `AGENTS.md`, so this bridge
+is what actually activates LDL rather than merely installing it). Each
+resolves independently:
 
-If you already had your own `AGENTS.md`, the derived contract was parked at
-`.ldl/AGENTS.template.md` instead of overwriting it. Review and merge that
-template into your own `AGENTS.md` by hand **before** dispatching any
-session — nothing rewrote your existing file for you, so a session started
-against the unmerged original runs under your prior instructions without
-LDL's execution rules. See `docs/consumer-contract.md` for why this file is
-handled differently from LDL's other managed paths.
+- If you had neither file, both installed straight to their own root paths
+  and you can dispatch a session now — it will already have the operating
+  contract active without you telling it to read anything.
+- If you already had your own `AGENTS.md` and/or `CLAUDE.md`, the derived
+  content for that file was parked at `.ldl/AGENTS.template.md` and/or
+  `.ldl/CLAUDE.template.md` instead of overwriting it. Review and merge the
+  relevant template(s) into your own file(s) by hand **before** dispatching
+  any session — nothing rewrote your existing file for you, so a session
+  started against the unmerged original runs under your prior instructions,
+  without LDL's execution rules loaded automatically. `.ldl/manifest.json`'s
+  `pendingManualIntegration` array lists exactly which file(s) still need
+  this. See `docs/consumer-contract.md`, "The AGENTS.md and CLAUDE.md
+  special case", for why these two files are handled differently from LDL's
+  other managed paths.
 
-Once your `AGENTS.md` reflects LDL's operating contract, start a fresh Claude
-Code session inside your project and dispatch one issue with a terse
-reference, for example:
+Once `pendingManualIntegration` is empty (or was empty from the start), start
+a fresh Claude Code session inside your project and dispatch one issue with a
+terse reference, for example:
 
 > Run Loop-Dee-Loup issue #12.
 

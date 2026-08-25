@@ -12,7 +12,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MANAGED_ITEMS, buildOps, deriveConsumerAgents, defaultResolveRevision, parseArgs, planInstall, run } from "./index.mjs";
+import { BRIDGE_FILES, MANAGED_ITEMS, buildOps, deriveConsumerAgents, defaultResolveRevision, parseArgs, planInstall, run } from "./index.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -57,6 +57,10 @@ function makeFixtureRoot(t) {
       "",
     ].join("\n"),
   );
+  writeFileSync(
+    join(root, "CLAUDE.md"),
+    ["# Claude Code instructions", "", "@AGENTS.md", "", "Repository-local Claude skills live under `.claude/skills/`.", ""].join("\n"),
+  );
   return root;
 }
 
@@ -66,10 +70,10 @@ function readManifest(dest) {
 
 function expectedOpCount() {
   // Two files per "dir" item (SKILL.md + extra.md) as fixed by makeFixtureRoot, one per
-  // "file" item, plus the derived AGENTS.md.
+  // "file" item, plus one per BRIDGE_FILES entry (AGENTS.md, CLAUDE.md).
   const dirs = MANAGED_ITEMS.filter((i) => i.kind === "dir").length;
   const files = MANAGED_ITEMS.filter((i) => i.kind === "file").length;
-  return dirs * 2 + files + 1;
+  return dirs * 2 + files + BRIDGE_FILES.length;
 }
 
 test("buildOps resolves every MANAGED_ITEMS path against the real repository", () => {
@@ -173,6 +177,79 @@ test("run: fresh install into an empty disposable dest installs every managed pa
   assert.ok(!installedAgents.includes("ldl:source-only"));
   assert.ok(installedAgents.includes("Generic rule that every consumer repository needs."));
   assert.ok(manifest.files.some((f) => f.dest === "AGENTS.md"));
+
+  const installedClaude = readFileSync(join(dest, "CLAUDE.md"), "utf8");
+  assert.ok(installedClaude.includes("@AGENTS.md"));
+  assert.ok(manifest.files.some((f) => f.dest === "CLAUDE.md"));
+  assert.deepEqual(manifest.pendingManualIntegration, []);
+});
+
+test("run: leaves a pre-existing unmanaged CLAUDE.md untouched and writes the derived template to .ldl/CLAUDE.template.md", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md\n");
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(readFileSync(join(dest, "CLAUDE.md"), "utf8"), "MY PROJECT'S OWN CLAUDE.md\n");
+  const template = readFileSync(join(dest, ".ldl", "CLAUDE.template.md"), "utf8");
+  assert.ok(template.includes("@AGENTS.md"));
+
+  const manifest = readManifest(dest);
+  assert.ok(!manifest.files.some((f) => f.dest === "CLAUDE.md"));
+  assert.ok(manifest.files.some((f) => f.dest === ".ldl/CLAUDE.template.md"));
+  assert.deepEqual(manifest.pendingManualIntegration, [
+    {
+      dest: "CLAUDE.md",
+      template: ".ldl/CLAUDE.template.md",
+      reason: "a pre-existing CLAUDE.md was not overwritten — merge .ldl/CLAUDE.template.md into it by hand to activate the LDL operating contract",
+    },
+  ]);
+});
+
+test("run: removes a superseded .ldl/CLAUDE.template.md once the consumer's own CLAUDE.md is gone and LDL starts managing CLAUDE.md directly", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md\n");
+
+  const first = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(first.exitCode, 0);
+  assert.ok(existsSync(join(dest, ".ldl", "CLAUDE.template.md")));
+  assert.equal(JSON.parse(first.message).manualIntegrationNeeded, 1);
+
+  rmSync(join(dest, "CLAUDE.md"));
+
+  const second = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(second.exitCode, 0);
+  assert.equal(JSON.parse(second.message).manualIntegrationNeeded, 0);
+  assert.ok(existsSync(join(dest, "CLAUDE.md")), "CLAUDE.md should now be LDL-managed");
+  assert.ok(!existsSync(join(dest, ".ldl", "CLAUDE.template.md")), "the superseded template must be removed, not left orphaned");
+  const manifest = readManifest(dest);
+  assert.ok(manifest.files.some((f) => f.dest === "CLAUDE.md"));
+  assert.ok(!manifest.files.some((f) => f.dest === ".ldl/CLAUDE.template.md"));
+  assert.deepEqual(manifest.pendingManualIntegration, []);
+});
+
+test("run: AGENTS.md and CLAUDE.md ownership resolve independently of each other", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  // Consumer already owns AGENTS.md but not CLAUDE.md.
+  writeFileSync(join(dest, "AGENTS.md"), "MY PROJECT'S OWN AGENTS.md\n");
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(readFileSync(join(dest, "AGENTS.md"), "utf8"), "MY PROJECT'S OWN AGENTS.md\n");
+  assert.ok(existsSync(join(dest, ".ldl", "AGENTS.template.md")));
+  assert.ok(existsSync(join(dest, "CLAUDE.md")), "CLAUDE.md has no pre-existing consumer file, so it installs straight to root");
+  assert.ok(!existsSync(join(dest, ".ldl", "CLAUDE.template.md")));
+
+  const manifest = readManifest(dest);
+  assert.ok(manifest.files.some((f) => f.dest === "CLAUDE.md"));
+  assert.ok(!manifest.files.some((f) => f.dest === "AGENTS.md"));
+  assert.equal(manifest.pendingManualIntegration.length, 1);
+  assert.equal(manifest.pendingManualIntegration[0].dest, "AGENTS.md");
 });
 
 test("run: is idempotent — re-running against an already-initialized dest reinstalls the same paths without duplication", async (t) => {
