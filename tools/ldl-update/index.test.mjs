@@ -60,6 +60,10 @@ function makeFixtureRoot(t, revisionTag) {
       "",
     ].join("\n"),
   );
+  writeFileSync(
+    join(root, "CLAUDE.md"),
+    ["# Claude Code instructions", "", "@AGENTS.md", "", `Repository-local Claude skills (${revisionTag}).`, ""].join("\n"),
+  );
   return root;
 }
 
@@ -276,6 +280,7 @@ test("run: rewritten manifest reflects the new revision and lists both updated a
     }
   }
   writeFileSync(join(rootV2, "AGENTS.md"), readFileSync(join(rootV1, "AGENTS.md")));
+  writeFileSync(join(rootV2, "CLAUDE.md"), readFileSync(join(rootV1, "CLAUDE.md")));
   // Now change exactly one managed file's content in rootV2.
   writeFileSync(join(rootV2, "docs", "operating-model.md"), "updated operating model content in rev-2\n");
 
@@ -411,6 +416,99 @@ test("run: an untouched superseded template is removed and dropped from the mani
   const manifest = readManifest(dest);
   assert.ok(manifest.files.some((f) => f.dest === "AGENTS.md"));
   assert.ok(!manifest.files.some((f) => f.dest === ".ldl/AGENTS.template.md"), "must not carry over a record for a file that was just deleted");
+});
+
+test("run: refuses to discard a locally edited .ldl/CLAUDE.template.md when it would otherwise be superseded", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md\n");
+  await bootstrap(dest, rootV1, "rev-1");
+  assert.ok(existsSync(join(dest, ".ldl", "CLAUDE.template.md")));
+
+  writeFileSync(join(dest, ".ldl", "CLAUDE.template.md"), "hand-edited template, not from LDL\n");
+  rmSync(join(dest, "CLAUDE.md"));
+  const beforeManifest = readManifest(dest);
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const result = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /CLAUDE\.template\.md/);
+  assert.match(result.message, /locally modified/);
+  assert.equal(readFileSync(join(dest, ".ldl", "CLAUDE.template.md"), "utf8"), "hand-edited template, not from LDL\n");
+  assert.equal(existsSync(join(dest, "CLAUDE.md")), false, "must not have installed CLAUDE.md either, since the whole run refused");
+  assert.deepEqual(readManifest(dest), beforeManifest);
+});
+
+test("run: an untouched superseded CLAUDE.template.md is removed and dropped from the manifest, and pendingManualIntegration clears", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md\n");
+  await bootstrap(dest, rootV1, "rev-1");
+  assert.equal(readManifest(dest).pendingManualIntegration.length, 1);
+  rmSync(join(dest, "CLAUDE.md"));
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const result = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(JSON.parse(result.message).manualIntegrationNeeded, 0);
+  assert.equal(existsSync(join(dest, ".ldl", "CLAUDE.template.md")), false);
+  const manifest = readManifest(dest);
+  assert.ok(manifest.files.some((f) => f.dest === "CLAUDE.md"));
+  assert.ok(!manifest.files.some((f) => f.dest === ".ldl/CLAUDE.template.md"));
+  assert.deepEqual(manifest.pendingManualIntegration, []);
+});
+
+test("run: a pre-existing consumer CLAUDE.md that stays unresolved across an otherwise no-op update keeps the run a true no-op", async (t) => {
+  const root = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md\n");
+  await bootstrap(dest, root, "rev-1");
+  const beforeManifest = readManifest(dest);
+  const beforeMtime = statSync(join(dest, ".ldl", "manifest.json")).mtimeMs;
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "rev-1" });
+
+  assert.equal(result.exitCode, 0);
+  const parsed = JSON.parse(result.message);
+  assert.equal(parsed.noop, true, "an unchanged pendingManualIntegration set must not defeat the no-op determination");
+  assert.equal(statSync(join(dest, ".ldl", "manifest.json")).mtimeMs, beforeMtime);
+  assert.deepEqual(readManifest(dest), beforeManifest);
+});
+
+test("run: a consumer who manually merges the parked template graduates the bridge to LDL-managed, clearing pendingManualIntegration", async (t) => {
+  // Stage 1 review finding on PR #131: before this fix, planBridgeOp always re-parked a
+  // consumer-owned bridge at its template on every run (since existingManifest never recorded
+  // it as managed), so the documented manual-merge path could never actually resolve
+  // pendingManualIntegration.
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+  await bootstrap(dest, rootV1, "rev-1");
+  assert.equal(readManifest(dest).pendingManualIntegration.length, 1);
+  const templateContent = readFileSync(join(dest, ".ldl", "CLAUDE.template.md"));
+
+  writeFileSync(join(dest, "CLAUDE.md"), templateContent);
+
+  const result = await run({ dest, root: rootV1 }, { resolveRevisionImpl: () => "rev-1" });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(JSON.parse(result.message).manualIntegrationNeeded, 0);
+  const manifest = readManifest(dest);
+  assert.ok(manifest.files.some((f) => f.dest === "CLAUDE.md"));
+  assert.deepEqual(manifest.pendingManualIntegration, []);
+  assert.ok(!existsSync(join(dest, ".ldl", "CLAUDE.template.md")));
+
+  // Now that CLAUDE.md is genuinely LDL-managed, a later hand-edit is a real conflict again —
+  // proving graduation activated the normal conflict-safety machinery for this file, rather
+  // than merely papering over the ownership question for one run.
+  writeFileSync(join(dest, "CLAUDE.md"), "hand-edited after graduation\n");
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const second = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+  assert.equal(second.exitCode, 1);
+  assert.match(second.message, /CLAUDE\.md/);
+  assert.match(second.message, /locally modified/);
 });
 
 test("run: a newly colliding unmanaged destination is recorded under skipped even when no managed file content changed", async (t) => {

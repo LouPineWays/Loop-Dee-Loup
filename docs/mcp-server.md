@@ -78,6 +78,7 @@ repository:
   "managedFileCount": 17,
   "skippedFileCount": 0,
   "conflicts": [],
+  "pendingManualIntegration": [],
   "next": "ldl_update"
 }
 ```
@@ -87,6 +88,15 @@ malformed or unreadable repository path (a bad path never fails the whole batch 
 repositories in the same call still resolve). If `repos` is omitted, the server falls back to
 the `LDL_CONSUMER_REPOS` environment variable: a `path.delimiter`-separated list (`;` on
 Windows, `:` elsewhere), read fresh on every call.
+
+`pendingManualIntegration` lists every bridge file (`AGENTS.md` and/or `CLAUDE.md` — see
+`docs/consumer-contract.md`, "The AGENTS.md and CLAUDE.md special case") this repository owns
+that is currently parked at its `.ldl/*.template.md` path awaiting a manual merge into a
+pre-existing consumer-owned file, each entry carrying `dest`, `template`, and `reason`. It is
+independent of `status`: a repository can be `current` while a bridge sits at its template
+indefinitely — that is expected steady state for a repository that already had its own
+`AGENTS.md`/`CLAUDE.md`, not a defect. Do not treat a non-empty `pendingManualIntegration` as
+"not yet installed"; treat it as "installed, but not yet active until merged by hand."
 
 ### `ldl_init`
 
@@ -111,6 +121,7 @@ what changed:
   "changedPaths": ["docs/operating-model.md", "tools/local-worker/adapter.mjs"],
   "skippedPaths": [],
   "conflicts": [],
+  "pendingManualIntegration": [],
   "noop": false
 }
 ```

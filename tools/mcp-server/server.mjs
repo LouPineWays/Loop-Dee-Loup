@@ -174,14 +174,13 @@ export function createServer({ root: rootOverride } = {}) {
         }
 
         const payload = JSON.parse(result.message);
-        // A previously LDL-managed .ldl/AGENTS.template.md that this update superseded (see
-        // tools/ldl-update/index.mjs's own supersedeTemplate handling) is a real deletion, not
-        // covered by `toInstall` — include it explicitly so changedPaths reflects every path
-        // the update actually touched, not just the ones planUpdate() itself installs.
+        // A previously LDL-managed bridge template (.ldl/AGENTS.template.md or
+        // .ldl/CLAUDE.template.md) that this update superseded (see tools/ldl-update/index.mjs's
+        // own supersededTemplates handling) is a real deletion, not covered by `toInstall` —
+        // include it explicitly so changedPaths reflects every path the update actually
+        // touched, not just the ones planUpdate() itself installs.
         const changedPaths =
-          before.kind === "plan"
-            ? [...before.toInstall.map((op) => op.destRel), ...(before.supersedeTemplate ? [".ldl/AGENTS.template.md"] : [])]
-            : [];
+          before.kind === "plan" ? [...before.toInstall.map((op) => op.destRel), ...before.supersededTemplates] : [];
         return textResult(
           {
             status: payload.noop ? "current" : "updated",
@@ -190,6 +189,7 @@ export function createServer({ root: rootOverride } = {}) {
             changedPaths,
             skippedPaths: before.kind === "plan" ? before.toSkip.map((s) => ({ dest: s.dest, reason: s.reason })) : [],
             conflicts: [],
+            pendingManualIntegration: before.kind === "plan" ? before.pendingManualIntegration : [],
             noop: Boolean(payload.noop),
           },
           false,

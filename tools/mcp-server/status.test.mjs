@@ -7,7 +7,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { MANAGED_ITEMS, run as ldlInit } from "../ldl-init/index.mjs";
@@ -48,6 +48,7 @@ function makeFixtureRoot(t, revisionTag) {
       "",
     ].join("\n"),
   );
+  writeFileSync(join(root, "CLAUDE.md"), `# Claude Code instructions\n\n@AGENTS.md\n\n(${revisionTag})\n`);
   return root;
 }
 
@@ -111,6 +112,41 @@ test("computeStatus: freshly bootstrapped repo against the same revision is curr
   assert.equal(result.next, "none");
   assert.deepEqual(result.conflicts, []);
   assert.ok(result.managedFileCount > 0);
+});
+
+test("computeStatus: a consumer-owned CLAUDE.md parked at a template is surfaced as pendingManualIntegration, without affecting current/outdated status", async (t) => {
+  const root = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md\n");
+  await bootstrap(dest, root, "rev-1");
+
+  const result = await computeStatus({ dest, root }, { resolveRevisionImpl: () => "rev-1" });
+  assert.equal(result.status, "current");
+  assert.equal(result.pendingManualIntegration.length, 1);
+  assert.equal(result.pendingManualIntegration[0].dest, "CLAUDE.md");
+  assert.equal(result.pendingManualIntegration[0].template, ".ldl/CLAUDE.template.md");
+});
+
+test("computeStatus: reports pendingManualIntegration freshly computed from the current bridge plan, not the on-disk manifest's own stale/absent field", async (t) => {
+  // Stage 1 review finding on PR #131: computeStatus previously read
+  // plan.parsedManifest.pendingManualIntegration (the *existing* manifest's own recorded
+  // value) instead of the freshly recomputed plan.pendingManualIntegration, so an older
+  // manifest predating this field entirely (or simply stale) would suppress the warning even
+  // though a bridge is genuinely parked at a template right now.
+  const root = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md\n");
+  await bootstrap(dest, root, "rev-1");
+
+  const manifestPath = join(dest, ".ldl", "manifest.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  assert.equal(manifest.pendingManualIntegration.length, 1, "sanity check: the manifest genuinely recorded the pending bridge");
+  delete manifest.pendingManualIntegration;
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+
+  const result = await computeStatus({ dest, root }, { resolveRevisionImpl: () => "rev-1" });
+  assert.equal(result.pendingManualIntegration.length, 1, "must recompute from the current bridge plan, not read the now-absent manifest field");
+  assert.equal(result.pendingManualIntegration[0].dest, "CLAUDE.md");
 });
 
 test("computeStatus: repo bootstrapped from an older revision is outdated", async (t) => {

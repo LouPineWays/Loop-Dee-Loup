@@ -31,8 +31,15 @@ Reusable engine/runtime material distributed from this repository:
   reference by name (e.g. `docs/bounded-review-cycle.md` Stage 2 names the
   `audit-control-issue` template directly), so a consumer repository can
   actually follow what its own installed documentation instructs it to do;
-- `AGENTS.md` — installed only as described under "The AGENTS.md special
-  case" below, since a consumer repository may already have its own.
+- `AGENTS.md` — installed only as described under "The AGENTS.md and
+  CLAUDE.md special case" below, since a consumer repository may already
+  have its own;
+- `CLAUDE.md` — the Claude Code project-instruction entry point that
+  imports `AGENTS.md` via `@AGENTS.md`, so a fresh Claude Code session has
+  the installed operating contract active from session start without a
+  manual `Read`. Installed only as described under "The AGENTS.md and
+  CLAUDE.md special case" below, for the same reason as `AGENTS.md`: a
+  consumer repository may already have its own `CLAUDE.md`.
 
 Nothing else in this repository is installed. In particular, `tools/burn-order/`,
 `docs/burn-order.md`, `docs/burn-order.json`, `docs/experiment-brief.md`,
@@ -114,7 +121,7 @@ entry in the newer revision) follows the same pre-existing-file rule as
 `tools/ldl-init`: it installs if the path is free, and is left alone and
 recorded under `skipped` if something unmanaged already occupies it.
 
-## The AGENTS.md special case
+## The AGENTS.md and CLAUDE.md special case
 
 Loop-Dee-Loup's own `AGENTS.md` contains a few sections specific to
 Loop-Dee-Loup's own development (its own Burn Order, its own prototype
@@ -125,16 +132,65 @@ vertical-slice rule, decomposition boundary, decision-form rule, session
 execution, bounded review cycle, and the operational-skills index — without
 Loop-Dee-Loup's own instance-specific state.
 
-- If the consumer repository has no `AGENTS.md` yet, the derived template is
-  installed at the repository root as `AGENTS.md`.
-- If the consumer repository already has an `AGENTS.md` that a prior
-  `tools/ldl-init` run did not itself install, that file is left completely
-  untouched, and the derived template is written instead to
-  `.ldl/AGENTS.template.md` for the project to review and merge in by hand.
+`AGENTS.md` alone is not enough to make that contract active in a fresh
+Claude Code session: Claude Code loads project instructions from `CLAUDE.md`,
+not `AGENTS.md`, so a consumer repository with an installed `AGENTS.md` but
+no `CLAUDE.md` has no durable, automatic bridge into a fresh session's
+context — a session only picks up the operating contract if something in
+the conversation happens to tell it to read `AGENTS.md` by hand. Loop-Dee-
+Loup's own root `CLAUDE.md` is therefore itself the source of the second
+managed bridge file: a few lines that import `AGENTS.md` with `@AGENTS.md`
+(a Claude Code memory-import: the referenced file's content is expanded into
+context at session start, without a tool-driven `Read`) plus the same
+skills-location note this repository's own copy carries. Copying that exact
+file into a consumer repository is what makes the installed operating
+contract active there from session start, not merely present on disk.
+
+`AGENTS.md` and `CLAUDE.md` share one ownership rule, applied independently
+to each file:
+
+- If the consumer repository has no file of that name yet, the derived
+  (`AGENTS.md`) or copied (`CLAUDE.md`) content is installed at the
+  repository root under that name.
+- If the consumer repository already has a same-named file that a prior
+  `tools/ldl-init`/`tools/ldl-update` run did not itself install, that file
+  is left completely untouched, and the derived/copied content is written
+  instead to `.ldl/AGENTS.template.md` / `.ldl/CLAUDE.template.md` for the
+  project to review and merge in by hand.
 
 This is the smallest explicit configuration surface consistent with the
 non-goal against rewriting a project's own `AGENTS.md` or `CLAUDE.md` merely
-to fit LDL.
+to fit LDL. It is also why `AGENTS.md` and `CLAUDE.md` are resolved
+separately from every other managed path in `tools/ldl-init/index.mjs`'s
+`BRIDGE_FILES` list rather than `MANAGED_ITEMS`: their destination depends on
+consumer repository state, not source repository state alone. Each of the
+two files resolves its own destination independently — a consumer that
+already owns `AGENTS.md` but not `CLAUDE.md` gets `AGENTS.md` parked at its
+template while `CLAUDE.md` installs straight to the root, and vice versa.
+
+### Unresolved manual integration is never presented as full activation
+
+Whenever a bridge file lands at its template path instead of its own root
+destination, that is a required manual step, not a completed install: a
+prior run genuinely could not make the operating contract active without a
+human merging the template in by hand. Every `tools/ldl-init` and
+`tools/ldl-update` run reports this explicitly rather than only leaving the
+template file on disk for someone to notice later:
+
+- `.ldl/manifest.json`'s `pendingManualIntegration` array (see "Provenance
+  manifest" below) records every bridge file currently parked at a template,
+  with the exact template path and a human-readable reason;
+- the CLI/MCP JSON result of every run reports a `manualIntegrationNeeded`
+  count alongside `installed`/`updated` and `skipped`;
+- `tools/mcp-server`'s `ldl_status` tool (see `docs/mcp-server.md`) surfaces
+  the same array as `pendingManualIntegration` per repository, independent of
+  whether that repository's sync status is `current`, `outdated`, or
+  `conflict` — a repository can be fully synchronized while a bridge sits at
+  its template indefinitely; that is expected steady state, not a defect.
+
+A repository with a non-empty `pendingManualIntegration` must not be treated
+as fully activated: activation is not complete until the corresponding
+template has been merged into the consumer-owned file it was parked next to.
 
 ## Provenance manifest
 
@@ -150,7 +206,10 @@ entirely and writes nothing:
   "ldlSourceRevision": "<git commit sha of the Loop-Dee-Loup clone used, or \"unknown\">",
   "installedAt": "<ISO-8601 timestamp of this run>",
   "files": [{ "dest": "<repo-relative path>", "sha256": "<hex digest>" }],
-  "skipped": [{ "dest": "<repo-relative path>", "reason": "<why it was left alone>" }]
+  "skipped": [{ "dest": "<repo-relative path>", "reason": "<why it was left alone>" }],
+  "pendingManualIntegration": [
+    { "dest": "<AGENTS.md or CLAUDE.md>", "template": "<its .ldl/*.template.md path>", "reason": "<why a human must merge it by hand>" }
+  ]
 }
 ```
 
@@ -168,7 +227,14 @@ read it without any conversation history to determine both the installed
 LDL revision and the installed-file manifest required by the bootstrap
 acceptance criteria. `skipped` records any destination path that already
 existed and was not itself LDL-managed, so a human can see what the
-bootstrap deliberately left alone.
+bootstrap deliberately left alone. `pendingManualIntegration` records every
+bridge file (`AGENTS.md` and/or `CLAUDE.md`) currently parked at its template
+path instead of its own root destination — see "The AGENTS.md and CLAUDE.md
+special case" above — so a fresh session can tell "installed and active"
+apart from "installed but still requires a manual merge" without
+reconstructing that history from conversation or from noticing the template
+file on disk. An empty array means every bridge file this repository owns is
+already installed at its own root destination.
 
 ## Safety and idempotency
 
@@ -183,11 +249,12 @@ bootstrap deliberately left alone.
   an existing plain file where a directory needs to be, that item is left
   alone and recorded under `skipped` instead of following the symlink
   outside the destination repository or crashing mid-install.
-- If a consumer's own `AGENTS.md` (the reason a prior run parked the
-  derived template at `.ldl/AGENTS.template.md` instead of installing to
-  `AGENTS.md`) is later removed, the next run installs straight to
-  `AGENTS.md` and deletes the now-superseded `.ldl/AGENTS.template.md`
-  rather than leaving it behind as an orphaned, unmanifested file.
+- If a consumer's own `AGENTS.md` or `CLAUDE.md` (the reason a prior run
+  parked that bridge file's derived/copied content at its template path
+  instead of installing to the file itself) is later removed, the next run
+  installs straight to that file and deletes the now-superseded template
+  rather than leaving it behind as an orphaned, unmanifested file, and drops
+  the corresponding entry from `pendingManualIntegration`.
 - Re-running the bootstrap against an already-initialized repository at the
   same Loop-Dee-Loup source revision reinstalls the same managed paths with
   identical content — a predictable no-op, not a duplicate or a corrupting
@@ -218,8 +285,13 @@ revision:
   or partially applying only the safe subset.
 - Consumer-owned material is never evaluated for conflicts and is never
   touched by an update, exactly as for a fresh bootstrap.
+- A bridge file's own superseded template (`.ldl/AGENTS.template.md` or
+  `.ldl/CLAUDE.template.md`) gets this exact same treatment: untouched since
+  install is safe to delete once superseded, a local edit is a conflict that
+  refuses the whole run rather than silently discarding it.
 - Running the update against an already-current repository (nothing to
-  install, nothing in conflict) is a predictable no-op: it does not touch
+  install, nothing in conflict, and no change to the `skipped` or
+  `pendingManualIntegration` sets) is a predictable no-op: it does not touch
   `.ldl/manifest.json` or any managed file at all.
 
 ## Explicitly out of scope for this mechanism
