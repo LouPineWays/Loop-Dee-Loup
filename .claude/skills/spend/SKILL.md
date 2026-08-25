@@ -33,8 +33,8 @@ telemetry establishes what happened, never whether it was good.
    If `measured.statusline_sample_count` is `0`, treat `cost_usd_total`, `context_window_size`,
    `last_context_used_percentage`, and `last_token_usage` as unavailable immediately and go
    straight to the `/usage`/`/context` fallback for them — do not spend a step probing session
-   logs to rediscover this; see `tools/telemetry/README.md`'s "Observed gap: statusLine has not
-   been seen to fire" for why this is a known, evidenced condition rather than a one-off.
+   logs to rediscover this; see `tools/telemetry/README.md`'s "statusLine's confirmed
+   non-interactive gap" for why this is a known, evidenced condition rather than a one-off.
 4. Separately, inspect the smallest necessary durable repository state — the active issue's
    acceptance criteria, PR state, review/audit verdicts — to determine what outcome the session
    actually validated. Telemetry never establishes this; do not infer it from commit count,

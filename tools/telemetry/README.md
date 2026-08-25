@@ -10,12 +10,14 @@ the measurement; `.claude/skills/spend/SKILL.md` performs the judgment on top of
 
 Two Claude Code entry points, wired in `.claude/settings.json`:
 
-- **`statusline.mjs`** — Claude Code's statusLine command. It's re-invoked on session start,
-  on each new assistant message, on `/compact` completion, and a few other local render
-  events — never on a model turn, so sampling it costs no API tokens. Its payload carries the
-  session's running cost, context-window usage, and identity. This script appends a compact
-  sample to the session's raw log **and** prints the actual status line text Claude Code
-  displays — both duties are required, since stdout here is not optional.
+- **`statusline.mjs`** — Claude Code's statusLine command. In an interactive `claude` terminal
+  session, it's re-invoked on session start, on each new assistant message, on `/compact`
+  completion, and a few other local render events — never on a model turn, so sampling it costs
+  no API tokens. Its payload carries the session's running cost, context-window usage, and
+  identity. This script appends a compact sample to the session's raw log **and** prints the
+  actual status line text Claude Code displays — both duties are required, since stdout here is
+  not optional. See "statusLine's confirmed non-interactive gap" below: this command has not
+  been observed to fire at all in this repository's actual (non-interactive) execution mode.
 - **`hook.mjs`** — a Claude Code hook, wired for `SessionStart`, `SessionEnd`, `PreCompact`,
   `PostCompact`, `SubagentStart`, and `SubagentStop`. Each firing appends one structural event
   (a boundary, a compaction, a subagent's identity and lifetime) to the same raw log. It never
@@ -26,7 +28,7 @@ Two Claude Code entry points, wired in `.claude/settings.json`:
 Both entry points share `collect.mjs`, which owns the on-disk shape and the privacy rule below,
 and never throw — a telemetry failure must never interrupt or slow down real session use.
 
-## statusLine confirmed not to fire in non-interactive/Agent-SDK sessions
+## statusLine's confirmed non-interactive gap
 
 PR #99 shipped `statusLine` wiring without a live confirmation that Claude Code actually
 invokes it (no interactive `claude` CLI was available in that session to test against the
@@ -47,22 +49,27 @@ rendering surface, not part of the Hooks system — while the Agent SDK / headle
 `.claude/settings.json`" but never mention `statusLine` anywhere on that page, despite covering
 hooks and settings behavior in detail.
 
-**Confirmed conclusion**: `statusLine` is architecturally scoped to interactive rendering
-surfaces (the plain interactive `claude` terminal, and presumably the desktop/web apps, which
-render an equivalent UI but haven't been dogfooded against this repository). It is not part of
-the Hooks system and is not invoked by headless/`-p`/Agent-SDK-driven execution — which is what
-every real session captured in this repository's telemetry to date has been. This is a known,
-documented Claude Code capability gap for non-interactive execution, not a defect in
-`statusline.mjs` or the `.claude/settings.json` wiring, and there is no hook-based substitute
-for statusLine's cost/context-window payload today.
+**Conclusion, scoped to what's actually verified**: in every real session this repository has
+captured — all of them running through whatever non-interactive/Agent-SDK-driven harness has
+executed Loop-Dee-Loup work to date — `statusLine` has never fired once, while `hook.mjs` fires
+reliably in the same sessions. `statusLine` is documented as an interactive-terminal rendering
+surface, not part of the Hooks system, and is absent from the Agent SDK / headless docs where
+hooks are explicitly covered — consistent with, but not a direct statement of, non-invocation
+in headless mode. This repository has not tested every Agent SDK/headless configuration or
+`claude -p` directly, so treat "statusLine doesn't fire outside an interactive terminal" as the
+best-supported explanation for the observed evidence, not an exhaustively verified claim about
+every non-interactive configuration. Either way, it is not a defect in `statusline.mjs` or the
+`.claude/settings.json` wiring — the script and wiring are independently confirmed correct (see
+above) — and there is no hook-based substitute for statusLine's cost/context-window payload
+today.
 
 Practical effect: `cost_usd_total`, `context_window_size`, `last_context_used_percentage`, and
-`last_token_usage` should be assumed unavailable whenever telemetry is collected from a
-non-interactive/Agent-SDK-driven session — see the `/spend` skill's evidence order, which
-checks `statusline_sample_count` before treating a session's cost/context fields as measured
-rather than falling straight back to `/usage`/`/context`. If this collector is ever run from a
-plain interactive `claude` terminal session, `statusline_sample` events should appear; that
-specific case remains undogfooded in this repository.
+`last_token_usage` should be assumed unavailable in this repository's normal execution mode —
+see the `/spend` skill's evidence order, which checks `statusline_sample_count` before treating
+a session's cost/context fields as measured rather than falling straight back to
+`/usage`/`/context`. If this collector is ever run from a plain interactive `claude` terminal
+session, `statusline_sample` events should appear; that specific case remains undogfooded in
+this repository.
 
 ## What it deliberately cannot measure
 
