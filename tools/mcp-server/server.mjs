@@ -190,6 +190,12 @@ export function createServer({ root: rootOverride } = {}) {
             skippedPaths: before.kind === "plan" ? before.toSkip.map((s) => ({ dest: s.dest, reason: s.reason })) : [],
             conflicts: [],
             pendingManualIntegration: before.kind === "plan" ? before.pendingManualIntegration : [],
+            // Sourced from the real run's own payload (not the pre-update `before` snapshot) so
+            // it reflects the actual outcome even in the degraded case where `before` itself
+            // failed to compute — see docs/consumer-contract.md, "Unresolved manual integration
+            // is never presented as full activation" (Stage 2 audit finding on PR #131: this
+            // count was previously dropped from the MCP ldl_update response entirely).
+            manualIntegrationNeeded: payload.manualIntegrationNeeded,
             noop: Boolean(payload.noop),
           },
           false,

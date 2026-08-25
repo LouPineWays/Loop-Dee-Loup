@@ -511,6 +511,45 @@ test("run: a consumer who manually merges the parked template graduates the brid
   assert.match(second.message, /locally modified/);
 });
 
+test("run: refuses the whole update, as a conflict, when a superseded bridge template was replaced by a symlink whose target content coincidentally matches the recorded hash", async (t) => {
+  // Stage 2 audit finding (P1) on PR #131: the template-supersession check compared on-disk
+  // content hash directly via existsSync/readFileSync, without the findUnsafeDestReason guard
+  // every other previously-managed destination gets — so a template path replaced by a symlink
+  // whose target happens to hash-match the recorded template hash was misclassified as safely
+  // superseded and removed, instead of refused as a conflict like any other tampered managed path.
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md\n");
+  await bootstrap(dest, rootV1, "rev-1");
+  const templatePath = join(dest, ".ldl", "CLAUDE.template.md");
+  assert.ok(existsSync(templatePath));
+  const templateContent = readFileSync(templatePath);
+
+  // Consumer removes their own CLAUDE.md (this run would otherwise supersede/delete the now-
+  // stale template), but first the template itself is replaced by a symlink to a different file
+  // whose content happens to hash-match the recorded template hash exactly.
+  rmSync(join(dest, "CLAUDE.md"));
+  const decoyPath = join(dest, "decoy-template-target.md");
+  writeFileSync(decoyPath, templateContent);
+  rmSync(templatePath);
+  try {
+    symlinkSync(decoyPath, templatePath, "file");
+  } catch (err) {
+    t.skip(`symlink creation not permitted in this environment: ${err.message}`);
+    return;
+  }
+  const beforeManifest = readManifest(dest);
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const result = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /CLAUDE\.template\.md/);
+  assert.match(result.message, /symlink/);
+  assert.equal(existsSync(decoyPath), true, "the symlink's target file must be untouched");
+  assert.deepEqual(readManifest(dest), beforeManifest, "nothing must have been written, including the manifest");
+});
+
 test("run: a newly colliding unmanaged destination is recorded under skipped even when no managed file content changed", async (t) => {
   const rootV1 = makeFixtureRoot(t, "rev-1");
   const dest = tempDir(t);
