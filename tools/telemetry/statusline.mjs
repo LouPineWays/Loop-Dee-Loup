@@ -2,11 +2,14 @@
 // Claude Code statusLine entry point for Loop-Dee-Loup's deterministic session telemetry
 // collector. Wired in .claude/settings.json's "statusLine" block.
 //
-// statusLine is re-invoked on session start, on each new assistant message, on /compact
-// completion, and on a few other local render events — never on a model turn itself, so
-// sampling it spends no API tokens. Its JSON payload carries the running session's cost,
-// context-window, and identity snapshot (see tools/telemetry/README.md for the fields this
-// script relies on and how it degrades when one is missing).
+// In an interactive `claude` terminal session, statusLine is re-invoked on session start, on
+// each new assistant message, on /compact completion, and on a few other local render events —
+// never on a model turn itself, so sampling it spends no API tokens. Its JSON payload carries
+// the running session's cost, context-window, and identity snapshot (see
+// tools/telemetry/README.md for the fields this script relies on and how it degrades when one
+// is missing). This command has not been observed to fire at all in this repository's actual
+// (non-interactive) execution mode — see "statusLine's confirmed non-interactive gap" in
+// tools/telemetry/README.md before assuming this script runs in your environment.
 //
 // This script has two jobs, both required by the statusLine contract: append a compact,
 // privacy-minimal sample to the firing session's raw telemetry log, AND print a short
