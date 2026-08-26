@@ -60,6 +60,7 @@ function countBy(items, keyFn) {
 export function reduceEvents(events) {
   const hookEvents = events.filter((e) => e && e.kind === "hook");
   const samples = events.filter((e) => e && e.kind === "statusline_sample");
+  const transcriptUsageSamples = events.filter((e) => e && e.kind === "transcript_usage");
 
   const sessionStart = hookEvents.find((e) => e.event === "SessionStart") ?? null;
   const sessionEndCandidates = hookEvents.filter((e) => e.event === "SessionEnd");
@@ -70,7 +71,14 @@ export function reduceEvents(events) {
   const subagentStops = hookEvents.filter((e) => e.event === "SubagentStop");
 
   const lastSample = samples.length > 0 ? samples[samples.length - 1] : null;
-  const sessionId = firstNonNull([sessionStart?.session_id, sessionEnd?.session_id, lastSample?.session_id, events[0]?.session_id]);
+  const lastTranscriptUsage = transcriptUsageSamples.length > 0 ? transcriptUsageSamples[transcriptUsageSamples.length - 1] : null;
+  const sessionId = firstNonNull([
+    sessionStart?.session_id,
+    sessionEnd?.session_id,
+    lastSample?.session_id,
+    lastTranscriptUsage?.session_id,
+    events[0]?.session_id,
+  ]);
 
   const identity = {
     session_id: sessionId,
@@ -104,7 +112,24 @@ export function reduceEvents(events) {
       .map((c) => ({ event: c.event, trigger: c.trigger ?? null, ts: c.ts })),
     subagent_start_events: subagentStarts.map((s) => ({ agent_id: s.agent_id ?? null, agent_type: s.agent_type ?? null, ts: s.ts })),
     subagent_stop_events: subagentStops.map((s) => ({ agent_id: s.agent_id ?? null, agent_type: s.agent_type ?? null, ts: s.ts })),
+    // Recovered from the session's own transcript (see transcript.mjs) — the mechanism
+    // that works in this repository's normal non-interactive execution mode, unlike the
+    // statusLine-derived fields above. null (not zero) when no transcript_usage event
+    // ever landed, e.g. the session crashed before SessionEnd/PreCompact fired, or ran on
+    // a Claude Code build too old to expose transcript_path in its hook payloads.
+    token_usage_main_total: lastTranscriptUsage?.main?.total ?? null,
+    token_usage_main_by_model: lastTranscriptUsage?.main?.by_model ?? null,
+    token_usage_subagent_total: lastTranscriptUsage?.subagents?.total ?? null,
+    token_usage_subagent_by_agent_type: lastTranscriptUsage?.subagents?.by_agent_type ?? null,
+    token_usage_subagent_count: lastTranscriptUsage?.subagents?.agent_count ?? null,
+    transcript_usage_sample_count: transcriptUsageSamples.length,
   };
+
+  const tokenFieldSum = (totals) =>
+    totals ? totals.input_tokens + totals.output_tokens + totals.cache_creation_input_tokens + totals.cache_read_input_tokens : null;
+  const mainTokenSum = tokenFieldSum(measured.token_usage_main_total);
+  const subagentTokenSum = tokenFieldSum(measured.token_usage_subagent_total);
+  const tokenGrandTotal = mainTokenSum !== null && subagentTokenSum !== null ? mainTokenSum + subagentTokenSum : null;
 
   const derived = {
     session_wall_duration_ms:
@@ -114,6 +139,10 @@ export function reduceEvents(events) {
     subagent_type_counts: countBy(subagentStarts, (s) => (s.agent_type && s.agent_type.trim()) || "unknown"),
     peak_context_used_percentage: usedPctSamples.length > 0 ? Math.max(...usedPctSamples) : null,
     cost_usd_peak: costUsdSamples.length > 0 ? Math.max(...costUsdSamples) : null,
+    // Plain arithmetic over the transcript-derived totals above — never a judgment about
+    // whether the split was appropriate. That's .claude/skills/spend's job.
+    token_usage_grand_total: tokenGrandTotal,
+    token_usage_main_share_of_total: tokenGrandTotal !== null && tokenGrandTotal > 0 ? mainTokenSum / tokenGrandTotal : null,
   };
 
   // Named structurally, not inferred from what happens to be null this run: these are
@@ -121,7 +150,11 @@ export function reduceEvents(events) {
   // log is, per issue #45's "a field that cannot be measured reliably must remain unknown
   // rather than being estimated with false precision."
   const unknown = [
-    "per_subagent_or_per_skill_token_or_cost_attribution",
+    // No Claude Code interface this collector uses exposes a skill-invocation boundary
+    // (unlike the Task/Agent tool, which the transcript's subagent files structurally
+    // separate) — so per-skill token/cost attribution is unavailable regardless of
+    // whether transcript_usage landed this session.
+    "per_skill_token_or_cost_attribution",
     "input_output_cache_token_breakdown_by_individual_turn",
     "monetary_cost_breakdown_by_model_when_multiple_models_used_in_one_session",
     "rate_limit_consumption",
@@ -135,6 +168,13 @@ export function reduceEvents(events) {
   if (measured.last_token_usage === null) unknown.push("token_usage");
   if (!sessionStart) unknown.push("session_start_ts");
   if (!sessionEnd) unknown.push("session_end_ts", "session_wall_duration_ms");
+  // Transcript-derived evidence is a separate mechanism from statusLine's samples and can
+  // be absent even when statusLine data exists (or vice versa) — gate it on its own event
+  // count, not on the statusLine-based checks above. When a transcript_usage event did
+  // land but no subagents ran, subagent totals are legitimately zero, not unmeasured.
+  if (transcriptUsageSamples.length === 0) {
+    unknown.push("token_usage_main_total", "token_usage_subagent_total", "token_usage_grand_total");
+  }
 
   return { measured, derived, unknown };
 }

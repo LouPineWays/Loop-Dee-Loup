@@ -6,6 +6,14 @@
 // Reads the hook's JSON payload from stdin, appends one compact, privacy-minimal event
 // line to the firing session's raw telemetry log (see collect.mjs), and exits 0.
 //
+// On SessionEnd and PreCompact, additionally reads the session's own transcript (via the
+// payload's transcript_path — never persisted) to recover deterministic token-economic
+// evidence statusLine cannot supply in this repository's normal execution mode. See
+// transcript.mjs and "statusLine's confirmed non-interactive gap" in
+// tools/telemetry/README.md. PreCompact is included, not just SessionEnd, so a session
+// that crashes after a compaction still leaves its last-known token totals behind, the
+// same incremental-sample philosophy statusLine's own hook already uses.
+//
 // Deliberately never writes to stdout: a SessionStart hook's stdout is injected straight
 // into the live session's context, and every other event's stdout is simply discarded —
 // so any output here would either spend tokens for no telemetry benefit or do nothing.
@@ -20,6 +28,9 @@
 
 import { pathToFileURL } from "node:url";
 import { readStdinJson, appendEvent, extractIdentity } from "./collect.mjs";
+import { collectTranscriptUsage } from "./transcript.mjs";
+
+const TRANSCRIPT_USAGE_EVENTS = new Set(["SessionEnd", "PreCompact"]);
 
 export function buildEvent(payload) {
   if (!payload || typeof payload.hook_event_name !== "string") return null;
@@ -43,11 +54,37 @@ export function buildEvent(payload) {
   return event;
 }
 
+// Builds the companion transcript_usage event for a SessionEnd/PreCompact firing, or null
+// when the event type doesn't warrant one, no transcript_path was supplied, or the
+// transcript couldn't be read (nothing measured). transcript_path itself is read here and
+// then discarded — it is never copied onto the returned event. Pure and side-effect-free
+// (aside from the filesystem read inside collectTranscriptUsage) so it's directly testable.
+export function buildTranscriptUsageEvent(payload, baseEvent) {
+  if (!baseEvent || !TRANSCRIPT_USAGE_EVENTS.has(baseEvent.event)) return null;
+  if (typeof payload?.transcript_path !== "string" || !payload.transcript_path) return null;
+  const usage = collectTranscriptUsage(payload.transcript_path);
+  if (!usage) return null;
+  return {
+    kind: "transcript_usage",
+    event: baseEvent.event,
+    ts: new Date().toISOString(),
+    session_id: baseEvent.session_id,
+    repo: baseEvent.repo,
+    cwd_basename: baseEvent.cwd_basename,
+    main: usage.main,
+    subagents: usage.subagents,
+  };
+}
+
 function main() {
   try {
     const payload = readStdinJson();
     const event = buildEvent(payload);
-    if (event) appendEvent(event.session_id, event);
+    if (event) {
+      appendEvent(event.session_id, event);
+      const usageEvent = buildTranscriptUsageEvent(payload, event);
+      if (usageEvent) appendEvent(usageEvent.session_id, usageEvent);
+    }
   } catch {
     // Deliberately swallowed — see header comment.
   }
