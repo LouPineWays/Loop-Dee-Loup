@@ -9,6 +9,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -295,6 +296,35 @@ test("run: a real content edit surviving under CRLF is still a conflict, not sil
   assert.match(result.message, /docs\/operating-model\.md/);
   assert.match(result.message, /locally modified/);
   assert.equal(readFileSync(managedPath, "utf8"), "hand-edited by the consumer, then checked out with CRLF\r\nsecond line\r\n");
+});
+
+test("run: a legacy manifest hash recorded from pre-normalization CRLF content does not become a false conflict against a genuine upstream update (Codex P2 finding on PR #147)", async (t) => {
+  // Simulates a manifest written by a pre-#146 install whose own buildOps() read+wrote
+  // unnormalized CRLF source bytes (this repository's own working tree, checked out with
+  // core.autocrlf=true, was exactly this case). The file on disk today is the correct LF
+  // content that was genuinely installed, but the *recorded* hash reflects the CRLF-bytes
+  // variant that pre-fix run actually hashed — a real cross-platform/history case, distinct
+  // from a live checkout-only CRLF difference (covered by the tests above), since here the
+  // representation mismatch is baked into stale provenance rather than live on-disk bytes.
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, rootV1, "rev-1");
+
+  const managedPath = join(dest, "docs", "operating-model.md");
+  const lfContent = readFileSync(managedPath, "utf8");
+  const legacyCrlfHash = createHash("sha256")
+    .update(Buffer.from(lfContent.replace(/\n/g, "\r\n"), "utf8"))
+    .digest("hex");
+  const manifestPath = join(dest, ".ldl", "manifest.json");
+  const manifest = readManifest(dest);
+  manifest.files.find((f) => f.dest === "docs/operating-model.md").sha256 = legacyCrlfHash;
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const result = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+
+  assert.equal(result.exitCode, 0, `expected a clean update, got: ${result.message}`);
+  assert.ok(readFileSync(managedPath, "utf8").includes("rev-2"));
 });
 
 test("run: never overwrites a pre-existing unmanaged file that happens to collide with a newly managed destination", async (t) => {

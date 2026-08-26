@@ -193,13 +193,21 @@ apply stale, already-loaded transformation logic to fresh source content and sti
 fresh revision as if the two were coherent (issue #146).
 
 To prevent that, this server fingerprints the on-disk bytes of every file that determines its
-own synchronization/derivation behavior once, at server-construction time, and re-checks that
-same fingerprint before every tool call — see `tools/mcp-server/staleness.mjs`. If the
-fingerprint has changed, every tool (including the read-only `ldl_status`) refuses with a
-compact error explaining that the server process is stale and must be restarted, rather than
-silently producing output that mixes old code with new provenance. This is automatic: nothing
-about it requires remembering to restart the server after every LDL change, only noticing the
-one time an operation is actually attempted against a checkout that moved underneath it.
+own synchronization/derivation behavior — see `tools/mcp-server/staleness.mjs`, which includes
+itself in that list, so a fix to this very guard is covered by the guard. A root is trusted
+the first time this process ever operates against it (there is no earlier signal to compare
+against), and every later call against that same root is checked against that baseline —
+covering both the server's own default backing checkout and any different checkout a caller
+explicitly selects via the per-call `root` argument, since either can drift while this process
+keeps running. The check runs once per tool call and, for the two consumer-mutating tools
+(`ldl_init`/`ldl_update`), a second time immediately before the actual write — narrowing the
+window in which the checkout could change between the read-heavy planning phase and the
+mutation itself. Once the fingerprint has changed, every tool (including the read-only
+`ldl_status`) refuses with a compact error explaining that the server process is stale and
+must be restarted, rather than silently producing output that mixes old code with new
+provenance. This is automatic: nothing about it requires remembering to restart the server
+after every LDL change, only noticing the one time an operation is actually attempted against
+a checkout that moved underneath it.
 
 `LDL_MCP_ROOT` (an environment variable, not a tool argument) overrides which checkout this
 server treats as its own backing checkout for this fingerprint — real deployments never need

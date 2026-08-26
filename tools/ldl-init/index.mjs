@@ -281,20 +281,28 @@ export function normalizeLineEndings(buffer) {
 }
 
 // True when currentBuf's content matches `hash` either byte-for-byte or, for text content,
-// after canonicalizing CRLF/CR to LF via normalizeLineEndings (issue #146). Applied
+// under either line-ending representation via normalizeLineEndings (issue #146). Applied
 // everywhere previously-managed content — a managed file, a superseded bridge template, or a
 // consumer-owned bridge root file being checked for the "already matches the target" bridge
 // graduation case in planBridgeOp() below — is compared against a recorded or target hash, so
 // a checkout-only line-ending difference (e.g. a consumer's own core.autocrlf converting an
 // LF-installed file to CRLF on checkout) is never mistaken for a local edit or a missed
-// update, while a genuine content edit still fails every comparison. Exported so
-// tools/ldl-update's planUpdate()/run() and tools/mcp-server/status.mjs's read-only mirror of
-// the template-supersession check all apply this exact same tolerance, rather than
-// independent implementations that could silently drift out of sync.
+// update, while a genuine content edit still fails every comparison. Checks the CRLF form of
+// the normalized content too, not only the LF form, because `hash` itself may have been
+// recorded by a pre-#146 run whose own buildOps() read unnormalized CRLF source bytes (Codex
+// P2 finding on PR #147) — without this, a consumer who later normalizes their own checkout
+// to LF (independent of any LDL run) would see that legacy CRLF-based provenance hash as an
+// unresolvable mismatch, a false conflict this issue's "no manual migration" acceptance
+// criterion forbids. Exported so tools/ldl-update's planUpdate()/run() and
+// tools/mcp-server/status.mjs's read-only mirror of the template-supersession check all apply
+// this exact same tolerance, rather than independent implementations that could drift.
 export function contentMatchesHash(currentBuf, hash) {
   if (sha256(currentBuf) === hash) return true;
   if (looksBinary(currentBuf)) return false;
-  return sha256(normalizeLineEndings(currentBuf)) === hash;
+  const lf = normalizeLineEndings(currentBuf);
+  if (sha256(lf) === hash) return true;
+  const crlf = Buffer.from(lf.toString("utf8").replace(/\n/g, "\r\n"), "utf8");
+  return sha256(crlf) === hash;
 }
 
 // Recursively lists files under absDir as "/"-joined paths relative to absDir, regardless

@@ -36,6 +36,12 @@ export const IMPLEMENTATION_FILES = [
   "tools/mcp-server/status.mjs",
   "tools/mcp-server/config.mjs",
   "tools/mcp-server/server.mjs",
+  // This module itself (Codex P2 finding on PR #147): a revision that changes only the
+  // guard's own algorithm or tracked-file set would otherwise leave every other fingerprinted
+  // byte unchanged, so an already-running process would keep accepting calls under its old
+  // guard behavior while resolving and reporting the new checkout's revision — exactly the
+  // hazard this list exists to catch, just applied to a fix for itself.
+  "tools/mcp-server/staleness.mjs",
 ];
 
 // Hashes IMPLEMENTATION_FILES' current on-disk content together into one deterministic

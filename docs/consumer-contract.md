@@ -225,7 +225,12 @@ A `files[].sha256` recorded by a version of `tools/ldl-init`/`tools/ldl-update` 
 predates the checkout-line-ending tolerance described under "Conflict-safe updates" below
 needs no migration: the comparison itself, not the stored hash, is what changed, so an
 existing consumer moves through the corrected status/update path exactly as before —
-no manual line-ending conversion, manifest hash editing, or reinitialization required.
+no manual line-ending conversion, manifest hash editing, or reinitialization required. This
+holds even for a hash that was itself recorded from unnormalized CRLF source bytes by a
+pre-fix run (e.g. one run from a Windows Loop-Dee-Loup checkout before this tolerance
+existed): the comparison checks a managed file's content under both line-ending
+representations against a recorded or target hash either way, so that legacy provenance is
+still recognized rather than becoming an unresolvable false conflict.
 
 `files` is the durable, machine-readable record of exactly which paths in
 the consumer repository are LDL-managed — a fresh coding-agent session can
