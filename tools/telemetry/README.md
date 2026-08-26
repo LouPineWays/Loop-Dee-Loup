@@ -190,6 +190,12 @@ snapshot), and `monetary_cost_by_model` is currently always `INSUFFICIENT` (`mea
 cost_usd_by_model` is always `null` — no local pricing table). `assessSufficiency()` is exported
 as a pure function; see `sufficiency.test.mjs` for the #120 regression case.
 
+This script is source-repository-only — `tools/ldl-init` does not distribute `tools/telemetry/`
+to consumer repositories (see `docs/consumer-contract.md`). An installed consumer's `spend`
+skill checks for this file's absence and applies a fixed per-claim fallback mapping instead
+(`.claude/skills/spend/SKILL.md`'s "Evidence-sufficiency verdicts" section), never skipping the
+verdict or promoting it to CLEAN merely because this script is unavailable there (issue #152).
+
 ## Tests
 
 ```

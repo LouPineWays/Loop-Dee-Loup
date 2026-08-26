@@ -54,7 +54,11 @@ machinery in principle — but issue #45 scoped their delivery to this repositor
 `tools/ldl-init` does not currently install either one. A consumer repository's installed
 `spend` skill degrades to its `/usage`/`/context` fallback when `tools/telemetry/` is
 absent, so this gap does not break an installed consumer repository; it only means that
-repository is not yet collecting the deterministic evidence `spend` prefers. Extending
+repository is not yet collecting the deterministic evidence `spend` prefers. This covers
+both individual measured fields (the skill's evidence-order step 3) and the
+evidence-sufficiency verdict gate itself: when `tools/telemetry/sufficiency.mjs` is absent,
+the skill's "Evidence-sufficiency verdicts" section applies a fixed fallback mapping per claim
+type instead of skipping the verdict or promoting it to CLEAN (see issue #152). Extending
 `tools/ldl-init`'s manifest to install `tools/telemetry/` and a merge-safe
 `.claude/settings.json` is unstarted follow-on work, not part of issue #45.
 
