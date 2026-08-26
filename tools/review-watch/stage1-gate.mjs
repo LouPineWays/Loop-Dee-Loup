@@ -44,11 +44,36 @@ import { findExistingTrigger } from "./trigger.mjs";
 // e.g. "Stage 1 exemption: docs typo fix, not review-worthy per Entry check." Matched
 // against the durable PR body (not a comment, not conversation memory) so a fresh session
 // re-running this gate sees the same judgment without reconstructing it.
-const EXEMPTION_PATTERN = /^Stage 1 exemption:\s*(.+)$/im;
+// [ \t]*, not \s*, after the label: \s matches newlines too, so \s* would let an empty
+// "Stage 1 exemption:" line swallow the following line of ordinary description text as
+// the "reason", accepting a malformed marker as a justified exemption. Restricting to
+// horizontal whitespace forces the reason onto the marker's own line.
+const EXEMPTION_PATTERN = /^Stage 1 exemption:[ \t]*(.+)$/im;
 
 export function findExemption(body) {
   const match = EXEMPTION_PATTERN.exec(body ?? "");
   return match ? match[1].trim() : null;
+}
+
+// A response from the bot login is not automatically a genuine review, per AGENTS.md's
+// Code Review Rules: a reply of "BLOCKED", or one where a mutation attempt (edit/commit/
+// push/PR update) was refused for lacking write permission, is a violated reviewer-role
+// boundary — docs/bounded-review-cycle.md's own Stage 1 step 3 and Stage 2 step 10 both
+// require retrying that the same way as no reply at all, never treating it as satisfied.
+// findAllMatches (poll.mjs) only checks login and timestamp, so without this filter any
+// such reply would silently open the gate. Matched against the truncated body_excerpt
+// findAllMatches already returns, which is long enough to catch a leading status word or
+// an early permission-denial sentence.
+const NON_GENUINE_PATTERNS = [
+  /^\s*BLOCKED\b/i,
+  /\b(?:do not|don't|cannot|can't) have (?:write |repository |branch )?(?:access|permission)/i,
+  /\binsufficient (?:write |repository )?permission/i,
+  /\b(?:not permitted|not authorized) to (?:modify|commit|push|edit)/i,
+];
+
+export function isGenuineResponse(bodyExcerpt) {
+  const text = bodyExcerpt ?? "";
+  return !NON_GENUINE_PATTERNS.some((re) => re.test(text));
 }
 
 export function parseArgs(argv) {
@@ -122,11 +147,13 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPrViewImpl = defau
     matches.push(...findAllMatches(items, { bot, sinceMs, endpointName: endpoint.name }));
   }
 
-  if (matches.length === 0) {
-    return { exitCode: 2, state: "PENDING", triggerTimestamp: trigger.created_at };
+  const genuineMatches = matches.filter((m) => isGenuineResponse(m.body_excerpt));
+
+  if (genuineMatches.length === 0) {
+    return { exitCode: 2, state: "PENDING", triggerTimestamp: trigger.created_at, nonGenuineMatches: matches };
   }
 
-  return { exitCode: 0, state: "RESPONSE_RECEIVED", triggerTimestamp: trigger.created_at, matches };
+  return { exitCode: 0, state: "RESPONSE_RECEIVED", triggerTimestamp: trigger.created_at, matches: genuineMatches };
 }
 
 function defaultGhApi(path) {

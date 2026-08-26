@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { findExemption, parseArgs, run } from "./stage1-gate.mjs";
+import { findExemption, isGenuineResponse, parseArgs, run } from "./stage1-gate.mjs";
 import { triggerCommentBody } from "./trigger.mjs";
 
 test("findExemption: matches the documented 'Stage 1 exemption:' line", () => {
@@ -23,6 +23,32 @@ test("findExemption: returns null for an empty/undefined body", () => {
 
 test("findExemption: is case-insensitive on the label", () => {
   assert.equal(findExemption("stage 1 EXEMPTION: reason here"), "reason here");
+});
+
+test("findExemption: an empty marker line does not let the next line of description become the reason (Stage 1 review finding)", () => {
+  const body = "Stage 1 exemption:\nThis PR touches the payments integration and needs review.";
+  assert.equal(
+    findExemption(body),
+    null,
+    "a bare 'Stage 1 exemption:' line with nothing after it on that line must not swallow the following description line as the reason",
+  );
+});
+
+test("findExemption: still matches when trailing spaces precede the reason on the same line", () => {
+  assert.equal(findExemption("Stage 1 exemption:   trivial rename, not review-worthy"), "trivial rename, not review-worthy");
+});
+
+test("isGenuineResponse: rejects a leading BLOCKED reply", () => {
+  assert.equal(isGenuineResponse("BLOCKED — cannot review, missing context."), false);
+});
+
+test("isGenuineResponse: rejects a blocked-mutation-attempt reply", () => {
+  assert.equal(isGenuineResponse("I attempted to push a fix but do not have write access to this repository."), false);
+  assert.equal(isGenuineResponse("Insufficient permission to commit changes."), false);
+});
+
+test("isGenuineResponse: accepts an ordinary review reply", () => {
+  assert.equal(isGenuineResponse("Reviewed the diff. No issues found."), true);
 });
 
 test("parseArgs: reads flags and defaults the bot login", () => {
@@ -179,6 +205,65 @@ test("run: RESPONSE_RECEIVED — a genuine response on the pull-reviews endpoint
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "RESPONSE_RECEIVED");
   assert.equal(result.matches[0].endpoint, "pull-reviews");
+});
+
+test("run: PENDING — a BLOCKED reply does not open the gate (Stage 1 review finding)", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
+            {
+              id: 2,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "BLOCKED — insufficient repository permission to inspect the PR.",
+              created_at: "2026-08-23T13:05:00Z",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "PENDING");
+  assert.equal(result.nonGenuineMatches.length, 1);
+});
+
+test("run: RESPONSE_RECEIVED — a genuine reply after an earlier BLOCKED one still opens the gate", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
+            {
+              id: 2,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "BLOCKED — insufficient repository permission.",
+              created_at: "2026-08-23T13:05:00Z",
+            },
+            {
+              id: 3,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "Reviewed after retry. No issues found.",
+              created_at: "2026-08-23T13:20:00Z",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "RESPONSE_RECEIVED");
+  assert.equal(result.matches.length, 1);
+  assert.equal(result.matches[0].id, 3);
 });
 
 test("run: surfaces a gh pr view failure as exit 1", async () => {
