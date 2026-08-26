@@ -71,8 +71,31 @@ const NON_GENUINE_PATTERNS = [
   /\b(?:not permitted|not authorized) to (?:modify|commit|push|edit)/i,
 ];
 
+// Stage 2 audit finding on issue #141 (LDL#135's own correction cycle): a Codex Cloud
+// environment misconfiguration produces this exact reply — "To use Codex here, create an
+// environment for this repo." — from the bot login within seconds of the trigger. It is a
+// setup prompt, not a review; NON_GENUINE_PATTERNS' BLOCKED/permission phrasing didn't
+// catch it, letting it through as RESPONSE_RECEIVED and defeating the gate's whole
+// fail-closed purpose whenever Codex Cloud lacks an environment for the repository.
+//
+// A first fix (three independent OR'd patterns, one per phrase/URL fragment) was itself
+// flagged on this correction PR's own Stage 1 review: this repository's diffs necessarily
+// discuss these exact strings (this very file, its tests, this comment), so any one
+// fragment matching anywhere in a genuine, unrelated review — e.g. one that legitimately
+// reports the settings URL as stale — would misclassify that whole review as non-genuine
+// and leave the gate wrongly PENDING. Requiring both signals together, anchored to the
+// start of the message rather than matched anywhere in it, keeps the exact known setup
+// reply caught (it is short — the whole thing fits in body_excerpt's 200 chars, unlike
+// every genuine response observed so far, which opens with a review/finding header) while
+// no longer rejecting a genuine review merely for mentioning the phrase or URL in passing.
+function isCodexCloudSetupPrompt(text) {
+  const normalized = (text ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+  return normalized.startsWith("to use codex here") && normalized.includes("create an environment for this repo");
+}
+
 export function isGenuineResponse(bodyExcerpt) {
   const text = bodyExcerpt ?? "";
+  if (isCodexCloudSetupPrompt(text)) return false;
   return !NON_GENUINE_PATTERNS.some((re) => re.test(text));
 }
 
