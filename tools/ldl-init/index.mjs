@@ -224,7 +224,13 @@ export function deriveConsumerAgents(sourceText) {
   // 3+ *consecutive* "\n") silently fails to fire, since each "\n" here is separated by a
   // "\r" rather than adjacent to the next one — producing the exact stray-blank-line
   // regression this issue exists to prevent, independent of the MCP process-coherence bug.
-  sourceText = sourceText.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  // Routed through the shared normalizeLineEndings primitive (Stage 2 audit finding on PR
+  // #147, issue #146) rather than a second inline copy of the same CRLF/CR-to-LF transform,
+  // so the two never independently drift — normalizeLineEndings is Buffer-in/Buffer-out, so
+  // sourceText round-trips through a Buffer here and stays a string everywhere below, which
+  // this function's own "pure string transform" contract (see the comment above it) depends
+  // on for its `.indexOf`/`.slice` calls.
+  sourceText = normalizeLineEndings(Buffer.from(sourceText, "utf8")).toString("utf8");
   let result = "";
   let cursor = 0;
   for (;;) {
