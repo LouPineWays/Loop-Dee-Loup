@@ -48,7 +48,7 @@ test("collectTranscriptUsage sums a single-model session and dedupes repeated st
       message_count: 2,
     });
     assert.deepEqual(result.main.by_model["claude-sonnet-5"], result.main.total);
-    assert.deepEqual(result.subagents, { total: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 0 }, by_agent_type: {}, agent_count: 0 });
+    assert.deepEqual(result.subagents, { total: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 0 }, by_agent_type: {}, by_model: {}, agent_count: 0 });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -204,6 +204,62 @@ test("collectTranscriptUsage reports subagents as null (not a partial total/agen
 
     const result = collectTranscriptUsage(transcriptPath);
     assert.equal(result.subagents, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("collectTranscriptUsage's by_model and by_agent_type accumulators survive a model/agentType literally named 'constructor' or '__proto__'", () => {
+  // Regression test (review of #139/PR #144): a plain {} accumulator resolves an
+  // inherited Object.prototype property for these keys instead of creating a real bucket,
+  // silently corrupting attribution while the overall total still looks valid.
+  const dir = mkdtempSync(join(tmpdir(), "ldl-transcript-test-"));
+  try {
+    const sessionId = "s-proto";
+    const transcriptPath = join(dir, `${sessionId}.jsonl`);
+    const usage1 = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+    const usage2 = { input_tokens: 2, output_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+    writeFileSync(
+      transcriptPath,
+      [
+        assistantLine({ id: "m1", model: "constructor", usage: usage1 }),
+        assistantLine({ id: "m2", model: "__proto__", usage: usage2 }),
+      ].join("\n") + "\n",
+      "utf8",
+    );
+
+    const subagentsDir = join(dir, sessionId, "subagents");
+    mkdirSync(subagentsDir, { recursive: true });
+    writeFileSync(join(subagentsDir, "agent-a1.meta.json"), JSON.stringify({ agentType: "constructor" }));
+    writeFileSync(join(subagentsDir, "agent-a1.jsonl"), assistantLine({ id: "m3", model: "claude-sonnet-5", usage: usage1 }) + "\n", "utf8");
+
+    const result = collectTranscriptUsage(transcriptPath);
+    assert.deepEqual(result.main.by_model.constructor, { ...usage1, message_count: 1 });
+    assert.deepEqual(result.main.by_model.__proto__ ?? result.main.by_model["__proto__"], { ...usage2, message_count: 1 });
+    assert.equal(Object.prototype.hasOwnProperty.call(result.main.by_model, "constructor"), true);
+    assert.equal(Object.prototype.hasOwnProperty.call(result.main.by_model, "__proto__"), true);
+    assert.deepEqual(result.subagents.by_agent_type.constructor, { ...usage1, message_count: 1 });
+    assert.equal(Object.prototype.hasOwnProperty.call(result.subagents.by_agent_type, "constructor"), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("collectTranscriptUsage aggregates subagent usage into subagents.by_model, not just by_agent_type", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-transcript-test-"));
+  try {
+    const sessionId = "s-submodel";
+    const transcriptPath = join(dir, `${sessionId}.jsonl`);
+    writeFileSync(transcriptPath, "", "utf8");
+    const subagentsDir = join(dir, sessionId, "subagents");
+    mkdirSync(subagentsDir, { recursive: true });
+
+    const usage = { input_tokens: 5, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 100 };
+    writeFileSync(join(subagentsDir, "agent-a1.meta.json"), JSON.stringify({ agentType: "Explore" }));
+    writeFileSync(join(subagentsDir, "agent-a1.jsonl"), assistantLine({ id: "m1", model: "claude-haiku-4-5", usage }) + "\n", "utf8");
+
+    const result = collectTranscriptUsage(transcriptPath);
+    assert.deepEqual(result.subagents.by_model["claude-haiku-4-5"], { ...usage, message_count: 1 });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

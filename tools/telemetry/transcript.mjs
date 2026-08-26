@@ -93,16 +93,40 @@ function extractUsageEntries(lines, { skipSidechain } = {}) {
   return { entries: [...seen.values()], hadParseError };
 }
 
+// Accumulates on a null-prototype object, not a plain {}: a model or agentType literally
+// named "constructor" would otherwise resolve an inherited Object.prototype property
+// instead of undefined, so `!byModel[model]` reads as false and `addInto` mutates that
+// inherited function/object rather than creating a real accumulator — silently corrupting
+// attribution for that key while the overall total still looks valid (found in review of
+// #139/PR #144; the reducer already guards this the same way for subagent_type_counts).
+// Spread into a plain object before returning so the record's JSON shape stays ordinary.
+function newAccumulator() {
+  return Object.create(null);
+}
+
 function sumUsage(entries) {
   const total = zeroTotals();
-  const byModel = {};
+  const byModel = newAccumulator();
   for (const { model, usage } of entries) {
     const delta = { ...usage, message_count: 1 };
     addInto(total, delta);
     if (!byModel[model]) byModel[model] = zeroTotals();
     addInto(byModel[model], delta);
   }
-  return { total, by_model: byModel };
+  return { total, by_model: { ...byModel } };
+}
+
+// Merges N by-model breakdowns (each `{ [model]: totals }`) into one combined view,
+// prototype-safe for the same reason as sumUsage's byModel above.
+function mergeByModel(breakdowns) {
+  const merged = newAccumulator();
+  for (const breakdown of breakdowns) {
+    for (const [model, totals] of Object.entries(breakdown)) {
+      if (!merged[model]) merged[model] = zeroTotals();
+      addInto(merged[model], totals);
+    }
+  }
+  return { ...merged };
 }
 
 // Enumerates `<transcript_dir>/<session_id>/subagents/*.jsonl`, pairing each with its
@@ -125,12 +149,13 @@ function readSubagentUsage(transcriptPath) {
   try {
     files = readdirSync(subagentsDir);
   } catch {
-    return { total: zeroTotals(), by_agent_type: {}, agent_count: 0 };
+    return { total: zeroTotals(), by_agent_type: {}, by_model: {}, agent_count: 0 };
   }
 
   const jsonlFiles = files.filter((f) => f.endsWith(".jsonl"));
   const total = zeroTotals();
-  const byAgentType = {};
+  const byAgentType = newAccumulator();
+  const byModelBreakdowns = [];
 
   for (const file of jsonlFiles) {
     const stem = file.slice(0, -".jsonl".length);
@@ -145,13 +170,14 @@ function readSubagentUsage(transcriptPath) {
     if (lines === null) return null; // this subagent transcript was discovered but unreadable
     const { entries, hadParseError } = extractUsageEntries(lines);
     if (hadParseError) return null; // torn line inside a discovered subagent transcript
-    const { total: fileTotal } = sumUsage(entries);
+    const { total: fileTotal, by_model: fileByModel } = sumUsage(entries);
     addInto(total, fileTotal);
     if (!byAgentType[agentType]) byAgentType[agentType] = zeroTotals();
     addInto(byAgentType[agentType], fileTotal);
+    byModelBreakdowns.push(fileByModel);
   }
 
-  return { total, by_agent_type: byAgentType, agent_count: jsonlFiles.length };
+  return { total, by_agent_type: { ...byAgentType }, by_model: mergeByModel(byModelBreakdowns), agent_count: jsonlFiles.length };
 }
 
 // path.basename(p, ".jsonl") assumes the running platform's separator; a transcript_path
@@ -167,9 +193,12 @@ function crossPlatformStemOf(pathValue) {
 // Top-level entry point: given a hook payload's transcript_path, returns
 // { main, subagents }, or null if the transcript_path itself is unusable (nothing to read
 // at all). `main` and `subagents` are each independently either { total, by_model } /
-// { total, by_agent_type, agent_count }, or null when *that specific* read was incomplete
-// (unreadable file, or a torn line found while parsing it) — a null here means "this
-// portion is unmeasured", not "zero". Never throws.
+// { total, by_agent_type, by_model, agent_count }, or null when *that specific* read was
+// incomplete (unreadable file, or a torn line found while parsing it) — a null here means
+// "this portion is unmeasured", not "zero". subagents.by_model exists (in addition to
+// by_agent_type) so a session-wide per-model view — reduce.mjs's
+// token_usage_session_by_model — doesn't silently drop tokens a subagent spent on a
+// different model than the main thread (found in review of #139/PR #144). Never throws.
 export function collectTranscriptUsage(transcriptPath) {
   if (typeof transcriptPath !== "string" || !transcriptPath) return null;
   try {

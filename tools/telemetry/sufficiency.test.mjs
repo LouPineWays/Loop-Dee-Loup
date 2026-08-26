@@ -71,9 +71,29 @@ test("an empty event log is INSUFFICIENT for every claim type, including compact
   // observed the session.
   const record = reduceEvents([]);
   assert.equal(assessSufficiency(record, "token_allocation").verdict, "INSUFFICIENT");
-  assert.equal(assessSufficiency(record, "monetary_cost").verdict, "INSUFFICIENT");
+  assert.equal(assessSufficiency(record, "monetary_cost_total").verdict, "INSUFFICIENT");
+  assert.equal(assessSufficiency(record, "monetary_cost_by_model").verdict, "INSUFFICIENT");
   assert.equal(assessSufficiency(record, "compaction_frequency").verdict, "INSUFFICIENT");
   assert.equal(assessSufficiency(record, "subagent_invocation_pattern").verdict, "INSUFFICIENT");
+});
+
+test("monetary_cost_by_model is always INSUFFICIENT, even with a real transcript_usage event: no local pricing table computes per-model cost", () => {
+  const record = reduceEvents(loadFixture("transcript_usage.jsonl"));
+  const result = assessSufficiency(record, "monetary_cost_by_model");
+  assert.equal(result.verdict, "INSUFFICIENT");
+  assert.deepEqual(result.missingFields, ["measured.cost_usd_by_model"]);
+});
+
+test("token_allocation is INSUFFICIENT for a PreCompact-only snapshot, even though main/subagent totals are both present", () => {
+  // Regression test (review of #139/PR #144): a session that crashed after a compaction
+  // but before SessionEnd only has a partial, pre-compaction transcript_usage snapshot.
+  // Both totals being non-null must not be mistaken for whole-session coverage.
+  const record = reduceEvents(loadFixture("transcript_usage_precompact_only.jsonl"));
+  assert.equal(record.measured.token_usage_main_total !== null, true);
+  assert.equal(record.measured.token_usage_is_session_complete, false);
+  const result = assessSufficiency(record, "token_allocation");
+  assert.equal(result.verdict, "INSUFFICIENT");
+  assert.ok(result.missingFields.includes("measured.token_usage_is_session_complete"));
 });
 
 test("zero compactions/subagents backed by real hook events (hook_event_count > 0) is SUFFICIENT, not just an empty array", () => {

@@ -60,10 +60,13 @@ the session, including the peak before a compaction, not just the last sample (w
 fired); lines added/removed; structural subagent/compaction events (that one happened, its
 type/trigger, when); and — from the session's own transcript, which works in this repository's
 normal non-interactive execution mode where statusLine does not — total input/output/cache-read/
-cache-creation tokens, broken down by model (`measured.token_usage_main_by_model`) and,
-separately, by subagent type (`measured.token_usage_subagent_by_agent_type`), plus the
-deterministic main-vs-subagent share of the session's token total (`derived.token_usage_grand_total`,
-`derived.token_usage_main_share_of_total`).
+cache-creation tokens, broken down by model for the main thread alone
+(`measured.token_usage_main_by_model`), by subagent type (`measured.token_usage_subagent_by_agent_type`),
+and merged session-wide across main and subagent threads (`measured.token_usage_session_by_model`
+— use this one, not `token_usage_main_by_model` alone, for "which models did this session's
+tokens actually go to", since a subagent can run on a different model than the main thread),
+plus the deterministic main-vs-subagent share of the session's token total
+(`derived.token_usage_grand_total`, `derived.token_usage_main_share_of_total`).
 
 It cannot: attribute tokens or cost to a specific *skill* invocation (no Claude Code interface
 this collector uses exposes a skill-invocation boundary the way it does for subagents), break
@@ -89,11 +92,21 @@ node tools/telemetry/sufficiency.mjs <session_id> <claim_type>
 ```
 
 `tools/telemetry/sufficiency.mjs`'s `CLAIM_REQUIREMENTS` names the claim types this gate covers
-(`token_allocation`, `monetary_cost`, `context_utilization`, `compaction_frequency`,
+(`token_allocation`, `monetary_cost_total`, `monetary_cost_by_model`, `compaction_frequency`,
 `subagent_invocation_pattern`) and the exact record fields each one requires. It returns
 `SUFFICIENT` or `INSUFFICIENT` plus the specific fields that are missing — never estimate this
 by hand, and never add a new ad hoc completeness rule inside this skill; extend
 `CLAIM_REQUIREMENTS` instead when a new class of claim needs its own evidence bar.
+
+Two things `token_allocation` specifically guards against, beyond plain field presence: a
+`transcript_usage` snapshot taken at `PreCompact` rather than `SessionEnd` only reflects usage
+accumulated up to that point, not the whole session, so the claim also requires
+`measured.token_usage_is_session_complete === true` — never render a whole-session allocation
+verdict from a partial mid-session snapshot. And `monetary_cost_by_model` is always
+`INSUFFICIENT` today (`measured.cost_usd_by_model` is always `null`) — this collector has no
+local pricing table, so per-model cost is a distinct, currently-unanswerable claim from
+`monetary_cost_total`; never let the total's `SUFFICIENT` verdict stand in for a per-model
+question.
 
 - **CLEAN** — the evidence needed for this claim is `SUFFICIENT`, and nothing in it supports a
   material defect or recurring inefficiency.

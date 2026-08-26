@@ -34,18 +34,33 @@ import { reduceSession } from "./reduce.mjs";
 // review of #139/PR #144: without this, reduceEvents([]) reported compaction_frequency
 // and subagent_invocation_pattern as SUFFICIENT purely because their arrays default
 // empty, not because anything was actually observed.
+// `requiresTrue`: fields that must be exactly `true` — for a claim where a false/partial
+// signal must not be treated as satisfied the way a present-but-false value would be
+// under `requires`' isPresent check (`false` is a real, present boolean, not a missing
+// value, so it needs its own check).
 export const CLAIM_REQUIREMENTS = {
   token_allocation: {
-    label: "whether token expenditure (main-agent vs. subagent, by model) was appropriately allocated",
+    label: "whether the whole session's token expenditure (main-agent vs. subagent, by model) was appropriately allocated",
     requires: ["measured.token_usage_main_total", "measured.token_usage_subagent_total"],
+    // A PreCompact-only transcript_usage event (no SessionEnd yet, or a crash before one)
+    // reflects only the usage accumulated up to that point — main/subagent totals can both
+    // be present and still understate the whole session's real expenditure. Found in
+    // review of #139/PR #144: without this, an in-progress session's partial snapshot
+    // could authorize a whole-session CLEAN/NOT CLEAN verdict.
+    requiresTrue: ["measured.token_usage_is_session_complete"],
   },
-  monetary_cost: {
-    label: "the session's total or per-model monetary cost",
+  monetary_cost_total: {
+    label: "the session's total monetary cost",
     requires: ["measured.cost_usd_total"],
   },
-  context_utilization: {
-    label: "how much of the context window was used, including any pre-compaction peak",
-    requires: ["measured.context_window_size", "derived.peak_context_used_percentage"],
+  monetary_cost_by_model: {
+    label: "monetary cost broken down by model",
+    // Always null today — this collector has no local pricing table (see README's "What
+    // it deliberately still cannot measure"), so this claim is always INSUFFICIENT until
+    // that changes. Kept as its own claim type, split from monetary_cost_total, so a
+    // per-model cost question can no longer pass on session-total cost alone (found in
+    // review of #139/PR #144).
+    requires: ["measured.cost_usd_by_model"],
   },
   compaction_frequency: {
     label: "whether the session compacted, how often, and why",
@@ -87,7 +102,8 @@ export function assessSufficiency(record, claimType) {
   }
   const missingFields = (spec.requires ?? []).filter((fieldPath) => !isPresent(getPath(record, fieldPath)));
   const missingPositive = (spec.requiresPositive ?? []).filter((fieldPath) => !isPositiveNumber(getPath(record, fieldPath)));
-  const allMissing = [...missingFields, ...missingPositive];
+  const missingTrue = (spec.requiresTrue ?? []).filter((fieldPath) => getPath(record, fieldPath) !== true);
+  const allMissing = [...missingFields, ...missingPositive, ...missingTrue];
   return {
     claimType,
     label: spec.label,

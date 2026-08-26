@@ -81,6 +81,46 @@ test("session with a transcript_usage event: per-model and per-subagent-type tok
   // Still genuinely unavailable: no Claude Code interface this collector uses exposes a
   // skill-invocation boundary the way it does for subagents.
   assert.ok(record.unknown.includes("per_skill_token_or_cost_attribution"));
+  // Always unmeasured: no local pricing table computes cost from token counts.
+  assert.equal(record.measured.cost_usd_by_model, null);
+  // The last transcript_usage event was captured at SessionEnd, so this snapshot covers
+  // the whole session, not just the usage accumulated before a mid-session compaction.
+  assert.equal(record.measured.token_usage_is_session_complete, true);
+  // The subagent ran on a different model (claude-haiku-4-5) than the main thread
+  // (claude-sonnet-5) — the session-wide per-model view must include both, not just main's.
+  assert.deepEqual(record.measured.token_usage_session_by_model, {
+    "claude-sonnet-5": { input_tokens: 600, output_tokens: 9000, cache_creation_input_tokens: 55000, cache_read_input_tokens: 420000, message_count: 26 },
+    "claude-haiku-4-5": { input_tokens: 50, output_tokens: 900, cache_creation_input_tokens: 2000, cache_read_input_tokens: 15000, message_count: 4 },
+  });
+});
+
+test("token_usage_is_session_complete is false and token_usage_session_by_model is null when the last transcript_usage event is a PreCompact snapshot, not SessionEnd", () => {
+  const record = reduceEvents(loadFixture("transcript_usage_precompact_only.jsonl"));
+  assert.equal(record.measured.token_usage_is_session_complete, false);
+  assert.notEqual(record.measured.token_usage_main_total, null);
+});
+
+test("mergeByModel-style session_by_model accumulation survives a model literally named 'constructor'", () => {
+  // Regression test (review of #139/PR #144): a plain {} accumulator would resolve
+  // Object.prototype.constructor for this key instead of creating a real bucket.
+  const record = reduceEvents([
+    {
+      kind: "transcript_usage",
+      event: "SessionEnd",
+      session_id: "s-proto",
+      ts: "2026-08-26T00:00:00.000Z",
+      main: { total: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 1 }, by_model: { constructor: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 1 } } },
+      subagents: { total: { input_tokens: 2, output_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 1 }, by_agent_type: {}, by_model: { constructor: { input_tokens: 2, output_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 1 } }, agent_count: 1 },
+    },
+  ]);
+  assert.equal(typeof record.measured.token_usage_session_by_model.constructor, "object");
+  assert.deepEqual(record.measured.token_usage_session_by_model.constructor, {
+    input_tokens: 3,
+    output_tokens: 3,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    message_count: 2,
+  });
 });
 
 test("incomplete telemetry (crash before SessionEnd, no samples): missing facts are named unknown, not guessed", () => {

@@ -39,6 +39,27 @@ function firstNonNull(values) {
   return null;
 }
 
+const ZERO_TOKEN_TOTALS = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 0 };
+
+// Merges two `{ [model]: {input_tokens, output_tokens, cache_creation_input_tokens,
+// cache_read_input_tokens, message_count} }` breakdowns into a session-wide view (main
+// transcript + subagent transcripts can each spend tokens on a different model). Same
+// null-prototype guard as countBy below, and for the same reason.
+function mergeByModel(a, b) {
+  const merged = Object.create(null);
+  for (const breakdown of [a, b]) {
+    for (const [model, totals] of Object.entries(breakdown)) {
+      if (!merged[model]) merged[model] = { ...ZERO_TOKEN_TOTALS };
+      merged[model].input_tokens += totals.input_tokens;
+      merged[model].output_tokens += totals.output_tokens;
+      merged[model].cache_creation_input_tokens += totals.cache_creation_input_tokens;
+      merged[model].cache_read_input_tokens += totals.cache_read_input_tokens;
+      merged[model].message_count += totals.message_count;
+    }
+  }
+  return { ...merged };
+}
+
 function countBy(items, keyFn) {
   // Accumulate on a null-prototype object: a plain {} would read an inherited
   // Object.prototype property (e.g. a custom agent type literally named "constructor")
@@ -121,7 +142,23 @@ export function reduceEvents(events) {
     token_usage_main_by_model: lastTranscriptUsage?.main?.by_model ?? null,
     token_usage_subagent_total: lastTranscriptUsage?.subagents?.total ?? null,
     token_usage_subagent_by_agent_type: lastTranscriptUsage?.subagents?.by_agent_type ?? null,
+    token_usage_subagent_by_model: lastTranscriptUsage?.subagents?.by_model ?? null,
     token_usage_subagent_count: lastTranscriptUsage?.subagents?.agent_count ?? null,
+    // Session-wide per-model view (main + subagent tokens merged): only computed when
+    // both portions are actually measured, since merging one real breakdown with one
+    // missing/incomplete portion would silently understate a model that only a subagent
+    // used — the same false-completeness shape as an unmeasured field standing in for a
+    // real zero (found in review of #139/PR #144).
+    token_usage_session_by_model:
+      lastTranscriptUsage?.main?.by_model && lastTranscriptUsage?.subagents?.by_model
+        ? mergeByModel(lastTranscriptUsage.main.by_model, lastTranscriptUsage.subagents.by_model)
+        : null,
+    // True only when the most recent transcript_usage event was captured at SessionEnd —
+    // a PreCompact-triggered one (or none at all) reflects only usage accumulated up to
+    // that point, not the whole session, so a "was expenditure appropriately allocated"
+    // claim must not treat that partial snapshot as covering the full session (found in
+    // review of #139/PR #144).
+    token_usage_is_session_complete: lastTranscriptUsage?.event === "SessionEnd",
     transcript_usage_sample_count: transcriptUsageSamples.length,
     // How many raw hook-kind events this session produced at all, regardless of type.
     // Exists so a claim resting on an empty array (e.g. "zero compactions") can require
@@ -129,6 +166,13 @@ export function reduceEvents(events) {
     // array defaults to [] the same way it would if no hook ever fired — see
     // sufficiency.mjs's requiresPositive.
     hook_event_count: hookEvents.length,
+    // Always null: this collector has no local pricing table, so per-model monetary cost
+    // can never be computed from token counts alone (see README's "What it deliberately
+    // still cannot measure"). Kept as a real field, not merely a name in `unknown` below,
+    // so sufficiency.mjs can gate a per-model-cost claim on it honestly (found in review
+    // of #139/PR #144 — the prior single `monetary_cost` claim type let a per-model cost
+    // question pass on session-total cost alone).
+    cost_usd_by_model: null,
   };
 
   const tokenFieldSum = (totals) =>

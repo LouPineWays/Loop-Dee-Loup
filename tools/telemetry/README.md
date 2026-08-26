@@ -97,11 +97,18 @@ above), calls `transcript.mjs`'s `collectTranscriptUsage(transcript_path)`, and 
 result as a `transcript_usage` event — `transcript_path` itself is read and then discarded, never
 persisted (matching the privacy rule below). `reduce.mjs` folds the most recent `transcript_usage`
 event into `measured.token_usage_main_total`, `measured.token_usage_main_by_model`,
-`measured.token_usage_subagent_total`, `measured.token_usage_subagent_by_agent_type`, and two
+`measured.token_usage_subagent_total`, `measured.token_usage_subagent_by_agent_type`,
+`measured.token_usage_subagent_by_model`, a merged `measured.token_usage_session_by_model`
+(main + subagent tokens combined per model — a subagent can run on a different model than the
+main thread, so `token_usage_main_by_model` alone would silently omit its tokens), and two
 purely arithmetic `derived` fields (`token_usage_grand_total`, `token_usage_main_share_of_total`).
 `measured.transcript_usage_sample_count === 0` means none of this fired — most commonly a session
 that crashed before reaching `SessionEnd` or a compaction, or a Claude Code build old enough not
-to supply `transcript_path` in hook payloads.
+to supply `transcript_path` in hook payloads. `measured.token_usage_is_session_complete` is
+`true` only when the most recent `transcript_usage` sample was captured at `SessionEnd` — a
+`PreCompact`-only sample (session still running, or crashed before `SessionEnd`) reflects usage
+accumulated only up to that point, not the whole session, and `sufficiency.mjs`'s
+`token_allocation` claim requires this before treating totals as whole-session evidence.
 
 A landed `transcript_usage` event does not by itself guarantee `token_usage_main_total` or
 `token_usage_subagent_total` are measured: `collectTranscriptUsage` treats a torn/malformed line
@@ -170,14 +177,18 @@ node tools/telemetry/sufficiency.mjs <session_id> <claim_type>
 ```
 
 Reduces the session (as above) and checks one named claim type — `token_allocation`,
-`monetary_cost`, `context_utilization`, `compaction_frequency`, or `subagent_invocation_pattern`,
-see `sufficiency.mjs`'s `CLAIM_REQUIREMENTS` — against the specific record fields that claim
-needs, returning `SUFFICIENT` or `INSUFFICIENT` plus the exact missing fields. Built for issue
-#139: `/spend` uses this to decide whether it may render a CLEAN/NOT CLEAN verdict for an
-economic claim at all, rather than re-deriving that judgment by reading the record's `unknown`
-list from scratch each time — the condition that let issue #120 close CLEAN on a token-allocation
-question its own evidence never answered. `assessSufficiency()` is exported as a pure function;
-see `sufficiency.test.mjs` for the #120 regression case.
+`monetary_cost_total`, `monetary_cost_by_model`, `compaction_frequency`, or
+`subagent_invocation_pattern`, see `sufficiency.mjs`'s `CLAIM_REQUIREMENTS` — against the
+specific record fields that claim needs, returning `SUFFICIENT` or `INSUFFICIENT` plus the
+exact missing fields. Built for issue #139: `/spend` uses this to decide whether it may render a
+CLEAN/NOT CLEAN verdict for an economic claim at all, rather than re-deriving that judgment by
+reading the record's `unknown` list from scratch each time — the condition that let issue #120
+close CLEAN on a token-allocation question its own evidence never answered.
+`token_allocation` additionally requires `measured.token_usage_is_session_complete === true`
+(the last `transcript_usage` sample must be a `SessionEnd`, not a `PreCompact`-only partial
+snapshot), and `monetary_cost_by_model` is currently always `INSUFFICIENT` (`measured.
+cost_usd_by_model` is always `null` — no local pricing table). `assessSufficiency()` is exported
+as a pure function; see `sufficiency.test.mjs` for the #120 regression case.
 
 ## Tests
 
