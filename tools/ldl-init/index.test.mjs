@@ -879,3 +879,45 @@ test("defaultResolveRevision returns 'unknown' for a directory with no git histo
   const dir = tempDir(t);
   assert.equal(defaultResolveRevision(dir), "unknown");
 });
+
+test("run: a consumer-shaped install of the real repository's spend skill has no unconditional dependency on the undistributed tools/telemetry/sufficiency.mjs (issue #152)", async (t) => {
+  // Regression guard: installs this repository's REAL .claude/skills/spend/SKILL.md content
+  // (not a fixture) into a disposable consumer-shaped dest, the same way tools/ldl-init would
+  // for a real consumer repository, then inspects the installed artifact directly — proving
+  // the distributed workflow is internally complete rather than only checking the source tree.
+  const dest = tempDir(t);
+
+  const result = await run({ dest, root: REPO_ROOT }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(result.exitCode, 0);
+
+  // tools/telemetry/ is deliberately not distributed (see docs/consumer-contract.md) — confirm
+  // that stays true, since the fallback below only matters while this holds.
+  assert.ok(
+    !existsSync(join(dest, "tools", "telemetry", "sufficiency.mjs")),
+    "tools/telemetry/sufficiency.mjs must not be distributed to consumers",
+  );
+
+  const installedSkill = readFileSync(join(dest, ".claude", "skills", "spend", "SKILL.md"), "utf8");
+  const normalizedSkill = installedSkill.replace(/\s+/g, " ");
+  assert.match(
+    normalizedSkill,
+    /first\s+check whether `tools\/telemetry\/sufficiency\.mjs` exists/,
+    "installed spend skill must gate the sufficiency script on a presence check, not invoke it unconditionally",
+  );
+  assert.match(
+    normalizedSkill,
+    /If `tools\/telemetry\/sufficiency\.mjs` does not exist/,
+    "installed spend skill must define an explicit fallback for the missing-script case",
+  );
+  assert.match(
+    normalizedSkill,
+    /never promote a claim to CLEAN merely because the deterministic gate itself is unavailable/,
+    "installed spend skill's fallback must preserve issue #139's evidence boundary (no promotion to CLEAN on missing evidence)",
+  );
+
+  const installedContract = readFileSync(join(dest, "docs", "consumer-contract.md"), "utf8");
+  assert.ok(
+    installedContract.includes("evidence-sufficiency verdict gate itself"),
+    "installed consumer-contract.md must describe the verdict-gate fallback, not only the per-field fallback",
+  );
+});

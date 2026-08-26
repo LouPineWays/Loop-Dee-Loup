@@ -84,8 +84,10 @@ the whole session. A claim is any conclusion of the form "X was/wasn't a problem
 wasn't appropriately allocated" — narrower structural observations ("no repeated compaction was
 observed") are claims too, just claims with a lower evidence bar.
 
-Before rendering a verdict for a claim that concerns token/cost allocation specifically, run
-the deterministic gate instead of eyeballing the record:
+Before rendering a verdict for a claim that concerns token/cost allocation specifically, first
+check whether `tools/telemetry/sufficiency.mjs` exists in this repository (a plain file check —
+no script needed to answer that). If it exists, run the deterministic gate instead of
+eyeballing the record:
 
 ```
 node tools/telemetry/sufficiency.mjs <session_id> <claim_type>
@@ -97,6 +99,38 @@ node tools/telemetry/sufficiency.mjs <session_id> <claim_type>
 `SUFFICIENT` or `INSUFFICIENT` plus the specific fields that are missing — never estimate this
 by hand, and never add a new ad hoc completeness rule inside this skill; extend
 `CLAIM_REQUIREMENTS` instead when a new class of claim needs its own evidence bar.
+
+If `tools/telemetry/sufficiency.mjs` does not exist — an installed consumer repository per
+`docs/consumer-contract.md` that has not received `tools/telemetry/` — this is the same case
+step 3 of the evidence order above already names for individual fields: fall back for
+everything rather than leaving the verdict undefined, and never promote a claim to CLEAN merely
+because the deterministic gate itself is unavailable. Apply this fixed mapping instead of the
+script, per claim type, using only the platform's own `/usage`/`/context` report and this
+session's own directly observable structure — never by parsing the transcript by hand to
+reconstruct what the gate would have checked:
+
+- `monetary_cost_total` — SUFFICIENT only if `/usage` or `/context` itself reports a total
+  session cost figure; INSUFFICIENT otherwise.
+- `monetary_cost_by_model` — always INSUFFICIENT. Neither `/usage`/`/context` nor any consumer
+  fallback source breaks cost down by model; this matches the source-repository gate, which is
+  always INSUFFICIENT here too (no local pricing table — see the README's "What it deliberately
+  still cannot measure").
+- `token_allocation` — always INSUFFICIENT. Whole-session main-vs-subagent token allocation by
+  model requires the transcript-derived measurement `tools/telemetry/transcript.mjs` performs;
+  no consumer fallback source reconstructs it, and this skill must not attempt to by hand.
+- `compaction_frequency` — INSUFFICIENT for the full claim ("how often, and why"). A narrower
+  claim — "no compaction is visible anywhere in this session's own context" — may be SUFFICIENT
+  when no compaction marker appears in the visible conversation, but do not promote that
+  narrower observation into a whole-session frequency verdict: a compaction that already
+  dropped early context is, by definition, no longer visible to check for.
+- `subagent_invocation_pattern` — SUFFICIENT for the narrower claim "which subagents this
+  session directly dispatched, of what type" when the full session is visible with no
+  compaction (a directly observable structural fact, not hook telemetry). INSUFFICIENT if a
+  compaction has occurred, since it may have dropped earlier subagent dispatches from visible
+  context.
+
+State plainly in the report which of the two paths (script or fallback) produced each verdict,
+so the evidence boundary stays explicit either way.
 
 Two things `token_allocation` specifically guards against, beyond plain field presence: a
 `transcript_usage` snapshot taken at `PreCompact` rather than `SessionEnd` only reflects usage
