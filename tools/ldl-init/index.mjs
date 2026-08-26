@@ -161,6 +161,104 @@ export function withResolvedBridgesManaged(existingManifest, resolvedManifestPat
   return { ...(existingManifest || {}), files: [...(existingManifest?.files || []), ...resolvedManifestPatch] };
 }
 
+// Looks up a BRIDGE_FILES entry by its root destRel ("AGENTS.md" or "CLAUDE.md"). Exported so
+// tools/ldl-ack validates a caller-supplied bridge name against the exact same set this script
+// itself resolves, rather than a second hardcoded list.
+export function findBridgeByDestRel(destRel) {
+  return BRIDGE_FILES.find((b) => b.destRel === destRel) || null;
+}
+
+// Validates and computes the manifest patch for issue #153's ownership-preserving manual
+// integration acknowledgement: a durable attestation that the *current* LDL bridge target for
+// one BRIDGE_FILES entry has been merged by hand into the consumer-owned destination it was
+// parked next to. Distinct from planBridgeOp's own resolvedByContentMatch graduation (which
+// this function neither duplicates nor weakens): resolvedByContentMatch recognizes a
+// byte-identical replacement and lets the destination graduate into the normal LDL-managed
+// `files[]` set; this recognizes a genuine merge that keeps consumer-owned content in the file,
+// and — per issue #153 requirement 3 — never adds that destination to `files[]`. The caller is
+// responsible for persisting the returned patch into `manualIntegrationAcknowledgements` and
+// leaving `files[]` untouched.
+//
+// Fails closed (returns { ok: false, reason }) rather than recording a misleading acknowledgement
+// (issue #153 requirement 6) when:
+//   - `bridgeDestRel` doesn't name a real BRIDGE_FILES entry;
+//   - there is no existing manifest to acknowledge against;
+//   - the bridge doesn't currently resolve to its templateDestRel given the *current* --root
+//     content and --dest state — i.e. there is no pending manual integration to acknowledge
+//     right now (already installed, already content-match-graduated, or the caller's `--dest`
+//     was never actually parked in the first place);
+//   - the parked template itself is missing or unsafe (symlinked, or blocked by a non-directory)
+//     — the same on-disk evidence a prior `tools/ldl-init`/`tools/ldl-update` run would have
+//     produced when it genuinely parked this bridge, so its absence means either the manual step
+//     was never actually reached or the path has since been tampered with;
+//   - the consumer-owned destination itself is unsafe to read (symlinked, or blocked by a
+//     non-directory) — planBridgeOp already implies it exists to reach the templateDestRel
+//     branch, but not that it's safe.
+//
+// The acknowledged hash is always recomputed fresh from `bridge.readContent(root)` — never read
+// off the parked template file on disk — so there is no code path by which a caller could
+// attest to a target older than the one --root currently defines (issue #153 requirement 4);
+// the moment --root's bridge content changes, this same recomputation makes a later
+// `derivePendingManualIntegration` call stop matching the recorded acknowledgedTargetSha256, and
+// the bridge becomes pending again automatically, without this function needing to track
+// revision or staleness itself.
+//
+// Exported so tools/ldl-ack and tools/mcp-server share this exact validation, rather than
+// separate CLI/MCP implementations of the same acknowledgement rule (issue #153 constraint).
+export function planAcknowledgeIntegration({ bridgeDestRel, root, destRoot, existingManifest }) {
+  const bridge = findBridgeByDestRel(bridgeDestRel);
+  if (!bridge) {
+    return {
+      ok: false,
+      reason: `unknown bridge "${bridgeDestRel}" — must be one of: ${BRIDGE_FILES.map((b) => b.destRel).join(", ")}`,
+    };
+  }
+  if (!existingManifest) {
+    return { ok: false, reason: "no .ldl/manifest.json found — run tools/ldl-init first" };
+  }
+
+  let content;
+  try {
+    content = bridge.readContent(root);
+  } catch (err) {
+    return { ok: false, reason: `failed deriving current bridge target from --root: ${err.message}` };
+  }
+
+  const { destRel } = planBridgeOp({ ...bridge, content, destRoot, existingManifest });
+  if (destRel !== bridge.templateDestRel) {
+    return {
+      ok: false,
+      reason: `${bridge.destRel} has no pending manual integration to acknowledge right now (it is not currently parked at ${bridge.templateDestRel})`,
+    };
+  }
+
+  const unsafeTemplateReason = findUnsafeDestReason(destRoot, bridge.templateDestRel);
+  if (unsafeTemplateReason) {
+    return { ok: false, reason: `${bridge.templateDestRel} is unsafe: ${unsafeTemplateReason}` };
+  }
+  if (!existsSync(join(destRoot, bridge.templateDestRel))) {
+    return {
+      ok: false,
+      reason: `${bridge.templateDestRel} does not exist — expected the parked template that establishes the current bridge target`,
+    };
+  }
+
+  const unsafeDestReason = findUnsafeDestReason(destRoot, bridge.destRel);
+  if (unsafeDestReason) {
+    return { ok: false, reason: `${bridge.destRel} is unsafe: ${unsafeDestReason}` };
+  }
+  if (!existsSync(join(destRoot, bridge.destRel))) {
+    return { ok: false, reason: `${bridge.destRel} does not exist at the destination — nothing to acknowledge as integrated` };
+  }
+
+  return {
+    ok: true,
+    dest: bridge.destRel,
+    template: bridge.templateDestRel,
+    acknowledgedTargetSha256: sha256(content),
+  };
+}
+
 // Derives the durable "still needs a human" signal for every bridge file from the actual
 // planInstall/planUpdate outcome (toSkip), not merely from planBridgeOp's destination choice.
 // Two distinct situations both count:
@@ -174,14 +272,29 @@ export function withResolvedBridgesManaged(existingManifest, resolvedManifestPat
 //     dangling symlink or other unsafe path component blocks it) — the bridge is not actually
 //     installed at all, which a destRel-only check would otherwise miss entirely and report as
 //     fully activated.
+// `acknowledgements` (issue #153) is the manifest's own `manualIntegrationAcknowledgements`
+// list — an ownership-preserving completion path distinct from planBridgeOp's
+// resolvedByContentMatch graduation (see planAcknowledgeIntegration below): a bridge parked at
+// its templateDestRel is excluded from the returned pending list when an acknowledgement for
+// that exact `bridge.destRel` binds to the exact content hash of the current target (`op.content`),
+// so a stale acknowledgement — recorded against a since-changed bridge target — never suppresses
+// a genuinely new pending requirement. Only ever consulted for the templateDestRel branch: an
+// acknowledgement attests that a human merged the parked template into the consumer-owned root
+// file, which has no bearing on the unrelated "root write itself failed" branch below. Callers
+// that don't pass `acknowledgements` (the default `[]`) get exactly the prior behavior, so every
+// existing call site and test is unaffected until it opts in.
 // Exported so tools/ldl-update and tools/mcp-server/status.mjs derive this exact same signal
 // from their own toInstall/toSkip outcome instead of a second implementation of it.
-export function derivePendingManualIntegration(bridgePlans, toSkip) {
+export function derivePendingManualIntegration(bridgePlans, toSkip, acknowledgements = []) {
   const skipReasonByDest = new Map(toSkip.map((s) => [s.dest, s.reason]));
   const pending = [];
   for (const { bridge, op } of bridgePlans) {
     const skipReason = skipReasonByDest.get(op.destRel);
     if (op.destRel === bridge.templateDestRel) {
+      const ack = acknowledgements.find((a) => a.dest === bridge.destRel);
+      if (ack && op.content !== undefined && ack.acknowledgedTargetSha256 === sha256(op.content)) {
+        continue;
+      }
       pending.push({
         dest: bridge.destRel,
         template: bridge.templateDestRel,
@@ -511,6 +624,28 @@ export function isValidManifest(value) {
     );
     if (!pendingValid) return false;
   }
+  // `manualIntegrationAcknowledgements` (issue #153) is optional for the same reason as the two
+  // fields above (an older or hand-authored manifest may predate it). Each entry binds an
+  // ownership-preserving manual-integration attestation to the exact target content it covers —
+  // `acknowledgedTargetSha256` must be a real sha256 hex digest, not a timeless boolean, or a
+  // later-changed bridge target could never be told apart from the one actually integrated.
+  if (value.manualIntegrationAcknowledgements !== undefined) {
+    if (!Array.isArray(value.manualIntegrationAcknowledgements)) return false;
+    const acknowledgementsValid = value.manualIntegrationAcknowledgements.every(
+      (a) =>
+        a &&
+        typeof a === "object" &&
+        typeof a.dest === "string" &&
+        a.dest.length > 0 &&
+        typeof a.template === "string" &&
+        a.template.length > 0 &&
+        typeof a.acknowledgedTargetSha256 === "string" &&
+        SHA256_HEX.test(a.acknowledgedTargetSha256) &&
+        typeof a.acknowledgedAt === "string" &&
+        a.acknowledgedAt.length > 0,
+    );
+    if (!acknowledgementsValid) return false;
+  }
   return true;
 }
 
@@ -636,8 +771,11 @@ export async function run(args, deps = {}) {
 
   // Computed from the actual install outcome (toSkip), not merely from planBridgeOp's
   // destination choice — see derivePendingManualIntegration's own comment for why a
-  // destRel-only check would miss an uninstalled bridge.
-  const pendingManualIntegration = derivePendingManualIntegration(bridgePlans, toSkip);
+  // destRel-only check would miss an uninstalled bridge. Carries forward any existing
+  // manualIntegrationAcknowledgements (issue #153) so a repeat/reinit run against an
+  // already-acknowledged bridge doesn't re-open pendingManualIntegration for it.
+  const manualIntegrationAcknowledgements = existingManifest?.manualIntegrationAcknowledgements || [];
+  const pendingManualIntegration = derivePendingManualIntegration(bridgePlans, toSkip, manualIntegrationAcknowledgements);
 
   const manifest = {
     schemaVersion: 1,
@@ -646,6 +784,7 @@ export async function run(args, deps = {}) {
     files: installedFiles,
     skipped: toSkip,
     pendingManualIntegration,
+    manualIntegrationAcknowledgements,
   };
 
   mkdirSync(join(destRoot, ".ldl"), { recursive: true });

@@ -312,8 +312,14 @@ export async function run(args, deps = {}) {
 
   // Computed from the actual toInstall/toSkip outcome, not merely from planBridgeOp's
   // destination choice — see derivePendingManualIntegration's own comment for why a
-  // destRel-only check would miss an uninstalled bridge.
-  const pendingManualIntegration = derivePendingManualIntegration(bridgePlans, toSkip);
+  // destRel-only check would miss an uninstalled bridge. Passing the manifest's existing
+  // manualIntegrationAcknowledgements (issue #153) means a bridge whose current target still
+  // matches what was acknowledged stays resolved across this update; a bridge whose target
+  // just changed (this update's own ops carry different bridge content) stops matching that
+  // acknowledgement's hash and becomes pending again automatically — no separate staleness
+  // tracking needed.
+  const manualIntegrationAcknowledgements = parsedManifest.manualIntegrationAcknowledgements || [];
+  const pendingManualIntegration = derivePendingManualIntegration(bridgePlans, toSkip, manualIntegrationAcknowledgements);
 
   // A skip is worth recording even when no managed file's content changed — e.g. a newer
   // MANAGED_ITEMS destination collides with a pre-existing unmanaged consumer file. Compare
@@ -369,6 +375,7 @@ export async function run(args, deps = {}) {
     files,
     skipped: toSkip,
     pendingManualIntegration,
+    manualIntegrationAcknowledgements,
   };
 
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");

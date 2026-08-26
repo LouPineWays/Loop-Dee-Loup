@@ -19,6 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { run as ldlInitRun } from "../ldl-init/index.mjs";
 import { run as ldlUpdateRun } from "../ldl-update/index.mjs";
+import { run as ldlAckRun } from "../ldl-ack/index.mjs";
 import { computeStatusAll, computeUpdatePlan } from "./status.mjs";
 import { resolvePathArg, resolveRepos } from "./config.mjs";
 import { implementationFingerprint } from "./staleness.mjs";
@@ -98,6 +99,37 @@ const TOOLS = [
         },
       },
       required: ["dest"],
+    },
+  },
+  {
+    name: "ldl_acknowledge_integration",
+    description:
+      "Record a durable, ownership-preserving attestation that the CURRENT LDL bridge target " +
+      "for AGENTS.md or CLAUDE.md has been manually merged into the consumer-owned root file it " +
+      "was parked next to, without requiring that file to become byte-for-byte identical to " +
+      "LDL's template and without adding it to LDL's managed files[] set — the destination " +
+      "remains fully consumer-owned. Clears pendingManualIntegration for that bridge only while " +
+      "its target content stays what was acknowledged; the moment a later Loop-Dee-Loup revision " +
+      "actually changes that bridge's content, the bridge reports pending again automatically. " +
+      "Refuses (writes nothing) when there is no current pending manual integration for the " +
+      "named bridge, the bridge name is invalid, or the destination/template state is missing " +
+      "or unsafe. Does not touch AGENTS.md/CLAUDE.md or any other managed file — this is a " +
+      "manifest-only attestation, not an install or update.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dest: { type: "string", description: "Path to the already-initialized consumer repository." },
+        bridge: {
+          type: "string",
+          enum: ["AGENTS.md", "CLAUDE.md"],
+          description: "Which bridge file's current manual integration to acknowledge.",
+        },
+        root: {
+          type: "string",
+          description: "Path to a Loop-Dee-Loup source checkout. Defaults to this server's own checkout.",
+        },
+      },
+      required: ["dest", "bridge"],
     },
   },
 ];
@@ -264,6 +296,15 @@ export function createServer({ root: rootOverride } = {}) {
           },
           false,
         );
+      }
+
+      if (name === "ldl_acknowledge_integration") {
+        if (!args.dest) return errorResult("Missing required argument: dest");
+        if (!args.bridge) return errorResult("Missing required argument: bridge");
+        const preMutationStaleness = checkCoherence(root);
+        if (preMutationStaleness) return preMutationStaleness;
+        const result = await ldlAckRun({ dest: resolvePathArg(args.dest), bridge: args.bridge, root });
+        return cliResult(result);
       }
 
       return errorResult(`Unknown tool: ${name}`);

@@ -196,6 +196,76 @@ A repository with a non-empty `pendingManualIntegration` must not be treated
 as fully activated: activation is not complete until the corresponding
 template has been merged into the consumer-owned file it was parked next to.
 
+### Two reconciliation modes for a parked bridge
+
+A bridge parked at its template clears `pendingManualIntegration` through
+exactly one of two distinct mechanisms. Which one applies depends on what the
+consumer repository's root file actually looks like afterward — this is not
+a choice a human makes explicitly beforehand:
+
+1. **Content-equivalent graduation.** If the consumer's root `AGENTS.md` or
+   `CLAUDE.md` becomes byte-for-byte equivalent to LDL's current target
+   content (under the same checkout-line-ending tolerance described in
+   "Conflict-safe updates" below), the next `tools/ldl-init`/`tools/ldl-update`
+   run recognizes the match (`planBridgeOp`'s `resolvedByContentMatch`) and
+   lets that root file graduate into the normal LDL-managed `files[]` set,
+   exactly like any other managed path from then on — including being
+   eligible for future conflict detection if it's edited again. This is the
+   narrow case where the "merge" was really a full replacement.
+
+2. **Ownership-preserving manual integration.** The ordinary case: a
+   consumer merges the parked template's content into their own
+   `AGENTS.md`/`CLAUDE.md` by hand, alongside unrelated instructions they
+   already had —
+
+   ```text
+   consumer-owned instructions
+   + LDL bridge/template content
+   = one combined consumer-owned AGENTS.md / CLAUDE.md
+   ```
+
+   The combined file is intentionally *not* identical to LDL's target
+   content, so it never satisfies graduation mode 1, and `tools/ldl-init`/
+   `tools/ldl-update` have no safe way to infer from arbitrary file bytes
+   alone that the required merge actually happened — `pendingManualIntegration`
+   would otherwise stay set indefinitely even after a real, correct merge.
+   `tools/ldl-ack` closes that gap with an explicit, durable acknowledgement
+   instead: a human or an authorized controlling session attests that the
+   *current* bridge target was integrated, without the destination ever
+   being added to `files[]` or otherwise becoming LDL-managed. The consumer
+   file remains entirely consumer-owned — LDL never overwrites it, never
+   conflict-checks it, and never claims ownership over the unrelated
+   instructions merged alongside its own content.
+
+   ```bash
+   node <path-to-loop-dee-loup-clone>/tools/ldl-ack/index.mjs \
+     --dest <path-to-your-project> --bridge AGENTS.md
+   ```
+
+   (or `--bridge CLAUDE.md`, independently — acknowledging one bridge never
+   affects the other). The equivalent MCP tool is `ldl_acknowledge_integration`
+   (see `docs/mcp-server.md`). The acknowledgement is refused, and nothing is
+   written, unless the named bridge is currently genuinely parked at its
+   template given the Loop-Dee-Loup checkout's present content and the
+   consumer repository's present state — see `tools/ldl-ack/index.mjs`'s
+   header comment for the complete list of refusal conditions.
+
+   The acknowledgement records the sha256 of the bridge's *current* target
+   content in `.ldl/manifest.json`'s `manualIntegrationAcknowledgements`
+   array (see "Provenance manifest" below), not a timeless boolean. This is
+   what lets a later Loop-Dee-Loup revision that doesn't change that
+   specific bridge's content leave the acknowledgement valid, while a
+   revision that does change it makes the bridge report pending again on
+   the very next `tools/ldl-init`/`tools/ldl-update`/`ldl_status` run,
+   automatically — a stale acknowledgement against a superseded target is
+   never mistaken for coverage of the new one.
+
+Editing the consumer file after mode 1 graduation is a normal LDL-managed
+conflict, exactly like editing any other managed path. Editing it after mode
+2 acknowledgement is not: the file was never added to `files[]`, so LDL has
+no ownership claim over it to conflict-check in the first place — it simply
+remains consumer-owned, as it was before the merge.
+
 ## Provenance manifest
 
 Every `tools/ldl-init` bootstrap run writes `.ldl/manifest.json` in the
@@ -213,6 +283,14 @@ entirely and writes nothing:
   "skipped": [{ "dest": "<repo-relative path>", "reason": "<why it was left alone>" }],
   "pendingManualIntegration": [
     { "dest": "<AGENTS.md or CLAUDE.md>", "template": "<its .ldl/*.template.md path>", "reason": "<why a human must merge it by hand>" }
+  ],
+  "manualIntegrationAcknowledgements": [
+    {
+      "dest": "<AGENTS.md or CLAUDE.md>",
+      "template": "<its .ldl/*.template.md path>",
+      "acknowledgedTargetSha256": "<sha256 of the exact bridge content this acknowledgement covers>",
+      "acknowledgedAt": "<ISO-8601 timestamp of the tools/ldl-ack run that recorded it>"
+    }
   ]
 }
 ```
@@ -249,7 +327,16 @@ special case" above — so a fresh session can tell "installed and active"
 apart from "installed but still requires a manual merge" without
 reconstructing that history from conversation or from noticing the template
 file on disk. An empty array means every bridge file this repository owns is
-already installed at its own root destination.
+already installed at its own root destination or has been resolved by one of
+the two reconciliation modes described above. `manualIntegrationAcknowledgements`
+records every `tools/ldl-ack`/`ldl_acknowledge_integration` attestation
+currently in force — see "Ownership-preserving manual integration" above —
+each entry bound to the exact target content hash it covers, not a timeless
+boolean, so a subsequent Loop-Dee-Loup revision that changes that bridge's
+content is never mistaken for still being covered by an older acknowledgement.
+It is read, but never written, by `tools/ldl-init` and `tools/ldl-update` —
+both carry it forward unchanged; only `tools/ldl-ack`/`ldl_acknowledge_integration`
+ever modifies it.
 
 ## Safety and idempotency
 

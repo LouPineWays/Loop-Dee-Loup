@@ -7,6 +7,7 @@ working in a consumer repository cheaply and deterministically ask:
 - What would change if it were updated?
 - Can it be safely synchronized right now?
 - Please synchronize it.
+- I've manually merged a parked bridge template into my own AGENTS.md/CLAUDE.md — please record that.
 
 It exists because that loop was previously only available by hand-inspecting
 `.ldl/manifest.json` and running `tools/ldl-init`/`tools/ldl-update` from a shell — workable,
@@ -20,18 +21,19 @@ install/update logic and not a runtime dependency consumer repositories need aft
 synchronizing:
 
 - Every tool below calls straight into the exact same exported functions
-  `tools/ldl-init/index.mjs` and `tools/ldl-update/index.mjs` already use for the CLI —
-  `run()`, `buildOps()`, `planUpdate()`, `isValidManifest()`, and friends. There is exactly one
-  implementation of path ownership, manifest generation, hashing, and conflict detection; this
-  server does not duplicate it. See `tools/mcp-server/status.mjs`.
+  `tools/ldl-init/index.mjs`, `tools/ldl-update/index.mjs`, and `tools/ldl-ack/index.mjs`
+  already use for the CLI — `run()`, `buildOps()`, `planUpdate()`, `isValidManifest()`,
+  `planAcknowledgeIntegration()`, and friends. There is exactly one implementation of path
+  ownership, manifest generation, hashing, conflict detection, and manual-integration
+  acknowledgement; this server does not duplicate any of it. See `tools/mcp-server/status.mjs`.
 - It is local-first, stdio-transport only. There is no hosted LDL service and this issue does
   not authorize building one.
 - A consumer repository that has already been synchronized remains fully usable without this
   server. Once `.ldl/manifest.json` is current, an agent session in that repository gets its
   governing rules from the repository's own installed `AGENTS.md`, `docs/`, `.claude/`, and
   GitHub state — never by depending on a live MCP connection for its own operating model.
-- It exposes exactly three bounded operations (`ldl_status`, `ldl_init`, `ldl_update`), not
-  arbitrary file-write or shell-execution tools.
+- It exposes exactly four bounded operations (`ldl_status`, `ldl_init`, `ldl_update`,
+  `ldl_acknowledge_integration`), not arbitrary file-write or shell-execution tools.
 
 ## Requirements
 
@@ -134,6 +136,35 @@ plan captured immediately before the real update runs; if that pre-check itself 
 reason, the update still proceeds using `tools/ldl-update`'s own logic — only the evidence
 degrades, never the safety guarantee.
 
+### `ldl_acknowledge_integration`
+
+Records a durable, ownership-preserving attestation (issue #153) that the **current** LDL
+bridge target for `AGENTS.md` or `CLAUDE.md` has been manually merged into the consumer-owned
+root file it was parked next to — see `docs/consumer-contract.md`, "Two reconciliation modes for
+a parked bridge". Takes `dest` (required), `bridge` (required — exactly `"AGENTS.md"` or
+`"CLAUDE.md"`), and optional `root`. Identical behavior to running
+`node tools/ldl-ack/index.mjs --dest <dest> --bridge <bridge>` directly.
+
+```json
+{
+  "acknowledged": "AGENTS.md",
+  "template": ".ldl/AGENTS.template.md",
+  "manualIntegrationNeeded": 0,
+  "manifestPath": ".ldl/manifest.json"
+}
+```
+
+Refuses (writes nothing) when there is no current pending manual integration for the named
+bridge — already installed, already content-match-graduated, or never actually parked — when the
+bridge name is invalid, or when the parked template or the consumer-owned destination is missing
+or unsafe (symlinked, or blocked by a non-directory). Never adds the acknowledged destination to
+the managed `files[]` set: the file remains fully consumer-owned, never conflict-checked by a
+later `ldl_update`. The acknowledgement is bound to the sha256 of the bridge's current target
+content, not a timeless boolean — the next `ldl_status`/`ldl_update` call against this repository
+reports the bridge pending again automatically the moment a later Loop-Dee-Loup revision actually
+changes that bridge's content, without this tool needing to be called again for an unrelated
+revision bump.
+
 ## Connecting a consumer-repository agent session
 
 ```text
@@ -199,8 +230,8 @@ the first time this process ever operates against it (there is no earlier signal
 against), and every later call against that same root is checked against that baseline —
 covering both the server's own default backing checkout and any different checkout a caller
 explicitly selects via the per-call `root` argument, since either can drift while this process
-keeps running. The check runs once per tool call and, for the two consumer-mutating tools
-(`ldl_init`/`ldl_update`), a second time immediately before the actual write — narrowing the
+keeps running. The check runs once per tool call and, for the three consumer-mutating tools
+(`ldl_init`/`ldl_update`/`ldl_acknowledge_integration`), a second time immediately before the actual write — narrowing the
 window in which the checkout could change between the read-heavy planning phase and the
 mutation itself. Once the fingerprint has changed, every tool (including the read-only
 `ldl_status`) refuses with a compact error explaining that the server process is stale and
@@ -219,12 +250,15 @@ coherence" tests.
 ## Security boundary
 
 - `ldl_status` never writes anything.
-- `ldl_init`/`ldl_update` only ever act on the `dest` path they're given, using the same
-  existence, non-directory, and symlink-write-through guards already enforced inside
-  `tools/ldl-init`/`tools/ldl-update` (`findUnsafeDestReason`, `findUnsafeLdlDirReason`) — this
-  server does not add, remove, or weaken those checks.
+- `ldl_init`/`ldl_update`/`ldl_acknowledge_integration` only ever act on the `dest` path they're
+  given, using the same existence, non-directory, and symlink-write-through guards already
+  enforced inside `tools/ldl-init`/`tools/ldl-update`/`tools/ldl-ack` (`findUnsafeDestReason`,
+  `findUnsafeLdlDirReason`) — this server does not add, remove, or weaken those checks.
+  `ldl_acknowledge_integration` additionally never adds its acknowledged destination to the
+  managed `files[]` set, so it can never turn a consumer-owned file into one a later `ldl_update`
+  would conflict-check or overwrite.
 - There is no tool here that executes an arbitrary shell command or writes an arbitrary file;
-  the tool surface is exactly the three operations documented above.
+  the tool surface is exactly the four operations documented above.
 
 ## Tests
 

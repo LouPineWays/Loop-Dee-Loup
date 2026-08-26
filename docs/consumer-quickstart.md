@@ -84,6 +84,23 @@ resolves independently:
   special case", for why these two files are handled differently from LDL's
   other managed paths.
 
+  If your merged file keeps your own unrelated instructions alongside the
+  template's content (the normal case), run `tools/ldl-ack` afterward to
+  record that the merge happened — otherwise `pendingManualIntegration` stays
+  set even though you did the merge, since LDL cannot safely infer that from
+  arbitrary file bytes alone:
+
+  ```bash
+  node <path-to-loop-dee-loup-clone>/tools/ldl-ack/index.mjs \
+    --dest <path-to-your-project> --bridge AGENTS.md
+  ```
+
+  (or `--bridge CLAUDE.md`, independently, if that one also needed merging).
+  See `docs/consumer-contract.md`, "Two reconciliation modes for a parked
+  bridge", for the one case where this step isn't needed — your merged file
+  ended up byte-for-byte identical to the template, so LDL recognized the
+  match automatically.
+
 Once `pendingManualIntegration` is empty (or was empty from the start), start
 a fresh Claude Code session inside your project and dispatch one issue with a
 terse reference, for example:
@@ -110,13 +127,14 @@ update contract.
 
 ## 6. Optional: check status and update through an MCP server instead of the CLI
 
-Steps 2 and 5 above can also be done through a local LDL MCP server your coding-agent session
-connects to, instead of running `tools/ldl-init`/`tools/ldl-update` by hand — useful if you
-maintain several LDL consumer repositories and want a cheap `ldl_status` check across all of
-them without loading each one's manifest into context. See `docs/mcp-server.md` for setup and
-the exact tools it exposes (`ldl_status`, `ldl_init`, `ldl_update`). It calls the same
-underlying mechanism as the CLI commands above — nothing about the ownership or conflict-safety
-rules in this page or `docs/consumer-contract.md` changes.
+Steps 2, 4, and 5 above can also be done through a local LDL MCP server your coding-agent
+session connects to, instead of running `tools/ldl-init`/`tools/ldl-update`/`tools/ldl-ack` by
+hand — useful if you maintain several LDL consumer repositories and want a cheap `ldl_status`
+check across all of them without loading each one's manifest into context. See
+`docs/mcp-server.md` for setup and the exact tools it exposes (`ldl_status`, `ldl_init`,
+`ldl_update`, `ldl_acknowledge_integration`). It calls the same underlying mechanism as the CLI
+commands above — nothing about the ownership or conflict-safety rules in this page or
+`docs/consumer-contract.md` changes.
 
 ## 7. What remains authoritative in your repository
 

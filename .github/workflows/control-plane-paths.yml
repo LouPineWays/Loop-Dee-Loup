@@ -21,6 +21,7 @@ on:
       - "tools/telemetry/**"
       - "tools/ldl-init/**"
       - "tools/ldl-update/**"
+      - "tools/ldl-ack/**"
       - "tools/mcp-server/**"
 
 concurrency:
@@ -51,6 +52,9 @@ jobs:
 
       - name: LDL-update tests
         run: node --test tools/ldl-update/index.test.mjs
+
+      - name: LDL-ack (manual integration acknowledgement) tests
+        run: node --test tools/ldl-ack/index.test.mjs
 
       - name: Install mcp-server dependencies
         run: npm ci
