@@ -71,16 +71,65 @@ a session's cost/context fields as measured rather than falling straight back to
 session, `statusline_sample` events should appear; that specific case remains undogfooded in
 this repository.
 
-## What it deliberately cannot measure
+## Transcript-derived token usage (issue #139)
 
-Claude Code hooks and the statusLine payload do not expose per-turn or per-subagent token/cost
-breakdowns — only OpenTelemetry does, and enabling OTel effectively requires standing up a
-collector, which conflicts with this issue's "no hosted infrastructure" constraint. So this
-collector can tell you a subagent *ran*, its type, and when it started and stopped, but not how
-many tokens or how much cost it consumed. `reduce.mjs` names this explicitly in the record's
-`unknown` list rather than estimating it — see "A field that cannot be measured reliably must
-remain unknown" in issue #45's requirements. Likewise, per-turn input/output/cache token
-breakdown and rate-limit consumption are unavailable from these interfaces.
+Issue #104 confirmed statusLine's non-interactive gap makes `cost_usd_total`,
+`context_window_size`, and per-turn token usage unavailable in this repository's normal
+execution mode. Issue #120 then tried to use `/spend` to evaluate LDL's real token economics
+anyway, found that gap made the question unanswerable, and still closed CLEAN — issue #139 is
+the fix for that false-CLEAN pattern, with two parts: this section covers the measurement half;
+`/spend`'s "Evidence-sufficiency verdicts" section covers the verdict half.
+
+The fix is `transcript.mjs`, not OpenTelemetry: Claude Code already writes one structured JSONL
+transcript per session — the file a hook payload's `transcript_path` field points to — and every
+assistant turn in it carries a `message.usage` object (`input_tokens`, `output_tokens`,
+`cache_creation_input_tokens`, `cache_read_input_tokens`) plus `message.model`. This is Claude
+Code's own accounting data, written as normal session operation regardless of interactive vs.
+non-interactive/Agent-SDK execution — it is the "existing supported structured telemetry" this
+issue's constraints call for, and it is available in exactly the execution mode where statusLine
+is not. Subagent turns are not mixed into the main file: each subagent gets its own
+`<transcript_dir>/<session_id>/subagents/agent-*.jsonl`, paired with an `agent-*.meta.json`
+carrying the subagent's `agentType` — so per-subagent-type token attribution, previously in
+`reduce.mjs`'s `unknown` list, is now measurable without a hosted OTel collector.
+
+`hook.mjs` reads this at `SessionEnd` and `PreCompact` (both fire reliably — see the gap section
+above), calls `transcript.mjs`'s `collectTranscriptUsage(transcript_path)`, and appends the
+result as a `transcript_usage` event — `transcript_path` itself is read and then discarded, never
+persisted (matching the privacy rule below). `reduce.mjs` folds the most recent `transcript_usage`
+event into `measured.token_usage_main_total`, `measured.token_usage_main_by_model`,
+`measured.token_usage_subagent_total`, `measured.token_usage_subagent_by_agent_type`,
+`measured.token_usage_subagent_by_model`, a merged `measured.token_usage_session_by_model`
+(main + subagent tokens combined per model — a subagent can run on a different model than the
+main thread, so `token_usage_main_by_model` alone would silently omit its tokens), and two
+purely arithmetic `derived` fields (`token_usage_grand_total`, `token_usage_main_share_of_total`).
+`measured.transcript_usage_sample_count === 0` means none of this fired — most commonly a session
+that crashed before reaching `SessionEnd` or a compaction, or a Claude Code build old enough not
+to supply `transcript_path` in hook payloads. `measured.token_usage_is_session_complete` is
+`true` only when the most recent `transcript_usage` sample was captured at `SessionEnd` — a
+`PreCompact`-only sample (session still running, or crashed before `SessionEnd`) reflects usage
+accumulated only up to that point, not the whole session, and `sufficiency.mjs`'s
+`token_allocation` claim requires this before treating totals as whole-session evidence.
+
+A landed `transcript_usage` event does not by itself guarantee `token_usage_main_total` or
+`token_usage_subagent_total` are measured: `collectTranscriptUsage` treats a torn/malformed line
+in the main transcript, or a discovered-but-unreadable subagent transcript, as evidence that
+specific portion's read was incomplete and reports it as `null` rather than a total that quietly
+excludes the lost data — a partial-but-plausible-looking number is exactly the false-confidence
+shape issue #139 exists to eliminate. `reduce.mjs` checks each field's actual value, not merely
+whether an event landed, before omitting it from the record's `unknown` list.
+
+## What it deliberately still cannot measure
+
+No Claude Code interface this collector uses exposes a *skill*-invocation boundary the way the
+transcript's subagent files expose a Task/Agent-tool boundary, so per-skill token/cost
+attribution remains unavailable — `reduce.mjs` names this explicitly
+(`per_skill_token_or_cost_attribution`) rather than approximating it from subagent data. This
+collector also does not preserve true per-individual-turn breakdown (only per-model/per-
+agent-type aggregates), does not compute monetary cost from token counts (no local pricing
+table — cost stays available only where statusLine's `cost_usd_total` fired), and cannot measure
+rate-limit consumption from either interface. `reduce.mjs` names each of these explicitly in the
+record's `unknown` list rather than estimating them — see "A field that cannot be measured
+reliably must remain unknown" in issue #45's requirements.
 
 ## Where the data lives
 
@@ -96,9 +145,12 @@ session's data.
 Only coarse identifiers and numeric measurements are ever written: session id, repo
 owner/name, the basename (not full path) of the working directory, model id, cost/token/line
 counts, context-window percentages, and (for subagent/compaction events) agent id/type and
-compaction trigger. Never: prompts, responses, reasoning, tool output, source file contents,
-`transcript_path`, or any other full filesystem path. `collect.test.mjs` and `hook.test.mjs`
-assert this directly against payloads that include disallowed fields.
+compaction trigger. From the transcript specifically: only `message.model` and the four numeric
+`usage` fields per turn (aggregated by model and by subagent `agentType`), plus a per-subagent
+message count and agent count. Never: prompts, responses, reasoning, tool output, source file
+contents, `transcript_path`, a subagent's free-text `.meta.json` `description`, or any other full
+filesystem path. `collect.test.mjs`, `hook.test.mjs`, and `transcript.test.mjs` assert this
+directly against payloads/fixtures that include disallowed fields.
 
 ## Reducing a session
 
@@ -118,15 +170,41 @@ Non-goals section of issue #45. `.claude/skills/spend/SKILL.md` is the layer tha
 judgment, using this record as its primary evidence source instead of reconstructing these
 facts from `/usage`, `/context`, or the transcript.
 
+## Evidence-sufficiency gate
+
+```
+node tools/telemetry/sufficiency.mjs <session_id> <claim_type>
+```
+
+Reduces the session (as above) and checks one named claim type — `token_allocation`,
+`monetary_cost_total`, `monetary_cost_by_model`, `compaction_frequency`, or
+`subagent_invocation_pattern`, see `sufficiency.mjs`'s `CLAIM_REQUIREMENTS` — against the
+specific record fields that claim needs, returning `SUFFICIENT` or `INSUFFICIENT` plus the
+exact missing fields. Built for issue #139: `/spend` uses this to decide whether it may render a
+CLEAN/NOT CLEAN verdict for an economic claim at all, rather than re-deriving that judgment by
+reading the record's `unknown` list from scratch each time — the condition that let issue #120
+close CLEAN on a token-allocation question its own evidence never answered.
+`token_allocation` additionally requires `measured.token_usage_is_session_complete === true`
+(the last `transcript_usage` sample must be a `SessionEnd`, not a `PreCompact`-only partial
+snapshot), and `monetary_cost_by_model` is currently always `INSUFFICIENT` (`measured.
+cost_usd_by_model` is always `null` — no local pricing table). `assessSufficiency()` is exported
+as a pure function; see `sufficiency.test.mjs` for the #120 regression case.
+
 ## Tests
 
 ```
 node --test tools/telemetry/*.test.mjs
 ```
 
-`reduce.test.mjs` exercises the pure reducer against four representative fixtures: a normal
-single-agent session, a session with several subagent invocations, incomplete telemetry (a
-session that ended before `SessionEnd` fired and before any statusLine sample landed), and a
-session containing a compaction. `collect.test.mjs`, `hook.test.mjs`, and `statusline.test.mjs`
-cover the shared helpers and both entry points, including end-to-end subprocess runs with
-piped stdin. `reduce.cli.test.mjs` covers the reducer's CLI plumbing.
+`reduce.test.mjs` exercises the pure reducer against representative fixtures: a normal
+single-agent session, a session with several subagent invocations but no transcript_usage event,
+a session with a transcript_usage event (per-model/per-subagent-type token totals present),
+incomplete telemetry (a session that ended before `SessionEnd` fired and before any statusLine
+sample landed), and a session containing a compaction. `collect.test.mjs`, `hook.test.mjs`, and
+`statusline.test.mjs` cover the shared helpers and both entry points, including end-to-end
+subprocess runs with piped stdin — `hook.test.mjs` specifically covers `buildTranscriptUsageEvent`
+and confirms `transcript_path` never survives into a written event. `transcript.test.mjs` covers
+`collectTranscriptUsage` against real temp-file transcript/subagent layouts, including dedup by
+message id, agentType attribution, missing/malformed files, and privacy (no prompt/response/
+description content leaks through). `sufficiency.test.mjs` covers `assessSufficiency`, including
+the issue #120 regression case. `reduce.cli.test.mjs` covers the reducer's CLI plumbing.

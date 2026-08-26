@@ -25,16 +25,25 @@ telemetry establishes what happened, never whether it was good.
    proved it.
 3. Only when the record is missing, empty, or missing a field this analysis actually needs,
    fall back to the platform's own `/usage` or `/context` report for that specific gap — never
-   as a routine replacement for the record, and never by parsing the transcript to recompute a
-   total the record (or `/usage`/`/context`) already gives you. `tools/telemetry/` not existing
-   in this repository at all (e.g. a consumer repository this hasn't been installed into yet,
-   per `docs/consumer-contract.md`) is the same case as an empty record — fall back for
-   everything, and say so plainly rather than treating it as an error to work around.
+   as a routine replacement for the record, and never by parsing the transcript yourself to
+   recompute a total `reduce.mjs` (or `/usage`/`/context`) already gives you deterministically.
+   `tools/telemetry/` not existing in this repository at all (e.g. a consumer repository this
+   hasn't been installed into yet, per `docs/consumer-contract.md`) is the same case as an
+   empty record — fall back for everything, and say so plainly rather than treating it as an
+   error to work around.
    If `measured.statusline_sample_count` is `0`, treat `cost_usd_total`, `context_window_size`,
    `last_context_used_percentage`, and `last_token_usage` as unavailable immediately and go
    straight to the `/usage`/`/context` fallback for them — do not spend a step probing session
    logs to rediscover this; see `tools/telemetry/README.md`'s "statusLine's confirmed
    non-interactive gap" for why this is a known, evidenced condition rather than a one-off.
+   `measured.token_usage_main_total` / `measured.token_usage_subagent_by_agent_type` are a
+   *separate* mechanism (recovered from the session's own transcript at SessionEnd/PreCompact,
+   see `tools/telemetry/transcript.mjs`) and follow their own gate:
+   `measured.transcript_usage_sample_count === 0` means they're unavailable this session —
+   most commonly because the session hasn't reached SessionEnd or a compaction yet, or ran on
+   a Claude Code build too old to supply `transcript_path` in hook payloads — there is no
+   `/usage`/`/context` fallback for per-model/per-subagent-type token attribution specifically;
+   report it as unavailable rather than reconstructing it from the transcript by hand.
 4. Separately, inspect the smallest necessary durable repository state — the active issue's
    acceptance criteria, PR state, review/audit verdicts — to determine what outcome the session
    actually validated. Telemetry never establishes this; do not infer it from commit count,
@@ -46,15 +55,78 @@ before including anything verbatim.
 
 ## What telemetry can and cannot tell you
 
-It can: session-total cost and duration, context-window usage over the session (including the
-peak before a compaction, not just the last sample), lines added/removed, structural
-subagent/compaction events (that one happened, its type/trigger, when).
+It can: session-total cost and duration (where statusLine fired); context-window usage over
+the session, including the peak before a compaction, not just the last sample (where statusLine
+fired); lines added/removed; structural subagent/compaction events (that one happened, its
+type/trigger, when); and — from the session's own transcript, which works in this repository's
+normal non-interactive execution mode where statusLine does not — total input/output/cache-read/
+cache-creation tokens, broken down by model for the main thread alone
+(`measured.token_usage_main_by_model`), by subagent type (`measured.token_usage_subagent_by_agent_type`),
+and merged session-wide across main and subagent threads (`measured.token_usage_session_by_model`
+— use this one, not `token_usage_main_by_model` alone, for "which models did this session's
+tokens actually go to", since a subagent can run on a different model than the main thread),
+plus the deterministic main-vs-subagent share of the session's token total
+(`derived.token_usage_grand_total`, `derived.token_usage_main_share_of_total`).
 
-It cannot: attribute tokens or cost to a specific subagent or skill invocation, break tokens
-down per turn, or measure rate-limit consumption — `tools/telemetry/reduce.mjs`'s `unknown`
-list names these explicitly each time, and no other command in this workflow closes that gap.
-If a conclusion needs that granularity, report it as unavailable rather than approximating it
-from something else.
+It cannot: attribute tokens or cost to a specific *skill* invocation (no Claude Code interface
+this collector uses exposes a skill-invocation boundary the way it does for subagents), break
+tokens down per individual turn rather than per model/agent-type aggregate, compute monetary
+cost from token counts (no pricing table — cost remains available only where statusLine's
+`cost_usd_total` fired), or measure rate-limit consumption. `tools/telemetry/reduce.mjs`'s
+`unknown` list names each of these explicitly every run, and no other command in this workflow
+closes that gap. If a conclusion needs that granularity, report it as unavailable rather than
+approximating it from something else.
+
+## Evidence-sufficiency verdicts (CLEAN / NOT CLEAN / INCONCLUSIVE)
+
+Every `/spend` report renders one verdict per material claim it makes, not just one verdict for
+the whole session. A claim is any conclusion of the form "X was/wasn't a problem" or "X was/
+wasn't appropriately allocated" — narrower structural observations ("no repeated compaction was
+observed") are claims too, just claims with a lower evidence bar.
+
+Before rendering a verdict for a claim that concerns token/cost allocation specifically, run
+the deterministic gate instead of eyeballing the record:
+
+```
+node tools/telemetry/sufficiency.mjs <session_id> <claim_type>
+```
+
+`tools/telemetry/sufficiency.mjs`'s `CLAIM_REQUIREMENTS` names the claim types this gate covers
+(`token_allocation`, `monetary_cost_total`, `monetary_cost_by_model`, `compaction_frequency`,
+`subagent_invocation_pattern`) and the exact record fields each one requires. It returns
+`SUFFICIENT` or `INSUFFICIENT` plus the specific fields that are missing — never estimate this
+by hand, and never add a new ad hoc completeness rule inside this skill; extend
+`CLAIM_REQUIREMENTS` instead when a new class of claim needs its own evidence bar.
+
+Two things `token_allocation` specifically guards against, beyond plain field presence: a
+`transcript_usage` snapshot taken at `PreCompact` rather than `SessionEnd` only reflects usage
+accumulated up to that point, not the whole session, so the claim also requires
+`measured.token_usage_is_session_complete === true` — never render a whole-session allocation
+verdict from a partial mid-session snapshot. And `monetary_cost_by_model` is always
+`INSUFFICIENT` today (`measured.cost_usd_by_model` is always `null`) — this collector has no
+local pricing table, so per-model cost is a distinct, currently-unanswerable claim from
+`monetary_cost_total`; never let the total's `SUFFICIENT` verdict stand in for a per-model
+question.
+
+- **CLEAN** — the evidence needed for this claim is `SUFFICIENT`, and nothing in it supports a
+  material defect or recurring inefficiency.
+- **NOT CLEAN** — the evidence needed for this claim is `SUFFICIENT`, and it supports one or
+  more material defects or recurring inefficiencies requiring correction.
+- **INCONCLUSIVE / INSUFFICIENT EVIDENCE** — `assessSufficiency` (or the equivalent reasoning
+  for a claim type it doesn't cover) returns `INSUFFICIENT`: material evidence this specific
+  claim needs is unavailable. Never round this up to CLEAN. Say plainly which fields are
+  missing (from `missingFields`) and why (usually `measured.transcript_usage_sample_count === 0`
+  or `measured.statusline_sample_count === 0` — see the evidence order above).
+
+**Missing evidence for one claim does not make every claim in the report inconclusive.** A
+session with zero `transcript_usage` events can still render a CLEAN or NOT CLEAN verdict on
+`compaction_frequency` or `subagent_invocation_pattern` — those claims' required fields
+(`measured.compaction_events`, `measured.subagent_start_events`) come from hooks that fire
+regardless — while its `token_allocation` claim must render INCONCLUSIVE. Keep each claim's
+verdict scoped to the evidence that specific claim actually needed; do not let a strong
+structural finding ("no review churn, no repeated founder interruption") get silently promoted
+into a broader economic claim ("expenditure was appropriately scoped") that the same evidence
+never supported. State the evidence boundary explicitly in the report instead.
 
 ## Judgment
 
@@ -82,8 +154,10 @@ Report:
    number;
 6. confidence/evidence limitations, including anything in the record's `unknown` list that
    would have mattered;
-7. zero to three smallest justified corrections — it is a legitimate result to recommend none;
-8. what, if anything, should be measured in a subsequent fresh session.
+7. **the CLEAN / NOT CLEAN / INCONCLUSIVE verdict for each material claim made**, per the
+   Evidence-sufficiency section above — not one blended verdict for the whole report;
+8. zero to three smallest justified corrections — it is a legitimate result to recommend none;
+9. what, if anything, should be measured in a subsequent fresh session.
 
 Do not pad the report to fill every category — a clean session can produce a very short one.
 Never recommend weakening a safety, verification, review, audit, or founder-authority gate
