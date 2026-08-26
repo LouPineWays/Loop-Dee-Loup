@@ -15,14 +15,23 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { run as ldlInitRun } from "../ldl-init/index.mjs";
 import { run as ldlUpdateRun } from "../ldl-update/index.mjs";
 import { computeStatusAll, computeUpdatePlan } from "./status.mjs";
 import { resolvePathArg, resolveRepos } from "./config.mjs";
+import { implementationFingerprint } from "./staleness.mjs";
 
-export const DEFAULT_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+// LDL_MCP_ROOT overrides which Loop-Dee-Loup checkout this server treats as its own backing
+// checkout — the one its static imports above actually came from. Real deployments never set
+// it (DEFAULT_ROOT is this file's own location, which is what it should be); it exists so a
+// test can point a real, unmodified `node server.mjs` process at a disposable fixture
+// directory it controls, including mutating that fixture's files after the process has
+// already started — see server.test.mjs's process-coherence test and issue #146.
+export const DEFAULT_ROOT = process.env.LDL_MCP_ROOT
+  ? resolve(process.env.LDL_MCP_ROOT)
+  : join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 const TOOLS = [
   {
@@ -115,11 +124,57 @@ export function createServer({ root: rootOverride } = {}) {
     { capabilities: { tools: {} } },
   );
 
+  // The checkout this server's own code was actually loaded from — not `args.root`, which a
+  // caller may point at an entirely different LDL checkout per-call and which has never
+  // determined which *code* executes, only which source content that code reads. Pre-seeded
+  // once, here, at server-construction time (main() constructs exactly one server per
+  // process), so it reflects the checkout state at the moment the static imports above
+  // resolved. See ./staleness.mjs and issue #146.
+  const backingRoot = rootOverride || DEFAULT_ROOT;
+
+  // Per-root coherence baselines (Codex P1 finding on PR #147): a caller may legitimately
+  // point ldl_status/ldl_init/ldl_update at a *different* checkout than backingRoot via
+  // `args.root` — the tool schemas document exactly this. A single backingRoot-only baseline
+  // left that path uncovered: a non-default root's own implementation files could drift
+  // mid-process-lifetime with no check catching it at all. The first call this process ever
+  // makes against a given root establishes that root's baseline (mirroring how backingRoot's
+  // own baseline is simply "whatever was on disk when this process started" — there is no
+  // earlier signal to compare against for either); every later call against that same root is
+  // then checked against it, so a root's implementation drifting while this process keeps
+  // running and using it is always caught, regardless of which root that is.
+  const implementationBaselines = new Map([[backingRoot, implementationFingerprint(backingRoot)]]);
+
+  // Returns a stale-server error result the moment `effectiveRoot`'s implementation files no
+  // longer match the baseline this process already trusted them at, or null when coherent.
+  // Called both once per tool call (covers the common case) and again immediately before any
+  // consumer-mutating call (ldl_init/ldl_update — Codex P2 finding on PR #147: the checkout
+  // can still change mid-call, between the read-heavy planning phase and the write, and a
+  // single entry-time check does not catch that narrower race).
+  function checkCoherence(effectiveRoot) {
+    const current = implementationFingerprint(effectiveRoot);
+    const baseline = implementationBaselines.get(effectiveRoot);
+    if (baseline === undefined) {
+      implementationBaselines.set(effectiveRoot, current);
+      return null;
+    }
+    if (current !== baseline) {
+      return errorResult(
+        `MCP server process is stale: its Loop-Dee-Loup synchronization implementation at ${effectiveRoot} ` +
+          "changed on disk since this process started trusting it, so this process can no longer be trusted " +
+          "to apply coherent synchronization semantics against it. Restart the MCP server process, then retry.",
+      );
+    }
+    return null;
+  }
+
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
     const root = resolvePathArg(args.root) || rootOverride || DEFAULT_ROOT;
+
+    const entryStaleness = checkCoherence(root);
+    if (entryStaleness) return entryStaleness;
 
     try {
       if (name === "ldl_status") {
@@ -135,6 +190,8 @@ export function createServer({ root: rootOverride } = {}) {
 
       if (name === "ldl_init") {
         if (!args.dest) return errorResult("Missing required argument: dest");
+        const preMutationStaleness = checkCoherence(root);
+        if (preMutationStaleness) return preMutationStaleness;
         const result = await ldlInitRun({ dest: resolvePathArg(args.dest), root });
         return cliResult(result);
       }
@@ -154,6 +211,13 @@ export function createServer({ root: rootOverride } = {}) {
         } catch (err) {
           before = { kind: "error", error: err.message };
         }
+
+        // Revalidated again here, immediately before the mutating run() call and after the
+        // read-heavy `before` plan above: the backing checkout can still have changed between
+        // the entry-time check and this point, and this is the last moment before this
+        // process would actually write into the consumer repository and stamp a revision.
+        const preMutationStaleness = checkCoherence(root);
+        if (preMutationStaleness) return preMutationStaleness;
 
         // ldl-update's run() does not itself catch every exception its internal planUpdate()
         // can raise (e.g. EISDIR when a managed file was replaced by a directory) — it can

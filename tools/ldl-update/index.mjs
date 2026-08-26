@@ -58,6 +58,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   buildOps,
+  contentMatchesHash,
   defaultResolveRevision,
   derivePendingManualIntegration,
   findUnsafeDestReason,
@@ -68,6 +69,8 @@ import {
   sha256,
   withResolvedBridgesManaged,
 } from "../ldl-init/index.mjs";
+
+export { contentMatchesHash };
 
 export { parseArgs };
 
@@ -169,10 +172,15 @@ export function planUpdate({ ops, destRoot, existingManifest }) {
       continue;
     }
 
-    const currentHash = sha256(readFileSync(absDest));
-    if (currentHash === targetHash) {
+    // contentMatchesHash tolerates a CRLF/CR-only difference (issue #146) so a checkout-only
+    // line-ending change — the consumer's own core.autocrlf converting an LF-installed file
+    // to CRLF, or vice versa — is never misreported as either a conflict or a missed update,
+    // while a genuine content edit still fails every comparison below.
+    const currentRaw = readFileSync(absDest);
+
+    if (contentMatchesHash(currentRaw, targetHash)) {
       unchangedFiles.push({ dest: op.destRel, sha256: targetHash });
-    } else if (currentHash === recordedHash) {
+    } else if (contentMatchesHash(currentRaw, recordedHash)) {
       toInstall.push(op);
     } else {
       conflicts.push({
@@ -284,7 +292,7 @@ export async function run(args, deps = {}) {
     const staleTemplatePath = join(destRoot, ...bridge.templateDestRel.split("/"));
     if (!existsSync(staleTemplatePath)) {
       supersededTemplates.push(bridge.templateDestRel); // already gone; just drop the stale manifest record
-    } else if (sha256(readFileSync(staleTemplatePath)) === previousTemplateEntry.sha256) {
+    } else if (contentMatchesHash(readFileSync(staleTemplatePath), previousTemplateEntry.sha256)) {
       supersededTemplates.push(bridge.templateDestRel);
     } else {
       conflicts.push({

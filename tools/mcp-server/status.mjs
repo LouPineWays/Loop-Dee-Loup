@@ -17,10 +17,9 @@ import {
   findUnsafeLdlDirReason,
   isValidManifest,
   planBridges,
-  sha256,
   withResolvedBridgesManaged,
 } from "../ldl-init/index.mjs";
-import { pendingIntegrationListsEqual, planUpdate, skipListsEqual } from "../ldl-update/index.mjs";
+import { contentMatchesHash, pendingIntegrationListsEqual, planUpdate, skipListsEqual } from "../ldl-update/index.mjs";
 
 // Mirrors the {toInstall, supersededTemplates, skipSetChanged, pendingIntegrationChanged} =>
 // no-op decision inside tools/ldl-update's run(), computed here read-only so a status check
@@ -53,7 +52,7 @@ function planStatusUpdate({ ops, destRoot, existingManifest, bridgePlans, resolv
     const staleTemplatePath = join(destRoot, ...bridge.templateDestRel.split("/"));
     if (!existsSync(staleTemplatePath)) {
       supersededTemplates.push(bridge.templateDestRel);
-    } else if (sha256(readFileSync(staleTemplatePath)) === previousTemplateEntry.sha256) {
+    } else if (contentMatchesHash(readFileSync(staleTemplatePath), previousTemplateEntry.sha256)) {
       supersededTemplates.push(bridge.templateDestRel);
     } else {
       conflicts.push({
