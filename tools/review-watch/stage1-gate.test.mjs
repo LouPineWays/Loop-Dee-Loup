@@ -70,6 +70,28 @@ test("isGenuineResponse: accepts a genuine review that discusses the setup-promp
   );
 });
 
+test("isGenuineResponse: rejects a Markdown-heading-wrapped BLOCKED reply (YouTubery PR #14, issue #151)", () => {
+  assert.equal(isGenuineResponse("### BLOCKED — checkout unavailable"), false);
+});
+
+test("isGenuineResponse: rejects other common leading Markdown wrappers around BLOCKED", () => {
+  assert.equal(isGenuineResponse("> BLOCKED — cannot review this PR."), false);
+  assert.equal(isGenuineResponse("**BLOCKED** — missing context."), false);
+  assert.equal(isGenuineResponse("# BLOCKED\nCheckout unavailable."), false);
+});
+
+test("isGenuineResponse: accepts a genuine review that discusses or quotes BLOCKED syntax rather than opening with it (issue #151)", () => {
+  const genuineReview =
+    "Reviewed the diff. One finding: `stage1-gate.mjs`'s classifier only rejects a reply when it starts with " +
+    "`BLOCKED`, so a Markdown heading like `### BLOCKED` slips through the anchor. Recommend normalizing leading " +
+    "Markdown before classification.";
+  assert.equal(
+    isGenuineResponse(genuineReview),
+    true,
+    "a genuine review that mentions/quotes BLOCKED as findings content, rather than opening with it, must remain genuine",
+  );
+});
+
 test("parseArgs: reads flags and defaults the bot login", () => {
   const args = parseArgs(["--repo", "owner/repo", "--number", "50", "--head", "abc123"]);
   assert.equal(args.repo, "owner/repo");
@@ -283,6 +305,32 @@ test("run: RESPONSE_RECEIVED — a genuine reply after an earlier BLOCKED one st
   assert.equal(result.state, "RESPONSE_RECEIVED");
   assert.equal(result.matches.length, 1);
   assert.equal(result.matches[0].id, 3);
+});
+
+test("run: PENDING — a Markdown-heading-wrapped BLOCKED reply does not open the gate (YouTubery PR #14, issue #151)", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
+            {
+              id: 2,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "### BLOCKED — checkout unavailable",
+              created_at: "2026-08-23T13:05:00Z",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "PENDING");
+  assert.equal(result.nonGenuineMatches.length, 1);
 });
 
 test("run: PENDING — a Codex Cloud 'create an environment' reply does not open the gate (Stage 2 audit finding on issue #141)", async () => {

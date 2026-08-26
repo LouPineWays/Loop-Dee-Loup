@@ -93,10 +93,32 @@ function isCodexCloudSetupPrompt(text) {
   return normalized.startsWith("to use codex here") && normalized.includes("create an environment for this repo");
 }
 
+// YouTubery PR #14 (LDL issue #151): a blocked/status reply wrapped in harmless leading
+// Markdown presentation -- e.g. "### BLOCKED -- checkout unavailable" -- defeated
+// NON_GENUINE_PATTERNS' `^\s*BLOCKED\b` anchor, because a heading marker sits before the
+// semantic first word. Rather than adding another one-off regex fragment per wrapper
+// style, strip harmless leading presentation (heading hashes, blockquote markers, and
+// bold/italic emphasis) once, so classification sees the same leading token a human
+// reader would. This only trims the *front* of the text -- classification still anchors
+// to the start of the normalized string, so a genuine review that discusses or quotes
+// "BLOCKED" later in its body (or as an unrelated Markdown-formatted word) is untouched.
+function stripLeadingMarkdownWrapper(text) {
+  let s = text ?? "";
+  let prev;
+  do {
+    prev = s;
+    s = s.replace(/^\s+/, "");
+    s = s.replace(/^>+/, "");
+    s = s.replace(/^#{1,6}(?=\s|$)/, "");
+    s = s.replace(/^[*_]{1,3}(?=\S)/, "");
+  } while (s !== prev);
+  return s;
+}
+
 export function isGenuineResponse(bodyExcerpt) {
-  const text = bodyExcerpt ?? "";
-  if (isCodexCloudSetupPrompt(text)) return false;
-  return !NON_GENUINE_PATTERNS.some((re) => re.test(text));
+  const normalized = stripLeadingMarkdownWrapper(bodyExcerpt ?? "");
+  if (isCodexCloudSetupPrompt(normalized)) return false;
+  return !NON_GENUINE_PATTERNS.some((re) => re.test(normalized));
 }
 
 export function parseArgs(argv) {
