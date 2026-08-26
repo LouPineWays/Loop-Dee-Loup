@@ -51,6 +51,13 @@ test("isGenuineResponse: accepts an ordinary review reply", () => {
   assert.equal(isGenuineResponse("Reviewed the diff. No issues found."), true);
 });
 
+test("isGenuineResponse: rejects the Codex Cloud 'create an environment' configuration reply (Stage 2 audit finding on issue #141)", () => {
+  assert.equal(
+    isGenuineResponse("To use Codex here, [create an environment for this repo](https://chatgpt.com/codex/cloud/settings/environments)."),
+    false,
+  );
+});
+
 test("parseArgs: reads flags and defaults the bot login", () => {
   const args = parseArgs(["--repo", "owner/repo", "--number", "50", "--head", "abc123"]);
   assert.equal(args.repo, "owner/repo");
@@ -264,6 +271,32 @@ test("run: RESPONSE_RECEIVED — a genuine reply after an earlier BLOCKED one st
   assert.equal(result.state, "RESPONSE_RECEIVED");
   assert.equal(result.matches.length, 1);
   assert.equal(result.matches[0].id, 3);
+});
+
+test("run: PENDING — a Codex Cloud 'create an environment' reply does not open the gate (Stage 2 audit finding on issue #141)", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
+            {
+              id: 2,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "To use Codex here, [create an environment for this repo](https://chatgpt.com/codex/cloud/settings/environments).",
+              created_at: "2026-08-23T13:00:04Z",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "PENDING");
+  assert.equal(result.nonGenuineMatches.length, 1);
 });
 
 test("run: surfaces a gh pr view failure as exit 1", async () => {

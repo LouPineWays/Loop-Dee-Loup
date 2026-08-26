@@ -69,6 +69,15 @@ const NON_GENUINE_PATTERNS = [
   /\b(?:do not|don't|cannot|can't) have (?:write |repository |branch )?(?:access|permission)/i,
   /\binsufficient (?:write |repository )?permission/i,
   /\b(?:not permitted|not authorized) to (?:modify|commit|push|edit)/i,
+  // Stage 2 audit finding on issue #141 (LDL#135's own correction cycle): a Codex Cloud
+  // environment misconfiguration produces this exact reply — "To use Codex here, create an
+  // environment for this repo." — from the bot login within seconds of the trigger. It is
+  // a setup prompt, not a review; matching only BLOCKED/permission phrasing above let it
+  // through as RESPONSE_RECEIVED, defeating the gate's whole fail-closed purpose whenever
+  // Codex Cloud lacks an environment for the repository.
+  /\bcreate an environment for this repo\b/i,
+  /\bto use codex here\b/i,
+  /chatgpt\.com\/codex\/cloud\/settings\/environments/i,
 ];
 
 export function isGenuineResponse(bodyExcerpt) {
