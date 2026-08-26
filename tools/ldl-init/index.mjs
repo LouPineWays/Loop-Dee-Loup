@@ -236,19 +236,49 @@ export function planAcknowledgeIntegration({ bridgeDestRel, root, destRoot, exis
   if (unsafeTemplateReason) {
     return { ok: false, reason: `${bridge.templateDestRel} is unsafe: ${unsafeTemplateReason}` };
   }
-  if (!existsSync(join(destRoot, bridge.templateDestRel))) {
+  const absTemplatePath = join(destRoot, bridge.templateDestRel);
+  if (!existsSync(absTemplatePath)) {
     return {
       ok: false,
       reason: `${bridge.templateDestRel} does not exist — expected the parked template that establishes the current bridge target`,
     };
   }
+  // The parked template on disk must actually be *this* target's content, not a stale one left
+  // over from an earlier Loop-Dee-Loup revision (Stage 1 review finding on PR #159): planBridgeOp
+  // above only asks "does this bridge currently resolve to its templateDestRel", which stays true
+  // across a source revision bump even before a consumer's own `tools/ldl-update` run has ever
+  // refreshed the parked file — recomputing `content` fresh from --root without checking the
+  // template's actual bytes would let an acknowledgement bind to a target the human parked
+  // template on disk never showed the consumer, durably misreporting an outdated operating
+  // contract as fully activated. `contentMatchesHash` applies the same checkout-line-ending
+  // tolerance every other comparison in this file uses.
+  if (!contentMatchesHash(readFileSync(absTemplatePath), sha256(content))) {
+    return {
+      ok: false,
+      reason:
+        `${bridge.templateDestRel} does not match the current bridge target content — it is stale relative to --root. ` +
+        `Run tools/ldl-update against --dest first to refresh the parked template, then acknowledge.`,
+    };
+  }
 
+  const absDestPath = join(destRoot, bridge.destRel);
   const unsafeDestReason = findUnsafeDestReason(destRoot, bridge.destRel);
   if (unsafeDestReason) {
     return { ok: false, reason: `${bridge.destRel} is unsafe: ${unsafeDestReason}` };
   }
-  if (!existsSync(join(destRoot, bridge.destRel))) {
+  let destStat;
+  try {
+    destStat = statSync(absDestPath);
+  } catch {
     return { ok: false, reason: `${bridge.destRel} does not exist at the destination — nothing to acknowledge as integrated` };
+  }
+  // A directory (or other non-regular node) sitting at the bridge's own destRel is not a file a
+  // human could have merged anything into — findUnsafeDestReason only guards symlinks and a
+  // non-directory blocking a path *segment*, not a non-file leaf (Stage 1 review finding on PR
+  // #159), and planBridgeOp already parks in this case only because readFileSync on a directory
+  // throws, not because it recognized this as a genuine consumer-owned file.
+  if (!destStat.isFile()) {
+    return { ok: false, reason: `${bridge.destRel} is not a regular file at the destination — nothing to acknowledge as integrated` };
   }
 
   return {

@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { MANAGED_ITEMS, run as ldlInit } from "../ldl-init/index.mjs";
+import { MANAGED_ITEMS, planAcknowledgeIntegration, run as ldlInit } from "../ldl-init/index.mjs";
 import { run as ldlUpdate } from "../ldl-update/index.mjs";
 import { parseArgs, run } from "./index.mjs";
 
@@ -234,6 +234,80 @@ test("run: rejects a malformed .ldl/manifest.json instead of acknowledging again
 
   assert.equal(result.exitCode, 1);
   assert.match(result.message, /not in the expected shape/);
+});
+
+test("run: aborts without writing anything when deps.beforeWrite reports staleness immediately before the write (Stage 1 review finding on PR #159)", async (t) => {
+  // tools/mcp-server wires deps.beforeWrite to its own process-coherence recheck, called right
+  // before the manifest write rather than only once at MCP tool-call entry — this test proves
+  // run() actually honors that hook at the correct point, independent of MCP server plumbing.
+  const root = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+  await bootstrap(dest, root, "rev-1");
+  const manifestPath = join(dest, ".ldl", "manifest.json");
+  const before = readFileSync(manifestPath, "utf8");
+
+  const result = await run(
+    { dest, root, bridge: "CLAUDE.md" },
+    { beforeWrite: () => "simulated staleness: backing checkout changed mid-call" },
+  );
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /simulated staleness/);
+  assert.equal(readFileSync(manifestPath, "utf8"), before, "a reported staleness must abort before any write, leaving the manifest untouched");
+});
+
+test("run: a falsy deps.beforeWrite result (the CLI default) never blocks a genuine acknowledgement", async (t) => {
+  const root = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+  await bootstrap(dest, root, "rev-1");
+
+  const result = await run({ dest, root, bridge: "CLAUDE.md" }, { beforeWrite: () => null });
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(readManifest(dest).pendingManualIntegration, []);
+});
+
+// Stage 1 review finding on PR #159: acknowledging must fail closed rather than binding to a
+// target the parked template on disk never actually showed the consumer.
+
+test("planAcknowledgeIntegration: refuses when the parked template is stale relative to the current --root bridge content", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+  await bootstrap(dest, rootV1, "rev-1");
+  // Sanity check: the template on disk right now genuinely reflects rev-1.
+  const templateBefore = readFileSync(join(dest, ".ldl", "CLAUDE.template.md"), "utf8");
+  assert.match(templateBefore, /\(rev-1\)/);
+
+  // The LDL checkout advances to rev-2 (a real content change to CLAUDE.md's own target), but
+  // the consumer never ran tools/ldl-update to refresh the parked template — it's still rev-1.
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const manifest = readManifest(dest);
+
+  const result = planAcknowledgeIntegration({ bridgeDestRel: "CLAUDE.md", root: rootV2, destRoot: dest, existingManifest: manifest });
+
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /does not match the current bridge target content/);
+  assert.match(result.reason, /run tools\/ldl-update/i);
+});
+
+test("planAcknowledgeIntegration: refuses when the bridge destination is a directory, not a regular file", async (t) => {
+  const root = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  // A directory literally named CLAUDE.md — planBridgeOp still parks a template because
+  // readFileSync on a directory throws, but there is no actual file a human could have merged
+  // anything into.
+  mkdirSync(join(dest, "CLAUDE.md"), { recursive: true });
+  await bootstrap(dest, root, "rev-1");
+  const manifest = readManifest(dest);
+  assert.equal(manifest.pendingManualIntegration.length, 1, "sanity check: a directory collision must still park the template");
+
+  const result = planAcknowledgeIntegration({ bridgeDestRel: "CLAUDE.md", root, destRoot: dest, existingManifest: manifest });
+
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /not a regular file/);
 });
 
 test("parseArgs: reads --dest, --bridge, and --root flags", () => {

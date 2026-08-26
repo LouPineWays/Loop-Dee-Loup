@@ -63,9 +63,15 @@ const LDL_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 // `now` is injected so tests get deterministic manifest output without depending on this
 // process's own wall-clock time, matching the pattern tools/ldl-init and tools/ldl-update use
-// for `now`/`resolveRevisionImpl`.
+// for `now`/`resolveRevisionImpl`. `beforeWrite` is injected by tools/mcp-server (issue #153,
+// Stage 1 review finding on PR #159) so its own process-coherence guard (see
+// docs/mcp-server.md's "Process coherence") can be rechecked immediately before the manifest
+// write below, after this function's own read-heavy planning (buildOps, planBridges,
+// planUpdate) has run — not only once at MCP tool-call entry. Must return a non-empty message
+// string to abort the write, or a falsy value to proceed; defaults to a no-op for the plain CLI,
+// which has no such long-lived-process staleness hazard to guard against.
 export async function run(args, deps = {}) {
-  const { now = () => new Date().toISOString() } = deps;
+  const { now = () => new Date().toISOString(), beforeWrite = () => null } = deps;
 
   if (!args.dest) {
     return { exitCode: 1, message: "Missing required arg: --dest <path-to-consumer-repo>" };
@@ -148,6 +154,15 @@ export async function run(args, deps = {}) {
     pendingManualIntegration,
     manualIntegrationAcknowledgements,
   };
+
+  // Rechecked here, immediately before the actual write and after every read-heavy planning
+  // step above — mirrors tools/mcp-server/server.mjs's own ldl_update pre-mutation recheck, so
+  // this newly exposed mutating tool gets the same narrowed-race guarantee (issue #153, Stage 1
+  // review finding on PR #159).
+  const staleness = beforeWrite();
+  if (staleness) {
+    return { exitCode: 1, message: staleness };
+  }
 
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
 

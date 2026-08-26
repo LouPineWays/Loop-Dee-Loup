@@ -447,6 +447,29 @@ test("process coherence: ldl_update revalidates immediately before mutating, not
   assert.equal(readFileSync(join(dest, ".ldl", "manifest.json"), "utf8"), before, "a stale process must never write into the consumer repository");
 });
 
+test("process coherence: ldl_acknowledge_integration revalidates immediately before mutating, not only at tool-call entry (Stage 1 review finding on PR #159)", async (t) => {
+  const fixtureRoot = makeFixtureRoot(t, "rev-1");
+  copyImplementationFiles(fixtureRoot);
+
+  const client = new Client({ name: "test-client", version: "0.0.0" }, { capabilities: {} });
+  const server = createServer({ root: fixtureRoot });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  t.after(() => client.close());
+
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+  await ldlInit({ dest, root: fixtureRoot });
+
+  appendFileSync(join(fixtureRoot, "tools", "ldl-ack", "index.mjs"), "\n// simulated upstream change\n");
+
+  const before = readFileSync(join(dest, ".ldl", "manifest.json"), "utf8");
+  const result = await client.callTool({ name: "ldl_acknowledge_integration", arguments: { dest, bridge: "CLAUDE.md", root: fixtureRoot } });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /stale/i);
+  assert.equal(readFileSync(join(dest, ".ldl", "manifest.json"), "utf8"), before, "a stale process must never write into the consumer repository");
+});
+
 test("process coherence: a real long-lived `node server.mjs` process refuses stale synchronization once its backing checkout changes (issue #146)", async (t) => {
   const fixtureRoot = makeFixtureRoot(t, "rev-1");
   copyImplementationFiles(fixtureRoot);
