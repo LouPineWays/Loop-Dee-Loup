@@ -40,6 +40,7 @@ const pathChecks = [
   { label: "tools/telemetry/**", ok: () => dirHasFiles("tools/telemetry") },
   { label: "tools/ldl-init/**", ok: () => dirHasFiles("tools/ldl-init") },
   { label: "tools/ldl-update/**", ok: () => dirHasFiles("tools/ldl-update") },
+  { label: "tools/ldl-ack/**", ok: () => dirHasFiles("tools/ldl-ack") },
   { label: "tools/mcp-server/**", ok: () => dirHasFiles("tools/mcp-server") },
 ];
 
@@ -61,6 +62,7 @@ const requiredLiterals = [
   "tools/telemetry/**",
   "tools/ldl-init/**",
   "tools/ldl-update/**",
+  "tools/ldl-ack/**",
   "tools/mcp-server/**",
 ];
 

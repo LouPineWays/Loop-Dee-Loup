@@ -20,9 +20,12 @@ import {
   deriveConsumerAgents,
   defaultResolveRevision,
   derivePendingManualIntegration,
+  findBridgeByDestRel,
+  isValidManifest,
   looksBinary,
   normalizeLineEndings,
   parseArgs,
+  planAcknowledgeIntegration,
   planBridgeOp,
   planInstall,
   run,
@@ -919,5 +922,218 @@ test("run: a consumer-shaped install of the real repository's spend skill has no
   assert.ok(
     installedContract.includes("evidence-sufficiency verdict gate itself"),
     "installed consumer-contract.md must describe the verdict-gate fallback, not only the per-field fallback",
+  );
+});
+
+// Issue #153: ownership-preserving manual integration acknowledgement.
+
+test("findBridgeByDestRel: resolves a known bridge and returns null for an unknown name", () => {
+  assert.equal(findBridgeByDestRel("CLAUDE.md").templateDestRel, ".ldl/CLAUDE.template.md");
+  assert.equal(findBridgeByDestRel("AGENTS.md").templateDestRel, ".ldl/AGENTS.template.md");
+  assert.equal(findBridgeByDestRel("README.md"), null);
+});
+
+test("isValidManifest: accepts a valid manualIntegrationAcknowledgements array and rejects a malformed entry", () => {
+  const base = { schemaVersion: 1, files: [] };
+  const goodEntry = {
+    dest: "CLAUDE.md",
+    template: ".ldl/CLAUDE.template.md",
+    acknowledgedTargetSha256: sha256(Buffer.from("x")),
+    acknowledgedAt: "2026-08-23T00:00:00.000Z",
+  };
+  assert.equal(isValidManifest({ ...base, manualIntegrationAcknowledgements: [goodEntry] }), true);
+  assert.equal(isValidManifest({ ...base, manualIntegrationAcknowledgements: [{ dest: "CLAUDE.md" }] }), false, "missing fields must be rejected");
+  assert.equal(
+    isValidManifest({ ...base, manualIntegrationAcknowledgements: [{ ...goodEntry, acknowledgedTargetSha256: "not-a-hash" }] }),
+    false,
+    "a non-sha256 acknowledgedTargetSha256 must be rejected",
+  );
+  assert.equal(
+    isValidManifest({ ...base, manualIntegrationAcknowledgements: [{ ...goodEntry, acknowledgedAt: "" }] }),
+    false,
+    "an empty acknowledgedAt must be rejected",
+  );
+});
+
+test("derivePendingManualIntegration: a matching acknowledgement (by exact target content hash) suppresses a parked bridge from pending", () => {
+  const content = Buffer.from("current CLAUDE.md target content\n");
+  const bridgePlans = [
+    { bridge: { destRel: "CLAUDE.md", templateDestRel: ".ldl/CLAUDE.template.md" }, op: { destRel: ".ldl/CLAUDE.template.md", content } },
+  ];
+  const acknowledgements = [
+    { dest: "CLAUDE.md", template: ".ldl/CLAUDE.template.md", acknowledgedTargetSha256: sha256(content), acknowledgedAt: "2026-08-23T00:00:00.000Z" },
+  ];
+
+  assert.deepEqual(derivePendingManualIntegration(bridgePlans, [], acknowledgements), []);
+});
+
+test("derivePendingManualIntegration: an acknowledgement bound to a superseded target does not suppress the newly changed pending bridge", () => {
+  const content = Buffer.from("NEW CLAUDE.md target content\n");
+  const bridgePlans = [
+    { bridge: { destRel: "CLAUDE.md", templateDestRel: ".ldl/CLAUDE.template.md" }, op: { destRel: ".ldl/CLAUDE.template.md", content } },
+  ];
+  const acknowledgements = [
+    {
+      dest: "CLAUDE.md",
+      template: ".ldl/CLAUDE.template.md",
+      acknowledgedTargetSha256: sha256(Buffer.from("OLD CLAUDE.md target content\n")),
+      acknowledgedAt: "2026-08-23T00:00:00.000Z",
+    },
+  ];
+
+  const pending = derivePendingManualIntegration(bridgePlans, [], acknowledgements);
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].dest, "CLAUDE.md");
+});
+
+test("derivePendingManualIntegration: an acknowledgement for a different bridge does not suppress this one", () => {
+  const content = Buffer.from("current AGENTS.md target content\n");
+  const bridgePlans = [
+    { bridge: { destRel: "AGENTS.md", templateDestRel: ".ldl/AGENTS.template.md" }, op: { destRel: ".ldl/AGENTS.template.md", content } },
+  ];
+  const acknowledgements = [
+    { dest: "CLAUDE.md", template: ".ldl/CLAUDE.template.md", acknowledgedTargetSha256: sha256(content), acknowledgedAt: "2026-08-23T00:00:00.000Z" },
+  ];
+
+  const pending = derivePendingManualIntegration(bridgePlans, [], acknowledgements);
+  assert.equal(pending.length, 1);
+});
+
+test("planAcknowledgeIntegration: refuses without an existing manifest", (t) => {
+  const dest = tempDir(t);
+  const result = planAcknowledgeIntegration({ bridgeDestRel: "CLAUDE.md", root: REPO_ROOT, destRoot: dest, existingManifest: null });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /no \.ldl\/manifest\.json/);
+});
+
+test("planAcknowledgeIntegration: refuses an unknown bridge name", (t) => {
+  const dest = tempDir(t);
+  const result = planAcknowledgeIntegration({
+    bridgeDestRel: "README.md",
+    root: REPO_ROOT,
+    destRoot: dest,
+    existingManifest: { schemaVersion: 1, files: [] },
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /unknown bridge/);
+});
+
+test("planAcknowledgeIntegration: refuses when the named bridge has no pending manual integration right now", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  const install = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(install.exitCode, 0);
+  const manifest = readManifest(dest);
+
+  const result = planAcknowledgeIntegration({ bridgeDestRel: "CLAUDE.md", root, destRoot: dest, existingManifest: manifest });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /no pending manual integration/);
+});
+
+test("planAcknowledgeIntegration: succeeds for a genuinely parked bridge and binds to the current target content hash", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+
+  const install = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(install.exitCode, 0);
+  const manifest = readManifest(dest);
+
+  const result = planAcknowledgeIntegration({ bridgeDestRel: "CLAUDE.md", root, destRoot: dest, existingManifest: manifest });
+  assert.equal(result.ok, true);
+  assert.equal(result.dest, "CLAUDE.md");
+  assert.equal(result.template, ".ldl/CLAUDE.template.md");
+  const targetContent = normalizeLineEndings(readFileSync(join(root, "CLAUDE.md")));
+  assert.equal(result.acknowledgedTargetSha256, sha256(targetContent));
+});
+
+test("planAcknowledgeIntegration: refuses when the parked template is missing", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+  const install = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(install.exitCode, 0);
+  const manifest = readManifest(dest);
+  rmSync(join(dest, ".ldl", "CLAUDE.template.md"));
+
+  const result = planAcknowledgeIntegration({ bridgeDestRel: "CLAUDE.md", root, destRoot: dest, existingManifest: manifest });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /does not exist/);
+});
+
+test("planAcknowledgeIntegration: refuses when the parked template is a symlink", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+  const install = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(install.exitCode, 0);
+  const manifest = readManifest(dest);
+  const templatePath = join(dest, ".ldl", "CLAUDE.template.md");
+  rmSync(templatePath);
+  const elsewhere = join(dest, "elsewhere.md");
+  writeFileSync(elsewhere, "not the real template\n");
+  try {
+    symlinkSync(elsewhere, templatePath);
+  } catch (err) {
+    t.skip(`symlink creation not permitted in this environment: ${err.message}`);
+    return;
+  }
+
+  const result = planAcknowledgeIntegration({ bridgeDestRel: "CLAUDE.md", root, destRoot: dest, existingManifest: manifest });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /symlink/);
+});
+
+test("planAcknowledgeIntegration: refuses when the consumer-owned destination is a symlink", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  const elsewhere = join(dest, "elsewhere.md");
+  writeFileSync(elsewhere, "MY PROJECT'S OWN CLAUDE.md via symlink, unmerged\n");
+  try {
+    symlinkSync(elsewhere, join(dest, "CLAUDE.md"));
+  } catch (err) {
+    t.skip(`symlink creation not permitted in this environment: ${err.message}`);
+    return;
+  }
+  const install = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(install.exitCode, 0);
+  const manifest = readManifest(dest);
+
+  const result = planAcknowledgeIntegration({ bridgeDestRel: "CLAUDE.md", root, destRoot: dest, existingManifest: manifest });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /symlink/);
+});
+
+test("run: carries forward an existing manualIntegrationAcknowledgements array unchanged across a reinit when the acknowledged target hasn't changed", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+
+  const first = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(first.exitCode, 0);
+  const manifestPath = join(dest, ".ldl", "manifest.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  assert.deepEqual(manifest.manualIntegrationAcknowledgements, []);
+
+  const ack = planAcknowledgeIntegration({ bridgeDestRel: "CLAUDE.md", root, destRoot: dest, existingManifest: manifest });
+  assert.equal(ack.ok, true);
+  manifest.manualIntegrationAcknowledgements = [
+    { dest: ack.dest, template: ack.template, acknowledgedTargetSha256: ack.acknowledgedTargetSha256, acknowledgedAt: "2026-08-23T00:00:00.000Z" },
+  ];
+  manifest.pendingManualIntegration = [];
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+
+  const second = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(second.exitCode, 0);
+  const secondManifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  assert.deepEqual(secondManifest.manualIntegrationAcknowledgements, manifest.manualIntegrationAcknowledgements);
+  assert.deepEqual(
+    secondManifest.pendingManualIntegration,
+    [],
+    "an acknowledged bridge whose target hasn't changed must stay resolved across a reinit",
+  );
+  assert.ok(
+    !secondManifest.files.some((f) => f.dest === "CLAUDE.md"),
+    "an acknowledged bridge must never be added to the managed files[] set",
   );
 });

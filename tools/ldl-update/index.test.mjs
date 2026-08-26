@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MANAGED_ITEMS, run as ldlInit } from "../ldl-init/index.mjs";
+import { MANAGED_ITEMS, planAcknowledgeIntegration, run as ldlInit } from "../ldl-init/index.mjs";
 import { parseArgs, planUpdate, run } from "./index.mjs";
 
 const SELF_PATH = fileURLToPath(import.meta.url).replace(/\.test\.mjs$/, ".mjs");
@@ -690,6 +690,134 @@ test("run: a newly colliding unmanaged destination is recorded under skipped eve
   // A second run with nothing new to report really is a no-op now.
   const second = await run({ dest, root: rootV1 }, { resolveRevisionImpl: () => "rev-1" });
   assert.equal(JSON.parse(second.message).noop, true);
+});
+
+// Issue #153: ownership-preserving manual integration acknowledgement, exercised through
+// tools/ldl-update's own run() rather than tools/ldl-init's, to prove every surface agrees.
+
+function writeManifest(dest, manifest) {
+  writeFileSync(join(dest, ".ldl", "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
+}
+
+test("run: an acknowledged bridge stays resolved across an unrelated update whose own bridge target content is unchanged", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+  await bootstrap(dest, rootV1, "rev-1");
+  const bootstrapped = readManifest(dest);
+  assert.equal(bootstrapped.pendingManualIntegration.length, 1);
+
+  const ack = planAcknowledgeIntegration({ bridgeDestRel: "CLAUDE.md", root: rootV1, destRoot: dest, existingManifest: bootstrapped });
+  assert.equal(ack.ok, true);
+  const acknowledgements = [
+    { dest: ack.dest, template: ack.template, acknowledgedTargetSha256: ack.acknowledgedTargetSha256, acknowledgedAt: "2026-08-23T00:00:00.000Z" },
+  ];
+  writeManifest(dest, { ...bootstrapped, pendingManualIntegration: [], manualIntegrationAcknowledgements: acknowledgements });
+
+  // Simulate an unrelated LDL source update: everything else advances to rev-2, but the
+  // bridge's own target content is held byte-identical to what was acknowledged.
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  writeFileSync(join(rootV2, "CLAUDE.md"), readFileSync(join(rootV1, "CLAUDE.md")));
+
+  const result = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(JSON.parse(result.message).manualIntegrationNeeded, 0);
+  const after = readManifest(dest);
+  assert.deepEqual(after.pendingManualIntegration, []);
+  assert.deepEqual(after.manualIntegrationAcknowledgements, acknowledgements);
+  assert.ok(!after.files.some((f) => f.dest === "CLAUDE.md"), "an acknowledged bridge must never be added to the managed files[] set");
+});
+
+test("run: an acknowledged bridge reports pending again once its own target content actually changes", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+  await bootstrap(dest, rootV1, "rev-1");
+  const bootstrapped = readManifest(dest);
+
+  const ack = planAcknowledgeIntegration({ bridgeDestRel: "CLAUDE.md", root: rootV1, destRoot: dest, existingManifest: bootstrapped });
+  assert.equal(ack.ok, true);
+  const acknowledgements = [
+    { dest: ack.dest, template: ack.template, acknowledgedTargetSha256: ack.acknowledgedTargetSha256, acknowledgedAt: "2026-08-23T00:00:00.000Z" },
+  ];
+  writeManifest(dest, { ...bootstrapped, pendingManualIntegration: [], manualIntegrationAcknowledgements: acknowledgements });
+
+  // rootV2's own makeFixtureRoot bakes revisionTag into CLAUDE.md's content, so this is a
+  // genuine change to the bridge's own target, not merely a different revision label.
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const result = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(JSON.parse(result.message).manualIntegrationNeeded, 1, "a genuinely changed bridge target must become pending again");
+  const after = readManifest(dest);
+  assert.equal(after.pendingManualIntegration.length, 1);
+  assert.equal(after.pendingManualIntegration[0].dest, "CLAUDE.md");
+  // The stale acknowledgement is preserved, not deleted out from under the consumer — it just
+  // no longer suppresses the newly changed target's pending state.
+  assert.deepEqual(after.manualIntegrationAcknowledgements, acknowledgements);
+  assert.ok(existsSync(join(dest, ".ldl", "CLAUDE.template.md")), "the refreshed template must be re-parked for a fresh merge/acknowledgement");
+});
+
+test("run: acknowledging one bridge leaves the other bridge's own pending state untouched", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "AGENTS.md"), "MY PROJECT'S OWN AGENTS.md, unmerged\n");
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+  await bootstrap(dest, rootV1, "rev-1");
+  const bootstrapped = readManifest(dest);
+  assert.equal(bootstrapped.pendingManualIntegration.length, 2);
+
+  const ack = planAcknowledgeIntegration({ bridgeDestRel: "CLAUDE.md", root: rootV1, destRoot: dest, existingManifest: bootstrapped });
+  assert.equal(ack.ok, true);
+  const acknowledgements = [
+    { dest: ack.dest, template: ack.template, acknowledgedTargetSha256: ack.acknowledgedTargetSha256, acknowledgedAt: "2026-08-23T00:00:00.000Z" },
+  ];
+  const pendingAfterAck = bootstrapped.pendingManualIntegration.filter((p) => p.dest !== "CLAUDE.md");
+  writeManifest(dest, { ...bootstrapped, pendingManualIntegration: pendingAfterAck, manualIntegrationAcknowledgements: acknowledgements });
+
+  const result = await run({ dest, root: rootV1 }, { resolveRevisionImpl: () => "rev-1" });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(JSON.parse(result.message).noop, true, "an unchanged pending/acknowledgement state must still be a true no-op");
+  const after = readManifest(dest);
+  assert.equal(after.pendingManualIntegration.length, 1);
+  assert.equal(after.pendingManualIntegration[0].dest, "AGENTS.md");
+  assert.deepEqual(after.manualIntegrationAcknowledgements, acknowledgements);
+});
+
+test("run: a local edit to an acknowledged, ownership-preserving bridge file is never treated as an LDL-managed conflict", async (t) => {
+  // Contrasts with the exact-content-match graduation case above ("a consumer who manually
+  // merges the parked template graduates the bridge to LDL-managed"), where a later hand-edit
+  // IS a real conflict — because that path adds the destination to files[]. Acknowledgement
+  // deliberately never does that (requirement 3), so this must stay a plain update, not a
+  // refusal, no matter what the consumer's own file now contains.
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+  await bootstrap(dest, rootV1, "rev-1");
+  const bootstrapped = readManifest(dest);
+
+  const ack = planAcknowledgeIntegration({ bridgeDestRel: "CLAUDE.md", root: rootV1, destRoot: dest, existingManifest: bootstrapped });
+  assert.equal(ack.ok, true);
+  writeManifest(dest, {
+    ...bootstrapped,
+    pendingManualIntegration: [],
+    manualIntegrationAcknowledgements: [
+      { dest: ack.dest, template: ack.template, acknowledgedTargetSha256: ack.acknowledgedTargetSha256, acknowledgedAt: "2026-08-23T00:00:00.000Z" },
+    ],
+  });
+
+  writeFileSync(join(dest, "CLAUDE.md"), "hand-edited again after acknowledgement, unrelated to the merge\n");
+
+  const result = await run({ dest, root: rootV1 }, { resolveRevisionImpl: () => "rev-1" });
+
+  assert.equal(result.exitCode, 0, "an acknowledged bridge's own file is not LDL-managed, so a local edit must never refuse the update");
+  assert.equal(
+    readFileSync(join(dest, "CLAUDE.md"), "utf8"),
+    "hand-edited again after acknowledgement, unrelated to the merge\n",
+    "CLAUDE.md remains entirely consumer-owned — the update must never touch it",
+  );
 });
 
 test("parseArgs: reads --dest and --root flags", () => {

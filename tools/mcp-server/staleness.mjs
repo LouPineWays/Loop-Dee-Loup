@@ -33,6 +33,7 @@ import { join } from "node:path";
 export const IMPLEMENTATION_FILES = [
   "tools/ldl-init/index.mjs",
   "tools/ldl-update/index.mjs",
+  "tools/ldl-ack/index.mjs",
   "tools/mcp-server/status.mjs",
   "tools/mcp-server/config.mjs",
   "tools/mcp-server/server.mjs",

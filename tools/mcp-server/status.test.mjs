@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { MANAGED_ITEMS, run as ldlInit } from "../ldl-init/index.mjs";
+import { MANAGED_ITEMS, planAcknowledgeIntegration, run as ldlInit } from "../ldl-init/index.mjs";
 import { computeStatus, computeStatusAll } from "./status.mjs";
 
 function tempDir(t) {
@@ -310,4 +310,38 @@ test("computeStatusAll: resolves each repository independently in the given orde
   assert.equal(results[0].status, "current");
   assert.equal(results[1].dest, destUninitialized);
   assert.equal(results[1].status, "not_initialized");
+});
+
+// Issue #153: computeStatus must agree with tools/ldl-ack's own acknowledgement, immediately —
+// not only after a subsequent tools/ldl-update run — since both read the same manifest field.
+test("computeStatus: an acknowledged bridge (issue #153) no longer reports pendingManualIntegration, and stays that way across an unrelated update", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+  await bootstrap(dest, rootV1, "rev-1");
+
+  const before = await computeStatus({ dest, root: rootV1 }, { resolveRevisionImpl: () => "rev-1" });
+  assert.equal(before.pendingManualIntegration.length, 1);
+
+  const manifestPath = join(dest, ".ldl", "manifest.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const ack = planAcknowledgeIntegration({ bridgeDestRel: "CLAUDE.md", root: rootV1, destRoot: dest, existingManifest: manifest });
+  assert.equal(ack.ok, true);
+  manifest.manualIntegrationAcknowledgements = [
+    { dest: ack.dest, template: ack.template, acknowledgedTargetSha256: ack.acknowledgedTargetSha256, acknowledgedAt: "2026-08-23T00:00:00.000Z" },
+  ];
+  manifest.pendingManualIntegration = [];
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+
+  const afterAck = await computeStatus({ dest, root: rootV1 }, { resolveRevisionImpl: () => "rev-1" });
+  assert.deepEqual(afterAck.pendingManualIntegration, []);
+  assert.equal(afterAck.status, "current", "acknowledging a bridge must not itself make the repo report outdated/conflict");
+
+  // A later revision that leaves this specific bridge's own content unchanged must not
+  // re-open the acknowledgement — status agrees with tools/ldl-update's own no-op rule.
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  writeFileSync(join(rootV2, "CLAUDE.md"), readFileSync(join(rootV1, "CLAUDE.md")));
+  const afterUnrelatedUpdate = await computeStatus({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+  assert.deepEqual(afterUnrelatedUpdate.pendingManualIntegration, []);
+  assert.equal(afterUnrelatedUpdate.status, "outdated", "unrelated managed content still reports outdated, independent of the acknowledgement");
 });

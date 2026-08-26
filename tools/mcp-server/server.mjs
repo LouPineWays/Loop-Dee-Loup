@@ -19,6 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { run as ldlInitRun } from "../ldl-init/index.mjs";
 import { run as ldlUpdateRun } from "../ldl-update/index.mjs";
+import { run as ldlAckRun } from "../ldl-ack/index.mjs";
 import { computeStatusAll, computeUpdatePlan } from "./status.mjs";
 import { resolvePathArg, resolveRepos } from "./config.mjs";
 import { implementationFingerprint } from "./staleness.mjs";
@@ -100,6 +101,37 @@ const TOOLS = [
       required: ["dest"],
     },
   },
+  {
+    name: "ldl_acknowledge_integration",
+    description:
+      "Record a durable, ownership-preserving attestation that the CURRENT LDL bridge target " +
+      "for AGENTS.md or CLAUDE.md has been manually merged into the consumer-owned root file it " +
+      "was parked next to, without requiring that file to become byte-for-byte identical to " +
+      "LDL's template and without adding it to LDL's managed files[] set — the destination " +
+      "remains fully consumer-owned. Clears pendingManualIntegration for that bridge only while " +
+      "its target content stays what was acknowledged; the moment a later Loop-Dee-Loup revision " +
+      "actually changes that bridge's content, the bridge reports pending again automatically. " +
+      "Refuses (writes nothing) when there is no current pending manual integration for the " +
+      "named bridge, the bridge name is invalid, or the destination/template state is missing " +
+      "or unsafe. Does not touch AGENTS.md/CLAUDE.md or any other managed file — this is a " +
+      "manifest-only attestation, not an install or update.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dest: { type: "string", description: "Path to the already-initialized consumer repository." },
+        bridge: {
+          type: "string",
+          enum: ["AGENTS.md", "CLAUDE.md"],
+          description: "Which bridge file's current manual integration to acknowledge.",
+        },
+        root: {
+          type: "string",
+          description: "Path to a Loop-Dee-Loup source checkout. Defaults to this server's own checkout.",
+        },
+      },
+      required: ["dest", "bridge"],
+    },
+  },
 ];
 
 function textResult(value, isError = false) {
@@ -144,27 +176,38 @@ export function createServer({ root: rootOverride } = {}) {
   // running and using it is always caught, regardless of which root that is.
   const implementationBaselines = new Map([[backingRoot, implementationFingerprint(backingRoot)]]);
 
-  // Returns a stale-server error result the moment `effectiveRoot`'s implementation files no
-  // longer match the baseline this process already trusted them at, or null when coherent.
-  // Called both once per tool call (covers the common case) and again immediately before any
-  // consumer-mutating call (ldl_init/ldl_update — Codex P2 finding on PR #147: the checkout
-  // can still change mid-call, between the read-heavy planning phase and the write, and a
-  // single entry-time check does not catch that narrower race).
-  function checkCoherence(effectiveRoot) {
+  // True the moment `effectiveRoot`'s implementation files no longer match the baseline this
+  // process already trusted them at (establishing that baseline on the first-ever check against
+  // a given root), false when coherent. Split out from checkCoherence() below (issue #153) so
+  // ldl_acknowledge_integration's own write-boundary recheck (see its dispatch below — Stage 1
+  // review finding on PR #159) can get a plain boolean to fold into tools/ldl-ack's own
+  // {exitCode, message} result, instead of an MCP-shaped error result it would have to unwrap.
+  function isStale(effectiveRoot) {
     const current = implementationFingerprint(effectiveRoot);
     const baseline = implementationBaselines.get(effectiveRoot);
     if (baseline === undefined) {
       implementationBaselines.set(effectiveRoot, current);
-      return null;
+      return false;
     }
-    if (current !== baseline) {
-      return errorResult(
-        `MCP server process is stale: its Loop-Dee-Loup synchronization implementation at ${effectiveRoot} ` +
-          "changed on disk since this process started trusting it, so this process can no longer be trusted " +
-          "to apply coherent synchronization semantics against it. Restart the MCP server process, then retry.",
-      );
-    }
-    return null;
+    return current !== baseline;
+  }
+
+  function stalenessMessage(effectiveRoot) {
+    return (
+      `MCP server process is stale: its Loop-Dee-Loup synchronization implementation at ${effectiveRoot} ` +
+      "changed on disk since this process started trusting it, so this process can no longer be trusted " +
+      "to apply coherent synchronization semantics against it. Restart the MCP server process, then retry."
+    );
+  }
+
+  // Returns a stale-server error result the moment `effectiveRoot`'s implementation files no
+  // longer match the baseline this process already trusted them at, or null when coherent.
+  // Called both once per tool call (covers the common case) and again immediately before any
+  // consumer-mutating call (ldl_init/ldl_update/ldl_acknowledge_integration — Codex P2 finding on
+  // PR #147: the checkout can still change mid-call, between the read-heavy planning phase and
+  // the write, and a single entry-time check does not catch that narrower race).
+  function checkCoherence(effectiveRoot) {
+    return isStale(effectiveRoot) ? errorResult(stalenessMessage(effectiveRoot)) : null;
   }
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
@@ -264,6 +307,23 @@ export function createServer({ root: rootOverride } = {}) {
           },
           false,
         );
+      }
+
+      if (name === "ldl_acknowledge_integration") {
+        if (!args.dest) return errorResult("Missing required argument: dest");
+        if (!args.bridge) return errorResult("Missing required argument: bridge");
+        const preMutationStaleness = checkCoherence(root);
+        if (preMutationStaleness) return preMutationStaleness;
+        // tools/ldl-ack's own run() does real reading (buildOps over every MANAGED_ITEMS entry,
+        // planBridges, planUpdate) between this point and its actual manifest write — the same
+        // read-heavy gap ldl_update's own `before` plan sits in front of. `beforeWrite` (issue
+        // #153, Stage 1 review finding on PR #159) lets run() recheck coherence at its own final
+        // write boundary, immediately before writeFileSync, rather than only here at call entry.
+        const result = await ldlAckRun(
+          { dest: resolvePathArg(args.dest), bridge: args.bridge, root },
+          { beforeWrite: () => (isStale(root) ? stalenessMessage(root) : null) },
+        );
+        return cliResult(result);
       }
 
       return errorResult(`Unknown tool: ${name}`);

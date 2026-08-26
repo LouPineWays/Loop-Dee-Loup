@@ -79,11 +79,11 @@ function toolJson(result) {
   return JSON.parse(result.content[0].text);
 }
 
-test("tools/list advertises exactly the three bounded LDL tools", async (t) => {
+test("tools/list advertises exactly the four bounded LDL tools", async (t) => {
   const client = await connectedClient(t);
   const { tools } = await client.listTools();
   const names = tools.map((tool) => tool.name).sort();
-  assert.deepEqual(names, ["ldl_init", "ldl_status", "ldl_update"]);
+  assert.deepEqual(names, ["ldl_acknowledge_integration", "ldl_init", "ldl_status", "ldl_update"]);
   for (const tool of tools) {
     assert.ok(tool.description && tool.description.length > 0, `${tool.name} must have a description`);
     assert.equal(tool.inputSchema.type, "object");
@@ -194,6 +194,63 @@ test("ldl_update reports manualIntegrationNeeded, matching pendingManualIntegrat
   const payload = JSON.parse(updateResult.content[0].text);
   assert.equal(payload.manualIntegrationNeeded, 1);
   assert.equal(payload.manualIntegrationNeeded, payload.pendingManualIntegration.length);
+});
+
+test("ldl_acknowledge_integration: full lifecycle through the protocol (issue #153)", async (t) => {
+  const client = await connectedClient(t);
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+
+  await ldlInit({ dest, root: rootV1 });
+  const statusBefore = toolJson(await client.callTool({ name: "ldl_status", arguments: { repos: [dest], root: rootV1 } }));
+  assert.equal(statusBefore[0].pendingManualIntegration.length, 1);
+
+  const ackResult = await client.callTool({ name: "ldl_acknowledge_integration", arguments: { dest, bridge: "CLAUDE.md", root: rootV1 } });
+  assert.equal(ackResult.isError, false);
+  const ackPayload = JSON.parse(ackResult.content[0].text);
+  assert.equal(ackPayload.acknowledged, "CLAUDE.md");
+  assert.equal(ackPayload.template, ".ldl/CLAUDE.template.md");
+  assert.equal(ackPayload.manualIntegrationNeeded, 0);
+
+  const statusAfter = toolJson(await client.callTool({ name: "ldl_status", arguments: { repos: [dest], root: rootV1 } }));
+  assert.deepEqual(statusAfter[0].pendingManualIntegration, []);
+  assert.equal(statusAfter[0].status, "current", "acknowledging must not itself make the repo report outdated/conflict");
+
+  // The destination remains fully consumer-owned: an unrelated update never touches it or
+  // conflict-checks it, and a subsequent update leaves the acknowledgement in force.
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  writeFileSync(join(rootV2, "CLAUDE.md"), readFileSync(join(rootV1, "CLAUDE.md")));
+  const updateResult = await client.callTool({ name: "ldl_update", arguments: { dest, root: rootV2 } });
+  assert.equal(updateResult.isError, false);
+  const updatePayload = JSON.parse(updateResult.content[0].text);
+  assert.deepEqual(updatePayload.pendingManualIntegration, []);
+  assert.equal(readFileSync(join(dest, "CLAUDE.md"), "utf8"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+});
+
+test("ldl_acknowledge_integration: refuses through the protocol when there is nothing currently pending to acknowledge", async (t) => {
+  const client = await connectedClient(t);
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await ldlInit({ dest, root: rootV1 }); // no pre-existing CLAUDE.md — nothing pending
+
+  const result = await client.callTool({ name: "ldl_acknowledge_integration", arguments: { dest, bridge: "CLAUDE.md", root: rootV1 } });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /no pending manual integration/);
+});
+
+test("ldl_acknowledge_integration: missing required arguments are clean protocol errors, not crashes", async (t) => {
+  const client = await connectedClient(t);
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+
+  const missingDest = await client.callTool({ name: "ldl_acknowledge_integration", arguments: { bridge: "CLAUDE.md", root: rootV1 } });
+  assert.equal(missingDest.isError, true);
+  assert.match(missingDest.content[0].text, /dest/);
+
+  const missingBridge = await client.callTool({ name: "ldl_acknowledge_integration", arguments: { dest, root: rootV1 } });
+  assert.equal(missingBridge.isError, true);
+  assert.match(missingBridge.content[0].text, /bridge/);
 });
 
 test("ldl_update returns the structured error shape even when the underlying run throws", async (t) => {
@@ -385,6 +442,29 @@ test("process coherence: ldl_update revalidates immediately before mutating, not
 
   const before = readFileSync(join(dest, ".ldl", "manifest.json"), "utf8");
   const result = await client.callTool({ name: "ldl_update", arguments: { dest, root: fixtureRoot } });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /stale/i);
+  assert.equal(readFileSync(join(dest, ".ldl", "manifest.json"), "utf8"), before, "a stale process must never write into the consumer repository");
+});
+
+test("process coherence: ldl_acknowledge_integration revalidates immediately before mutating, not only at tool-call entry (Stage 1 review finding on PR #159)", async (t) => {
+  const fixtureRoot = makeFixtureRoot(t, "rev-1");
+  copyImplementationFiles(fixtureRoot);
+
+  const client = new Client({ name: "test-client", version: "0.0.0" }, { capabilities: {} });
+  const server = createServer({ root: fixtureRoot });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  t.after(() => client.close());
+
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "CLAUDE.md"), "MY PROJECT'S OWN CLAUDE.md, unmerged\n");
+  await ldlInit({ dest, root: fixtureRoot });
+
+  appendFileSync(join(fixtureRoot, "tools", "ldl-ack", "index.mjs"), "\n// simulated upstream change\n");
+
+  const before = readFileSync(join(dest, ".ldl", "manifest.json"), "utf8");
+  const result = await client.callTool({ name: "ldl_acknowledge_integration", arguments: { dest, bridge: "CLAUDE.md", root: fixtureRoot } });
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /stale/i);
   assert.equal(readFileSync(join(dest, ".ldl", "manifest.json"), "utf8"), before, "a stale process must never write into the consumer repository");

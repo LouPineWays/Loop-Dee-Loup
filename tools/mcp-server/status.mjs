@@ -63,8 +63,11 @@ function planStatusUpdate({ ops, destRoot, existingManifest, bridgePlans, resolv
   }
 
   // Computed from the actual toInstall/toSkip outcome, not merely from planBridgeOp's
-  // destination choice — see derivePendingManualIntegration's own comment.
-  const pendingManualIntegration = derivePendingManualIntegration(bridgePlans, toSkip);
+  // destination choice — see derivePendingManualIntegration's own comment. Passes the
+  // manifest's own manualIntegrationAcknowledgements (issue #153) so status agrees with
+  // tools/ldl-update's own no-op/pending determination for an acknowledged bridge, rather than
+  // reporting it pending again from a read-only path ldl_update itself would not re-flag.
+  const pendingManualIntegration = derivePendingManualIntegration(bridgePlans, toSkip, existingManifest.manualIntegrationAcknowledgements || []);
 
   const skipSetChanged = !skipListsEqual(toSkip, existingManifest.skipped || []);
   const pendingIntegrationChanged = !pendingIntegrationListsEqual(pendingManualIntegration, existingManifest.pendingManualIntegration || []);
