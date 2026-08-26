@@ -15,14 +15,23 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { run as ldlInitRun } from "../ldl-init/index.mjs";
 import { run as ldlUpdateRun } from "../ldl-update/index.mjs";
 import { computeStatusAll, computeUpdatePlan } from "./status.mjs";
 import { resolvePathArg, resolveRepos } from "./config.mjs";
+import { implementationFingerprint } from "./staleness.mjs";
 
-export const DEFAULT_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+// LDL_MCP_ROOT overrides which Loop-Dee-Loup checkout this server treats as its own backing
+// checkout — the one its static imports above actually came from. Real deployments never set
+// it (DEFAULT_ROOT is this file's own location, which is what it should be); it exists so a
+// test can point a real, unmodified `node server.mjs` process at a disposable fixture
+// directory it controls, including mutating that fixture's files after the process has
+// already started — see server.test.mjs's process-coherence test and issue #146.
+export const DEFAULT_ROOT = process.env.LDL_MCP_ROOT
+  ? resolve(process.env.LDL_MCP_ROOT)
+  : join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 const TOOLS = [
   {
@@ -115,11 +124,36 @@ export function createServer({ root: rootOverride } = {}) {
     { capabilities: { tools: {} } },
   );
 
+  // The checkout this server's own code was actually loaded from — not `args.root`, which a
+  // caller may point at an entirely different LDL checkout per-call and which has never
+  // determined which *code* executes, only which source content that code reads. Captured
+  // once, here, at server-construction time (main() constructs exactly one server per
+  // process), so it reflects the checkout state at the moment the static imports above
+  // resolved. See ./staleness.mjs and issue #146.
+  const backingRoot = rootOverride || DEFAULT_ROOT;
+  const loadedFingerprint = implementationFingerprint(backingRoot);
+
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
     const root = resolvePathArg(args.root) || rootOverride || DEFAULT_ROOT;
+
+    // Refuse every tool call once this process's backing checkout has changed since its
+    // synchronization code was loaded (issue #146): whatever ldl_status/ldl_init/ldl_update
+    // would compute past this point would read fresh source content and resolve a fresh
+    // revision using code that may no longer match either, and there is no way for this
+    // process to safely tell the difference from in here — only a restart re-establishes
+    // coherence. Checked ahead of every tool, including the read-only ldl_status, because
+    // status's own revision-resolution + derivation call is exactly as exposed to this hazard
+    // as an actual update.
+    if (implementationFingerprint(backingRoot) !== loadedFingerprint) {
+      return errorResult(
+        `MCP server process is stale: its Loop-Dee-Loup synchronization implementation at ${backingRoot} ` +
+          "changed on disk after this process started, so this process can no longer be trusted to apply " +
+          "coherent synchronization semantics. Restart the MCP server process, then retry.",
+      );
+    }
 
     try {
       if (name === "ldl_status") {

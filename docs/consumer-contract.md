@@ -221,6 +221,12 @@ out. A `.ldl/manifest.json` that exists but is not in this shape (missing, trunc
 written by something else entirely) is treated as absent rather than trusted or used to
 crash the run.
 
+A `files[].sha256` recorded by a version of `tools/ldl-init`/`tools/ldl-update` that
+predates the checkout-line-ending tolerance described under "Conflict-safe updates" below
+needs no migration: the comparison itself, not the stored hash, is what changed, so an
+existing consumer moves through the corrected status/update path exactly as before —
+no manual line-ending conversion, manifest hash editing, or reinitialization required.
+
 `files` is the durable, machine-readable record of exactly which paths in
 the consumer repository are LDL-managed — a fresh coding-agent session can
 read it without any conversation history to determine both the installed
@@ -278,6 +284,21 @@ revision:
   is a managed file recorded in the manifest but missing from disk — a local
   deletion, which is still a local modification the recorded provenance
   doesn't explain.
+- Content is compared with checkout line-ending differences treated as
+  equivalent, never as a local modification: a text managed file that a
+  consumer's own Git checkout renders as CRLF (e.g. a Windows checkout with
+  `core.autocrlf=true`) compares equal to the LF content LDL actually
+  installs and hashes, so a fresh checkout of an untouched managed file never
+  reports a conflict, and a genuine synchronization run against unchanged
+  upstream content stays a true no-op. A real content edit — including one
+  made under a CRLF checkout — still fails this comparison and is still a
+  conflict; only the line-ending representation itself is treated as
+  insignificant. Content that isn't confidently text (detected by the
+  presence of a NUL byte) is compared byte-for-byte with no normalization.
+  Every LDL-installed managed file is always written with canonical LF line
+  endings, regardless of the line-ending convention on either side of the
+  comparison — see `tools/ldl-init/index.mjs`'s `normalizeLineEndings` and
+  `contentMatchesHash`.
 - If any conflict is found, the entire run refuses to write anything —
   neither the conflicting file(s), any other managed file, nor
   `.ldl/manifest.json` — and reports every conflicting path and the reason,

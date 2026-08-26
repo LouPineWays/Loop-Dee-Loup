@@ -11,7 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,9 +20,24 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { MANAGED_ITEMS, run as ldlInit } from "../ldl-init/index.mjs";
 import { createServer } from "./server.mjs";
+import { IMPLEMENTATION_FILES } from "./staleness.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SERVER_PATH = join(HERE, "server.mjs");
+const REPO_ROOT = join(HERE, "..", "..");
+
+// Copies the real, current implementation files staleness.mjs fingerprints into a fixture
+// root, so a test can spawn/construct a server pointed at that fixture (a normal, coherent
+// "process just started" state) and then mutate one of those copies to simulate the backing
+// checkout advancing to a new revision with different synchronization behavior, without ever
+// touching this repository's own real files. See issue #146's process-coherence tests below.
+function copyImplementationFiles(fixtureRoot) {
+  for (const relPath of IMPLEMENTATION_FILES) {
+    const dest = join(fixtureRoot, ...relPath.split("/"));
+    mkdirSync(dirname(dest), { recursive: true });
+    cpSync(join(REPO_ROOT, ...relPath.split("/")), dest);
+  }
+}
 
 function tempDir(t) {
   const dir = mkdtempSync(join(tmpdir(), "ldl-mcp-server-test-"));
@@ -274,4 +289,73 @@ test("smoke: the real `node server.mjs` process boots and speaks MCP over real s
   const [status] = JSON.parse(result.content[0].text);
   assert.equal(status.status, "not_initialized");
   assert.ok(status.sourceRevision && status.sourceRevision !== "unknown");
+});
+
+test("process coherence: an in-process server refuses every tool once its backing checkout's implementation changes (issue #146)", async (t) => {
+  const fixtureRoot = makeFixtureRoot(t, "rev-1");
+  copyImplementationFiles(fixtureRoot);
+
+  const client = new Client({ name: "test-client", version: "0.0.0" }, { capabilities: {} });
+  const server = createServer({ root: fixtureRoot });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  t.after(() => client.close());
+
+  const dest = tempDir(t);
+
+  // Coherent baseline: the fixture's implementation copies are untouched since createServer()
+  // captured its fingerprint, so every tool still runs normally.
+  const before = await client.callTool({ name: "ldl_status", arguments: { repos: [dest], root: fixtureRoot } });
+  assert.equal(before.isError, false);
+  assert.equal(toolJson(before)[0].status, "not_initialized");
+
+  // The backing checkout changes on disk — e.g. a founder session editing/updating this LDL
+  // clone — while this same createServer() instance (and its already-imported code) keeps
+  // running, exactly the Failure 2 scenario from issue #146.
+  appendFileSync(join(fixtureRoot, "tools", "ldl-init", "index.mjs"), "\n// simulated upstream change\n");
+
+  for (const call of [
+    { name: "ldl_status", arguments: { repos: [dest], root: fixtureRoot } },
+    { name: "ldl_init", arguments: { dest, root: fixtureRoot } },
+    { name: "ldl_update", arguments: { dest, root: fixtureRoot } },
+  ]) {
+    const after = await client.callTool(call);
+    assert.equal(after.isError, true, `${call.name} must refuse once the backing checkout changed`);
+    assert.match(after.content[0].text, /stale/i);
+    assert.match(after.content[0].text, /[Rr]estart/);
+  }
+
+  // The refusal itself, above, is the proof: nothing in this test observes a successful
+  // response computed from the pre-change fixture copy while claiming coherence with the
+  // post-change one — a hybrid response is exactly what these assertions rule out.
+});
+
+test("process coherence: a real long-lived `node server.mjs` process refuses stale synchronization once its backing checkout changes (issue #146)", async (t) => {
+  const fixtureRoot = makeFixtureRoot(t, "rev-1");
+  copyImplementationFiles(fixtureRoot);
+
+  const client = new Client({ name: "coherence-smoke-client", version: "0.0.0" }, { capabilities: {} });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [SERVER_PATH],
+    env: { LDL_MCP_ROOT: fixtureRoot },
+  });
+  await client.connect(transport);
+  t.after(() => client.close());
+
+  const dest = tempDir(t);
+
+  const before = await client.callTool({ name: "ldl_status", arguments: { repos: [dest] } });
+  assert.equal(before.isError, false);
+  assert.equal(toolJson(before)[0].status, "not_initialized");
+
+  // The real spawned process's backing checkout (what it loaded tools/ldl-update/index.mjs's
+  // code from at startup) advances to a new revision with different synchronization behavior
+  // while the process keeps running and serving requests over the same stdio connection.
+  appendFileSync(join(fixtureRoot, "tools", "ldl-update", "index.mjs"), "\n// simulated upstream change\n");
+
+  const after = await client.callTool({ name: "ldl_status", arguments: { repos: [dest] } });
+  assert.equal(after.isError, true);
+  assert.match(after.content[0].text, /stale/i);
+  assert.match(after.content[0].text, /[Rr]estart/);
 });

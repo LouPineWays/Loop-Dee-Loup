@@ -85,7 +85,7 @@ export const BRIDGE_FILES = [
   {
     destRel: "CLAUDE.md",
     templateDestRel: ".ldl/CLAUDE.template.md",
-    readContent: (root) => readFileSync(join(root, "CLAUDE.md")),
+    readContent: (root) => normalizeLineEndings(readFileSync(join(root, "CLAUDE.md"))),
   },
 ];
 
@@ -110,7 +110,7 @@ export function planBridgeOp({ destRel, templateDestRel, content, destRoot, exis
   }
   let onDiskMatchesTarget = false;
   try {
-    onDiskMatchesTarget = sha256(readFileSync(absDest)) === sha256(content);
+    onDiskMatchesTarget = contentMatchesHash(readFileSync(absDest), sha256(content));
   } catch {
     onDiskMatchesTarget = false; // unreadable (e.g. a directory) — fall through to templateDestRel
   }
@@ -216,6 +216,15 @@ export function parseArgs(argv) {
 // AGENTS.md, leaving the generic operating contract a consumer repository actually needs.
 // Pure string transform so it is trivially unit-testable without touching the filesystem.
 export function deriveConsumerAgents(sourceText) {
+  // Normalize CRLF/CR to LF first (issue #146): sourceText comes from a working-tree read,
+  // which carries CRLF whenever the Loop-Dee-Loup checkout doing the deriving has
+  // core.autocrlf (or an equivalent) converting line endings on checkout — Windows by far
+  // the common case. Left unnormalized, a source-only block spanning CRLF-terminated lines
+  // leaves behind a run of "\r\n\r\n\r\n" where the blank-line collapse below (which matches
+  // 3+ *consecutive* "\n") silently fails to fire, since each "\n" here is separated by a
+  // "\r" rather than adjacent to the next one — producing the exact stray-blank-line
+  // regression this issue exists to prevent, independent of the MCP process-coherence bug.
+  sourceText = sourceText.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   let result = "";
   let cursor = 0;
   for (;;) {
@@ -242,6 +251,52 @@ export function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
 }
 
+// Cheap, deterministic text/binary heuristic (issue #146): a NUL byte essentially never
+// appears in a legitimate UTF-8/ASCII text file, but does appear near the start of almost
+// every real binary format. Every MANAGED_ITEMS/BRIDGE_FILES entry today is markdown, JS, or
+// JSON, but this guard exists so a future binary managed item is never silently corrupted by
+// line-ending normalization rather than requiring every caller to hand-maintain an
+// extension allowlist.
+export function looksBinary(buffer) {
+  const scanLength = Math.min(buffer.length, 8000);
+  for (let i = 0; i < scanLength; i++) {
+    if (buffer[i] === 0) return true;
+  }
+  return false;
+}
+
+// Canonicalizes CRLF and lone-CR line endings to LF, for comparison and for source reads —
+// but only for content that passes looksBinary()'s text heuristic, so exact-byte semantics
+// are preserved for anything that isn't confidently text (issue #146 requirement 1: "Preserve
+// exact-byte semantics for files where normalization would not be safe or appropriate").
+// Used in two places that must agree on exactly the same normalization: buildOps() below
+// (so the content Loop-Dee-Loup treats as canonical source truth doesn't itself carry
+// checkout-artifact CRLF, regardless of the LDL maintainer's own git line-ending config) and
+// tools/ldl-update's planUpdate() (so an installed file's on-disk representation in a
+// consumer's own checkout is compared against that same canonical form, independent of the
+// consumer's own checkout line-ending config).
+export function normalizeLineEndings(buffer) {
+  if (looksBinary(buffer)) return buffer;
+  return Buffer.from(buffer.toString("utf8").replace(/\r\n/g, "\n").replace(/\r/g, "\n"), "utf8");
+}
+
+// True when currentBuf's content matches `hash` either byte-for-byte or, for text content,
+// after canonicalizing CRLF/CR to LF via normalizeLineEndings (issue #146). Applied
+// everywhere previously-managed content — a managed file, a superseded bridge template, or a
+// consumer-owned bridge root file being checked for the "already matches the target" bridge
+// graduation case in planBridgeOp() below — is compared against a recorded or target hash, so
+// a checkout-only line-ending difference (e.g. a consumer's own core.autocrlf converting an
+// LF-installed file to CRLF on checkout) is never mistaken for a local edit or a missed
+// update, while a genuine content edit still fails every comparison. Exported so
+// tools/ldl-update's planUpdate()/run() and tools/mcp-server/status.mjs's read-only mirror of
+// the template-supersession check all apply this exact same tolerance, rather than
+// independent implementations that could silently drift out of sync.
+export function contentMatchesHash(currentBuf, hash) {
+  if (sha256(currentBuf) === hash) return true;
+  if (looksBinary(currentBuf)) return false;
+  return sha256(normalizeLineEndings(currentBuf)) === hash;
+}
+
 // Recursively lists files under absDir as "/"-joined paths relative to absDir, regardless
 // of host OS path separator, so manifest dest paths stay stable across platforms.
 function walkFiles(absDir, relPrefix = "") {
@@ -266,10 +321,10 @@ export function buildOps(root) {
   for (const item of MANAGED_ITEMS) {
     const absSrc = join(root, item.src);
     if (item.kind === "file") {
-      ops.push({ destRel: item.dest, content: readFileSync(absSrc) });
+      ops.push({ destRel: item.dest, content: normalizeLineEndings(readFileSync(absSrc)) });
     } else {
       for (const relFile of walkFiles(absSrc)) {
-        ops.push({ destRel: `${item.dest}/${relFile}`, content: readFileSync(join(absSrc, relFile)) });
+        ops.push({ destRel: `${item.dest}/${relFile}`, content: normalizeLineEndings(readFileSync(join(absSrc, relFile))) });
       }
     }
   }

@@ -16,13 +16,17 @@ import {
   BRIDGE_FILES,
   MANAGED_ITEMS,
   buildOps,
+  contentMatchesHash,
   deriveConsumerAgents,
   defaultResolveRevision,
   derivePendingManualIntegration,
+  looksBinary,
+  normalizeLineEndings,
   parseArgs,
   planBridgeOp,
   planInstall,
   run,
+  sha256,
 } from "./index.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -98,6 +102,41 @@ test("buildOps resolves every MANAGED_ITEMS path against the real repository", (
   assert.ok(dests.includes("docs/operating-model.md"));
 });
 
+test("buildOps normalizes CRLF source content to LF, regardless of the LDL maintainer's own checkout line endings (issue #146)", (t) => {
+  const root = makeFixtureRoot(t);
+  // Simulate reading this source root from a checkout with core.autocrlf=true, which
+  // converts every text file's working-tree bytes to CRLF even though the committed blob
+  // (and every other consumer's checkout) is LF.
+  const target = join(root, ".claude", "personas", "audit-verdict-extractor.md");
+  writeFileSync(target, readFileSync(target, "utf8").replace(/\n/g, "\r\n"));
+
+  const ops = buildOps(root);
+  const op = ops.find((o) => o.destRel === ".claude/personas/audit-verdict-extractor.md");
+  assert.ok(op, "expected an op for the CRLF-rewritten source file");
+  assert.ok(!op.content.toString("utf8").includes("\r"), "buildOps must normalize CRLF source content to LF");
+});
+
+test("looksBinary/normalizeLineEndings: text content is normalized, content with a NUL byte is left exact-byte untouched", () => {
+  const crlfText = Buffer.from("line one\r\nline two\r\n", "utf8");
+  assert.equal(looksBinary(crlfText), false);
+  assert.equal(normalizeLineEndings(crlfText).toString("utf8"), "line one\nline two\n");
+
+  const binary = Buffer.from([0x00, 0x01, 0x0d, 0x0a, 0x02]);
+  assert.equal(looksBinary(binary), true);
+  assert.deepEqual(normalizeLineEndings(binary), binary, "binary content must be preserved exact-byte, not line-ending normalized");
+});
+
+test("contentMatchesHash: matches raw bytes, matches a CRLF/LF-normalized equivalent, and rejects a genuine content difference", () => {
+  const lf = Buffer.from("alpha\nbeta\n", "utf8");
+  const crlf = Buffer.from("alpha\r\nbeta\r\n", "utf8");
+  const edited = Buffer.from("alpha\r\nBETA-EDITED\r\n", "utf8");
+  const targetHash = sha256(lf);
+
+  assert.equal(contentMatchesHash(lf, targetHash), true);
+  assert.equal(contentMatchesHash(crlf, targetHash), true, "a CRLF-only representation difference must still match");
+  assert.equal(contentMatchesHash(edited, targetHash), false, "a genuine content edit must not match even under CRLF");
+});
+
 test("deriveConsumerAgents strips a source-only block and keeps the rest intact", () => {
   const source = [
     "# Title",
@@ -141,6 +180,34 @@ test("deriveConsumerAgents strips multiple blocks", () => {
 test("deriveConsumerAgents throws on an unterminated source-only block", () => {
   const source = "before\n<!-- ldl:source-only:start -->\nnever closed\n";
   assert.throws(() => deriveConsumerAgents(source), /unterminated/);
+});
+
+test("deriveConsumerAgents collapses the blank-line run a stripped block leaves behind identically for LF and CRLF source text (issue #146)", () => {
+  // Regression fixture reproducing the YouTubery blank-line failure: a CRLF-terminated
+  // source (the ordinary result of reading a working tree checked out with
+  // core.autocrlf=true) breaks the "\n{3,}" blank-line collapse below, since consecutive
+  // blank lines are "\r\n\r\n\r\n" — each "\n" separated by a "\r" rather than adjacent to
+  // the next one — if the CRLF is not normalized away first.
+  const lfSource = [
+    "# Title",
+    "",
+    "Kept before.",
+    "",
+    "<!-- ldl:source-only:start -->",
+    "Instance-specific, must not survive.",
+    "<!-- ldl:source-only:end -->",
+    "",
+    "Kept after.",
+    "",
+  ].join("\n");
+  const crlfSource = lfSource.replace(/\n/g, "\r\n");
+
+  const lfResult = deriveConsumerAgents(lfSource);
+  const crlfResult = deriveConsumerAgents(crlfSource);
+
+  assert.equal(crlfResult, lfResult, "CRLF source must derive to the exact same canonical LF output as LF source");
+  assert.ok(!/\n{3,}/.test(lfResult), "the blank-line run left by the stripped block must collapse to a single blank line");
+  assert.ok(!crlfResult.includes("\r"), "derived output is always canonical LF, never carries the source's CRLF");
 });
 
 test("run: exits 1 when --dest is missing", async () => {

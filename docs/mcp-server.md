@@ -180,6 +180,34 @@ anywhere) to a `path.delimiter`-separated list of the repositories you maintain,
 `ldl_status` with no `repos` argument to get a compact status summary across all of them in one
 call, instead of loading each repository's full manifest or documentation into context.
 
+## Process coherence
+
+This server is a normal long-lived process: once started, its imported
+`tools/ldl-init`/`tools/ldl-update`/`status.mjs` code stays exactly what was on disk at
+startup, in memory, for the rest of its life — Node does not hot-reload an already-imported
+module when its file changes later. But every tool call still re-reads managed-item source
+content and re-resolves the current Loop-Dee-Loup revision fresh, from whatever is on disk
+right now. If the backing Loop-Dee-Loup checkout is edited or updated (e.g. `git pull`, or a
+founder session landing a fix) while this process keeps running, a naive implementation could
+apply stale, already-loaded transformation logic to fresh source content and still report the
+fresh revision as if the two were coherent (issue #146).
+
+To prevent that, this server fingerprints the on-disk bytes of every file that determines its
+own synchronization/derivation behavior once, at server-construction time, and re-checks that
+same fingerprint before every tool call — see `tools/mcp-server/staleness.mjs`. If the
+fingerprint has changed, every tool (including the read-only `ldl_status`) refuses with a
+compact error explaining that the server process is stale and must be restarted, rather than
+silently producing output that mixes old code with new provenance. This is automatic: nothing
+about it requires remembering to restart the server after every LDL change, only noticing the
+one time an operation is actually attempted against a checkout that moved underneath it.
+
+`LDL_MCP_ROOT` (an environment variable, not a tool argument) overrides which checkout this
+server treats as its own backing checkout for this fingerprint — real deployments never need
+to set it, since the default is simply this file's own location. It exists for tests that
+need to spawn a real `node server.mjs` process pointed at a disposable fixture directory they
+can mutate after the process has started; see `tools/mcp-server/server.test.mjs`'s "process
+coherence" tests.
+
 ## Security boundary
 
 - `ldl_status` never writes anything.
