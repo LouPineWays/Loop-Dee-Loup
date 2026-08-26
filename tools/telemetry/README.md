@@ -103,6 +103,14 @@ purely arithmetic `derived` fields (`token_usage_grand_total`, `token_usage_main
 that crashed before reaching `SessionEnd` or a compaction, or a Claude Code build old enough not
 to supply `transcript_path` in hook payloads.
 
+A landed `transcript_usage` event does not by itself guarantee `token_usage_main_total` or
+`token_usage_subagent_total` are measured: `collectTranscriptUsage` treats a torn/malformed line
+in the main transcript, or a discovered-but-unreadable subagent transcript, as evidence that
+specific portion's read was incomplete and reports it as `null` rather than a total that quietly
+excludes the lost data — a partial-but-plausible-looking number is exactly the false-confidence
+shape issue #139 exists to eliminate. `reduce.mjs` checks each field's actual value, not merely
+whether an event landed, before omitting it from the record's `unknown` list.
+
 ## What it deliberately still cannot measure
 
 No Claude Code interface this collector uses exposes a *skill*-invocation boundary the way the

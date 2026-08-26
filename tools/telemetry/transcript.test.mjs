@@ -140,7 +140,7 @@ test("collectTranscriptUsage falls back to agentType 'unknown' for a subagent wi
   }
 });
 
-test("collectTranscriptUsage skips lines with isSidechain:true in the main transcript, malformed JSON, and non-assistant lines", () => {
+test("collectTranscriptUsage skips lines with isSidechain:true in the main transcript and ordinary non-assistant lines, without those counting as incomplete", () => {
   const dir = mkdtempSync(join(tmpdir(), "ldl-transcript-test-"));
   try {
     const transcriptPath = join(dir, "s-5.jsonl");
@@ -151,13 +151,59 @@ test("collectTranscriptUsage skips lines with isSidechain:true in the main trans
         assistantLine({ id: "m1", model: "claude-sonnet-5", usage }),
         JSON.stringify({ type: "assistant", isSidechain: true, message: { id: "m-sidechain", model: "claude-sonnet-5", usage } }),
         JSON.stringify({ type: "user", message: { role: "user", content: "hello" } }),
-        "{ not valid json",
         "",
       ].join("\n"),
       "utf8",
     );
     const result = collectTranscriptUsage(transcriptPath);
     assert.deepEqual(result.main.total, { ...usage, message_count: 1 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("collectTranscriptUsage reports main as null (unmeasured, not partial) when the main transcript contains a torn/malformed line", () => {
+  // Regression test (review of #139/PR #144): a torn line used to be silently skipped,
+  // leaving `main` looking like a complete, trustworthy total when data was actually
+  // lost — exactly the false-confidence shape this issue exists to eliminate.
+  const dir = mkdtempSync(join(tmpdir(), "ldl-transcript-test-"));
+  try {
+    const transcriptPath = join(dir, "s-7.jsonl");
+    const usage = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+    writeFileSync(
+      transcriptPath,
+      [assistantLine({ id: "m1", model: "claude-sonnet-5", usage }), "{ not valid json"].join("\n"),
+      "utf8",
+    );
+    const result = collectTranscriptUsage(transcriptPath);
+    assert.equal(result.main, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("collectTranscriptUsage reports subagents as null (not a partial total/agent_count) when a discovered subagent transcript is unreadable", () => {
+  // Regression test (review of #139/PR #144): an unreadable subagent file used to be
+  // silently excluded from the total while still counted in agent_count, so the returned
+  // aggregate looked internally consistent and complete despite missing a subagent's
+  // tokens entirely.
+  const dir = mkdtempSync(join(tmpdir(), "ldl-transcript-test-"));
+  try {
+    const sessionId = "s-8";
+    const transcriptPath = join(dir, `${sessionId}.jsonl`);
+    writeFileSync(transcriptPath, "", "utf8");
+    const subagentsDir = join(dir, sessionId, "subagents");
+    mkdirSync(subagentsDir, { recursive: true });
+
+    const usage = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+    writeFileSync(join(subagentsDir, "agent-good.meta.json"), JSON.stringify({ agentType: "Explore" }));
+    writeFileSync(join(subagentsDir, "agent-good.jsonl"), assistantLine({ id: "m1", model: "claude-sonnet-5", usage }) + "\n", "utf8");
+
+    writeFileSync(join(subagentsDir, "agent-torn.meta.json"), JSON.stringify({ agentType: "general-purpose" }));
+    writeFileSync(join(subagentsDir, "agent-torn.jsonl"), "{ not valid json", "utf8");
+
+    const result = collectTranscriptUsage(transcriptPath);
+    assert.equal(result.subagents, null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

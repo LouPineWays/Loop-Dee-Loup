@@ -123,6 +123,12 @@ export function reduceEvents(events) {
     token_usage_subagent_by_agent_type: lastTranscriptUsage?.subagents?.by_agent_type ?? null,
     token_usage_subagent_count: lastTranscriptUsage?.subagents?.agent_count ?? null,
     transcript_usage_sample_count: transcriptUsageSamples.length,
+    // How many raw hook-kind events this session produced at all, regardless of type.
+    // Exists so a claim resting on an empty array (e.g. "zero compactions") can require
+    // evidence the collection mechanism actually observed the session, not just that the
+    // array defaults to [] the same way it would if no hook ever fired — see
+    // sufficiency.mjs's requiresPositive.
+    hook_event_count: hookEvents.length,
   };
 
   const tokenFieldSum = (totals) =>
@@ -169,11 +175,17 @@ export function reduceEvents(events) {
   if (!sessionStart) unknown.push("session_start_ts");
   if (!sessionEnd) unknown.push("session_end_ts", "session_wall_duration_ms");
   // Transcript-derived evidence is a separate mechanism from statusLine's samples and can
-  // be absent even when statusLine data exists (or vice versa) — gate it on its own event
-  // count, not on the statusLine-based checks above. When a transcript_usage event did
-  // land but no subagents ran, subagent totals are legitimately zero, not unmeasured.
-  if (transcriptUsageSamples.length === 0) {
-    unknown.push("token_usage_main_total", "token_usage_subagent_total", "token_usage_grand_total");
+  // be absent even when statusLine data exists (or vice versa). Check the actual field,
+  // not just "did any transcript_usage event land": collectTranscriptUsage can produce an
+  // event whose `main` or `subagents` portion is independently null when that specific
+  // read was incomplete (a torn line, or an unreadable discovered subagent transcript —
+  // see transcript.mjs), so a landed event does not guarantee either field was measured.
+  // When a transcript_usage event did land and no subagents ran, subagent totals are
+  // legitimately zero, not unmeasured — this only fires when the field is truly null.
+  if (measured.token_usage_main_total === null) unknown.push("token_usage_main_total");
+  if (measured.token_usage_subagent_total === null) unknown.push("token_usage_subagent_total");
+  if (measured.token_usage_main_total === null || measured.token_usage_subagent_total === null) {
+    unknown.push("token_usage_grand_total");
   }
 
   return { measured, derived, unknown };

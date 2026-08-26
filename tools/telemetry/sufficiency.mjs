@@ -26,6 +26,14 @@
 import { pathToFileURL } from "node:url";
 import { reduceSession } from "./reduce.mjs";
 
+// `requires`: fields that must be non-null/non-empty (via isPresent below).
+// `requiresPositive`: fields that must additionally be a real number > 0 — for a claim
+// that would otherwise be "satisfied" by an array defaulting to [] whether or not the
+// collection mechanism ever ran at all (an empty `compaction_events` looks identical for
+// "zero compactions, confirmed by 40 hook events" and "no hook ever fired"). Found in
+// review of #139/PR #144: without this, reduceEvents([]) reported compaction_frequency
+// and subagent_invocation_pattern as SUFFICIENT purely because their arrays default
+// empty, not because anything was actually observed.
 export const CLAIM_REQUIREMENTS = {
   token_allocation: {
     label: "whether token expenditure (main-agent vs. subagent, by model) was appropriately allocated",
@@ -42,10 +50,12 @@ export const CLAIM_REQUIREMENTS = {
   compaction_frequency: {
     label: "whether the session compacted, how often, and why",
     requires: ["measured.compaction_events"],
+    requiresPositive: ["measured.hook_event_count"],
   },
   subagent_invocation_pattern: {
     label: "how many subagents ran, of what type, and when",
     requires: ["measured.subagent_start_events"],
+    requiresPositive: ["measured.hook_event_count"],
   },
 };
 
@@ -62,6 +72,10 @@ function isPresent(value) {
   return true;
 }
 
+function isPositiveNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
 // Pure: takes an already-reduced record (reduceSession()'s or reduceEvents()'s output)
 // and one claim type, returns which of that claim's required fields are missing. Throws
 // on an unrecognized claim type — a typo here should fail loudly, not silently pass every
@@ -71,12 +85,14 @@ export function assessSufficiency(record, claimType) {
   if (!spec) {
     throw new Error(`Unknown claim type "${claimType}". Known: ${Object.keys(CLAIM_REQUIREMENTS).join(", ")}`);
   }
-  const missingFields = spec.requires.filter((fieldPath) => !isPresent(getPath(record, fieldPath)));
+  const missingFields = (spec.requires ?? []).filter((fieldPath) => !isPresent(getPath(record, fieldPath)));
+  const missingPositive = (spec.requiresPositive ?? []).filter((fieldPath) => !isPositiveNumber(getPath(record, fieldPath)));
+  const allMissing = [...missingFields, ...missingPositive];
   return {
     claimType,
     label: spec.label,
-    verdict: missingFields.length === 0 ? "SUFFICIENT" : "INSUFFICIENT",
-    missingFields,
+    verdict: allMissing.length === 0 ? "SUFFICIENT" : "INSUFFICIENT",
+    missingFields: allMissing,
   };
 }
 

@@ -54,8 +54,18 @@ function readRawLines(filePath) {
 // Claude Code repeats the same cumulative `message.usage` snapshot across every streamed
 // line belonging to one message (same `message.id`); summing raw lines would double- or
 // triple-count every turn, so dedup by message id first.
+//
+// Returns { entries, hadParseError }. A line that parses as JSON but simply isn't an
+// assistant-usage line (the large majority — user/system/tool-result lines) is normal and
+// does not set hadParseError. A line that fails JSON.parse is a torn/corrupt write — real
+// evidence this read is incomplete, not something to silently drop while reporting the
+// rest of the totals as if they were the whole picture. See collectTranscriptUsage: a
+// completeness signal here is what stops a partially-unreadable transcript from producing
+// plausible-looking-but-wrong totals that would make an economic claim look SUFFICIENT
+// when it isn't (found in review of #139/PR #144).
 function extractUsageEntries(lines, { skipSidechain } = {}) {
   const seen = new Map();
+  let hadParseError = false;
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -63,7 +73,8 @@ function extractUsageEntries(lines, { skipSidechain } = {}) {
     try {
       obj = JSON.parse(trimmed);
     } catch {
-      continue; // torn/corrupt line — skip, don't fail the whole read
+      hadParseError = true;
+      continue;
     }
     if (skipSidechain && obj?.isSidechain === true) continue;
     const msg = obj?.message;
@@ -79,7 +90,7 @@ function extractUsageEntries(lines, { skipSidechain } = {}) {
       },
     });
   }
-  return [...seen.values()];
+  return { entries: [...seen.values()], hadParseError };
 }
 
 function sumUsage(entries) {
@@ -97,8 +108,14 @@ function sumUsage(entries) {
 // Enumerates `<transcript_dir>/<session_id>/subagents/*.jsonl`, pairing each with its
 // sibling `.meta.json` (present per subagent, see hook.mjs's SubagentStart handling) for
 // the coarse `agentType` label only — never the meta file's free-text `description`.
-// Tolerant of a missing directory (no subagents ran) or missing/malformed meta files
-// (agentType falls back to "unknown" rather than dropping the subagent's usage).
+// Tolerant of a missing directory (no subagents ran — a real, measured "zero" fact, not a
+// read failure) or missing/malformed meta files (agentType falls back to "unknown" rather
+// than dropping the subagent's usage). NOT tolerant of a subagent .jsonl that exists but
+// can't be read or contains a torn line: that subagent was discovered but its usage is
+// unmeasured, so returns null for the whole aggregate rather than a total/agent_count that
+// silently excludes it while looking complete (found in review of #139/PR #144 — a missing
+// subagent's tokens would otherwise vanish from the total without any signal that anything
+// was lost).
 function readSubagentUsage(transcriptPath) {
   const dir = dirname(transcriptPath);
   const base = crossPlatformStemOf(transcriptPath);
@@ -125,8 +142,10 @@ function readSubagentUsage(transcriptPath) {
       // no/unreadable meta file — keep "unknown" rather than dropping this subagent's usage
     }
     const lines = readRawLines(join(subagentsDir, file));
-    if (lines === null) continue;
-    const { total: fileTotal } = sumUsage(extractUsageEntries(lines));
+    if (lines === null) return null; // this subagent transcript was discovered but unreadable
+    const { entries, hadParseError } = extractUsageEntries(lines);
+    if (hadParseError) return null; // torn line inside a discovered subagent transcript
+    const { total: fileTotal } = sumUsage(entries);
     addInto(total, fileTotal);
     if (!byAgentType[agentType]) byAgentType[agentType] = zeroTotals();
     addInto(byAgentType[agentType], fileTotal);
@@ -146,14 +165,18 @@ function crossPlatformStemOf(pathValue) {
 }
 
 // Top-level entry point: given a hook payload's transcript_path, returns
-// { main: { total, by_model }, subagents: { total, by_agent_type, agent_count } }, or null
-// if the transcript itself could not be read at all (nothing measured). Never throws.
+// { main, subagents }, or null if the transcript_path itself is unusable (nothing to read
+// at all). `main` and `subagents` are each independently either { total, by_model } /
+// { total, by_agent_type, agent_count }, or null when *that specific* read was incomplete
+// (unreadable file, or a torn line found while parsing it) — a null here means "this
+// portion is unmeasured", not "zero". Never throws.
 export function collectTranscriptUsage(transcriptPath) {
   if (typeof transcriptPath !== "string" || !transcriptPath) return null;
   try {
     const lines = readRawLines(transcriptPath);
-    if (lines === null) return null;
-    const main = sumUsage(extractUsageEntries(lines, { skipSidechain: true }));
+    if (lines === null) return null; // the transcript itself is unreadable: nothing at all
+    const { entries, hadParseError } = extractUsageEntries(lines, { skipSidechain: true });
+    const main = hadParseError ? null : sumUsage(entries);
     const subagents = readSubagentUsage(transcriptPath);
     return { main, subagents };
   } catch {

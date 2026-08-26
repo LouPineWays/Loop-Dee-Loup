@@ -63,12 +63,27 @@ test("subagent_invocation_pattern is answerable from hook events alone, without 
   assert.equal(result.verdict, "SUFFICIENT");
 });
 
-test("an empty event log is INSUFFICIENT for every claim type that needs measured evidence, but compaction/subagent claims still resolve on their (empty) structural fields", () => {
+test("an empty event log is INSUFFICIENT for every claim type, including compaction/subagent claims: an empty array alone doesn't prove the mechanism ran", () => {
+  // Regression test (review of #139/PR #144): compaction_events and subagent_start_events
+  // default to [] whether or not any hook ever actually fired — a session where telemetry
+  // never ran at all looks identical to one confirmed to have zero compactions unless
+  // sufficiency also requires positive evidence (hook_event_count > 0) the mechanism
+  // observed the session.
   const record = reduceEvents([]);
   assert.equal(assessSufficiency(record, "token_allocation").verdict, "INSUFFICIENT");
   assert.equal(assessSufficiency(record, "monetary_cost").verdict, "INSUFFICIENT");
-  // Zero compactions / zero subagent starts is still a measured "nothing happened" fact —
-  // an empty array, not a missing one.
+  assert.equal(assessSufficiency(record, "compaction_frequency").verdict, "INSUFFICIENT");
+  assert.equal(assessSufficiency(record, "subagent_invocation_pattern").verdict, "INSUFFICIENT");
+});
+
+test("zero compactions/subagents backed by real hook events (hook_event_count > 0) is SUFFICIENT, not just an empty array", () => {
+  const record = reduceEvents([
+    { kind: "hook", event: "SessionStart", session_id: "s-1", ts: "2026-08-26T00:00:00.000Z" },
+    { kind: "hook", event: "SessionEnd", session_id: "s-1", ts: "2026-08-26T00:05:00.000Z" },
+  ]);
+  assert.equal(record.measured.hook_event_count, 2);
+  assert.deepEqual(record.measured.compaction_events, []);
+  assert.deepEqual(record.measured.subagent_start_events, []);
   assert.equal(assessSufficiency(record, "compaction_frequency").verdict, "SUFFICIENT");
   assert.equal(assessSufficiency(record, "subagent_invocation_pattern").verdict, "SUFFICIENT");
 });
@@ -81,6 +96,7 @@ test("assessSufficiency throws on an unrecognized claim type rather than silentl
 test("every declared claim type has a non-empty label and at least one required field", () => {
   for (const [claimType, spec] of Object.entries(CLAIM_REQUIREMENTS)) {
     assert.ok(spec.label && spec.label.length > 0, `${claimType} needs a label`);
-    assert.ok(Array.isArray(spec.requires) && spec.requires.length > 0, `${claimType} needs at least one required field`);
+    const requiredCount = (spec.requires?.length ?? 0) + (spec.requiresPositive?.length ?? 0);
+    assert.ok(requiredCount > 0, `${claimType} needs at least one required field`);
   }
 });
