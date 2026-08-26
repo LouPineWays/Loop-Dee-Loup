@@ -58,6 +58,18 @@ test("isGenuineResponse: rejects the Codex Cloud 'create an environment' configu
   );
 });
 
+test("isGenuineResponse: accepts a genuine review that discusses the setup-prompt phrase/URL rather than being one (Stage 1 review finding on PR #142)", () => {
+  const genuineReview =
+    "**P1** The documented `chatgpt.com/codex/cloud/settings/environments` link this gate matches against is stale; " +
+    "Codex Cloud moved environment setup to a different settings page, so a real 'create an environment for this repo' " +
+    "reply from that surface would no longer contain this URL.";
+  assert.equal(
+    isGenuineResponse(genuineReview),
+    true,
+    "a review that merely mentions the setup-prompt phrase/URL while reviewing unrelated content must not be misclassified as the setup prompt itself",
+  );
+});
+
 test("parseArgs: reads flags and defaults the bot login", () => {
   const args = parseArgs(["--repo", "owner/repo", "--number", "50", "--head", "abc123"]);
   assert.equal(args.repo, "owner/repo");
