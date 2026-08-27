@@ -193,8 +193,36 @@ function isSelfReferentialRefusal(text) {
 // match to reach the end of the (normalized) message -- unbounded object length is fine,
 // but a second clause anywhere ends the match and the whole-message anchor then fails,
 // exactly like BLOCKED_STATUS_PATTERN and the Codex-Cloud-setup-prompt check above.
+//
+// An eighth-round finding on this correction's own PR (#164) showed a *causal* explanation
+// attached to the refusal by "because"/"since" -- "Not authorized to push changes to this
+// branch because repository write permission is unavailable." -- was itself being rejected:
+// "because" was (correctly) still a clause boundary for the *main* scan, but the reason
+// clause it introduces is still part of the *same* refusal, not an unrelated topic shift,
+// and that clause's own internal wording ("permission is unavailable") can legitimately
+// contain another CLAUSE_BOUNDARY_WORD ("is"). REASON_CLAUSE_TAIL lets the main scan stop at
+// "because"/"since" as before, then optionally consumes everything after it unfiltered --
+// once the message has explicitly marked the rest as *why* the same refusal happened, no
+// further boundary-word scan is needed.
+//
+// Two other eighth-round findings on this same PR asked for more than this: recognizing
+// arbitrary lexical main verbs ("exists", "appears", "remains", ...) as clause boundaries,
+// and binding a permission-denial phrase to the *same grammatical subject* as an attempt
+// elsewhere in the sentence (real coreference resolution, e.g. distinguishing "I tried ...
+// and found that the caller does not have permission" from a genuine self-referential
+// refusal). Both were valid observations but were declined and left unfixed by founder
+// decision: this issue's own Non-goals explicitly exclude "parsing arbitrary Markdown
+// generally" and "semantic adjudication of review findings", and continuing to enumerate an
+// unbounded set of English main verbs, or implementing subject/coreference binding, is
+// exactly that -- a fundamentally different (and unbounded) class of work from the smallest-
+// reliable-boundary pattern matching this issue calls for. Recognized as a known residual
+// gap in both directions rather than silently absent; see PR #164's review thread for the
+// concrete examples and disposition, and LDL issue #165 for the separate tooling gap this
+// round of back-and-forth exposed (Stage 1 currently allows re-triggering across fix-commit
+// heads with no bound on rounds, contrary to docs/bounded-review-cycle.md step 7).
 const CLAUSE_BOUNDARY_WORD = "(?:is|are|was|were|has|have|will|would|can|could|should|must|before|after|when|because|since)";
-const TRAILING_CLAUSE_TAIL = String.raw`(?:\s+(?!${CLAUSE_BOUNDARY_WORD}\b)\S+)*[.!]?\s*$`;
+const REASON_CLAUSE_TAIL = String.raw`(?:\s+(?:because|since)\s+\S+(?:\s+\S+)*)?`;
+const TRAILING_CLAUSE_TAIL = String.raw`(?:\s+(?!${CLAUSE_BOUNDARY_WORD}\b)\S+)*${REASON_CLAUSE_TAIL}[.!]?\s*$`;
 const ELLIPTICAL_REFUSAL_PATTERN = new RegExp(
   String.raw`^(?:insufficient|no|lack of|missing)\s+(?:write |repository |branch )?(?:permission|access)\s+to\s+\w+${TRAILING_CLAUSE_TAIL}` +
     String.raw`|^not (?:permitted|authorized)\s+to\s+\w+${TRAILING_CLAUSE_TAIL}`,

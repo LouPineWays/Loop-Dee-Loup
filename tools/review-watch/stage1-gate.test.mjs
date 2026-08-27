@@ -237,6 +237,21 @@ test("isGenuineResponse: rejects an impersonal authorization refusal with a long
   );
 });
 
+test("isGenuineResponse: rejects an impersonal refusal with a causal 'because' explanation (eighth Stage 1 review round on PR #164, finding 1 -- accepted)", () => {
+  assert.equal(
+    isGenuineResponse("Not authorized to push changes to this branch because repository write permission is unavailable."),
+    false,
+    "a 'because'/'since' clause explaining the same refusal is part of it, not an unrelated topic shift, even when that reason clause itself contains a word like 'is'",
+  );
+});
+
+// Two other findings from the same eighth Stage 1 review round on PR #164 were declined by
+// founder decision as out of this issue's scope (parsing arbitrary English main verbs as
+// clause boundaries, and binding a permission phrase to the same grammatical subject as an
+// attempt elsewhere in the sentence -- see stage1-gate.mjs's ELLIPTICAL_REFUSAL_PATTERN
+// comment and LDL issue #165). No test is added for either: they describe known, accepted
+// residual gaps, not verified-and-fixed behavior.
+
 test("parseArgs: reads flags and defaults the bot login", () => {
   const args = parseArgs(["--repo", "owner/repo", "--number", "50", "--head", "abc123"]);
   assert.equal(args.repo, "owner/repo");
