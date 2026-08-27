@@ -128,11 +128,15 @@ const ATTEMPT_CUE_PATTERN = /\b(?:attempt(?:ed|ing)?|tr(?:y|ies|ied|ying)|fail(?
 const MODAL_REFUSAL_PATTERN = /\b(?:cannot|can't|could not|couldn't|will not|won't)\s+(?!have\b)\w+/i;
 // "lack(s|ing) ... access/permission" (Stage 1 review, fifth round on PR #164) is its own
 // negation verb -- "I lack write access" already says "I don't have it" without any "do
-// not/don't/cannot have" wording for the first alternative to match.
+// not/don't/cannot have" wording for the first alternative to match. "denied" (sixth round)
+// is likewise its own negation, in both the passive ("write access was denied") and active
+// ("denied write access") voice a bot reply might use.
 const LACK_VERB = "lack(?:s|ing)?";
 const PERMISSION_LACK_PATTERN = new RegExp(
   String.raw`\b(?:do not|don't|does not|doesn't|did not|didn't|cannot|can't|could not|couldn't) have (?:write |repository |branch )?(?:access|permission)\b` +
     String.raw`|\b${LACK_VERB}\s+(?:write |repository |branch )?(?:access|permission)\b` +
+    String.raw`|\b(?:write |repository |branch )?(?:access|permission)(?:\s+(?:was|is|were|are))?\s+denied\b` +
+    String.raw`|\bdenied\s+(?:write |repository |branch )?(?:access|permission)\b` +
     String.raw`|\binsufficient (?:write |repository )?permission\b` +
     String.raw`|\bnot (?:permitted|authorized)\b`,
   "i",
@@ -166,22 +170,23 @@ function isSelfReferentialRefusal(text) {
 // branch." -- rather than a human review sentence *about* someone else's permissions
 // ("The caller needs permission to read this file") or a security finding describing the
 // *reviewed code's* own permission handling ("Missing permission checks allow anonymous
-// updates", "No access control is enforced"). A fourth-round finding showed the elliptical
-// check matched as soon as it saw the opening adjective+noun ("missing permission", "no
-// access") regardless of what followed, so an ordinary finding *about* the target code's
-// authorization bugs -- which naturally opens exactly that way -- was misclassified as the
-// gate's own refusal. Requiring the actual "to <verb>" continuation right after the
-// permission/access noun (present in every real observed refusal: "... to commit changes",
-// "... to push this branch") is what a genuine security finding never has at that exact
-// position -- it continues with a noun ("checks", "control") or main verb ("allow",
-// "enforced"), not an infinitive naming the blocked mutation. Anchoring this to the very
-// start of the whole (normalized) message, not any sentence boundary within it, is what
-// otherwise tells the two apart: a genuine finding almost never opens with the bare negated-
-// permission phrase as its first words, but a real status reply -- like the already-anchored
-// BLOCKED and Codex-Cloud-setup-prompt checks above -- is that phrase from its first
-// character.
+// updates", "No access control is enforced", "No permission to push is required before this
+// workflow updates protected branches"). Two rounds of findings on this same anchor:
+//  - matching as soon as it saw the opening adjective+noun ("missing permission", "no
+//    access") regardless of what followed let an ordinary finding *about* the target code's
+//    authorization bugs -- which naturally opens exactly that way -- through;
+//  - requiring the "to <verb>" continuation right after the noun narrowed that, but still
+//    matched as a mere *prefix*: a genuine finding can coincidentally continue "no
+//    permission to push ..." with a real main clause of its own ("... is required before
+//    this workflow updates protected branches"), which a real terse status reply never has.
+// A real reply *is* this phrase, give or take a short trailing object ("to commit changes",
+// "to push this branch") -- it doesn't continue into another verb phrase afterward. Capping
+// what may follow the verb to a few words and anchoring both the start AND the end of the
+// (normalized) message is what requires the phrase to account for the *whole* reply rather
+// than merely open it, the same way BLOCKED_STATUS_PATTERN and the Codex-Cloud-setup-prompt
+// check are anchored above.
 const ELLIPTICAL_REFUSAL_PATTERN =
-  /^(?:insufficient|no|lack of|missing)\s+(?:write |repository |branch )?(?:permission|access)\s+to\s+\w+|^not (?:permitted|authorized)\s+to\s+\w+/i;
+  /^(?:insufficient|no|lack of|missing)\s+(?:write |repository |branch )?(?:permission|access)\s+to\s+\w+(?:\s+\w+){0,3}[.!]?\s*$|^not (?:permitted|authorized)\s+to\s+\w+(?:\s+\w+){0,3}[.!]?\s*$/i;
 
 // Stage 2 audit finding on issue #141 (LDL#135's own correction cycle): a Codex Cloud
 // environment misconfiguration produces this exact reply — "To use Codex here, create an

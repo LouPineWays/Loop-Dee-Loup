@@ -213,6 +213,22 @@ test("isGenuineResponse: rejects an access refusal phrased with 'lack' (fifth St
   );
 });
 
+test("isGenuineResponse: rejects an access refusal phrased with passive 'denied' (sixth Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("I tried to push a fix, but write access was denied."),
+    false,
+    "'write access was denied' is a negation phrase and must count as a permission-lack signal alongside 'do not have'/'lack'/'cannot have'",
+  );
+});
+
+test("isGenuineResponse: accepts a genuine finding whose 'no permission to <verb>' opening continues into an unrelated main clause (sixth Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("No permission to push is required before this workflow updates protected branches."),
+    true,
+    "the elliptical refusal phrase must account for (approximately) the whole message, not merely match as a prefix of a longer descriptive sentence",
+  );
+});
+
 test("parseArgs: reads flags and defaults the bot login", () => {
   const args = parseArgs(["--repo", "owner/repo", "--number", "50", "--head", "abc123"]);
   assert.equal(args.repo, "owner/repo");
