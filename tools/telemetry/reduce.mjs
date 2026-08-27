@@ -39,6 +39,43 @@ function firstNonNull(values) {
   return null;
 }
 
+function tokenGrandTotalOf(totals) {
+  if (!totals) return -1;
+  return totals.input_tokens + totals.output_tokens + totals.cache_creation_input_tokens + totals.cache_read_input_tokens;
+}
+
+// Selects which transcript_usage sample's `main`/`subagents` portions the record trusts,
+// independently per portion rather than taking one sample wholesale by append order.
+//
+// A genuine SessionEnd sample is preferred outright when one exists: it's the real read
+// taken at actual session termination, so it strictly dominates any earlier checkpoint
+// regardless of append order. Without one, `main` and `subagents` are each independently
+// taken from whichever sample reports the highest token grand total for that portion (both
+// only grow over a real session, so the highest total is the most complete one seen).
+//
+// This exists because SubagentStop checkpoints (added for issue #178) can fire for several
+// parallel subagents close together: their hook processes can append out of chronological
+// order, and one subagent stopping while a sibling is still writing its own transcript makes
+// `collectTranscriptUsage` report `subagents: null` for that single sample (a live sibling
+// looks like a torn read — see transcript.mjs) even though `main` and earlier samples'
+// `subagents` are fine. Taking a single "most recent" sample wholesale would let either of
+// those regress previously-captured evidence to null or stale numbers on an abrupt,
+// non-SessionEnd teardown (found in Codex review of #178/PR #180).
+function pickBestTranscriptUsage(transcriptUsageSamples) {
+  if (transcriptUsageSamples.length === 0) return null;
+  const sessionEndSample = [...transcriptUsageSamples].reverse().find((s) => s.event === "SessionEnd");
+  if (sessionEndSample) return { main: sessionEndSample.main, subagents: sessionEndSample.subagents, event: "SessionEnd" };
+
+  let bestMain = null;
+  let bestSubagents = null;
+  for (const sample of transcriptUsageSamples) {
+    if (sample.main && tokenGrandTotalOf(sample.main.total) > tokenGrandTotalOf(bestMain?.total)) bestMain = sample.main;
+    if (sample.subagents && tokenGrandTotalOf(sample.subagents.total) > tokenGrandTotalOf(bestSubagents?.total)) bestSubagents = sample.subagents;
+  }
+  const lastSample = transcriptUsageSamples[transcriptUsageSamples.length - 1];
+  return { main: bestMain, subagents: bestSubagents, event: lastSample.event };
+}
+
 const ZERO_TOKEN_TOTALS = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 0 };
 
 // Merges two `{ [model]: {input_tokens, output_tokens, cache_creation_input_tokens,
@@ -92,7 +129,12 @@ export function reduceEvents(events) {
   const subagentStops = hookEvents.filter((e) => e.event === "SubagentStop");
 
   const lastSample = samples.length > 0 ? samples[samples.length - 1] : null;
+  // Raw last-appended sample, used only for identity fields below (session_id/repo/
+  // cwd_basename are identical across every transcript_usage sample of one session, so
+  // append order doesn't matter there). The actual main/subagents/completeness data comes
+  // from pickBestTranscriptUsage, not this one directly — see its comment.
   const lastTranscriptUsage = transcriptUsageSamples.length > 0 ? transcriptUsageSamples[transcriptUsageSamples.length - 1] : null;
+  const bestUsage = pickBestTranscriptUsage(transcriptUsageSamples);
   const sessionId = firstNonNull([
     sessionStart?.session_id,
     sessionEnd?.session_id,
@@ -138,27 +180,30 @@ export function reduceEvents(events) {
     // statusLine-derived fields above. null (not zero) when no transcript_usage event
     // ever landed, e.g. the session crashed before SessionEnd/PreCompact fired, or ran on
     // a Claude Code build too old to expose transcript_path in its hook payloads.
-    token_usage_main_total: lastTranscriptUsage?.main?.total ?? null,
-    token_usage_main_by_model: lastTranscriptUsage?.main?.by_model ?? null,
-    token_usage_subagent_total: lastTranscriptUsage?.subagents?.total ?? null,
-    token_usage_subagent_by_agent_type: lastTranscriptUsage?.subagents?.by_agent_type ?? null,
-    token_usage_subagent_by_model: lastTranscriptUsage?.subagents?.by_model ?? null,
-    token_usage_subagent_count: lastTranscriptUsage?.subagents?.agent_count ?? null,
+    token_usage_main_total: bestUsage?.main?.total ?? null,
+    token_usage_main_by_model: bestUsage?.main?.by_model ?? null,
+    token_usage_subagent_total: bestUsage?.subagents?.total ?? null,
+    token_usage_subagent_by_agent_type: bestUsage?.subagents?.by_agent_type ?? null,
+    token_usage_subagent_by_model: bestUsage?.subagents?.by_model ?? null,
+    token_usage_subagent_count: bestUsage?.subagents?.agent_count ?? null,
     // Session-wide per-model view (main + subagent tokens merged): only computed when
     // both portions are actually measured, since merging one real breakdown with one
     // missing/incomplete portion would silently understate a model that only a subagent
     // used — the same false-completeness shape as an unmeasured field standing in for a
     // real zero (found in review of #139/PR #144).
     token_usage_session_by_model:
-      lastTranscriptUsage?.main?.by_model && lastTranscriptUsage?.subagents?.by_model
-        ? mergeByModel(lastTranscriptUsage.main.by_model, lastTranscriptUsage.subagents.by_model)
+      bestUsage?.main?.by_model && bestUsage?.subagents?.by_model
+        ? mergeByModel(bestUsage.main.by_model, bestUsage.subagents.by_model)
         : null,
-    // True only when the most recent transcript_usage event was captured at SessionEnd —
-    // a PreCompact-triggered one (or none at all) reflects only usage accumulated up to
-    // that point, not the whole session, so a "was expenditure appropriately allocated"
+    // True only when a genuine SessionEnd-sourced sample exists — a PreCompact- or
+    // SubagentStop-triggered one (or none at all) reflects only usage accumulated up to
+    // that checkpoint, not the whole session, so a "was expenditure appropriately allocated"
     // claim must not treat that partial snapshot as covering the full session (found in
-    // review of #139/PR #144).
-    token_usage_is_session_complete: lastTranscriptUsage?.event === "SessionEnd",
+    // review of #139/PR #144). Checked via pickBestTranscriptUsage, not append order, so a
+    // straggler PreCompact/SubagentStop sample appended after a genuine SessionEnd sample
+    // (a real possibility once SubagentStop can also trigger a checkpoint — issue #178) can't
+    // make a genuinely complete session look incomplete.
+    token_usage_is_session_complete: bestUsage?.event === "SessionEnd",
     transcript_usage_sample_count: transcriptUsageSamples.length,
     // How many raw hook-kind events this session produced at all, regardless of type.
     // Exists so a claim resting on an empty array (e.g. "zero compactions") can require

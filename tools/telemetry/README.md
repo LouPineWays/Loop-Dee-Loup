@@ -92,8 +92,9 @@ is not. Subagent turns are not mixed into the main file: each subagent gets its 
 carrying the subagent's `agentType` — so per-subagent-type token attribution, previously in
 `reduce.mjs`'s `unknown` list, is now measurable without a hosted OTel collector.
 
-`hook.mjs` reads this at `SessionEnd` and `PreCompact` (both fire reliably — see the gap section
-above), calls `transcript.mjs`'s `collectTranscriptUsage(transcript_path)`, and appends the
+`hook.mjs` reads this at `SessionEnd`, `PreCompact`, and `SubagentStop` (see "SessionEnd is not
+always invoked" below for why `SubagentStop` was added), calls `transcript.mjs`'s
+`collectTranscriptUsage(transcript_path)`, and appends the
 result as a `transcript_usage` event — `transcript_path` itself is read and then discarded, never
 persisted (matching the privacy rule below). `reduce.mjs` folds the most recent `transcript_usage`
 event into `measured.token_usage_main_total`, `measured.token_usage_main_by_model`,
@@ -117,6 +118,61 @@ specific portion's read was incomplete and reports it as `null` rather than a to
 excludes the lost data — a partial-but-plausible-looking number is exactly the false-confidence
 shape issue #139 exists to eliminate. `reduce.mjs` checks each field's actual value, not merely
 whether an event landed, before omitting it from the record's `unknown` list.
+
+## SessionEnd is not always invoked (issue #178)
+
+Issue #174's dogfood sweep found `transcript_usage` complete for only 3 of 59 sampled session
+logs. Issue #178 segmented that evidence by PR #144's merge boundary and found 18 eligible
+post-#144 sessions (excluding the then-still-running session): 9 completed a genuine
+`SessionStart`→`SessionEnd` pair in well under a second with **no real Claude Code transcript
+at all** — nothing happened in them, so a missing `transcript_usage` event is correct, not a
+defect — and 6 ran substantial real work (485KB–2.2MB main transcripts, genuine assistant
+`usage`, in most cases one or more completed subagents) yet never produced a `SessionEnd` hook
+event at all: no structural event, no `PreCompact` either. Only the remaining 3 completed
+normally with a `SessionEnd` and sufficient `transcript_usage`.
+
+The issue's leading hypothesis — that Claude Code's default `SessionEnd` hook timeout is too
+short for this hook's synchronous transcript-read work — was directly tested and **rejected**:
+`collectTranscriptUsage` against the two largest real transcripts found in the affected cohort
+(2.2MB/1183 lines and 1.9MB/840 lines, one with 3 subagents) completed in 15–16ms each, and 100
+reproduction runs of `hook.mjs` fed a piped `SessionEnd` payload over stdin (including large,
+chunked-write payloads meant to provoke a Windows synchronous-pipe-read race) produced zero
+missing or malformed events. Neither the collection work itself nor the stdin read is slow or
+flaky enough to explain a multi-second-plus process losing its `SessionEnd` invocation entirely.
+
+What the evidence does support: in this repository's actual execution environment — a
+multi-session agent-orchestration harness, not a bare interactive `claude` CLI process — a
+session that did real work can have its underlying process superseded or torn down without
+Claude Code ever invoking that session's `SessionEnd` hook. This is external process-lifecycle
+behavior, not a defect in `hook.mjs`, `collect.mjs`, or `transcript.mjs`; a repository-local
+hook cannot make a host invoke a hook it never invokes. `SubagentStart`/`SubagentStop` were
+confirmed (via a live instrumented run) to keep firing correctly within these same sessions
+right up to whatever their last subagent completion was, and a captured `SubagentStop` payload's
+`transcript_path` was confirmed to point at the same main-session transcript `SessionEnd` and
+`PreCompact` receive.
+
+**Mitigation**: `hook.mjs` now also builds a `transcript_usage` checkpoint on `SubagentStop`,
+the same way it already did for `PreCompact` — a last-known-totals snapshot that survives an
+abrupt, non-`SessionEnd` session death for any session that ran at least one subagent to
+completion. Because parallel subagents can each trigger their own `SubagentStop` checkpoint
+close together, `reduce.mjs`'s `pickBestTranscriptUsage` selects `main` and `subagents`
+independently across every `transcript_usage` sample (highest token grand total wins, and a
+genuine `SessionEnd` sample is preferred outright when one exists) rather than trusting
+whichever sample happens to be last in append order — otherwise a stale or `subagents: null`
+checkpoint (the latter is expected, not corruption, when one subagent stops while a sibling is
+still writing its own transcript — see `collectTranscriptUsage`) could regress previously
+captured evidence on an abrupt teardown (found in Codex review of this fix, PR #180).
+`token_usage_is_session_complete` still requires a genuine `SessionEnd` sample to exist (see
+`pickBestTranscriptUsage`), so a `SubagentStop`-only checkpoint is correctly reported as
+partial, not whole-session, evidence — `sufficiency.mjs`'s `token_allocation` claim still
+correctly returns `INSUFFICIENT` for it. This does not, and
+cannot, recover evidence for a session that never dispatches a subagent and is then torn down
+before any `SessionEnd`/`PreCompact` — 2 of the 6 affected post-#178-investigation sessions had
+no subagent activity at all. That gap is a genuine, currently irreducible observability
+limitation of a repository-local hook against a host that can discard a session without
+invoking any of the hooks Claude Code exposes; it is not fixable by changing this collector's
+own timeout, retry, or capture logic, and no such fix should be attempted without new evidence
+that a *different* invoked-but-failing hook path (rather than a never-invoked one) is the cause.
 
 ## What it deliberately still cannot measure
 
@@ -185,8 +241,9 @@ CLEAN/NOT CLEAN verdict for an economic claim at all, rather than re-deriving th
 reading the record's `unknown` list from scratch each time — the condition that let issue #120
 close CLEAN on a token-allocation question its own evidence never answered.
 `token_allocation` additionally requires `measured.token_usage_is_session_complete === true`
-(the last `transcript_usage` sample must be a `SessionEnd`, not a `PreCompact`-only partial
-snapshot), and `monetary_cost_by_model` is currently always `INSUFFICIENT` (`measured.
+(the last `transcript_usage` sample must be a `SessionEnd`, not a `PreCompact`- or
+`SubagentStop`-only partial snapshot — see "SessionEnd is not always invoked" above), and
+`monetary_cost_by_model` is currently always `INSUFFICIENT` (`measured.
 cost_usd_by_model` is always `null` — no local pricing table). `assessSufficiency()` is exported
 as a pure function; see `sufficiency.test.mjs` for the #120 regression case.
 
@@ -206,10 +263,13 @@ node --test tools/telemetry/*.test.mjs
 single-agent session, a session with several subagent invocations but no transcript_usage event,
 a session with a transcript_usage event (per-model/per-subagent-type token totals present),
 incomplete telemetry (a session that ended before `SessionEnd` fired and before any statusLine
-sample landed), and a session containing a compaction. `collect.test.mjs`, `hook.test.mjs`, and
-`statusline.test.mjs` cover the shared helpers and both entry points, including end-to-end
-subprocess runs with piped stdin — `hook.test.mjs` specifically covers `buildTranscriptUsageEvent`
-and confirms `transcript_path` never survives into a written event. `transcript.test.mjs` covers
+sample landed), a session containing a compaction, and (issue #178) a session with a
+`SubagentStop`-only `transcript_usage` event and no `SessionEnd` at all, confirming partial usage
+is still recovered while `token_usage_is_session_complete` correctly stays `false`.
+`collect.test.mjs`, `hook.test.mjs`, and `statusline.test.mjs` cover the shared helpers and both
+entry points, including end-to-end subprocess runs with piped stdin — `hook.test.mjs` specifically
+covers `buildTranscriptUsageEvent` (for `SessionEnd` and `SubagentStop`) and confirms
+`transcript_path` never survives into a written event. `transcript.test.mjs` covers
 `collectTranscriptUsage` against real temp-file transcript/subagent layouts, including dedup by
 message id, agentType attribution, missing/malformed files, and privacy (no prompt/response/
 description content leaks through). `sufficiency.test.mjs` covers `assessSufficiency`, including

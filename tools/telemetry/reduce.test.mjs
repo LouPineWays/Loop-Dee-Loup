@@ -58,7 +58,7 @@ test("session with subagents but no transcript_usage event: start/stop pairs are
 test("session with a transcript_usage event: per-model and per-subagent-type token totals are measured, not unknown", () => {
   const record = reduceEvents(loadFixture("transcript_usage.jsonl"));
   assert.equal(record.measured.transcript_usage_sample_count, 2);
-  // The last transcript_usage event (SessionEnd) wins over the earlier PreCompact one.
+  // The SessionEnd transcript_usage event is preferred outright over the earlier PreCompact one.
   assert.deepEqual(record.measured.token_usage_main_total, {
     input_tokens: 600,
     output_tokens: 9000,
@@ -98,6 +98,108 @@ test("token_usage_is_session_complete is false and token_usage_session_by_model 
   const record = reduceEvents(loadFixture("transcript_usage_precompact_only.jsonl"));
   assert.equal(record.measured.token_usage_is_session_complete, false);
   assert.notEqual(record.measured.token_usage_main_total, null);
+});
+
+// Issue #178: real post-#144 sessions were found where SessionEnd never fired at all (no
+// structural event, no PreCompact either) despite substantial real work, because the
+// session's own process was torn down without Claude Code invoking SessionEnd for it. A
+// SubagentStop-triggered transcript_usage event is the mitigation — a last-known-totals
+// checkpoint that survives that kind of abrupt end for any session that ran a subagent.
+test("a SubagentStop-only transcript_usage event still recovers partial token usage when SessionEnd never fires", () => {
+  const record = reduceEvents([
+    { kind: "hook", event: "SessionStart", session_id: "s-no-end", ts: "2026-08-27T00:00:00.000Z", reason: "startup" },
+    { kind: "hook", event: "SubagentStart", session_id: "s-no-end", ts: "2026-08-27T00:01:00.000Z", agent_id: "a-1", agent_type: "general-purpose" },
+    { kind: "hook", event: "SubagentStop", session_id: "s-no-end", ts: "2026-08-27T00:05:00.000Z", agent_id: "a-1", agent_type: "general-purpose" },
+    {
+      kind: "transcript_usage",
+      event: "SubagentStop",
+      session_id: "s-no-end",
+      ts: "2026-08-27T00:05:00.000Z",
+      main: { total: { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 2 }, by_model: {} },
+      subagents: { total: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 1 }, by_agent_type: {}, by_model: {}, agent_count: 1 },
+    },
+    // No SessionEnd event at all — the session's process ended without ever invoking it.
+  ]);
+  // Partial economic evidence was still recovered, unlike before this fix (nothing at all).
+  assert.notEqual(record.measured.token_usage_main_total, null);
+  assert.equal(record.measured.token_usage_main_total.input_tokens, 10);
+  // But it must not be mistaken for whole-session evidence: no SessionEnd ever landed.
+  assert.equal(record.measured.token_usage_is_session_complete, false);
+  assert.equal(record.measured.session_end_ts, null);
+  assert.ok(record.unknown.includes("session_end_ts"));
+});
+
+// Codex review of #178/PR #180 (P2): parallel subagents' SubagentStop hook processes can
+// append their transcript_usage checkpoints out of chronological order. A blind "take the
+// last appended sample" would let a stale, smaller checkpoint overwrite a more complete one
+// captured earlier — and, separately, would let a straggler PreCompact/SubagentStop sample
+// that happens to append after a genuine SessionEnd sample make a complete session look
+// incomplete. pickBestTranscriptUsage must resist both.
+test("an out-of-order stale SubagentStop checkpoint does not overwrite a more complete earlier one", () => {
+  const complete = { input_tokens: 100, output_tokens: 200, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 10 };
+  const stale = { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 1 };
+  const record = reduceEvents([
+    { kind: "hook", event: "SessionStart", session_id: "s-race", ts: "2026-08-27T00:00:00.000Z", reason: "startup" },
+    // Appended first but reflects an earlier, smaller read (the subagent whose hook process
+    // was scheduled later actually wrote its checkpoint first).
+    {
+      kind: "transcript_usage", event: "SubagentStop", session_id: "s-race", ts: "2026-08-27T00:05:00.000Z",
+      main: { total: complete, by_model: {} },
+      subagents: { total: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 1 }, by_agent_type: {}, by_model: {}, agent_count: 1 },
+    },
+    // Appended second, but its own read caught the session at an earlier/smaller point.
+    {
+      kind: "transcript_usage", event: "SubagentStop", session_id: "s-race", ts: "2026-08-27T00:04:59.000Z",
+      main: { total: stale, by_model: {} },
+      subagents: { total: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 1 }, by_agent_type: {}, by_model: {}, agent_count: 1 },
+    },
+  ]);
+  // The more complete (higher grand-total) main portion wins, not whichever appended last.
+  assert.deepEqual(record.measured.token_usage_main_total, complete);
+});
+
+test("a null subagents portion from a live sibling transcript does not erase previously captured valid subagent totals", () => {
+  const validSubagents = { total: { input_tokens: 5, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 1 }, by_agent_type: { "general-purpose": { input_tokens: 5, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 1 } }, by_model: {}, agent_count: 1 };
+  const record = reduceEvents([
+    { kind: "hook", event: "SessionStart", session_id: "s-live-sibling", ts: "2026-08-27T00:00:00.000Z", reason: "startup" },
+    // First subagent stops; its sibling isn't running yet, so subagents reads cleanly.
+    {
+      kind: "transcript_usage", event: "SubagentStop", session_id: "s-live-sibling", ts: "2026-08-27T00:05:00.000Z",
+      main: { total: { input_tokens: 20, output_tokens: 20, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 2 }, by_model: {} },
+      subagents: validSubagents,
+    },
+    // A second subagent stops moments later while a third sibling is still mid-write:
+    // collectTranscriptUsage reports subagents: null for this one sample (see transcript.mjs).
+    {
+      kind: "transcript_usage", event: "SubagentStop", session_id: "s-live-sibling", ts: "2026-08-27T00:05:05.000Z",
+      main: { total: { input_tokens: 25, output_tokens: 25, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 3 }, by_model: {} },
+      subagents: null,
+    },
+  ]);
+  // main correctly takes the later, more complete read...
+  assert.equal(record.measured.token_usage_main_total.input_tokens, 25);
+  // ...but subagents must not regress to null when an earlier sample already measured it.
+  assert.deepEqual(record.measured.token_usage_subagent_total, validSubagents.total);
+});
+
+test("token_usage_is_session_complete stays true when a genuine SessionEnd sample is followed by a straggler SubagentStop append", () => {
+  const record = reduceEvents([
+    { kind: "hook", event: "SessionStart", session_id: "s-straggler", ts: "2026-08-27T00:00:00.000Z", reason: "startup" },
+    {
+      kind: "transcript_usage", event: "SessionEnd", session_id: "s-straggler", ts: "2026-08-27T00:10:00.000Z",
+      main: { total: { input_tokens: 50, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 5 }, by_model: {} },
+      subagents: { total: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 0 }, by_agent_type: {}, by_model: {}, agent_count: 0 },
+    },
+    // A slower parallel subagent's SubagentStop hook process appends after SessionEnd's own
+    // write landed, even though the real session genuinely ended.
+    {
+      kind: "transcript_usage", event: "SubagentStop", session_id: "s-straggler", ts: "2026-08-27T00:09:58.000Z",
+      main: { total: { input_tokens: 40, output_tokens: 40, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 4 }, by_model: {} },
+      subagents: null,
+    },
+  ]);
+  assert.equal(record.measured.token_usage_is_session_complete, true);
+  assert.equal(record.measured.token_usage_main_total.input_tokens, 50);
 });
 
 test("mergeByModel-style session_by_model accumulation survives a model literally named 'constructor'", () => {
