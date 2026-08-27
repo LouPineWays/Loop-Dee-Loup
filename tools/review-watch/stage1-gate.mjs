@@ -64,8 +64,7 @@ export function findExemption(body) {
 // such reply would silently open the gate. Matched against the truncated body_excerpt
 // findAllMatches already returns, which is long enough to catch a leading status word or
 // an early permission-denial sentence. The patterns below (BLOCKED_STATUS_PATTERN,
-// PERMISSION_LACK_PATTERNS/MUTATION_ATTEMPT_PATTERN, REFUSAL_TO_MUTATE_PATTERN) are
-// isGenuineResponse's non-genuine signals.
+// REFUSED_MUTATION_ATTEMPT_PATTERN) are isGenuineResponse's non-genuine signals.
 //
 // Anchored to the (normalized) start of the message: a genuine, unrelated review is
 // free-form prose that can mention "BLOCKED" or a permission phrase anywhere in its body
@@ -73,26 +72,27 @@ export function findExemption(body) {
 // refusal reply *opens* with its status rather than burying it inside findings content.
 const BLOCKED_STATUS_PATTERN = /^\s*BLOCKED\b/i;
 
-// issue #161, Failure B: `\b(?:do not|...) have ... permission\b` matched anywhere in the
-// body, so a genuine finding that merely *discusses* a permission rule -- e.g. "The
-// reviewer cannot have write permission under this workflow" -- was rejected purely for
-// containing that phrase, even though nothing was actually attempted or refused. The
-// AGENTS.md boundary this filter exists to catch is specifically a mutation *attempt* that
-// was refused (edit/commit/push/open/update a file, branch, commit, or PR) -- so requiring
-// both signals together (a permission-lack phrase AND a mutation-attempt verb, anywhere in
-// the same message) keeps an actual "I tried to push but don't have access" reply caught
-// while no longer rejecting a review that discusses permission design without describing
-// any attempted mutation. This mirrors the same two-signals-together fix already applied
-// to the Codex Cloud setup-prompt false positive below.
-const PERMISSION_LACK_PATTERNS = [
-  /\b(?:do not|don't|cannot|can't) have (?:write |repository |branch )?(?:access|permission)\b/i,
-  /\binsufficient (?:write |repository )?permission\b/i,
-];
-const MUTATION_ATTEMPT_PATTERN = /\b(?:push(?:ed|ing)?|commit(?:ted|ting)?|edit(?:ed|ing)?|modif(?:y|ies|ied|ying)|open(?:ed|ing)?|updat(?:e|ed|ing))\b/i;
-
-// Already action-scoped ("to modify/commit/push/edit"), so this one phrase alone is
-// enough -- no separate mutation-attempt conjunction needed.
-const REFUSAL_TO_MUTATE_PATTERN = /\b(?:not permitted|not authorized) to (?:modify|commit|push|edit|open|update)\b/i;
+// issue #161, Failure B, and its own Stage 1 review follow-up: a first fix here checked
+// "does the message contain a permission-lack phrase (anywhere)" AND "does the message
+// contain a mutation verb (anywhere)" as two *independent* body-wide checks. That was
+// flagged as wrong in both directions on this correction's own Stage 1 review:
+//  - too loose: a genuine review that separately discusses permission boundaries and also
+//    contains an ordinary instruction like "Update the test" would match "update" as an
+//    unrelated "mutation attempt" with no connection to the permission discussion, and
+//    reject an otherwise-genuine review;
+//  - too narrow: a real refusal phrased with a verb outside a small hardcoded list (e.g.
+//    "I tried to apply the fix, but I don't have write access") wouldn't match any
+//    enumerated verb and would slip through as genuine.
+// The actual AGENTS.md boundary is one clause -- an attempt/authorization cue word
+// ("attempted", "tried", "unable", "permission", "permitted", "authorized", ...) governing
+// an infinitive mutation verb close by ("... to push", "... to apply", "... to commit"),
+// e.g. "attempted to push", "permission to commit", "not authorized to edit". Requiring
+// the verb to be the object of that *same* cue (allowing a few filler words in between,
+// but not an unrelated sentence later in the message) ties the verb to the refusal clause
+// instead of anywhere in the message, and covers arbitrary verbs instead of enumerating
+// them -- fixing both directions with one primitive instead of a growing verb list.
+const REFUSED_MUTATION_ATTEMPT_PATTERN =
+  /\b(?:attempt(?:ed|ing)?|tr(?:y|ied|ies|ying)|unable|fail(?:ed|s|ing)?|wanted?|need(?:ed|s)?|permission|permitted|authorized)\b(?:\s+\S+){0,3}\s+to\s+\w+/i;
 
 // Stage 2 audit finding on issue #141 (LDL#135's own correction cycle): a Codex Cloud
 // environment misconfiguration produces this exact reply — "To use Codex here, create an
@@ -152,9 +152,7 @@ export function isGenuineResponse(bodyExcerpt) {
   const normalized = stripLeadingMarkdownWrapper(bodyExcerpt ?? "");
   if (isCodexCloudSetupPrompt(normalized)) return false;
   if (BLOCKED_STATUS_PATTERN.test(normalized)) return false;
-  if (REFUSAL_TO_MUTATE_PATTERN.test(normalized)) return false;
-  const hasPermissionLackPhrase = PERMISSION_LACK_PATTERNS.some((re) => re.test(normalized));
-  if (hasPermissionLackPhrase && MUTATION_ATTEMPT_PATTERN.test(normalized)) return false;
+  if (REFUSED_MUTATION_ATTEMPT_PATTERN.test(normalized)) return false;
   return true;
 }
 

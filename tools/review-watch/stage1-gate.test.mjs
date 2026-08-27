@@ -122,6 +122,25 @@ test("isGenuineResponse: accepts a genuine finding discussing that a reviewer ca
   );
 });
 
+test("isGenuineResponse: accepts a genuine review that discusses permission boundaries and separately gives an ordinary instruction (Stage 1 review finding on PR #164)", () => {
+  const genuineReview =
+    "The reviewer cannot have write permission under this workflow, by design. Separately: update the test fixture " +
+    "to also cover the new list-prefix cases, since the current suite only exercises headings and emphasis.";
+  assert.equal(
+    isGenuineResponse(genuineReview),
+    true,
+    "an ordinary instruction verb (e.g. 'update') elsewhere in a genuine review must not be tied to an unrelated permission-lack mention earlier in the message",
+  );
+});
+
+test("isGenuineResponse: rejects a refusal that uses a mutation verb outside a small hardcoded list (Stage 1 review finding on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("I tried to apply the fix, but I don't have write access to this repository."),
+    false,
+    "a refused mutation attempt must be recognized regardless of which verb (apply/change/push/...) describes the attempted mutation",
+  );
+});
+
 test("parseArgs: reads flags and defaults the bot login", () => {
   const args = parseArgs(["--repo", "owner/repo", "--number", "50", "--head", "abc123"]);
   assert.equal(args.repo, "owner/repo");
