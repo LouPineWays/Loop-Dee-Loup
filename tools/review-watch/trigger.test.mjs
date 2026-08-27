@@ -7,8 +7,13 @@ import assert from "node:assert/strict";
 import {
   parseArgs,
   headMarker,
+  ackMarker,
   triggerCommentBody,
   findExistingTrigger,
+  extractHeadFromTrigger,
+  findTriggerRounds,
+  attributeRound,
+  findPriorGenuineHead,
   extractCommentId,
   findCommentById,
   run,
@@ -34,6 +39,151 @@ test("triggerCommentBody: embeds the head marker when a head is given", () => {
   const body = triggerCommentBody("abc123");
   assert.match(body, /^@codex review\n/);
   assert.equal(body, `@codex review\n${headMarker("abc123")}`);
+});
+
+test("ackMarker: null when no reason is given", () => {
+  assert.equal(ackMarker(undefined), null);
+});
+
+test("ackMarker: embeds the reason", () => {
+  assert.equal(ackMarker("founder-approved retry"), "<!-- ldl-repeat-round-ack:founder-approved retry -->");
+});
+
+test("ackMarker: escapes an embedded comment-close sequence so the reason can't break out of the marker", () => {
+  assert.equal(ackMarker("x --> y"), "<!-- ldl-repeat-round-ack:x --&gt; y -->");
+});
+
+test("triggerCommentBody: embeds both the head marker and the ack marker when both are given", () => {
+  const body = triggerCommentBody("abc123", "founder said retry");
+  assert.equal(body, `@codex review\n${headMarker("abc123")}\n${ackMarker("founder said retry")}`);
+});
+
+test("triggerCommentBody: omits the ack marker when no reason is given, even with a head", () => {
+  const body = triggerCommentBody("abc123", undefined);
+  assert.equal(body, `@codex review\n${headMarker("abc123")}`);
+});
+
+test("extractHeadFromTrigger: reads the head back out of a trigger comment body", () => {
+  assert.equal(extractHeadFromTrigger(triggerCommentBody("abc123")), "abc123");
+});
+
+test("extractHeadFromTrigger: null when the comment carries no head marker", () => {
+  assert.equal(extractHeadFromTrigger("@codex review"), null);
+});
+
+test("findTriggerRounds: collects every trigger comment tagged by its head, oldest first", () => {
+  const rounds = findTriggerRounds([
+    { body: triggerCommentBody("head-b"), created_at: "2026-08-24T09:00:00Z" },
+    { body: "not a trigger", created_at: "2026-08-24T08:30:00Z" },
+    { body: triggerCommentBody("head-a"), created_at: "2026-08-24T08:00:00Z" },
+  ]);
+  assert.deepEqual(rounds, [
+    { head: "head-a", timestamp: "2026-08-24T08:00:00Z" },
+    { head: "head-b", timestamp: "2026-08-24T09:00:00Z" },
+  ]);
+});
+
+test("findTriggerRounds: ignores a comment that merely mentions the trigger text without a head marker (Stage 1 review finding on this PR)", () => {
+  const rounds = findTriggerRounds([
+    { body: triggerCommentBody("old-sha"), created_at: "2026-08-24T08:00:00Z" },
+    {
+      body: "Once this is fixed we should re-request @codex review at the new head.",
+      created_at: "2026-08-24T08:05:00Z",
+    },
+    {
+      body: "## Review finding\n\nAny comment containing `@codex review` text...",
+      created_at: "2026-08-24T08:10:00Z",
+    },
+  ]);
+  assert.deepEqual(rounds, [{ head: "old-sha", timestamp: "2026-08-24T08:00:00Z" }]);
+});
+
+test("attributeRound: attributes a response to the latest round at or before its timestamp", () => {
+  const rounds = [
+    { head: "head-a", timestamp: "2026-08-24T08:00:00Z" },
+    { head: "head-b", timestamp: "2026-08-24T09:00:00Z" },
+  ];
+  assert.equal(attributeRound(rounds, "2026-08-24T08:30:00Z").head, "head-a");
+  assert.equal(attributeRound(rounds, "2026-08-24T09:30:00Z").head, "head-b");
+});
+
+test("attributeRound: null when the response predates every round", () => {
+  const rounds = [{ head: "head-a", timestamp: "2026-08-24T08:00:00Z" }];
+  assert.equal(attributeRound(rounds, "2026-08-24T07:00:00Z"), null);
+});
+
+test("findPriorGenuineHead: finds an earlier head's genuine response (reproduces PR #164's re-trigger loop)", () => {
+  const comments = [
+    { body: triggerCommentBody("old-sha"), created_at: "2026-08-24T08:00:00Z" },
+    {
+      user: { login: "chatgpt-codex-connector[bot]" },
+      created_at: "2026-08-24T08:10:00Z",
+      body: "Found a real defect: off-by-one in the loop bound.",
+    },
+  ];
+  const priorHead = findPriorGenuineHead({ comments, currentHead: "new-sha" });
+  assert.equal(priorHead, "old-sha");
+});
+
+test("findPriorGenuineHead: null when the only genuine response belongs to the current head", () => {
+  const comments = [
+    { body: triggerCommentBody("current-sha"), created_at: "2026-08-24T08:00:00Z" },
+    {
+      user: { login: "chatgpt-codex-connector[bot]" },
+      created_at: "2026-08-24T08:10:00Z",
+      body: "Looks good, no defects found.",
+    },
+  ];
+  assert.equal(findPriorGenuineHead({ comments, currentHead: "current-sha" }), null);
+});
+
+test("findPriorGenuineHead: null when the earlier head's response was BLOCKED, not genuine", () => {
+  const comments = [
+    { body: triggerCommentBody("old-sha"), created_at: "2026-08-24T08:00:00Z" },
+    {
+      user: { login: "chatgpt-codex-connector[bot]" },
+      created_at: "2026-08-24T08:10:00Z",
+      body: "BLOCKED — checkout unavailable.",
+    },
+  ];
+  assert.equal(findPriorGenuineHead({ comments, currentHead: "new-sha" }), null);
+});
+
+test("findPriorGenuineHead: still attributes correctly when an intervening comment merely mentions the trigger text (Stage 1 review finding on this PR)", () => {
+  const comments = [
+    { body: triggerCommentBody("old-sha"), created_at: "2026-08-24T08:00:00Z" },
+    {
+      body: "Once this is fixed we should re-request @codex review at the new head.",
+      created_at: "2026-08-24T08:05:00Z",
+    },
+    {
+      user: { login: "chatgpt-codex-connector[bot]" },
+      created_at: "2026-08-24T08:10:00Z",
+      body: "Found a real defect: `@codex review` handling has an off-by-one bug.",
+    },
+  ];
+  const priorHead = findPriorGenuineHead({ comments, currentHead: "new-sha" });
+  assert.equal(
+    priorHead,
+    "old-sha",
+    "a discussion comment or the bot's own response mentioning the trigger text must not create a phantom null-head round that swallows the real attribution",
+  );
+});
+
+test("findPriorGenuineHead: checks otherItems (pull-comments/pull-reviews) too, not just the issue-comments thread", () => {
+  const comments = [{ body: triggerCommentBody("old-sha"), created_at: "2026-08-24T08:00:00Z" }];
+  const otherItems = [
+    {
+      user: { login: "chatgpt-codex-connector[bot]" },
+      submitted_at: "2026-08-24T08:10:00Z",
+      body: "This line has a real bug.",
+    },
+  ];
+  assert.equal(findPriorGenuineHead({ comments, otherItems, currentHead: "new-sha" }), "old-sha");
+});
+
+test("findPriorGenuineHead: null when no trigger has been posted yet", () => {
+  assert.equal(findPriorGenuineHead({ comments: [], currentHead: "abc123" }), null);
 });
 
 test("findExistingTrigger: matches a comment containing the trigger text", () => {
@@ -135,10 +285,10 @@ test("run: no prior trigger — posts exactly one and returns its timestamp", as
 test("run: a prior trigger already exists — skips posting and returns the existing timestamp", async () => {
   let ghPostCalls = 0;
   const result = await run(
-    { repo: "owner/repo", kind: "pr", number: 50 },
+    { repo: "owner/repo", kind: "issue", number: 53 },
     {
       ghApiImpl: async () => [
-        { id: 1, body: "@codex review", created_at: "2026-08-23T13:00:00Z", html_url: "https://github.com/owner/repo/pull/50#c1" },
+        { id: 1, body: "@codex review", created_at: "2026-08-23T13:00:00Z", html_url: "https://github.com/owner/repo/issues/53#c1" },
       ],
       ghPostImpl: async () => {
         ghPostCalls += 1;
@@ -152,16 +302,47 @@ test("run: a prior trigger already exists — skips posting and returns the exis
   assert.equal(result.timestamp, "2026-08-23T13:00:00Z");
 });
 
-test("run: --kind pr and --kind issue both check the issues/comments endpoint", async () => {
+test("run: --kind pr (with --head) and --kind issue both check the issues/comments endpoint", async () => {
   const seenPaths = [];
   const ghApiImpl = async (path) => {
     seenPaths.push(path);
     return [];
   };
   const ghPostImpl = async () => ({ created_at: "2026-08-23T14:05:00Z" });
-  await run({ repo: "owner/repo", kind: "pr", number: 50 }, { ghApiImpl, ghPostImpl });
+  await run({ repo: "owner/repo", kind: "pr", number: 50, head: "abc123" }, { ghApiImpl, ghPostImpl });
   await run({ repo: "owner/repo", kind: "issue", number: 53 }, { ghApiImpl, ghPostImpl });
-  assert.deepEqual(seenPaths, ["repos/owner/repo/issues/50/comments", "repos/owner/repo/issues/53/comments"]);
+  assert.ok(seenPaths.includes("repos/owner/repo/issues/50/comments"));
+  assert.ok(seenPaths.includes("repos/owner/repo/issues/53/comments"));
+});
+
+test("run: --kind pr without --head is rejected instead of silently skipping the cross-head block (Stage 1 review finding on this PR)", async () => {
+  const result = await run(
+    { repo: "owner/repo", kind: "pr", number: 50 },
+    { ghApiImpl: async () => [], ghPostImpl: async () => ({ created_at: "x" }) },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /--head is required for --kind pr/);
+});
+
+test("run: --kind pr without --head is rejected even with --force (the combination that would otherwise skip every check)", async () => {
+  let ghApiCalls = 0;
+  let ghPostCalls = 0;
+  const result = await run(
+    { repo: "owner/repo", kind: "pr", number: 50, force: "true" },
+    {
+      ghApiImpl: async () => {
+        ghApiCalls += 1;
+        return [];
+      },
+      ghPostImpl: async () => {
+        ghPostCalls += 1;
+        return { created_at: "x" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(ghApiCalls, 0);
+  assert.equal(ghPostCalls, 0, "must not post unconditionally just because --head was omitted");
 });
 
 test("run: with --head, a stale trigger from an older head does not block posting at the new head", async () => {
@@ -197,6 +378,102 @@ test("run: with --head, a trigger already posted at that same head is not duplic
   assert.equal(result.exitCode, 0);
   assert.equal(ghPostCalls, 0);
   assert.equal(result.timestamp, "2026-08-23T13:00:00Z");
+});
+
+test("run: with --head, refuses to post when an earlier head on this PR already received a genuine response (issue #165)", async () => {
+  let ghPostCalls = 0;
+  const endpointsSeen = [];
+  const result = await run(
+    { repo: "owner/repo", kind: "pr", number: 164, head: "new-sha" },
+    {
+      ghApiImpl: async (path) => {
+        endpointsSeen.push(path);
+        if (path.endsWith("/comments") && path.includes("/issues/")) {
+          return [
+            { body: triggerCommentBody("old-sha"), created_at: "2026-08-23T13:00:00Z" },
+            {
+              user: { login: "chatgpt-codex-connector[bot]" },
+              created_at: "2026-08-23T13:10:00Z",
+              body: "Found a real off-by-one bug in the loop bound.",
+            },
+          ];
+        }
+        return [];
+      },
+      ghPostImpl: async () => {
+        ghPostCalls += 1;
+        return { created_at: "should-not-be-used" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.priorGenuineHead, "old-sha");
+  assert.match(result.message, /already received a genuine Codex response/);
+  assert.equal(ghPostCalls, 0, "must not post a second round without an explicit override");
+  assert.ok(
+    endpointsSeen.some((p) => p.includes("/pulls/") && p.includes("/comments")),
+    "must check the pull-comments endpoint for the prior round's response, not just issue-comments",
+  );
+  assert.ok(
+    endpointsSeen.some((p) => p.includes("/pulls/") && p.includes("/reviews")),
+    "must check the pull-reviews endpoint for the prior round's response, not just issue-comments",
+  );
+});
+
+test("run: with --head, --ack-repeat-round overrides the cross-head block and records the reason on the posted comment", async () => {
+  let ghPostCalls = 0;
+  const result = await run(
+    { repo: "owner/repo", kind: "pr", number: 164, head: "new-sha", "ack-repeat-round": "founder approved a second round" },
+    {
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { body: triggerCommentBody("old-sha"), created_at: "2026-08-23T13:00:00Z" },
+            {
+              user: { login: "chatgpt-codex-connector[bot]" },
+              created_at: "2026-08-23T13:10:00Z",
+              body: "Found a real off-by-one bug in the loop bound.",
+            },
+          ];
+        }
+        return [];
+      },
+      ghPostImpl: async ({ head, ackReason }) => {
+        ghPostCalls += 1;
+        assert.equal(head, "new-sha");
+        assert.equal(ackReason, "founder approved a second round");
+        return { created_at: "2026-08-24T09:00:00Z", html_url: "https://github.com/owner/repo/pull/164#c3" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(ghPostCalls, 1, "the override must let the retry post");
+  assert.equal(result.posted, true);
+});
+
+test("run: cross-head block does not apply to --kind issue (Stage 2 audits have no heads)", async () => {
+  let ghPostCalls = 0;
+  const result = await run(
+    { repo: "owner/repo", kind: "issue", number: 53 },
+    {
+      ghApiImpl: async () => [
+        { body: "@codex review", created_at: "2026-08-23T13:00:00Z" },
+        {
+          user: { login: "chatgpt-codex-connector[bot]" },
+          created_at: "2026-08-23T13:10:00Z",
+          body: "Audit findings: none.",
+        },
+      ],
+      ghPostImpl: async () => {
+        ghPostCalls += 1;
+        return { created_at: "x" };
+      },
+    },
+  );
+  // A trigger already exists on the thread (dedup, not the cross-head block, is what stops
+  // this repost) — the point of this test is that exitCode is never 2 for --kind issue.
+  assert.equal(result.exitCode, 0);
+  assert.equal(ghPostCalls, 0);
 });
 
 test("run: --force true bypasses dedup and reposts even when a trigger already exists", async () => {

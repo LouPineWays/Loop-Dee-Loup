@@ -30,7 +30,25 @@
 // determining retry is warranted — e.g. per docs/bounded-review-cycle.md Stage 2 step 10, a
 // prior trigger that produced no genuine Codex response (no reply, or a BLOCKED reply) stays
 // PENDING and must be retried; without --force, this script's own idempotency would treat
-// that prior trigger as already-satisfied and refuse to post the retry.
+// that prior trigger as already-satisfied and refuse to post the retry. --force only bypasses
+// the *same-head* dedup check above — it never bypasses the cross-head block described next.
+//
+// Cross-head block (issue #165): per-head dedup alone does not stop a session from pushing a
+// fix commit (a new head) and re-triggering `@codex review` at that new head, repeatedly,
+// even after an *earlier* head on the same PR already drew a genuine Stage 1 response.
+// docs/bounded-review-cycle.md Stage 1 step 7 ("Do not request a second inline review on that
+// PR... A second invocation is another round and is prohibited by default") already prohibits
+// this in prose, but nothing mechanical stopped it — observed directly on PR #164, which
+// cycled trigger/fix-commit/re-trigger 8 times before a founder intervened. For --kind pr with
+// --head given, `run` additionally checks every endpoint this PR could hold a Codex response
+// on (pull-comments, pull-reviews, issue-comments) for a genuine response (reusing
+// genuine-response.mjs's isGenuineResponse — never a second, competing classifier) already
+// attributable to an *earlier* trigger round at a *different* head. If one is found, posting
+// is refused (exit 2) unless `--ack-repeat-round "<reason>"` is given, which records the
+// reason as a durable marker on the newly posted comment and proceeds. Reserve that override
+// for a founder-authorized exception (per AGENTS.md's Founder interrupt conditions) — it exists
+// so a genuinely legitimate second round is not permanently impossible, not so this check can
+// be routinely worked around.
 //
 // Idempotent by default: if a comment containing `@codex review` already exists on the
 // thread (scoped to --head when given), this exits 0 without posting a second one. Success
@@ -39,14 +57,18 @@
 // stderr.
 //
 // Exit codes: 0 = success, 1 = operational error (bad/missing args, `gh` failure, or an
-// unexpected response shape from the comments read).
+// unexpected response shape from the comments read), 2 = blocked — an earlier head on this
+// PR already received a genuine response and no --ack-repeat-round override was given.
 //
 // Tests: node --test tools/review-watch/trigger.test.mjs
 
 import { execFileSync } from "node:child_process";
-import { endpointsFor } from "./poll.mjs";
+import { endpointsFor, findAllMatches } from "./poll.mjs";
+import { isGenuineResponse } from "./genuine-response.mjs";
 
 const TRIGGER_TEXT = "@codex review";
+const DEFAULT_BOT = "chatgpt-codex-connector[bot]";
+const HEAD_MARKER_PATTERN = /<!-- ldl-trigger-head:(.+?) -->/;
 
 export function parseArgs(argv) {
   const args = {};
@@ -64,9 +86,85 @@ export function headMarker(head) {
   return head ? `<!-- ldl-trigger-head:${head} -->` : null;
 }
 
-export function triggerCommentBody(head) {
-  const marker = headMarker(head);
-  return marker ? `${TRIGGER_TEXT}\n${marker}` : TRIGGER_TEXT;
+// Records an --ack-repeat-round override as a durable marker on the posted comment, so a
+// second (or later) Stage 1 round at a new head carries visible, recorded justification
+// rather than merely bypassing the check silently. "-->" is escaped so an adversarial or
+// careless reason string can't prematurely close the HTML comment.
+export function ackMarker(reason) {
+  if (!reason) return null;
+  const escaped = reason.replace(/-->/g, "--&gt;");
+  return `<!-- ldl-repeat-round-ack:${escaped} -->`;
+}
+
+export function triggerCommentBody(head, ackReason) {
+  const lines = [TRIGGER_TEXT, headMarker(head), ackMarker(ackReason)].filter(Boolean);
+  return lines.join("\n");
+}
+
+// Pure. Extracts the head SHA a trigger comment was scoped to via headMarker's own format, or
+// null when the comment carries no head marker (e.g. a Stage 2 issue trigger, which is never
+// scoped to a head).
+export function extractHeadFromTrigger(body) {
+  const match = HEAD_MARKER_PATTERN.exec(body ?? "");
+  return match ? match[1] : null;
+}
+
+// Pure. Every genuine Stage 1 trigger comment on the thread (any head, not just the one
+// dedup is scoped to), each tagged with the head it was posted for and sorted oldest first —
+// the basis for attributing a later genuine bot response to the trigger round that requested
+// it. Requires a valid head marker, not merely the TRIGGER_TEXT substring (Stage 1 review
+// finding on this PR): an ordinary discussion comment, or the bot's own review response, can
+// easily mention "@codex review" in prose without being an actual trigger post — especially
+// likely in this exact file's own review thread, which necessarily discusses that literal
+// text. Treating such a comment as a round with `head: null` let attributeRound assign a
+// later genuine response to that phantom null-head round instead of the real one, silently
+// defeating findPriorGenuineHead's cross-head attribution. A genuine trigger always carries
+// headMarker's own format (triggerCommentBody always includes it whenever a head is given,
+// and this function is only ever consulted for --kind pr --head), so requiring the marker
+// excludes every non-trigger false positive while keeping every real round.
+export function findTriggerRounds(comments) {
+  return comments
+    .map((c) => ({ head: extractHeadFromTrigger(c.body), timestamp: c.created_at }))
+    .filter((round) => round.head !== null)
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+}
+
+// Pure. Given trigger rounds sorted oldest first, returns the round a response at
+// `responseTimestamp` belongs to: the latest round whose trigger was posted at or before that
+// response. This is how one genuine response gets attributed to "the round for head X" without
+// needing an explicit upper-bound window per round.
+export function attributeRound(rounds, responseTimestamp) {
+  const responseMs = new Date(responseTimestamp).getTime();
+  let owner = null;
+  for (const round of rounds) {
+    if (new Date(round.timestamp).getTime() <= responseMs) owner = round;
+    else break;
+  }
+  return owner;
+}
+
+// Pure — no I/O. Returns the head of the earliest prior trigger round on this PR that already
+// drew a genuine Codex response, as long as that round's head differs from `currentHead` — or
+// null if no such round exists. `comments` is the issue-comments thread (source of every
+// trigger comment's own head marker); `otherItems` is every other endpoint's items (pull
+// review comments, pull reviews) that could also carry a genuine response. Both are combined
+// for genuine-response scanning since a Codex reply can land on any of them.
+export function findPriorGenuineHead({ comments, otherItems = [], currentHead, bot = DEFAULT_BOT }) {
+  const rounds = findTriggerRounds(comments);
+  if (rounds.length === 0) return null;
+
+  const sinceMs = new Date(rounds[0].timestamp).getTime();
+  const allItems = [...comments, ...otherItems];
+  const matches = findAllMatches(allItems, { bot, sinceMs, endpointName: "combined" });
+
+  for (const match of matches) {
+    if (!isGenuineResponse(match.body_excerpt)) continue;
+    const owner = attributeRound(rounds, match.created_at);
+    if (owner && owner.head && owner.head !== currentHead) {
+      return owner.head;
+    }
+  }
+  return null;
 }
 
 // Pure — no I/O — so tests can exercise it without a network call or `gh`. Returns the
@@ -92,9 +190,24 @@ export function findExistingTrigger(comments, { head } = {}) {
 export async function run(args, { ghApiImpl = defaultGhApi, ghPostImpl = defaultGhPost } = {}) {
   const { repo, kind, number, head } = args;
   const force = args.force === "true" || args.force === "1";
+  const ackReason = args["ack-repeat-round"];
 
   if (!repo || !kind || !number) {
     return { exitCode: 1, message: "Missing required args: --repo, --kind, --number are all required." };
+  }
+
+  // Stage 1 review finding on this PR: without this, an omitted --head on a --kind pr call
+  // silently skips the cross-head block above — and, combined with --force (which then makes
+  // needsCommentsRead false too, so no reads happen at all), skips the same-head dedup as
+  // well, posting an unconditional new trigger despite an earlier head's genuine response.
+  // docs/bounded-review-cycle.md never documents --kind pr without --head (Stage 1 always
+  // reviews a frozen head; only Stage 2's --kind issue has no head), so failing closed here
+  // matches every documented invocation and only rejects a malformed one.
+  if (kind === "pr" && !head) {
+    return {
+      exitCode: 1,
+      message: "--head is required for --kind pr (Stage 1 reviews a frozen head; use --kind issue for Stage 2).",
+    };
   }
 
   let endpoints;
@@ -108,8 +221,11 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPostImpl = default
     return { exitCode: 1, message: `No issue-comments endpoint resolved for --kind ${kind}.` };
   }
 
-  if (!force) {
-    let comments;
+  // The cross-head block below needs the full issue-comments thread even under --force,
+  // since --force only bypasses the same-head repost dedup, never the cross-head check.
+  const needsCommentsRead = !force || (kind === "pr" && head);
+  let comments = null;
+  if (needsCommentsRead) {
     try {
       comments = await ghApiImpl(commentsEndpoint.path);
     } catch (err) {
@@ -122,16 +238,51 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPostImpl = default
         message: `Ambiguous existing-trigger read: expected an array of comments from ${commentsEndpoint.path}.`,
       };
     }
+  }
 
+  if (!force) {
     const existing = findExistingTrigger(comments, { head });
     if (existing) {
       return { exitCode: 0, timestamp: existing.created_at, posted: false, url: existing.html_url ?? null };
     }
   }
 
+  if (kind === "pr" && head) {
+    const otherItems = [];
+    for (const endpoint of endpoints) {
+      if (endpoint.name === "issue-comments") continue;
+      let items;
+      try {
+        items = await ghApiImpl(endpoint.path);
+      } catch (err) {
+        return { exitCode: 1, message: `gh api call failed for ${endpoint.path}: ${err.message}` };
+      }
+      if (!Array.isArray(items)) {
+        return {
+          exitCode: 1,
+          message: `Ambiguous cross-head response read: expected an array of items from ${endpoint.path}.`,
+        };
+      }
+      otherItems.push(...items);
+    }
+
+    const priorHead = findPriorGenuineHead({ comments, otherItems, currentHead: head });
+    if (priorHead && !ackReason) {
+      return {
+        exitCode: 2,
+        message:
+          `Refusing to post a second Stage 1 trigger on ${repo}#${number}: head ${priorHead} on this PR ` +
+          `already received a genuine Codex response. Per docs/bounded-review-cycle.md Stage 1 step 7, a ` +
+          `second invocation is another round and is prohibited by default. Pass ` +
+          `--ack-repeat-round "<reason>" to record an explicit, founder-authorized override and proceed.`,
+        priorGenuineHead: priorHead,
+      };
+    }
+  }
+
   let posted;
   try {
-    posted = await ghPostImpl({ repo, kind, number, head });
+    posted = await ghPostImpl({ repo, kind, number, head, ackReason });
   } catch (err) {
     return { exitCode: 1, message: `gh comment post failed: ${err.message}` };
   }
@@ -169,9 +320,9 @@ export function findCommentById(comments, id) {
 // thread back and picks out that exact comment by id to obtain its authoritative
 // timestamp/url — never re-derived via trigger-text dedup, which would return a stale
 // pre-existing trigger instead of the one just posted.
-function defaultGhPost({ repo, kind, number, head }) {
+function defaultGhPost({ repo, kind, number, head, ackReason }) {
   const sub = kind === "pr" ? "pr" : "issue";
-  const body = triggerCommentBody(head);
+  const body = triggerCommentBody(head, ackReason);
   const output = execFileSync("gh", [sub, "comment", String(number), "--repo", repo, "--body", body], {
     encoding: "utf8",
   });
