@@ -151,6 +151,12 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPrViewImpl = defau
   // match can only be trusted when the thread is unambiguous — exactly one round total.
   const rounds = findTriggerRounds(comments);
   const boundGenuineMatches = genuineMatches.filter((m) => matchBelongsToHead(m, { head, rounds }));
+  // Present (possibly empty) in both outcomes below, not only PENDING: a genuine finding
+  // that fails head-binding (e.g. an unbound issue comment on a multi-head thread) is still
+  // a real post-trigger response the controller must see and verify under Stage 1 steps 4-9
+  // — dropping it silently just because a *different*, commit-bound match already satisfied
+  // the gate would hide a genuine finding from review (Stage 1 review finding on this PR).
+  const unboundGenuineMatches = genuineMatches.filter((m) => !matchBelongsToHead(m, { head, rounds }));
 
   if (boundGenuineMatches.length === 0) {
     return {
@@ -158,11 +164,7 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPrViewImpl = defau
       state: "PENDING",
       triggerTimestamp: trigger.created_at,
       nonGenuineMatches,
-      // Present (possibly empty) whenever PENDING is reported so a caller can tell "no
-      // response at all yet" apart from "a genuine response exists but isn't reliably bound
-      // to this head" (e.g. an older head's delayed reply, or an ambiguous unbound comment
-      // once more than one trigger round exists) without re-deriving matchBelongsToHead.
-      unboundGenuineMatches: genuineMatches,
+      unboundGenuineMatches,
     };
   }
 
@@ -171,6 +173,7 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPrViewImpl = defau
     state: "RESPONSE_RECEIVED",
     triggerTimestamp: trigger.created_at,
     matches: boundGenuineMatches,
+    unboundGenuineMatches,
   };
 }
 

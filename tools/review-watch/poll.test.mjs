@@ -112,6 +112,15 @@ test("matchBelongsToHead: an unbound match fails closed once more than one trigg
   assert.equal(matchBelongsToHead({ commit_id: null }, { head: "sha-b", rounds }), false);
 });
 
+test("matchBelongsToHead: a same-head retry (two trigger comments, one head) is not treated as cross-head ambiguity (Stage 1 review finding on issue #163's own PR)", () => {
+  const rounds = [{ head: "sha-a", timestamp: "2026-08-23T13:00:00Z" }, { head: "sha-a", timestamp: "2026-08-23T13:30:00Z" }];
+  assert.equal(
+    matchBelongsToHead({ commit_id: null }, { head: "sha-a", rounds }),
+    true,
+    "a --force retry at the same frozen head posts a second trigger comment (a second round) but not a second distinct head, so an unbound genuine retry response must still bind",
+  );
+});
+
 test("parsePaginatedOutput: flattens multiple `gh api --paginate --slurp` pages into one flat array", () => {
   // --slurp wraps each page's own JSON array into one outer array, so 3 items spread across
   // 2 pages arrive as [[{id:1},{id:2}],[{id:3}]] on stdout, not as one flat 3-item array.

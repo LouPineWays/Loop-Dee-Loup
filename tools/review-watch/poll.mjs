@@ -118,16 +118,22 @@ export function findAllMatches(items, { bot, sinceMs, endpointName }) {
 //    reviewing older head A, arriving after newer head B's trigger, must not satisfy B).
 //  - The match has no direct commit identity (a plain issue comment — Codex's BLOCKED/status
 //    replies, and some genuine reviews, land here). Timestamp-only attribution is unsafe the
-//    moment more than one trigger round exists on the thread: a delayed reply for an older
-//    round is, by timestamp alone, indistinguishable from a fresh reply to the newest round.
-//    Trust it only when the thread is unambiguous — exactly one trigger round exists in
-//    total, so there is no other head this response could actually belong to. With more than
-//    one round, fail closed (per issue #163's requirement 2) rather than guess from arrival
-//    order.
+//    moment more than one *distinct* head is in play on the thread: a delayed reply for an
+//    older head is, by timestamp alone, indistinguishable from a fresh reply to a newer one.
+//    Trust it only when the thread is unambiguous — every trigger round targets the same
+//    head. That is a *distinct-head* count, not a raw round count: a same-head retry (e.g.
+//    trigger.mjs --force true after a BLOCKED reply, at the same frozen head) posts a second
+//    trigger comment and so a second round, but docs/bounded-review-cycle.md already defines
+//    duplicate same-head invocations as one round — a raw `rounds.length !== 1` check would
+//    wrongly treat that retry as introducing cross-head ambiguity and leave the gate stuck
+//    PENDING forever once the genuine retry response lands only as an issue comment (Stage 1
+//    review finding on this PR, issue #163). With more than one distinct head, fail closed
+//    (per issue #163's requirement 2) rather than guess from arrival order.
 export function matchBelongsToHead(match, { head, rounds }) {
   if (match.commit_id) return match.commit_id === head;
-  if (rounds.length !== 1) return false;
-  return rounds[0].head === head;
+  const distinctHeads = new Set(rounds.map((r) => r.head));
+  if (distinctHeads.size !== 1) return false;
+  return rounds[0]?.head === head;
 }
 
 function sleep(ms) {
