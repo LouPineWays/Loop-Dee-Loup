@@ -154,10 +154,18 @@ right up to whatever their last subagent completion was, and a captured `Subagen
 **Mitigation**: `hook.mjs` now also builds a `transcript_usage` checkpoint on `SubagentStop`,
 the same way it already did for `PreCompact` — a last-known-totals snapshot that survives an
 abrupt, non-`SessionEnd` session death for any session that ran at least one subagent to
-completion. `token_usage_is_session_complete` still requires the *most recent* `transcript_usage`
-event to be a genuine `SessionEnd` (see `reduce.mjs`), so a `SubagentStop`-only checkpoint is
-correctly reported as partial, not whole-session, evidence — `sufficiency.mjs`'s
-`token_allocation` claim still correctly returns `INSUFFICIENT` for it. This does not, and
+completion. Because parallel subagents can each trigger their own `SubagentStop` checkpoint
+close together, `reduce.mjs`'s `pickBestTranscriptUsage` selects `main` and `subagents`
+independently across every `transcript_usage` sample (highest token grand total wins, and a
+genuine `SessionEnd` sample is preferred outright when one exists) rather than trusting
+whichever sample happens to be last in append order — otherwise a stale or `subagents: null`
+checkpoint (the latter is expected, not corruption, when one subagent stops while a sibling is
+still writing its own transcript — see `collectTranscriptUsage`) could regress previously
+captured evidence on an abrupt teardown (found in Codex review of this fix, PR #180).
+`token_usage_is_session_complete` still requires a genuine `SessionEnd` sample to exist (see
+`pickBestTranscriptUsage`), so a `SubagentStop`-only checkpoint is correctly reported as
+partial, not whole-session, evidence — `sufficiency.mjs`'s `token_allocation` claim still
+correctly returns `INSUFFICIENT` for it. This does not, and
 cannot, recover evidence for a session that never dispatches a subagent and is then torn down
 before any `SessionEnd`/`PreCompact` — 2 of the 6 affected post-#178-investigation sessions had
 no subagent activity at all. That gap is a genuine, currently irreducible observability
