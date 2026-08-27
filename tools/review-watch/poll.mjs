@@ -69,13 +69,21 @@ export function endpointsFor(kind, repo, number) {
 }
 
 // Pure. The authoritative commit a review item is attributable to, when the endpoint
-// exposes one — `commit_id` on both `/pulls/{n}/comments` (inline review comments) and
-// `/pulls/{n}/reviews` (review submissions) items. `original_commit_id` is the fallback for
-// an inline comment shape that omits `commit_id` (older payloads / some webhook mirrors).
+// exposes one. `original_commit_id` is checked first, not `commit_id` — verified directly
+// against this correction's own PR (#175): GitHub re-anchors an inline review comment's
+// `commit_id` forward to a later commit once that comment's diff position is unaffected by
+// the intervening push, while `original_commit_id` stays fixed to the commit the comment was
+// actually authored against. Preferring the drifting field would silently let a stale review
+// comment for an older head appear bound to a newer head the moment code at that exact line
+// goes unchanged by a later push — reintroducing issue #163's own false-positive class
+// through a different mechanism (field drift instead of arrival-order timestamps) — so this
+// falls back to `commit_id` only when `original_commit_id` is absent, which is the case for
+// `/pulls/{n}/reviews` (review submissions): they carry no `original_commit_id` field at all,
+// and their `commit_id` is fixed at submission time rather than re-anchored by later pushes.
 // Plain issue comments (`/issues/{n}/comments`) carry neither field — null means "no direct
 // commit identity available", not "matches every head". See matchBelongsToHead (issue #163).
 export function extractCommitId(item) {
-  return item?.commit_id ?? item?.original_commit_id ?? null;
+  return item?.original_commit_id ?? item?.commit_id ?? null;
 }
 
 // Pure — no I/O — so tests can exercise it without a network call or `gh`. Returns every

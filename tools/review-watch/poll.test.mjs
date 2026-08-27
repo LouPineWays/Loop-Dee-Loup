@@ -75,6 +75,17 @@ test("extractCommitId: returns null when neither field is present (e.g. a plain 
   assert.equal(extractCommitId({ id: 1, body: "no commit fields here" }), null);
 });
 
+test("extractCommitId: prefers original_commit_id over a drifted commit_id (verified against PR #175's own review comments, issue #163)", () => {
+  // GitHub re-anchors an inline review comment's commit_id forward to a later commit once
+  // its diff position survives an intervening push — original_commit_id stays fixed to the
+  // commit the comment was actually authored against. Preferring commit_id here would let a
+  // stale review comment for an older head silently appear bound to a newer one.
+  assert.equal(
+    extractCommitId({ commit_id: "sha-newer-after-push", original_commit_id: "sha-actually-reviewed" }),
+    "sha-actually-reviewed",
+  );
+});
+
 test("findAllMatches: carries commit_id through onto the returned match (issue #163)", () => {
   const matches = findAllMatches(
     [{ id: 1, user: { login: BOT }, created_at: "2026-08-23T14:05:00Z", commit_id: "sha-a" }],
