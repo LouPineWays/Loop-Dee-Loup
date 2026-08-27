@@ -109,13 +109,23 @@ export function extractHeadFromTrigger(body) {
   return match ? match[1] : null;
 }
 
-// Pure. Every trigger comment on the thread (any head, not just the one dedup is scoped to),
-// each tagged with the head it was posted for and sorted oldest first — the basis for
-// attributing a later genuine bot response to the trigger round that requested it.
+// Pure. Every genuine Stage 1 trigger comment on the thread (any head, not just the one
+// dedup is scoped to), each tagged with the head it was posted for and sorted oldest first —
+// the basis for attributing a later genuine bot response to the trigger round that requested
+// it. Requires a valid head marker, not merely the TRIGGER_TEXT substring (Stage 1 review
+// finding on this PR): an ordinary discussion comment, or the bot's own review response, can
+// easily mention "@codex review" in prose without being an actual trigger post — especially
+// likely in this exact file's own review thread, which necessarily discusses that literal
+// text. Treating such a comment as a round with `head: null` let attributeRound assign a
+// later genuine response to that phantom null-head round instead of the real one, silently
+// defeating findPriorGenuineHead's cross-head attribution. A genuine trigger always carries
+// headMarker's own format (triggerCommentBody always includes it whenever a head is given,
+// and this function is only ever consulted for --kind pr --head), so requiring the marker
+// excludes every non-trigger false positive while keeping every real round.
 export function findTriggerRounds(comments) {
   return comments
-    .filter((c) => (c.body ?? "").includes(TRIGGER_TEXT))
     .map((c) => ({ head: extractHeadFromTrigger(c.body), timestamp: c.created_at }))
+    .filter((round) => round.head !== null)
     .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 }
 

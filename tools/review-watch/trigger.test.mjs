@@ -83,6 +83,21 @@ test("findTriggerRounds: collects every trigger comment tagged by its head, olde
   ]);
 });
 
+test("findTriggerRounds: ignores a comment that merely mentions the trigger text without a head marker (Stage 1 review finding on this PR)", () => {
+  const rounds = findTriggerRounds([
+    { body: triggerCommentBody("old-sha"), created_at: "2026-08-24T08:00:00Z" },
+    {
+      body: "Once this is fixed we should re-request @codex review at the new head.",
+      created_at: "2026-08-24T08:05:00Z",
+    },
+    {
+      body: "## Review finding\n\nAny comment containing `@codex review` text...",
+      created_at: "2026-08-24T08:10:00Z",
+    },
+  ]);
+  assert.deepEqual(rounds, [{ head: "old-sha", timestamp: "2026-08-24T08:00:00Z" }]);
+});
+
 test("attributeRound: attributes a response to the latest round at or before its timestamp", () => {
   const rounds = [
     { head: "head-a", timestamp: "2026-08-24T08:00:00Z" },
@@ -132,6 +147,27 @@ test("findPriorGenuineHead: null when the earlier head's response was BLOCKED, n
     },
   ];
   assert.equal(findPriorGenuineHead({ comments, currentHead: "new-sha" }), null);
+});
+
+test("findPriorGenuineHead: still attributes correctly when an intervening comment merely mentions the trigger text (Stage 1 review finding on this PR)", () => {
+  const comments = [
+    { body: triggerCommentBody("old-sha"), created_at: "2026-08-24T08:00:00Z" },
+    {
+      body: "Once this is fixed we should re-request @codex review at the new head.",
+      created_at: "2026-08-24T08:05:00Z",
+    },
+    {
+      user: { login: "chatgpt-codex-connector[bot]" },
+      created_at: "2026-08-24T08:10:00Z",
+      body: "Found a real defect: `@codex review` handling has an off-by-one bug.",
+    },
+  ];
+  const priorHead = findPriorGenuineHead({ comments, currentHead: "new-sha" });
+  assert.equal(
+    priorHead,
+    "old-sha",
+    "a discussion comment or the bot's own response mentioning the trigger text must not create a phantom null-head round that swallows the real attribution",
+  );
 });
 
 test("findPriorGenuineHead: checks otherItems (pull-comments/pull-reviews) too, not just the issue-comments thread", () => {
