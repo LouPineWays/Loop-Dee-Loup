@@ -243,8 +243,9 @@ CLEAN/NOT CLEAN verdict for an economic claim at all, rather than re-deriving th
 reading the record's `unknown` list from scratch each time — the condition that let issue #120
 close CLEAN on a token-allocation question its own evidence never answered.
 `token_allocation` additionally requires `measured.token_usage_is_session_complete === true`
-(the last `transcript_usage` sample must be a `SessionEnd`, not a `PreCompact`- or
-`SubagentStop`-only partial snapshot — see "SessionEnd is not always invoked" above), and
+(a genuine `SessionEnd`-captured sample must exist among the session's `transcript_usage`
+samples, regardless of append order — not merely a `PreCompact`- or `SubagentStop`-only
+partial snapshot — see "SessionEnd is not always invoked" above), and
 `monetary_cost_by_model` is currently always `INSUFFICIENT` (`measured.
 cost_usd_by_model` is always `null` — no local pricing table). `assessSufficiency()` is exported
 as a pure function; see `sufficiency.test.mjs` for the #120 regression case.
