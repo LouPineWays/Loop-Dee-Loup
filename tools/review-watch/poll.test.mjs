@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { findAllMatches, endpointsFor, parseArgs, run, parsePaginatedOutput } from "./poll.mjs";
+import { findAllMatches, endpointsFor, parseArgs, run, parsePaginatedOutput, extractCommitId, matchBelongsToHead } from "./poll.mjs";
 
 const BOT = "chatgpt-codex-connector[bot]";
 const SINCE = "2026-08-23T14:00:00Z";
@@ -60,6 +60,75 @@ test("findAllMatches: returns every genuine match, not just the first — one in
   assert.deepEqual(
     matches.map((m) => m.id),
     [6, 7],
+  );
+});
+
+test("extractCommitId: reads commit_id when present", () => {
+  assert.equal(extractCommitId({ commit_id: "sha-a" }), "sha-a");
+});
+
+test("extractCommitId: falls back to original_commit_id when commit_id is absent", () => {
+  assert.equal(extractCommitId({ original_commit_id: "sha-b" }), "sha-b");
+});
+
+test("extractCommitId: returns null when neither field is present (e.g. a plain issue comment)", () => {
+  assert.equal(extractCommitId({ id: 1, body: "no commit fields here" }), null);
+});
+
+test("extractCommitId: prefers original_commit_id over a drifted commit_id (verified against PR #175's own review comments, issue #163)", () => {
+  // GitHub re-anchors an inline review comment's commit_id forward to a later commit once
+  // its diff position survives an intervening push — original_commit_id stays fixed to the
+  // commit the comment was actually authored against. Preferring commit_id here would let a
+  // stale review comment for an older head silently appear bound to a newer one.
+  assert.equal(
+    extractCommitId({ commit_id: "sha-newer-after-push", original_commit_id: "sha-actually-reviewed" }),
+    "sha-actually-reviewed",
+  );
+});
+
+test("findAllMatches: carries commit_id through onto the returned match (issue #163)", () => {
+  const matches = findAllMatches(
+    [{ id: 1, user: { login: BOT }, created_at: "2026-08-23T14:05:00Z", commit_id: "sha-a" }],
+    { bot: BOT, sinceMs: SINCE_MS, endpointName: "pull-comments" },
+  );
+  assert.equal(matches[0].commit_id, "sha-a");
+});
+
+test("findAllMatches: commit_id is null when the source item carries no commit identity", () => {
+  const matches = findAllMatches([{ id: 1, user: { login: BOT }, created_at: "2026-08-23T14:05:00Z" }], {
+    bot: BOT,
+    sinceMs: SINCE_MS,
+    endpointName: "issue-comments",
+  });
+  assert.equal(matches[0].commit_id, null);
+});
+
+test("matchBelongsToHead: a match with a matching commit_id is bound to that head regardless of round count", () => {
+  const rounds = [{ head: "sha-a", timestamp: "2026-08-23T13:00:00Z" }, { head: "sha-b", timestamp: "2026-08-23T14:00:00Z" }];
+  assert.equal(matchBelongsToHead({ commit_id: "sha-b" }, { head: "sha-b", rounds }), true);
+});
+
+test("matchBelongsToHead: a match whose commit_id names a different head is excluded even after that head's own trigger (issue #163's delayed-response race)", () => {
+  const rounds = [{ head: "sha-a", timestamp: "2026-08-23T13:00:00Z" }, { head: "sha-b", timestamp: "2026-08-23T14:00:00Z" }];
+  assert.equal(matchBelongsToHead({ commit_id: "sha-a" }, { head: "sha-b", rounds }), false);
+});
+
+test("matchBelongsToHead: an unbound match (no commit_id) is trusted only when exactly one trigger round exists", () => {
+  const rounds = [{ head: "sha-a", timestamp: "2026-08-23T13:00:00Z" }];
+  assert.equal(matchBelongsToHead({ commit_id: null }, { head: "sha-a", rounds }), true);
+});
+
+test("matchBelongsToHead: an unbound match fails closed once more than one trigger round exists, even for the latest head", () => {
+  const rounds = [{ head: "sha-a", timestamp: "2026-08-23T13:00:00Z" }, { head: "sha-b", timestamp: "2026-08-23T14:00:00Z" }];
+  assert.equal(matchBelongsToHead({ commit_id: null }, { head: "sha-b", rounds }), false);
+});
+
+test("matchBelongsToHead: a same-head retry (two trigger comments, one head) is not treated as cross-head ambiguity (Stage 1 review finding on issue #163's own PR)", () => {
+  const rounds = [{ head: "sha-a", timestamp: "2026-08-23T13:00:00Z" }, { head: "sha-a", timestamp: "2026-08-23T13:30:00Z" }];
+  assert.equal(
+    matchBelongsToHead({ commit_id: null }, { head: "sha-a", rounds }),
+    true,
+    "a --force retry at the same frozen head posts a second trigger comment (a second round) but not a second distinct head, so an unbound genuine retry response must still bind",
   );
 });
 

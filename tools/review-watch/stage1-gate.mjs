@@ -22,6 +22,13 @@
 //   PENDING          — a trigger exists but no genuine post-trigger bot response yet. exit 2.
 //   RESPONSE_RECEIVED — a trigger and a genuine post-trigger bot response both exist. exit 0.
 //
+// RESPONSE_RECEIVED additionally requires the genuine response to be provably bound to the
+// exact frozen --head being gated (poll.mjs's matchBelongsToHead), not merely timestamped
+// after that head's trigger (issue #163): a delayed response for an older head on the same
+// PR must never satisfy a newer head's gate just because it arrived later. A genuine response
+// that exists but isn't reliably bound to --head leaves the gate at PENDING, reported via
+// unboundGenuineMatches rather than folded into RESPONSE_RECEIVED.
+//
 // This gate does not evaluate whether a reported finding is valid or whether a correction
 // actually fixes it — that is the controlling session's job under Stage 1 steps 4-9. Its
 // only job is to prevent the mandatory trigger-and-response transition from being silently
@@ -36,8 +43,8 @@
 // Tests: node --test tools/review-watch/stage1-gate.test.mjs
 
 import { execFileSync } from "node:child_process";
-import { endpointsFor, findAllMatches } from "./poll.mjs";
-import { findExistingTrigger } from "./trigger.mjs";
+import { endpointsFor, findAllMatches, matchBelongsToHead } from "./poll.mjs";
+import { findExistingTrigger, findTriggerRounds } from "./trigger.mjs";
 import { isGenuineResponse } from "./genuine-response.mjs";
 
 // Re-exported so existing callers/tests that import isGenuineResponse from this module
@@ -172,13 +179,41 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPrViewImpl = defau
     matches.push(...findAllMatches(items, { bot, sinceMs, endpointName: endpoint.name }));
   }
 
+  const nonGenuineMatches = matches.filter((m) => !isGenuineResponse(m.body_excerpt));
   const genuineMatches = matches.filter((m) => isGenuineResponse(m.body_excerpt));
 
-  if (genuineMatches.length === 0) {
-    return { exitCode: 2, state: "PENDING", triggerTimestamp: trigger.created_at, nonGenuineMatches: matches };
+  // Head correlation (issue #163): a genuine response may only satisfy this gate when
+  // durable evidence ties it to the exact frozen `head` being evaluated, never merely to
+  // "arrived after this head's trigger" — see matchBelongsToHead's own comment in poll.mjs
+  // for the delayed-response race this closes. `rounds` is every head-marked trigger round
+  // on the whole thread (not just this head's own trigger), since an unbound (no commit_id)
+  // match can only be trusted when the thread is unambiguous — exactly one round total.
+  const rounds = findTriggerRounds(comments);
+  const boundGenuineMatches = genuineMatches.filter((m) => matchBelongsToHead(m, { head, rounds }));
+  // Present (possibly empty) in both outcomes below, not only PENDING: a genuine finding
+  // that fails head-binding (e.g. an unbound issue comment on a multi-head thread) is still
+  // a real post-trigger response the controller must see and verify under Stage 1 steps 4-9
+  // — dropping it silently just because a *different*, commit-bound match already satisfied
+  // the gate would hide a genuine finding from review (Stage 1 review finding on this PR).
+  const unboundGenuineMatches = genuineMatches.filter((m) => !matchBelongsToHead(m, { head, rounds }));
+
+  if (boundGenuineMatches.length === 0) {
+    return {
+      exitCode: 2,
+      state: "PENDING",
+      triggerTimestamp: trigger.created_at,
+      nonGenuineMatches,
+      unboundGenuineMatches,
+    };
   }
 
-  return { exitCode: 0, state: "RESPONSE_RECEIVED", triggerTimestamp: trigger.created_at, matches: genuineMatches };
+  return {
+    exitCode: 0,
+    state: "RESPONSE_RECEIVED",
+    triggerTimestamp: trigger.created_at,
+    matches: boundGenuineMatches,
+    unboundGenuineMatches,
+  };
 }
 
 function defaultGhApi(path) {
