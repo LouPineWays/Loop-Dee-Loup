@@ -126,8 +126,17 @@ const ATTEMPT_CUE_PATTERN = /\b(?:attempt(?:ed|ing)?|tr(?:y|ies|ied|ying)|fail(?
 // own territory (a state, not an action), so letting it double here would make a bare
 // negated-permission phrase alone satisfy both signals and defeat the two-signal check.
 const MODAL_REFUSAL_PATTERN = /\b(?:cannot|can't|could not|couldn't|will not|won't)\s+(?!have\b)\w+/i;
-const PERMISSION_LACK_PATTERN =
-  /\b(?:do not|don't|does not|doesn't|did not|didn't|cannot|can't|could not|couldn't) have (?:write |repository |branch )?(?:access|permission)\b|\binsufficient (?:write |repository )?permission\b|\bnot (?:permitted|authorized)\b/i;
+// "lack(s|ing) ... access/permission" (Stage 1 review, fifth round on PR #164) is its own
+// negation verb -- "I lack write access" already says "I don't have it" without any "do
+// not/don't/cannot have" wording for the first alternative to match.
+const LACK_VERB = "lack(?:s|ing)?";
+const PERMISSION_LACK_PATTERN = new RegExp(
+  String.raw`\b(?:do not|don't|does not|doesn't|did not|didn't|cannot|can't|could not|couldn't) have (?:write |repository |branch )?(?:access|permission)\b` +
+    String.raw`|\b${LACK_VERB}\s+(?:write |repository |branch )?(?:access|permission)\b` +
+    String.raw`|\binsufficient (?:write |repository )?permission\b` +
+    String.raw`|\bnot (?:permitted|authorized)\b`,
+  "i",
+);
 
 function splitIntoSentences(text) {
   return text.split(/(?<=[.!?])\s+/).filter(Boolean);

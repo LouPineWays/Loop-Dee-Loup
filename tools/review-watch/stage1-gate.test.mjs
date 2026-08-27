@@ -205,6 +205,14 @@ test("isGenuineResponse: rejects a refusal split across two consecutive first-pe
   );
 });
 
+test("isGenuineResponse: rejects an access refusal phrased with 'lack' (fifth Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("I tried to push a fix, but I lack write access."),
+    false,
+    "'lack write access' is a negation phrase on its own and must count as a permission-lack signal, not only 'do not have'/'cannot have' wording",
+  );
+});
+
 test("parseArgs: reads flags and defaults the bot login", () => {
   const args = parseArgs(["--repo", "owner/repo", "--number", "50", "--head", "abc123"]);
   assert.equal(args.repo, "owner/repo");
