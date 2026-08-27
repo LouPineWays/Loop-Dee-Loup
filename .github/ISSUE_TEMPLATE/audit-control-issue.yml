@@ -14,6 +14,18 @@ body:
     validations:
       required: true
   - type: input
+    id: work_issue
+    attributes:
+      label: Work issue
+      description: >-
+        The implementation issue this audit gates (e.g. "#151"). Read by
+        tools/review-watch/lifecycle-gate.mjs's post-audit check as the sole structured
+        source of which issue a CLEAN verdict here authorizes closing — per
+        docs/bounded-review-cycle.md, merge alone never closes it. Never a closing
+        keyword; this field is a plain reference, not a GitHub auto-close mechanism.
+    validations:
+      required: true
+  - type: input
     id: merge_commit
     attributes:
       label: Exact merge commit
