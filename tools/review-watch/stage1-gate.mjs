@@ -63,20 +63,43 @@ export function findExemption(body) {
 // findAllMatches (poll.mjs) only checks login and timestamp, so without this filter any
 // such reply would silently open the gate. Matched against the truncated body_excerpt
 // findAllMatches already returns, which is long enough to catch a leading status word or
-// an early permission-denial sentence.
-const NON_GENUINE_PATTERNS = [
-  /^\s*BLOCKED\b/i,
-  /\b(?:do not|don't|cannot|can't) have (?:write |repository |branch )?(?:access|permission)/i,
-  /\binsufficient (?:write |repository )?permission/i,
-  /\b(?:not permitted|not authorized) to (?:modify|commit|push|edit)/i,
+// an early permission-denial sentence. The patterns below (BLOCKED_STATUS_PATTERN,
+// PERMISSION_LACK_PATTERNS/MUTATION_ATTEMPT_PATTERN, REFUSAL_TO_MUTATE_PATTERN) are
+// isGenuineResponse's non-genuine signals.
+//
+// Anchored to the (normalized) start of the message: a genuine, unrelated review is
+// free-form prose that can mention "BLOCKED" or a permission phrase anywhere in its body
+// (issue #151's regression, and issue #161's Failure A/B below), but an actual status/
+// refusal reply *opens* with its status rather than burying it inside findings content.
+const BLOCKED_STATUS_PATTERN = /^\s*BLOCKED\b/i;
+
+// issue #161, Failure B: `\b(?:do not|...) have ... permission\b` matched anywhere in the
+// body, so a genuine finding that merely *discusses* a permission rule -- e.g. "The
+// reviewer cannot have write permission under this workflow" -- was rejected purely for
+// containing that phrase, even though nothing was actually attempted or refused. The
+// AGENTS.md boundary this filter exists to catch is specifically a mutation *attempt* that
+// was refused (edit/commit/push/open/update a file, branch, commit, or PR) -- so requiring
+// both signals together (a permission-lack phrase AND a mutation-attempt verb, anywhere in
+// the same message) keeps an actual "I tried to push but don't have access" reply caught
+// while no longer rejecting a review that discusses permission design without describing
+// any attempted mutation. This mirrors the same two-signals-together fix already applied
+// to the Codex Cloud setup-prompt false positive below.
+const PERMISSION_LACK_PATTERNS = [
+  /\b(?:do not|don't|cannot|can't) have (?:write |repository |branch )?(?:access|permission)\b/i,
+  /\binsufficient (?:write |repository )?permission\b/i,
 ];
+const MUTATION_ATTEMPT_PATTERN = /\b(?:push(?:ed|ing)?|commit(?:ted|ting)?|edit(?:ed|ing)?|modif(?:y|ies|ied|ying)|open(?:ed|ing)?|updat(?:e|ed|ing))\b/i;
+
+// Already action-scoped ("to modify/commit/push/edit"), so this one phrase alone is
+// enough -- no separate mutation-attempt conjunction needed.
+const REFUSAL_TO_MUTATE_PATTERN = /\b(?:not permitted|not authorized) to (?:modify|commit|push|edit|open|update)\b/i;
 
 // Stage 2 audit finding on issue #141 (LDL#135's own correction cycle): a Codex Cloud
 // environment misconfiguration produces this exact reply — "To use Codex here, create an
 // environment for this repo." — from the bot login within seconds of the trigger. It is a
-// setup prompt, not a review; NON_GENUINE_PATTERNS' BLOCKED/permission phrasing didn't
-// catch it, letting it through as RESPONSE_RECEIVED and defeating the gate's whole
-// fail-closed purpose whenever Codex Cloud lacks an environment for the repository.
+// setup prompt, not a review; the BLOCKED/permission patterns above didn't catch it,
+// letting it through as RESPONSE_RECEIVED and defeating the gate's whole fail-closed
+// purpose whenever Codex Cloud lacks an environment for the repository.
 //
 // A first fix (three independent OR'd patterns, one per phrase/URL fragment) was itself
 // flagged on this correction PR's own Stage 1 review: this repository's diffs necessarily
@@ -95,13 +118,21 @@ function isCodexCloudSetupPrompt(text) {
 
 // YouTubery PR #14 (LDL issue #151): a blocked/status reply wrapped in harmless leading
 // Markdown presentation -- e.g. "### BLOCKED -- checkout unavailable" -- defeated
-// NON_GENUINE_PATTERNS' `^\s*BLOCKED\b` anchor, because a heading marker sits before the
+// BLOCKED_STATUS_PATTERN's `^\s*BLOCKED\b` anchor, because a heading marker sits before the
 // semantic first word. Rather than adding another one-off regex fragment per wrapper
-// style, strip harmless leading presentation (heading hashes, blockquote markers, and
-// bold/italic emphasis) once, so classification sees the same leading token a human
-// reader would. This only trims the *front* of the text -- classification still anchors
-// to the start of the normalized string, so a genuine review that discusses or quotes
-// "BLOCKED" later in its body (or as an unrelated Markdown-formatted word) is untouched.
+// style, strip harmless leading presentation (heading hashes, blockquote markers, list
+// markers, and bold/italic emphasis) once, so classification sees the same leading token a
+// human reader would. This only trims the *front* of the text -- classification still
+// anchors to the start of the normalized string, so a genuine review that discusses or
+// quotes "BLOCKED" later in its body (or as an unrelated Markdown-formatted word) is
+// untouched.
+//
+// Refreshed YouTubery PR #14 review (issue #161, Failure A): a list-wrapped reply --
+// e.g. "- **BLOCKED** -- checkout unavailable" -- still defeated the anchor, because the
+// leading list marker ("-", "+", "*", or "1.") wasn't among the wrappers stripped. List
+// markers are only stripped when followed by whitespace, so they can never consume "*" or
+// "_" emphasis markers (which are only ever immediately followed by non-space content) --
+// the two wrapper classes stay unambiguous regardless of loop order.
 function stripLeadingMarkdownWrapper(text) {
   let s = text ?? "";
   let prev;
@@ -110,6 +141,8 @@ function stripLeadingMarkdownWrapper(text) {
     s = s.replace(/^\s+/, "");
     s = s.replace(/^>+/, "");
     s = s.replace(/^#{1,6}(?=\s|$)/, "");
+    s = s.replace(/^[-+*](?=\s)/, "");
+    s = s.replace(/^\d{1,3}[.)](?=\s)/, "");
     s = s.replace(/^[*_]{1,3}(?=\S)/, "");
   } while (s !== prev);
   return s;
@@ -118,7 +151,11 @@ function stripLeadingMarkdownWrapper(text) {
 export function isGenuineResponse(bodyExcerpt) {
   const normalized = stripLeadingMarkdownWrapper(bodyExcerpt ?? "");
   if (isCodexCloudSetupPrompt(normalized)) return false;
-  return !NON_GENUINE_PATTERNS.some((re) => re.test(normalized));
+  if (BLOCKED_STATUS_PATTERN.test(normalized)) return false;
+  if (REFUSAL_TO_MUTATE_PATTERN.test(normalized)) return false;
+  const hasPermissionLackPhrase = PERMISSION_LACK_PATTERNS.some((re) => re.test(normalized));
+  if (hasPermissionLackPhrase && MUTATION_ATTEMPT_PATTERN.test(normalized)) return false;
+  return true;
 }
 
 export function parseArgs(argv) {

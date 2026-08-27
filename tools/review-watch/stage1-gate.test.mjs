@@ -92,6 +92,36 @@ test("isGenuineResponse: accepts a genuine review that discusses or quotes BLOCK
   );
 });
 
+test("isGenuineResponse: rejects a list-wrapped BLOCKED reply (YouTubery PR #14, issue #161 Failure A)", () => {
+  assert.equal(isGenuineResponse("- **BLOCKED** — checkout unavailable"), false);
+});
+
+test("isGenuineResponse: rejects other common leading list-prefix wrappers around BLOCKED (issue #161 Failure A)", () => {
+  assert.equal(isGenuineResponse("+ BLOCKED — checkout unavailable"), false);
+  assert.equal(isGenuineResponse("1. BLOCKED — checkout unavailable"), false);
+  assert.equal(isGenuineResponse("* BLOCKED — checkout unavailable"), false);
+  assert.equal(isGenuineResponse("1) BLOCKED — checkout unavailable"), false);
+});
+
+test("isGenuineResponse: rejects a genuine reviewer permission-denial/refusal response (existing #135/#141 case, still anchored correctly)", () => {
+  assert.equal(
+    isGenuineResponse("I attempted to push a fix but do not have write access to this repository."),
+    false,
+  );
+  assert.equal(isGenuineResponse("Insufficient permission to commit changes."), false);
+});
+
+test("isGenuineResponse: accepts a genuine finding discussing that a reviewer cannot have write permission (issue #161 Failure B)", () => {
+  const genuineReview =
+    "The reviewer cannot have write permission under this workflow, by design: the Code Review Rules boundary in " +
+    "AGENTS.md restricts `@codex review` to a read-only inspection role, and this PR's diff correctly reflects that.";
+  assert.equal(
+    isGenuineResponse(genuineReview),
+    true,
+    "a finding that merely discusses a permission-lack phrase, without describing an attempted mutation, must remain genuine",
+  );
+});
+
 test("parseArgs: reads flags and defaults the bot login", () => {
   const args = parseArgs(["--repo", "owner/repo", "--number", "50", "--head", "abc123"]);
   assert.equal(args.repo, "owner/repo");
@@ -331,6 +361,58 @@ test("run: PENDING — a Markdown-heading-wrapped BLOCKED reply does not open th
   assert.equal(result.exitCode, 2);
   assert.equal(result.state, "PENDING");
   assert.equal(result.nonGenuineMatches.length, 1);
+});
+
+test("run: PENDING — a list-formatted BLOCKED reply does not open the gate (YouTubery PR #14, issue #161 Failure A)", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
+            {
+              id: 2,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "- **BLOCKED** — checkout unavailable",
+              created_at: "2026-08-23T13:05:00Z",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "PENDING");
+  assert.equal(result.nonGenuineMatches.length, 1);
+});
+
+test("run: RESPONSE_RECEIVED — a genuine finding discussing permission rules opens the gate (issue #161 Failure B)", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
+            {
+              id: 2,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "Reviewed the diff. Note: the reviewer cannot have write permission under this workflow, by design.",
+              created_at: "2026-08-23T13:05:00Z",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "RESPONSE_RECEIVED");
+  assert.equal(result.matches.length, 1);
 });
 
 test("run: PENDING — a Codex Cloud 'create an environment' reply does not open the gate (Stage 2 audit finding on issue #141)", async () => {
