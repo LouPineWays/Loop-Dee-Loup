@@ -285,10 +285,10 @@ test("run: no prior trigger — posts exactly one and returns its timestamp", as
 test("run: a prior trigger already exists — skips posting and returns the existing timestamp", async () => {
   let ghPostCalls = 0;
   const result = await run(
-    { repo: "owner/repo", kind: "pr", number: 50 },
+    { repo: "owner/repo", kind: "issue", number: 53 },
     {
       ghApiImpl: async () => [
-        { id: 1, body: "@codex review", created_at: "2026-08-23T13:00:00Z", html_url: "https://github.com/owner/repo/pull/50#c1" },
+        { id: 1, body: "@codex review", created_at: "2026-08-23T13:00:00Z", html_url: "https://github.com/owner/repo/issues/53#c1" },
       ],
       ghPostImpl: async () => {
         ghPostCalls += 1;
@@ -302,16 +302,47 @@ test("run: a prior trigger already exists — skips posting and returns the exis
   assert.equal(result.timestamp, "2026-08-23T13:00:00Z");
 });
 
-test("run: --kind pr and --kind issue both check the issues/comments endpoint", async () => {
+test("run: --kind pr (with --head) and --kind issue both check the issues/comments endpoint", async () => {
   const seenPaths = [];
   const ghApiImpl = async (path) => {
     seenPaths.push(path);
     return [];
   };
   const ghPostImpl = async () => ({ created_at: "2026-08-23T14:05:00Z" });
-  await run({ repo: "owner/repo", kind: "pr", number: 50 }, { ghApiImpl, ghPostImpl });
+  await run({ repo: "owner/repo", kind: "pr", number: 50, head: "abc123" }, { ghApiImpl, ghPostImpl });
   await run({ repo: "owner/repo", kind: "issue", number: 53 }, { ghApiImpl, ghPostImpl });
-  assert.deepEqual(seenPaths, ["repos/owner/repo/issues/50/comments", "repos/owner/repo/issues/53/comments"]);
+  assert.ok(seenPaths.includes("repos/owner/repo/issues/50/comments"));
+  assert.ok(seenPaths.includes("repos/owner/repo/issues/53/comments"));
+});
+
+test("run: --kind pr without --head is rejected instead of silently skipping the cross-head block (Stage 1 review finding on this PR)", async () => {
+  const result = await run(
+    { repo: "owner/repo", kind: "pr", number: 50 },
+    { ghApiImpl: async () => [], ghPostImpl: async () => ({ created_at: "x" }) },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /--head is required for --kind pr/);
+});
+
+test("run: --kind pr without --head is rejected even with --force (the combination that would otherwise skip every check)", async () => {
+  let ghApiCalls = 0;
+  let ghPostCalls = 0;
+  const result = await run(
+    { repo: "owner/repo", kind: "pr", number: 50, force: "true" },
+    {
+      ghApiImpl: async () => {
+        ghApiCalls += 1;
+        return [];
+      },
+      ghPostImpl: async () => {
+        ghPostCalls += 1;
+        return { created_at: "x" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(ghApiCalls, 0);
+  assert.equal(ghPostCalls, 0, "must not post unconditionally just because --head was omitted");
 });
 
 test("run: with --head, a stale trigger from an older head does not block posting at the new head", async () => {

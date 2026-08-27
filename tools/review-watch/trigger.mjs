@@ -196,6 +196,20 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPostImpl = default
     return { exitCode: 1, message: "Missing required args: --repo, --kind, --number are all required." };
   }
 
+  // Stage 1 review finding on this PR: without this, an omitted --head on a --kind pr call
+  // silently skips the cross-head block above — and, combined with --force (which then makes
+  // needsCommentsRead false too, so no reads happen at all), skips the same-head dedup as
+  // well, posting an unconditional new trigger despite an earlier head's genuine response.
+  // docs/bounded-review-cycle.md never documents --kind pr without --head (Stage 1 always
+  // reviews a frozen head; only Stage 2's --kind issue has no head), so failing closed here
+  // matches every documented invocation and only rejects a malformed one.
+  if (kind === "pr" && !head) {
+    return {
+      exitCode: 1,
+      message: "--head is required for --kind pr (Stage 1 reviews a frozen head; use --kind issue for Stage 2).",
+    };
+  }
+
   let endpoints;
   try {
     endpoints = endpointsFor(kind, repo, number);
