@@ -188,8 +188,8 @@ function isSelfReferentialRefusal(text) {
 // "to this branch") with no further finite verb, while a genuine finding's continuation
 // starts a *second clause* (an auxiliary/copula/modal, or a subordinating conjunction --
 // "is required", "should be", "before this workflow ..."). Instead of bounding length,
-// TRAILING_CLAUSE_BOUNDARY (below) bounds *content*: consume any number of trailing words
-// via ANCHORED_CLAUSE_TAIL as long as none of them opens a new clause, then require the
+// TRAILING_CLAUSE_TAIL (below) bounds *content*: consume any number of trailing words as
+// long as none of them opens a new clause (CLAUSE_BOUNDARY_WORD), then require the
 // match to reach the end of the (normalized) message -- unbounded object length is fine,
 // but a second clause anywhere ends the match and the whole-message anchor then fails,
 // exactly like BLOCKED_STATUS_PATTERN and the Codex-Cloud-setup-prompt check above.
