@@ -74,11 +74,17 @@ export function parseArgs(argv) {
 // `String(ref.number) === String(issue)` can never equal `"#151"`, and the generated
 // commit-message pattern searches for the literal (harmless, always-absent) text "##151" —
 // so a PR that actually carries `Fixes #151` in both closingIssuesReferences and a commit
-// message would incorrectly report MERGE_READY.
+// message would incorrectly report MERGE_READY. Rejects "0"/"#0" (Stage 2 audit finding on
+// issue #187: `\d+` alone accepts an all-zero string, and `checkMergeReady`'s `!issue` guard
+// treats the non-empty string "0" as present, so a zero --issue previously passed validation
+// and silently checked nonexistent issue #0 instead of failing closed) — GitHub issue numbers
+// are always positive, so requiring `Number(match[1]) > 0` rejects it without rejecting any
+// real issue number.
 export function normalizeIssueNumber(raw) {
   if (raw === undefined || raw === null || raw === "") return null;
   const match = /^#?(\d+)$/.exec(String(raw).trim());
-  return match ? match[1] : null;
+  if (!match) return null;
+  return Number(match[1]) > 0 ? match[1] : null;
 }
 
 // GitHub's own closing-keyword set (close/closes/closed, fix/fixes/fixed, resolve/resolves/

@@ -48,6 +48,13 @@ test("normalizeIssueNumber: rejects non-numeric input (Stage 1 review finding on
   assert.equal(normalizeIssueNumber(undefined), null);
 });
 
+test("normalizeIssueNumber: rejects 0 and #0 (Stage 2 audit finding on issue #187)", () => {
+  assert.equal(normalizeIssueNumber(0), null);
+  assert.equal(normalizeIssueNumber("0"), null);
+  assert.equal(normalizeIssueNumber("#0"), null);
+  assert.equal(normalizeIssueNumber("00"), null);
+});
+
 // -- findClosingKeywordMatch ------------------------------------------------------------
 
 test("findClosingKeywordMatch: matches Fixes #N (the PR #154 regression case)", () => {
@@ -164,6 +171,15 @@ test("checkMergeReady: exits 1 when required args are missing", async () => {
 test("checkMergeReady: exits 1 when --issue is not numeric (Stage 1 review finding on PR #186)", async () => {
   const result = await checkMergeReady({ repo: "owner/repo", pr: 154, issue: "abc" });
   assert.equal(result.exitCode, 1);
+  assert.match(result.message, /positive integer/);
+});
+
+test("checkMergeReady: exits 1 (not MERGE_READY) when --issue is 0 (Stage 2 audit finding on issue #187)", async () => {
+  const result = await checkMergeReady(
+    { repo: "owner/repo", pr: 154, issue: 0 },
+    { ghPrViewImpl: async () => ({ closingIssuesReferences: [], commits: [] }) },
+  );
+  assert.equal(result.exitCode, 1, "a zero issue number must fail closed, not silently report MERGE_READY");
   assert.match(result.message, /positive integer/);
 });
 
