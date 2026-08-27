@@ -38,6 +38,53 @@ test("findExemption: still matches when trailing spaces precede the reason on th
   assert.equal(findExemption("Stage 1 exemption:   trivial rename, not review-worthy"), "trivial rename, not review-worthy");
 });
 
+test("findExemption: ignores an exemption-looking line inside a backtick fence (issue #162)", () => {
+  const body = [
+    "Example:",
+    "",
+    "```text",
+    "Stage 1 exemption: generated artifact only",
+    "```",
+  ].join("\n");
+  assert.equal(findExemption(body), null);
+});
+
+test("findExemption: a fenced example containing exactly the documented syntax and no real exemption does not grant one (issue #162)", () => {
+  const body = [
+    "This PR adds documentation for the exemption mechanism.",
+    "",
+    "```text",
+    "Stage 1 exemption: <reason>",
+    "```",
+    "",
+    "No other exemption is being claimed here.",
+  ].join("\n");
+  assert.equal(findExemption(body), null);
+});
+
+test("findExemption: recognizes a real exemption outside the fence even when a fenced example precedes it (issue #162)", () => {
+  const body = [
+    "```text",
+    "Stage 1 exemption: generated artifact only",
+    "```",
+    "",
+    "Stage 1 exemption: trivial rename, not review-worthy",
+  ].join("\n");
+  assert.equal(findExemption(body), "trivial rename, not review-worthy");
+});
+
+test("findExemption: ignores an exemption-looking line inside a tilde fence (issue #162)", () => {
+  const body = ["~~~text", "Stage 1 exemption: example reason", "~~~"].join("\n");
+  assert.equal(findExemption(body), null);
+});
+
+test("findExemption: a bare exemption marker inside a fence still does not swallow a real exemption outside it (issue #162)", () => {
+  const body = ["```text", "Stage 1 exemption:", "some fenced description", "```", "", "Stage 1 exemption: real reason"].join(
+    "\n",
+  );
+  assert.equal(findExemption(body), "real reason");
+});
+
 test("isGenuineResponse: rejects a leading BLOCKED reply", () => {
   assert.equal(isGenuineResponse("BLOCKED — cannot review, missing context."), false);
 });
@@ -282,6 +329,26 @@ test("run: EXEMPT — an explicit exemption in the PR body short-circuits before
   assert.equal(result.state, "EXEMPT");
   assert.equal(result.reason, "trivial docs fix, not review-worthy.");
   assert.equal(ghApiCalls, 0, "an exemption must short-circuit before reading any comment thread");
+});
+
+test("run: NOT_REQUESTED — a fenced-example-only exemption in the PR body does not bypass Stage 1 (issue #162)", async () => {
+  let ghApiCalls = 0;
+  const body = ["Documenting the exemption syntax:", "", "```text", "Stage 1 exemption: generated artifact only", "```"].join(
+    "\n",
+  );
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => body,
+      ghApiImpl: async () => {
+        ghApiCalls += 1;
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "NOT_REQUESTED");
+  assert.ok(ghApiCalls > 0, "an example-only body must not short-circuit before the normal trigger/response check");
 });
 
 test("run: NOT_REQUESTED — no trigger comment at the given head", async () => {

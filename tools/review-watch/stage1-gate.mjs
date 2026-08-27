@@ -57,8 +57,47 @@ export { isGenuineResponse };
 // horizontal whitespace forces the reason onto the marker's own line.
 const EXEMPTION_PATTERN = /^Stage 1 exemption:[ \t]*(.+)$/im;
 
+// A fence delimiter line per CommonMark's fenced-code-block rule (simplified): up to 3
+// leading spaces, then a run of 3+ backticks or 3+ tildes, then anything else (an info
+// string on an opening fence; nothing but trailing whitespace on a closing one).
+const FENCE_LINE_PATTERN = /^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$/;
+
+// Blanks out every line inside a fenced Markdown code/example block (both the fence
+// delimiters and their content) so `findExemption` cannot match a `Stage 1 exemption:`
+// line that only appears as documentation of the syntax rather than an actual
+// declaration (issue #162: a PR body documenting this exemption mechanism in a fenced
+// example was misread by EXEMPTION_PATTERN as a real declaration). This is a minimal
+// line-oriented fence-state parser, not a general CommonMark implementation: a fence
+// opens on a line of 3+ identical backticks/tildes and closes on the next line that is
+// nothing but the same character repeated at least as many times, matching ordinary
+// GitHub PR body fences (including tilde fences) without handling every CommonMark edge
+// case such as nested nonequal-length nonclosing fences beyond that one comparison.
+function blankFencedBlocks(body) {
+  const lines = body.split("\n");
+  let fenceChar = null;
+  let fenceLen = 0;
+  return lines
+    .map((line) => {
+      const match = FENCE_LINE_PATTERN.exec(line);
+      if (fenceChar) {
+        if (match && match[1][0] === fenceChar && match[1].length >= fenceLen && match[2].trim() === "") {
+          fenceChar = null;
+          fenceLen = 0;
+        }
+        return "";
+      }
+      if (match) {
+        fenceChar = match[1][0];
+        fenceLen = match[1].length;
+        return "";
+      }
+      return line;
+    })
+    .join("\n");
+}
+
 export function findExemption(body) {
-  const match = EXEMPTION_PATTERN.exec(body ?? "");
+  const match = EXEMPTION_PATTERN.exec(blankFencedBlocks(body ?? ""));
   return match ? match[1].trim() : null;
 }
 
