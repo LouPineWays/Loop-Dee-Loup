@@ -6,13 +6,14 @@
 // Reads the hook's JSON payload from stdin, appends one compact, privacy-minimal event
 // line to the firing session's raw telemetry log (see collect.mjs), and exits 0.
 //
-// On SessionEnd and PreCompact, additionally reads the session's own transcript (via the
-// payload's transcript_path — never persisted) to recover deterministic token-economic
-// evidence statusLine cannot supply in this repository's normal execution mode. See
-// transcript.mjs and "statusLine's confirmed non-interactive gap" in
-// tools/telemetry/README.md. PreCompact is included, not just SessionEnd, so a session
-// that crashes after a compaction still leaves its last-known token totals behind, the
-// same incremental-sample philosophy statusLine's own hook already uses.
+// On SessionEnd, PreCompact, and SubagentStop, additionally reads the session's own
+// transcript (via the payload's transcript_path — never persisted) to recover deterministic
+// token-economic evidence statusLine cannot supply in this repository's normal execution
+// mode. See transcript.mjs and "statusLine's confirmed non-interactive gap" in
+// tools/telemetry/README.md. PreCompact and SubagentStop are included, not just SessionEnd,
+// so a session that never reaches a normal SessionEnd still leaves its last-known token
+// totals behind, the same incremental-sample philosophy statusLine's own hook already uses
+// — see "SessionEnd is not always invoked" in tools/telemetry/README.md (issue #178).
 //
 // Deliberately never writes to stdout: a SessionStart hook's stdout is injected straight
 // into the live session's context, and every other event's stdout is simply discarded —
@@ -30,7 +31,15 @@ import { pathToFileURL } from "node:url";
 import { readStdinJson, appendEvent, extractIdentity } from "./collect.mjs";
 import { collectTranscriptUsage } from "./transcript.mjs";
 
-const TRANSCRIPT_USAGE_EVENTS = new Set(["SessionEnd", "PreCompact"]);
+// SubagentStop is included alongside SessionEnd/PreCompact for issue #178: a session that
+// dispatches at least one subagent to completion leaves a last-known-totals checkpoint even
+// if the session's own process is later torn down (by the harness superseding it with a new
+// session_id, a crash, or any other path) without ever invoking SessionEnd or triggering a
+// compaction — see "SessionEnd is not always invoked" in tools/telemetry/README.md. Verified
+// against a real SubagentStop hook payload that its transcript_path points at the same main
+// session transcript SessionEnd/PreCompact receive, so collectTranscriptUsage's main+subagent
+// aggregation works unmodified from this trigger.
+const TRANSCRIPT_USAGE_EVENTS = new Set(["SessionEnd", "PreCompact", "SubagentStop"]);
 
 export function buildEvent(payload) {
   if (!payload || typeof payload.hook_event_name !== "string") return null;
@@ -54,7 +63,7 @@ export function buildEvent(payload) {
   return event;
 }
 
-// Builds the companion transcript_usage event for a SessionEnd/PreCompact firing, or null
+// Builds the companion transcript_usage event for a SessionEnd/PreCompact/SubagentStop firing, or null
 // when the event type doesn't warrant one, no transcript_path was supplied, or the
 // transcript couldn't be read (nothing measured). transcript_path itself is read here and
 // then discarded — it is never copied onto the returned event. Pure and side-effect-free

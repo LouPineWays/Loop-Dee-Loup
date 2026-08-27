@@ -100,6 +100,35 @@ test("token_usage_is_session_complete is false and token_usage_session_by_model 
   assert.notEqual(record.measured.token_usage_main_total, null);
 });
 
+// Issue #178: real post-#144 sessions were found where SessionEnd never fired at all (no
+// structural event, no PreCompact either) despite substantial real work, because the
+// session's own process was torn down without Claude Code invoking SessionEnd for it. A
+// SubagentStop-triggered transcript_usage event is the mitigation — a last-known-totals
+// checkpoint that survives that kind of abrupt end for any session that ran a subagent.
+test("a SubagentStop-only transcript_usage event still recovers partial token usage when SessionEnd never fires", () => {
+  const record = reduceEvents([
+    { kind: "hook", event: "SessionStart", session_id: "s-no-end", ts: "2026-08-27T00:00:00.000Z", reason: "startup" },
+    { kind: "hook", event: "SubagentStart", session_id: "s-no-end", ts: "2026-08-27T00:01:00.000Z", agent_id: "a-1", agent_type: "general-purpose" },
+    { kind: "hook", event: "SubagentStop", session_id: "s-no-end", ts: "2026-08-27T00:05:00.000Z", agent_id: "a-1", agent_type: "general-purpose" },
+    {
+      kind: "transcript_usage",
+      event: "SubagentStop",
+      session_id: "s-no-end",
+      ts: "2026-08-27T00:05:00.000Z",
+      main: { total: { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 2 }, by_model: {} },
+      subagents: { total: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, message_count: 1 }, by_agent_type: {}, by_model: {}, agent_count: 1 },
+    },
+    // No SessionEnd event at all — the session's process ended without ever invoking it.
+  ]);
+  // Partial economic evidence was still recovered, unlike before this fix (nothing at all).
+  assert.notEqual(record.measured.token_usage_main_total, null);
+  assert.equal(record.measured.token_usage_main_total.input_tokens, 10);
+  // But it must not be mistaken for whole-session evidence: no SessionEnd ever landed.
+  assert.equal(record.measured.token_usage_is_session_complete, false);
+  assert.equal(record.measured.session_end_ts, null);
+  assert.ok(record.unknown.includes("session_end_ts"));
+});
+
 test("mergeByModel-style session_by_model accumulation survives a model literally named 'constructor'", () => {
   // Regression test (review of #139/PR #144): a plain {} accumulator would resolve
   // Object.prototype.constructor for this key instead of creating a real bucket.
