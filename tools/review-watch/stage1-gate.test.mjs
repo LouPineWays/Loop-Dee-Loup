@@ -184,6 +184,27 @@ test("isGenuineResponse: accepts a genuine review whose attempt and permission m
   );
 });
 
+test("isGenuineResponse: accepts genuine security findings that open with 'missing'/'no' permission wording but are not refusals (fourth Stage 1 review round on PR #164)", () => {
+  assert.equal(isGenuineResponse("Missing permission checks allow anonymous updates."), true);
+  assert.equal(isGenuineResponse("No access control is enforced."), true);
+});
+
+test("isGenuineResponse: rejects a prefaced first-person 'not authorized' refusal (fourth Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("Sorry, I tried to push, but I am not authorized to update this branch."),
+    false,
+    "'not authorized' must count as a permission-lack phrase even when not anchored at the very start of the message",
+  );
+});
+
+test("isGenuineResponse: rejects a refusal split across two consecutive first-person sentences (fourth Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("I tried to push a fix. I don't have write access."),
+    false,
+    "an attempt and its permission-lack outcome stated as two consecutive first-person sentences describe one refusal, not two unrelated clauses",
+  );
+});
+
 test("parseArgs: reads flags and defaults the bot login", () => {
   const args = parseArgs(["--repo", "owner/repo", "--number", "50", "--head", "abc123"]);
   assert.equal(args.repo, "owner/repo");

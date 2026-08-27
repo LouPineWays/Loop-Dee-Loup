@@ -73,14 +73,16 @@ export function findExemption(body) {
 // refusal reply *opens* with its status rather than burying it inside findings content.
 const BLOCKED_STATUS_PATTERN = /^\s*BLOCKED\b/i;
 
-// issue #161, Failure B, and three rounds of this correction's own Stage 1 review,
-// converged on two genuinely different non-genuine shapes rather than one regex each round
-// kept missing:
+// issue #161, Failure B, and four rounds of this correction's own Stage 1 review, converged
+// on two genuinely different non-genuine shapes rather than one regex each round kept
+// missing:
 //
 // A refused *self-referential* attempt: the responder itself describes trying (or directly
 // refusing) and failing -- "I attempted to push a fix but do not have write access", "I
-// tried applying the fix, but I don't have write access", "I cannot apply this fix because
-// I don't have write access". Three independent fixes here were each flagged as wrong:
+// tried applying the fix, but I don't have write access", "I cannot apply this fix because I
+// don't have write access", "Sorry, I tried to push, but I am not authorized to update this
+// branch", "I tried to push a fix. I don't have write access". Four independent fixes here
+// were each flagged as wrong:
 //  - checking a permission-lack phrase and a mutation verb *anywhere* in the message let an
 //    unrelated instruction verb elsewhere ("Update the test") pair with an unrelated
 //    permission mention and reject a genuine review;
@@ -90,21 +92,34 @@ const BLOCKED_STATUS_PATTERN = /^\s*BLOCKED\b/i;
 //    modal refusal of the mutation itself ("I cannot apply this fix ..."), and checking the
 //    three signals anywhere in a possibly multi-sentence message let an unrelated attempt
 //    mentioned in one sentence (e.g. reproducing a bug) pair with an unrelated permission
-//    discussion in a *different* sentence of the same genuine review.
-// isSelfReferentialRefusal (below) requires all three signals -- an explicit first-person
-// pronoun (PRONOUN_PATTERN), a refusal-of-action cue (ATTEMPT_CUE_PATTERN, or
-// MODAL_REFUSAL_PATTERN for "cannot/can't <verb>" that isn't the permission-lack phrase's
-// own "cannot have") and a genuinely *negated* permission/access phrase
-// (PERMISSION_LACK_PATTERN) -- to occur within the *same sentence*, not merely anywhere in
-// the message. That ties the refusal to one coherent clause (fixing the cross-sentence
-// false positive) while still not caring about verb form or an enumerated verb list (fixing
-// the gerund and direct-modal-refusal false negatives). A second-round finding also showed
-// that treating bare "need(ed)" or bare "permission"/"authorized" (with no negation) as
-// attempt/permission cues was itself a bug -- "The tests need to cover empty input" and "the
-// caller needs permission to read this file" are ordinary review prose, not refusals, and
-// neither contains negation ("cannot have", "insufficient", "do not have permission").
-// Restricting both cue lists to genuinely negated/attempt-specific wording (not bare nouns)
-// is what keeps this conjunction safe without the pronoun check alone being sufficient.
+//    discussion in a *different* sentence of the same genuine review;
+//  - restricting the check to one grammatical sentence was too strict in the other
+//    direction: "not authorized"/"not permitted" wasn't recognized as a permission-lack
+//    phrase at all outside the anchored elliptical check below, and a single refusal spread
+//    naturally across two consecutive first-person sentences ("I tried to push a fix. I
+//    don't have write access") no longer matched, because neither sentence alone carried
+//    both signals.
+// isSelfReferentialRefusal (below) groups each maximal run of *consecutive* sentences that
+// all mention the responder itself (PRONOUN_PATTERN) into one unit -- ties the refusal to a
+// continuous self-referential narrative (fixing the split-across-two-sentences false
+// negative) while still not merging in a third-person sentence with no pronoun (fixing the
+// unrelated-clause false positive, since that sentence never joins the run) -- then requires
+// a refusal-of-action cue (ATTEMPT_CUE_PATTERN, or MODAL_REFUSAL_PATTERN for "cannot/can't
+// <verb>" that isn't the permission-lack phrase's own "cannot have") and a genuinely
+// *negated* permission/access/authorization phrase (PERMISSION_LACK_PATTERN, which now also
+// recognizes bare "not permitted"/"not authorized" -- previously only handled anchored at
+// the very start of the message) anywhere within that unit. A second-round finding also
+// showed that treating bare "need(ed)" or bare "permission"/"authorized" (with no negation)
+// as attempt/permission cues was itself a bug -- "The tests need to cover empty input" and
+// "the caller needs permission to read this file" are ordinary review prose, not refusals,
+// and neither contains negation. Restricting both cue lists to genuinely negated/attempt-
+// specific wording (not bare nouns) is what keeps this conjunction safe without the pronoun
+// grouping alone being sufficient. A known residual tradeoff: two consecutive sentences that
+// both happen to use "I"/"we" but discuss genuinely unrelated topics (e.g. reproducing a bug
+// in one sentence, an unrelated permission-validation finding about the reviewed code in the
+// next) could in principle still combine; no concrete case has surfaced, and the "smallest
+// reliable boundary" this issue calls for stops here rather than chasing hypothetical
+// phrasings indefinitely.
 const PRONOUN_PATTERN = /\b(?:I|I'm|I've|[Ww]e|[Ww]e're|[Ww]e've)\b/;
 const ATTEMPT_CUE_PATTERN = /\b(?:attempt(?:ed|ing)?|tr(?:y|ies|ied|ying)|fail(?:ed|s|ing)?|unable)\b/i;
 // Excludes "cannot/can't have" via the negative lookahead: that's PERMISSION_LACK_PATTERN's
@@ -112,31 +127,52 @@ const ATTEMPT_CUE_PATTERN = /\b(?:attempt(?:ed|ing)?|tr(?:y|ies|ied|ying)|fail(?
 // negated-permission phrase alone satisfy both signals and defeat the two-signal check.
 const MODAL_REFUSAL_PATTERN = /\b(?:cannot|can't|could not|couldn't|will not|won't)\s+(?!have\b)\w+/i;
 const PERMISSION_LACK_PATTERN =
-  /\b(?:do not|don't|does not|doesn't|did not|didn't|cannot|can't|could not|couldn't) have (?:write |repository |branch )?(?:access|permission)\b|\binsufficient (?:write |repository )?permission\b/i;
+  /\b(?:do not|don't|does not|doesn't|did not|didn't|cannot|can't|could not|couldn't) have (?:write |repository |branch )?(?:access|permission)\b|\binsufficient (?:write |repository )?permission\b|\bnot (?:permitted|authorized)\b/i;
 
 function splitIntoSentences(text) {
   return text.split(/(?<=[.!?])\s+/).filter(Boolean);
 }
 
 function isSelfReferentialRefusal(text) {
-  return splitIntoSentences(text).some(
-    (sentence) =>
-      PRONOUN_PATTERN.test(sentence) &&
-      (ATTEMPT_CUE_PATTERN.test(sentence) || MODAL_REFUSAL_PATTERN.test(sentence)) &&
-      PERMISSION_LACK_PATTERN.test(sentence),
-  );
+  const sentences = splitIntoSentences(text);
+  let i = 0;
+  while (i < sentences.length) {
+    if (!PRONOUN_PATTERN.test(sentences[i])) {
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    while (j < sentences.length && PRONOUN_PATTERN.test(sentences[j])) j++;
+    const unit = sentences.slice(i, j).join(" ");
+    if ((ATTEMPT_CUE_PATTERN.test(unit) || MODAL_REFUSAL_PATTERN.test(unit)) && PERMISSION_LACK_PATTERN.test(unit)) {
+      return true;
+    }
+    i = j;
+  }
+  return false;
 }
 
 // The other non-genuine shape has no subject at all: a short, complete, bot-style status
 // sentence -- "Insufficient permission to commit changes.", "Not authorized to push this
 // branch." -- rather than a human review sentence *about* someone else's permissions
-// ("The caller needs permission to read this file"). Anchoring this to the very start of
-// the whole (normalized) message, not any sentence boundary within it, is what tells the
-// two apart: a genuine finding almost never opens with the bare negated-permission phrase
-// as its first words, but a real status reply -- like the already-anchored BLOCKED and
-// Codex-Cloud-setup-prompt checks above -- is that phrase from its first character.
+// ("The caller needs permission to read this file") or a security finding describing the
+// *reviewed code's* own permission handling ("Missing permission checks allow anonymous
+// updates", "No access control is enforced"). A fourth-round finding showed the elliptical
+// check matched as soon as it saw the opening adjective+noun ("missing permission", "no
+// access") regardless of what followed, so an ordinary finding *about* the target code's
+// authorization bugs -- which naturally opens exactly that way -- was misclassified as the
+// gate's own refusal. Requiring the actual "to <verb>" continuation right after the
+// permission/access noun (present in every real observed refusal: "... to commit changes",
+// "... to push this branch") is what a genuine security finding never has at that exact
+// position -- it continues with a noun ("checks", "control") or main verb ("allow",
+// "enforced"), not an infinitive naming the blocked mutation. Anchoring this to the very
+// start of the whole (normalized) message, not any sentence boundary within it, is what
+// otherwise tells the two apart: a genuine finding almost never opens with the bare negated-
+// permission phrase as its first words, but a real status reply -- like the already-anchored
+// BLOCKED and Codex-Cloud-setup-prompt checks above -- is that phrase from its first
+// character.
 const ELLIPTICAL_REFUSAL_PATTERN =
-  /^(?:insufficient|no|lack of|missing)\s+(?:write |repository |branch )?(?:permission|access)\b|^not (?:permitted|authorized)\b/i;
+  /^(?:insufficient|no|lack of|missing)\s+(?:write |repository |branch )?(?:permission|access)\s+to\s+\w+|^not (?:permitted|authorized)\s+to\s+\w+/i;
 
 // Stage 2 audit finding on issue #141 (LDL#135's own correction cycle): a Codex Cloud
 // environment misconfiguration produces this exact reply — "To use Codex here, create an
