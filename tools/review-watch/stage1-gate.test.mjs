@@ -229,6 +229,14 @@ test("isGenuineResponse: accepts a genuine finding whose 'no permission to <verb
   );
 });
 
+test("isGenuineResponse: rejects an impersonal authorization refusal with a longer direct object (seventh Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("Not authorized to push changes to this branch."),
+    false,
+    "an unbounded direct-object/prepositional-phrase completion of the same verb must not be capped to a fixed small word count",
+  );
+});
+
 test("parseArgs: reads flags and defaults the bot login", () => {
   const args = parseArgs(["--repo", "owner/repo", "--number", "50", "--head", "abc123"]);
   assert.equal(args.repo, "owner/repo");

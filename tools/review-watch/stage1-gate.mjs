@@ -166,27 +166,40 @@ function isSelfReferentialRefusal(text) {
 }
 
 // The other non-genuine shape has no subject at all: a short, complete, bot-style status
-// sentence -- "Insufficient permission to commit changes.", "Not authorized to push this
-// branch." -- rather than a human review sentence *about* someone else's permissions
+// sentence -- "Insufficient permission to commit changes.", "Not authorized to push changes
+// to this branch." -- rather than a human review sentence *about* someone else's permissions
 // ("The caller needs permission to read this file") or a security finding describing the
 // *reviewed code's* own permission handling ("Missing permission checks allow anonymous
 // updates", "No access control is enforced", "No permission to push is required before this
-// workflow updates protected branches"). Two rounds of findings on this same anchor:
+// workflow updates protected branches"). Three rounds of findings on this same anchor:
 //  - matching as soon as it saw the opening adjective+noun ("missing permission", "no
 //    access") regardless of what followed let an ordinary finding *about* the target code's
 //    authorization bugs -- which naturally opens exactly that way -- through;
 //  - requiring the "to <verb>" continuation right after the noun narrowed that, but still
-//    matched as a mere *prefix*: a genuine finding can coincidentally continue "no
-//    permission to push ..." with a real main clause of its own ("... is required before
-//    this workflow updates protected branches"), which a real terse status reply never has.
-// A real reply *is* this phrase, give or take a short trailing object ("to commit changes",
-// "to push this branch") -- it doesn't continue into another verb phrase afterward. Capping
-// what may follow the verb to a few words and anchoring both the start AND the end of the
-// (normalized) message is what requires the phrase to account for the *whole* reply rather
-// than merely open it, the same way BLOCKED_STATUS_PATTERN and the Codex-Cloud-setup-prompt
-// check are anchored above.
-const ELLIPTICAL_REFUSAL_PATTERN =
-  /^(?:insufficient|no|lack of|missing)\s+(?:write |repository |branch )?(?:permission|access)\s+to\s+\w+(?:\s+\w+){0,3}[.!]?\s*$|^not (?:permitted|authorized)\s+to\s+\w+(?:\s+\w+){0,3}[.!]?\s*$/i;
+//    matched as a mere *prefix*: a genuine finding can coincidentally continue "no permission
+//    to push ..." with a real main clause of its own ("... is required before this workflow
+//    updates protected branches"), which a real terse status reply never has;
+//  - capping what may follow the verb to a fixed small word count was itself an arbitrary
+//    threshold a legitimate, merely-longer direct object ("push changes to this branch")
+//    could always be one word past -- the cap needed bumping every time a longer real object
+//    surfaced, rather than fixing the actual distinction.
+// The structural difference a fixed word count was standing in for: a real reply's trailing
+// words are a direct-object/prepositional-phrase completion of the *same* verb ("changes",
+// "to this branch") with no further finite verb, while a genuine finding's continuation
+// starts a *second clause* (an auxiliary/copula/modal, or a subordinating conjunction --
+// "is required", "should be", "before this workflow ..."). Instead of bounding length,
+// TRAILING_CLAUSE_BOUNDARY (below) bounds *content*: consume any number of trailing words
+// via ANCHORED_CLAUSE_TAIL as long as none of them opens a new clause, then require the
+// match to reach the end of the (normalized) message -- unbounded object length is fine,
+// but a second clause anywhere ends the match and the whole-message anchor then fails,
+// exactly like BLOCKED_STATUS_PATTERN and the Codex-Cloud-setup-prompt check above.
+const CLAUSE_BOUNDARY_WORD = "(?:is|are|was|were|has|have|will|would|can|could|should|must|before|after|when|because|since)";
+const TRAILING_CLAUSE_TAIL = String.raw`(?:\s+(?!${CLAUSE_BOUNDARY_WORD}\b)\S+)*[.!]?\s*$`;
+const ELLIPTICAL_REFUSAL_PATTERN = new RegExp(
+  String.raw`^(?:insufficient|no|lack of|missing)\s+(?:write |repository |branch )?(?:permission|access)\s+to\s+\w+${TRAILING_CLAUSE_TAIL}` +
+    String.raw`|^not (?:permitted|authorized)\s+to\s+\w+${TRAILING_CLAUSE_TAIL}`,
+  "i",
+);
 
 // Stage 2 audit finding on issue #141 (LDL#135's own correction cycle): a Codex Cloud
 // environment misconfiguration produces this exact reply — "To use Codex here, create an
