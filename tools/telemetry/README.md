@@ -96,8 +96,9 @@ carrying the subagent's `agentType` — so per-subagent-type token attribution, 
 always invoked" below for why `SubagentStop` was added), calls `transcript.mjs`'s
 `collectTranscriptUsage(transcript_path)`, and appends the
 result as a `transcript_usage` event — `transcript_path` itself is read and then discarded, never
-persisted (matching the privacy rule below). `reduce.mjs` folds the most recent `transcript_usage`
-event into `measured.token_usage_main_total`, `measured.token_usage_main_by_model`,
+persisted (matching the privacy rule below). `reduce.mjs`'s `pickBestTranscriptUsage` folds the
+best `transcript_usage` event(s) — not simply the most recently appended one, see "SessionEnd is
+not always invoked" below — into `measured.token_usage_main_total`, `measured.token_usage_main_by_model`,
 `measured.token_usage_subagent_total`, `measured.token_usage_subagent_by_agent_type`,
 `measured.token_usage_subagent_by_model`, a merged `measured.token_usage_session_by_model`
 (main + subagent tokens combined per model — a subagent can run on a different model than the
@@ -106,9 +107,10 @@ purely arithmetic `derived` fields (`token_usage_grand_total`, `token_usage_main
 `measured.transcript_usage_sample_count === 0` means none of this fired — most commonly a session
 that crashed before reaching `SessionEnd` or a compaction, or a Claude Code build old enough not
 to supply `transcript_path` in hook payloads. `measured.token_usage_is_session_complete` is
-`true` only when the most recent `transcript_usage` sample was captured at `SessionEnd` — a
-`PreCompact`-only sample (session still running, or crashed before `SessionEnd`) reflects usage
-accumulated only up to that point, not the whole session, and `sufficiency.mjs`'s
+`true` only when a genuine `SessionEnd`-captured `transcript_usage` sample exists among the
+session's samples (see `pickBestTranscriptUsage`, not append order) — a `PreCompact`- or
+`SubagentStop`-only sample (session still running, or torn down before `SessionEnd`) reflects
+usage accumulated only up to that checkpoint, not the whole session, and `sufficiency.mjs`'s
 `token_allocation` claim requires this before treating totals as whole-session evidence.
 
 A landed `transcript_usage` event does not by itself guarantee `token_usage_main_total` or
