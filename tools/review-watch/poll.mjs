@@ -30,6 +30,11 @@
 // produced by one invocation are one round") several standalone comments, and a caller
 // that only saw the first would under-verify the rest of the round.
 //
+// Each match also carries `commit_id` (extractCommitId) when the source endpoint exposes
+// one, and matchBelongsToHead is the shared primitive a frozen-head caller (stage1-gate.mjs)
+// uses to decide whether a match is reliably attributable to a specific head rather than
+// merely timestamped after that head's trigger — see issue #163.
+//
 // Exit codes: 0 = matched (match JSON on stdout), 2 = timed out with no match,
 // 1 = operational error (bad args, `gh` failure).
 //
@@ -63,6 +68,16 @@ export function endpointsFor(kind, repo, number) {
   throw new Error(`--kind must be "pr" or "issue", got: ${kind}`);
 }
 
+// Pure. The authoritative commit a review item is attributable to, when the endpoint
+// exposes one — `commit_id` on both `/pulls/{n}/comments` (inline review comments) and
+// `/pulls/{n}/reviews` (review submissions) items. `original_commit_id` is the fallback for
+// an inline comment shape that omits `commit_id` (older payloads / some webhook mirrors).
+// Plain issue comments (`/issues/{n}/comments`) carry neither field — null means "no direct
+// commit identity available", not "matches every head". See matchBelongsToHead (issue #163).
+export function extractCommitId(item) {
+  return item?.commit_id ?? item?.original_commit_id ?? null;
+}
+
 // Pure — no I/O — so tests can exercise it without a network call or `gh`. Returns every
 // post-`sinceMs` item authored by `bot` in `items`, not just the first, so one invocation's
 // full round of comments/reviews is captured in a single sweep.
@@ -81,9 +96,38 @@ export function findAllMatches(items, { bot, sinceMs, endpointName }) {
       created_at: timestamp,
       url: item.html_url ?? null,
       body_excerpt: (item.body ?? "").slice(0, 200),
+      commit_id: extractCommitId(item),
     });
   }
   return matches;
+}
+
+// Pure — no I/O. Decides whether a single match (from findAllMatches, now carrying
+// `commit_id`) is reliably attributable to `head`, given every trigger round known on the
+// thread (trigger.mjs's findTriggerRounds — head-marked trigger comments sorted oldest
+// first). This is the shared head-correlation primitive issue #163 asks for, so a genuine
+// response can only satisfy a frozen-head gate (stage1-gate.mjs) when durable evidence
+// actually ties it to that exact head, not merely to "arrived after this head's trigger".
+//
+// Two cases:
+//  - The match carries direct commit identity (an inline review comment or a review
+//    submission — both expose `commit_id`): trust that over any timestamp reasoning. It
+//    settles the question outright, in either direction — a match whose `commit_id` names a
+//    *different* head is excluded even if its timestamp lands after the requested head's
+//    trigger, which is exactly the delayed-response race in issue #163 (a response actually
+//    reviewing older head A, arriving after newer head B's trigger, must not satisfy B).
+//  - The match has no direct commit identity (a plain issue comment — Codex's BLOCKED/status
+//    replies, and some genuine reviews, land here). Timestamp-only attribution is unsafe the
+//    moment more than one trigger round exists on the thread: a delayed reply for an older
+//    round is, by timestamp alone, indistinguishable from a fresh reply to the newest round.
+//    Trust it only when the thread is unambiguous — exactly one trigger round exists in
+//    total, so there is no other head this response could actually belong to. With more than
+//    one round, fail closed (per issue #163's requirement 2) rather than guess from arrival
+//    order.
+export function matchBelongsToHead(match, { head, rounds }) {
+  if (match.commit_id) return match.commit_id === head;
+  if (rounds.length !== 1) return false;
+  return rounds[0].head === head;
 }
 
 function sleep(ms) {
