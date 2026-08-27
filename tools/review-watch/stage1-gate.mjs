@@ -73,35 +73,59 @@ export function findExemption(body) {
 // refusal reply *opens* with its status rather than burying it inside findings content.
 const BLOCKED_STATUS_PATTERN = /^\s*BLOCKED\b/i;
 
-// issue #161, Failure B, and two rounds of this correction's own Stage 1 review, converged
-// on two genuinely different non-genuine shapes rather than one regex each round kept
-// missing:
+// issue #161, Failure B, and three rounds of this correction's own Stage 1 review,
+// converged on two genuinely different non-genuine shapes rather than one regex each round
+// kept missing:
 //
-// A refused *self-referential* attempt: the responder itself describes trying and failing
-// -- "I attempted to push a fix but do not have write access", "I tried applying the fix,
-// but I don't have write access". Two independent fixes here were each flagged as wrong:
-//  - checking a permission-lack phrase and a mutation verb *anywhere* in the message let
-//    an ordinary instruction verb elsewhere ("Update the test") pair with an unrelated
+// A refused *self-referential* attempt: the responder itself describes trying (or directly
+// refusing) and failing -- "I attempted to push a fix but do not have write access", "I
+// tried applying the fix, but I don't have write access", "I cannot apply this fix because
+// I don't have write access". Three independent fixes here were each flagged as wrong:
+//  - checking a permission-lack phrase and a mutation verb *anywhere* in the message let an
+//    unrelated instruction verb elsewhere ("Update the test") pair with an unrelated
 //    permission mention and reject a genuine review;
-//  - requiring the verb to be a bare infinitive right after "to" ("... to push") missed
-//    the identical refusal phrased with a gerund ("tried applying") or direct object.
-// Gating on an explicit first-person pronoun (PRONOUN_PATTERN) plus a real attempt verb
-// (ATTEMPT_CUE_PATTERN) plus a genuinely *negated* permission/access phrase
-// (PERMISSION_LACK_PATTERN) -- all three present *anywhere*, no verb-form or proximity
-// requirement -- fixes both directions: an unrelated instruction elsewhere in a genuine
-// review never carries "I ... attempted/tried ... do not have ... access" together, and
-// nothing about the negated-permission phrase depends on infinitive form. A second-round
-// finding also showed that treating bare "need(ed)" or bare "permission"/"authorized" (with
-// no negation) as attempt/permission cues was itself the bug -- "The tests need to cover
-// empty input" and "the caller needs permission to read this file" are ordinary review
-// prose, not refusals, and neither contains negation ("cannot have", "insufficient", "do
-// not have permission"). Restricting both cue lists to genuinely negated/attempt-specific
-// wording (not bare nouns) is what keeps this three-way conjunction safe without a pronoun
-// check on its own being sufficient.
+//  - requiring the verb to be a bare infinitive right after "to" ("... to push") missed the
+//    identical refusal phrased with a gerund ("tried applying") or direct object;
+//  - requiring a distinct attempt verb (attempted/tried/failed/unable) missed a *direct*
+//    modal refusal of the mutation itself ("I cannot apply this fix ..."), and checking the
+//    three signals anywhere in a possibly multi-sentence message let an unrelated attempt
+//    mentioned in one sentence (e.g. reproducing a bug) pair with an unrelated permission
+//    discussion in a *different* sentence of the same genuine review.
+// isSelfReferentialRefusal (below) requires all three signals -- an explicit first-person
+// pronoun (PRONOUN_PATTERN), a refusal-of-action cue (ATTEMPT_CUE_PATTERN, or
+// MODAL_REFUSAL_PATTERN for "cannot/can't <verb>" that isn't the permission-lack phrase's
+// own "cannot have") and a genuinely *negated* permission/access phrase
+// (PERMISSION_LACK_PATTERN) -- to occur within the *same sentence*, not merely anywhere in
+// the message. That ties the refusal to one coherent clause (fixing the cross-sentence
+// false positive) while still not caring about verb form or an enumerated verb list (fixing
+// the gerund and direct-modal-refusal false negatives). A second-round finding also showed
+// that treating bare "need(ed)" or bare "permission"/"authorized" (with no negation) as
+// attempt/permission cues was itself a bug -- "The tests need to cover empty input" and "the
+// caller needs permission to read this file" are ordinary review prose, not refusals, and
+// neither contains negation ("cannot have", "insufficient", "do not have permission").
+// Restricting both cue lists to genuinely negated/attempt-specific wording (not bare nouns)
+// is what keeps this conjunction safe without the pronoun check alone being sufficient.
 const PRONOUN_PATTERN = /\b(?:I|I'm|I've|[Ww]e|[Ww]e're|[Ww]e've)\b/;
 const ATTEMPT_CUE_PATTERN = /\b(?:attempt(?:ed|ing)?|tr(?:y|ies|ied|ying)|fail(?:ed|s|ing)?|unable)\b/i;
+// Excludes "cannot/can't have" via the negative lookahead: that's PERMISSION_LACK_PATTERN's
+// own territory (a state, not an action), so letting it double here would make a bare
+// negated-permission phrase alone satisfy both signals and defeat the two-signal check.
+const MODAL_REFUSAL_PATTERN = /\b(?:cannot|can't|could not|couldn't|will not|won't)\s+(?!have\b)\w+/i;
 const PERMISSION_LACK_PATTERN =
   /\b(?:do not|don't|does not|doesn't|did not|didn't|cannot|can't|could not|couldn't) have (?:write |repository |branch )?(?:access|permission)\b|\binsufficient (?:write |repository )?permission\b/i;
+
+function splitIntoSentences(text) {
+  return text.split(/(?<=[.!?])\s+/).filter(Boolean);
+}
+
+function isSelfReferentialRefusal(text) {
+  return splitIntoSentences(text).some(
+    (sentence) =>
+      PRONOUN_PATTERN.test(sentence) &&
+      (ATTEMPT_CUE_PATTERN.test(sentence) || MODAL_REFUSAL_PATTERN.test(sentence)) &&
+      PERMISSION_LACK_PATTERN.test(sentence),
+  );
+}
 
 // The other non-genuine shape has no subject at all: a short, complete, bot-style status
 // sentence -- "Insufficient permission to commit changes.", "Not authorized to push this
@@ -173,13 +197,7 @@ export function isGenuineResponse(bodyExcerpt) {
   if (isCodexCloudSetupPrompt(normalized)) return false;
   if (BLOCKED_STATUS_PATTERN.test(normalized)) return false;
   if (ELLIPTICAL_REFUSAL_PATTERN.test(normalized)) return false;
-  if (
-    PRONOUN_PATTERN.test(normalized) &&
-    ATTEMPT_CUE_PATTERN.test(normalized) &&
-    PERMISSION_LACK_PATTERN.test(normalized)
-  ) {
-    return false;
-  }
+  if (isSelfReferentialRefusal(normalized)) return false;
   return true;
 }
 

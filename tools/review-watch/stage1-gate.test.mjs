@@ -165,6 +165,25 @@ test("isGenuineResponse: accepts a genuine finding describing a third party's pe
   );
 });
 
+test("isGenuineResponse: rejects a direct modal refusal with no separate attempt verb (third Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("I cannot apply this fix because I don't have write access."),
+    false,
+    "a direct refusal of the mutation itself ('cannot apply') must count as an attempt cue, not only an explicit 'attempted'/'tried'",
+  );
+});
+
+test("isGenuineResponse: accepts a genuine review whose attempt and permission mentions describe unrelated clauses (third Stage 1 review round on PR #164)", () => {
+  const genuineReview =
+    "I attempted to reproduce the failure locally. The reviewer cannot have write permission under this workflow; " +
+    "the diff violates that boundary.";
+  assert.equal(
+    isGenuineResponse(genuineReview),
+    true,
+    "an attempt mentioned in one sentence (reproducing a bug) must not combine with an unrelated permission discussion in a different sentence of the same genuine review",
+  );
+});
+
 test("parseArgs: reads flags and defaults the bot login", () => {
   const args = parseArgs(["--repo", "owner/repo", "--number", "50", "--head", "abc123"]);
   assert.equal(args.repo, "owner/repo");
