@@ -92,6 +92,166 @@ test("isGenuineResponse: accepts a genuine review that discusses or quotes BLOCK
   );
 });
 
+test("isGenuineResponse: rejects a list-wrapped BLOCKED reply (YouTubery PR #14, issue #161 Failure A)", () => {
+  assert.equal(isGenuineResponse("- **BLOCKED** — checkout unavailable"), false);
+});
+
+test("isGenuineResponse: rejects other common leading list-prefix wrappers around BLOCKED (issue #161 Failure A)", () => {
+  assert.equal(isGenuineResponse("+ BLOCKED — checkout unavailable"), false);
+  assert.equal(isGenuineResponse("1. BLOCKED — checkout unavailable"), false);
+  assert.equal(isGenuineResponse("* BLOCKED — checkout unavailable"), false);
+  assert.equal(isGenuineResponse("1) BLOCKED — checkout unavailable"), false);
+});
+
+test("isGenuineResponse: rejects a genuine reviewer permission-denial/refusal response (existing #135/#141 case, still anchored correctly)", () => {
+  assert.equal(
+    isGenuineResponse("I attempted to push a fix but do not have write access to this repository."),
+    false,
+  );
+  assert.equal(isGenuineResponse("Insufficient permission to commit changes."), false);
+});
+
+test("isGenuineResponse: accepts a genuine finding discussing that a reviewer cannot have write permission (issue #161 Failure B)", () => {
+  const genuineReview =
+    "The reviewer cannot have write permission under this workflow, by design: the Code Review Rules boundary in " +
+    "AGENTS.md restricts `@codex review` to a read-only inspection role, and this PR's diff correctly reflects that.";
+  assert.equal(
+    isGenuineResponse(genuineReview),
+    true,
+    "a finding that merely discusses a permission-lack phrase, without describing an attempted mutation, must remain genuine",
+  );
+});
+
+test("isGenuineResponse: accepts a genuine review that discusses permission boundaries and separately gives an ordinary instruction (Stage 1 review finding on PR #164)", () => {
+  const genuineReview =
+    "The reviewer cannot have write permission under this workflow, by design. Separately: update the test fixture " +
+    "to also cover the new list-prefix cases, since the current suite only exercises headings and emphasis.";
+  assert.equal(
+    isGenuineResponse(genuineReview),
+    true,
+    "an ordinary instruction verb (e.g. 'update') elsewhere in a genuine review must not be tied to an unrelated permission-lack mention earlier in the message",
+  );
+});
+
+test("isGenuineResponse: rejects a refusal that uses a mutation verb outside a small hardcoded list (Stage 1 review finding on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("I tried to apply the fix, but I don't have write access to this repository."),
+    false,
+    "a refused mutation attempt must be recognized regardless of which verb (apply/change/push/...) describes the attempted mutation",
+  );
+});
+
+test("isGenuineResponse: rejects a refused attempt phrased with a gerund instead of an infinitive (second Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("I tried applying the fix, but I don't have write access to this repository."),
+    false,
+    "the refusal must be recognized regardless of verb form (infinitive vs. gerund), since real replies aren't guaranteed to phrase it as 'to <verb>'",
+  );
+});
+
+test("isGenuineResponse: accepts an ordinary review recommendation that happens to use 'need to' (second Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("The tests need to cover empty input."),
+    true,
+    "an ordinary unnegated 'need to <verb>' instruction is not a refusal and must not be rejected merely for containing 'need' and an infinitive",
+  );
+});
+
+test("isGenuineResponse: accepts a genuine finding describing a third party's permission requirement (second Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("The caller needs permission to read this file."),
+    true,
+    "a finding describing someone else's (not the responder's own) permission requirement, with no negation, must not be rejected",
+  );
+});
+
+test("isGenuineResponse: rejects a direct modal refusal with no separate attempt verb (third Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("I cannot apply this fix because I don't have write access."),
+    false,
+    "a direct refusal of the mutation itself ('cannot apply') must count as an attempt cue, not only an explicit 'attempted'/'tried'",
+  );
+});
+
+test("isGenuineResponse: accepts a genuine review whose attempt and permission mentions describe unrelated clauses (third Stage 1 review round on PR #164)", () => {
+  const genuineReview =
+    "I attempted to reproduce the failure locally. The reviewer cannot have write permission under this workflow; " +
+    "the diff violates that boundary.";
+  assert.equal(
+    isGenuineResponse(genuineReview),
+    true,
+    "an attempt mentioned in one sentence (reproducing a bug) must not combine with an unrelated permission discussion in a different sentence of the same genuine review",
+  );
+});
+
+test("isGenuineResponse: accepts genuine security findings that open with 'missing'/'no' permission wording but are not refusals (fourth Stage 1 review round on PR #164)", () => {
+  assert.equal(isGenuineResponse("Missing permission checks allow anonymous updates."), true);
+  assert.equal(isGenuineResponse("No access control is enforced."), true);
+});
+
+test("isGenuineResponse: rejects a prefaced first-person 'not authorized' refusal (fourth Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("Sorry, I tried to push, but I am not authorized to update this branch."),
+    false,
+    "'not authorized' must count as a permission-lack phrase even when not anchored at the very start of the message",
+  );
+});
+
+test("isGenuineResponse: rejects a refusal split across two consecutive first-person sentences (fourth Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("I tried to push a fix. I don't have write access."),
+    false,
+    "an attempt and its permission-lack outcome stated as two consecutive first-person sentences describe one refusal, not two unrelated clauses",
+  );
+});
+
+test("isGenuineResponse: rejects an access refusal phrased with 'lack' (fifth Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("I tried to push a fix, but I lack write access."),
+    false,
+    "'lack write access' is a negation phrase on its own and must count as a permission-lack signal, not only 'do not have'/'cannot have' wording",
+  );
+});
+
+test("isGenuineResponse: rejects an access refusal phrased with passive 'denied' (sixth Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("I tried to push a fix, but write access was denied."),
+    false,
+    "'write access was denied' is a negation phrase and must count as a permission-lack signal alongside 'do not have'/'lack'/'cannot have'",
+  );
+});
+
+test("isGenuineResponse: accepts a genuine finding whose 'no permission to <verb>' opening continues into an unrelated main clause (sixth Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("No permission to push is required before this workflow updates protected branches."),
+    true,
+    "the elliptical refusal phrase must account for (approximately) the whole message, not merely match as a prefix of a longer descriptive sentence",
+  );
+});
+
+test("isGenuineResponse: rejects an impersonal authorization refusal with a longer direct object (seventh Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("Not authorized to push changes to this branch."),
+    false,
+    "an unbounded direct-object/prepositional-phrase completion of the same verb must not be capped to a fixed small word count",
+  );
+});
+
+test("isGenuineResponse: rejects an impersonal refusal with a causal 'because' explanation (eighth Stage 1 review round on PR #164, finding 1 -- accepted)", () => {
+  assert.equal(
+    isGenuineResponse("Not authorized to push changes to this branch because repository write permission is unavailable."),
+    false,
+    "a 'because'/'since' clause explaining the same refusal is part of it, not an unrelated topic shift, even when that reason clause itself contains a word like 'is'",
+  );
+});
+
+// Two other findings from the same eighth Stage 1 review round on PR #164 were declined by
+// founder decision as out of this issue's scope (parsing arbitrary English main verbs as
+// clause boundaries, and binding a permission phrase to the same grammatical subject as an
+// attempt elsewhere in the sentence -- see stage1-gate.mjs's ELLIPTICAL_REFUSAL_PATTERN
+// comment and LDL issue #165). No test is added for either: they describe known, accepted
+// residual gaps, not verified-and-fixed behavior.
+
 test("parseArgs: reads flags and defaults the bot login", () => {
   const args = parseArgs(["--repo", "owner/repo", "--number", "50", "--head", "abc123"]);
   assert.equal(args.repo, "owner/repo");
@@ -331,6 +491,58 @@ test("run: PENDING — a Markdown-heading-wrapped BLOCKED reply does not open th
   assert.equal(result.exitCode, 2);
   assert.equal(result.state, "PENDING");
   assert.equal(result.nonGenuineMatches.length, 1);
+});
+
+test("run: PENDING — a list-formatted BLOCKED reply does not open the gate (YouTubery PR #14, issue #161 Failure A)", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
+            {
+              id: 2,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "- **BLOCKED** — checkout unavailable",
+              created_at: "2026-08-23T13:05:00Z",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "PENDING");
+  assert.equal(result.nonGenuineMatches.length, 1);
+});
+
+test("run: RESPONSE_RECEIVED — a genuine finding discussing permission rules opens the gate (issue #161 Failure B)", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
+            {
+              id: 2,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "Reviewed the diff. Note: the reviewer cannot have write permission under this workflow, by design.",
+              created_at: "2026-08-23T13:05:00Z",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "RESPONSE_RECEIVED");
+  assert.equal(result.matches.length, 1);
 });
 
 test("run: PENDING — a Codex Cloud 'create an environment' reply does not open the gate (Stage 2 audit finding on issue #141)", async () => {
