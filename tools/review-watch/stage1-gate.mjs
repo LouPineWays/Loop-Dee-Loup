@@ -64,7 +64,8 @@ export function findExemption(body) {
 // such reply would silently open the gate. Matched against the truncated body_excerpt
 // findAllMatches already returns, which is long enough to catch a leading status word or
 // an early permission-denial sentence. The patterns below (BLOCKED_STATUS_PATTERN,
-// REFUSED_MUTATION_ATTEMPT_PATTERN) are isGenuineResponse's non-genuine signals.
+// ELLIPTICAL_REFUSAL_PATTERN, PRONOUN/ATTEMPT_CUE/PERMISSION_LACK_PATTERN) are
+// isGenuineResponse's non-genuine signals.
 //
 // Anchored to the (normalized) start of the message: a genuine, unrelated review is
 // free-form prose that can mention "BLOCKED" or a permission phrase anywhere in its body
@@ -72,27 +73,46 @@ export function findExemption(body) {
 // refusal reply *opens* with its status rather than burying it inside findings content.
 const BLOCKED_STATUS_PATTERN = /^\s*BLOCKED\b/i;
 
-// issue #161, Failure B, and its own Stage 1 review follow-up: a first fix here checked
-// "does the message contain a permission-lack phrase (anywhere)" AND "does the message
-// contain a mutation verb (anywhere)" as two *independent* body-wide checks. That was
-// flagged as wrong in both directions on this correction's own Stage 1 review:
-//  - too loose: a genuine review that separately discusses permission boundaries and also
-//    contains an ordinary instruction like "Update the test" would match "update" as an
-//    unrelated "mutation attempt" with no connection to the permission discussion, and
-//    reject an otherwise-genuine review;
-//  - too narrow: a real refusal phrased with a verb outside a small hardcoded list (e.g.
-//    "I tried to apply the fix, but I don't have write access") wouldn't match any
-//    enumerated verb and would slip through as genuine.
-// The actual AGENTS.md boundary is one clause -- an attempt/authorization cue word
-// ("attempted", "tried", "unable", "permission", "permitted", "authorized", ...) governing
-// an infinitive mutation verb close by ("... to push", "... to apply", "... to commit"),
-// e.g. "attempted to push", "permission to commit", "not authorized to edit". Requiring
-// the verb to be the object of that *same* cue (allowing a few filler words in between,
-// but not an unrelated sentence later in the message) ties the verb to the refusal clause
-// instead of anywhere in the message, and covers arbitrary verbs instead of enumerating
-// them -- fixing both directions with one primitive instead of a growing verb list.
-const REFUSED_MUTATION_ATTEMPT_PATTERN =
-  /\b(?:attempt(?:ed|ing)?|tr(?:y|ied|ies|ying)|unable|fail(?:ed|s|ing)?|wanted?|need(?:ed|s)?|permission|permitted|authorized)\b(?:\s+\S+){0,3}\s+to\s+\w+/i;
+// issue #161, Failure B, and two rounds of this correction's own Stage 1 review, converged
+// on two genuinely different non-genuine shapes rather than one regex each round kept
+// missing:
+//
+// A refused *self-referential* attempt: the responder itself describes trying and failing
+// -- "I attempted to push a fix but do not have write access", "I tried applying the fix,
+// but I don't have write access". Two independent fixes here were each flagged as wrong:
+//  - checking a permission-lack phrase and a mutation verb *anywhere* in the message let
+//    an ordinary instruction verb elsewhere ("Update the test") pair with an unrelated
+//    permission mention and reject a genuine review;
+//  - requiring the verb to be a bare infinitive right after "to" ("... to push") missed
+//    the identical refusal phrased with a gerund ("tried applying") or direct object.
+// Gating on an explicit first-person pronoun (PRONOUN_PATTERN) plus a real attempt verb
+// (ATTEMPT_CUE_PATTERN) plus a genuinely *negated* permission/access phrase
+// (PERMISSION_LACK_PATTERN) -- all three present *anywhere*, no verb-form or proximity
+// requirement -- fixes both directions: an unrelated instruction elsewhere in a genuine
+// review never carries "I ... attempted/tried ... do not have ... access" together, and
+// nothing about the negated-permission phrase depends on infinitive form. A second-round
+// finding also showed that treating bare "need(ed)" or bare "permission"/"authorized" (with
+// no negation) as attempt/permission cues was itself the bug -- "The tests need to cover
+// empty input" and "the caller needs permission to read this file" are ordinary review
+// prose, not refusals, and neither contains negation ("cannot have", "insufficient", "do
+// not have permission"). Restricting both cue lists to genuinely negated/attempt-specific
+// wording (not bare nouns) is what keeps this three-way conjunction safe without a pronoun
+// check on its own being sufficient.
+const PRONOUN_PATTERN = /\b(?:I|I'm|I've|[Ww]e|[Ww]e're|[Ww]e've)\b/;
+const ATTEMPT_CUE_PATTERN = /\b(?:attempt(?:ed|ing)?|tr(?:y|ies|ied|ying)|fail(?:ed|s|ing)?|unable)\b/i;
+const PERMISSION_LACK_PATTERN =
+  /\b(?:do not|don't|does not|doesn't|did not|didn't|cannot|can't|could not|couldn't) have (?:write |repository |branch )?(?:access|permission)\b|\binsufficient (?:write |repository )?permission\b/i;
+
+// The other non-genuine shape has no subject at all: a short, complete, bot-style status
+// sentence -- "Insufficient permission to commit changes.", "Not authorized to push this
+// branch." -- rather than a human review sentence *about* someone else's permissions
+// ("The caller needs permission to read this file"). Anchoring this to the very start of
+// the whole (normalized) message, not any sentence boundary within it, is what tells the
+// two apart: a genuine finding almost never opens with the bare negated-permission phrase
+// as its first words, but a real status reply -- like the already-anchored BLOCKED and
+// Codex-Cloud-setup-prompt checks above -- is that phrase from its first character.
+const ELLIPTICAL_REFUSAL_PATTERN =
+  /^(?:insufficient|no|lack of|missing)\s+(?:write |repository |branch )?(?:permission|access)\b|^not (?:permitted|authorized)\b/i;
 
 // Stage 2 audit finding on issue #141 (LDL#135's own correction cycle): a Codex Cloud
 // environment misconfiguration produces this exact reply — "To use Codex here, create an
@@ -152,7 +172,14 @@ export function isGenuineResponse(bodyExcerpt) {
   const normalized = stripLeadingMarkdownWrapper(bodyExcerpt ?? "");
   if (isCodexCloudSetupPrompt(normalized)) return false;
   if (BLOCKED_STATUS_PATTERN.test(normalized)) return false;
-  if (REFUSED_MUTATION_ATTEMPT_PATTERN.test(normalized)) return false;
+  if (ELLIPTICAL_REFUSAL_PATTERN.test(normalized)) return false;
+  if (
+    PRONOUN_PATTERN.test(normalized) &&
+    ATTEMPT_CUE_PATTERN.test(normalized) &&
+    PERMISSION_LACK_PATTERN.test(normalized)
+  ) {
+    return false;
+  }
   return true;
 }
 

@@ -141,6 +141,30 @@ test("isGenuineResponse: rejects a refusal that uses a mutation verb outside a s
   );
 });
 
+test("isGenuineResponse: rejects a refused attempt phrased with a gerund instead of an infinitive (second Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("I tried applying the fix, but I don't have write access to this repository."),
+    false,
+    "the refusal must be recognized regardless of verb form (infinitive vs. gerund), since real replies aren't guaranteed to phrase it as 'to <verb>'",
+  );
+});
+
+test("isGenuineResponse: accepts an ordinary review recommendation that happens to use 'need to' (second Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("The tests need to cover empty input."),
+    true,
+    "an ordinary unnegated 'need to <verb>' instruction is not a refusal and must not be rejected merely for containing 'need' and an infinitive",
+  );
+});
+
+test("isGenuineResponse: accepts a genuine finding describing a third party's permission requirement (second Stage 1 review round on PR #164)", () => {
+  assert.equal(
+    isGenuineResponse("The caller needs permission to read this file."),
+    true,
+    "a finding describing someone else's (not the responder's own) permission requirement, with no negation, must not be rejected",
+  );
+});
+
 test("parseArgs: reads flags and defaults the bot login", () => {
   const args = parseArgs(["--repo", "owner/repo", "--number", "50", "--head", "abc123"]);
   assert.equal(args.repo, "owner/repo");
