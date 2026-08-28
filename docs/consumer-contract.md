@@ -19,7 +19,8 @@ Reusable engine/runtime material distributed from this repository:
 
 - `.claude/skills/context-clearing/`, `local-worker/`, `model-check/`,
   `persona-maker/`, `retro/`, `script-maker/`, `sift/`, `skill-maker/`,
-  `spend/` — the operational skills the Loop dispatches;
+  `spend/`, `stage1-classifier-hardening/` — the operational skills the
+  Loop dispatches;
 - `.claude/personas/audit-verdict-extractor.md` — the reusable Stage 2
   verdict-extraction persona;
 - `tools/local-worker/` — the local-LLM delegation adapter;
