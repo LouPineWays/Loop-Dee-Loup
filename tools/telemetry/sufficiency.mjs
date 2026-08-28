@@ -74,20 +74,23 @@ export const CLAIM_REQUIREMENTS = {
   },
 };
 
-function getPath(obj, dottedPath) {
+// Exported so tools/telemetry/coverage.mjs (issue #199's telemetry-battery aggregation)
+// reads the same field-presence rule this gate uses, rather than re-deriving its own.
+export function getPath(obj, dottedPath) {
   return dottedPath.split(".").reduce((acc, key) => (acc == null ? acc : acc[key]), obj);
 }
 
 // An empty array or empty object is still a real, measured "nothing happened" fact (e.g.
 // zero compactions) — only null/undefined means the mechanism never produced this field.
-function isPresent(value) {
+export function isPresent(value) {
   if (value === null || value === undefined) return false;
   if (Array.isArray(value)) return true;
   if (typeof value === "object") return Object.keys(value).length > 0;
   return true;
 }
 
-function isPositiveNumber(value) {
+// Exported for the same reason as getPath/isPresent above.
+export function isPositiveNumber(value) {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
