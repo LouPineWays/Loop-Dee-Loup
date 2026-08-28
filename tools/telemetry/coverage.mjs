@@ -31,24 +31,44 @@
 //
 // Tests: node --test tools/telemetry/coverage.test.mjs
 // Usage:
-//   node tools/telemetry/coverage.mjs [--sample <n> | --since <iso-timestamp>]
-//                                      [--exclude-session <id>] [--session <id>]... [--json]
-//     Default (no prior battery run): the <n> (default 10) most recently modified session
-//     logs in .claude/telemetry/sessions/ ($LDL_TELEMETRY_DIR override honored via
-//     collect.mjs). Pass --since <iso-timestamp> (the previous run's recorded "as of"
-//     cutoff, see docs/telemetry-battery-log.md) once one exists, to sample only sessions
-//     strictly newer than that run — the mechanism the telemetry-battery skill's noise/
-//     regression handling needs to tell a persistent gap from the same stale evidence
-//     being re-counted across overlapping weekly samples. Pass --exclude-session <id> with
-//     the invoking session's own id (when known) so a still-running battery session, which
-//     necessarily has no SessionEnd/whole-session measurement yet, never injects a
-//     guaranteed partial/unavailable result into its own sample (Stage 1 review finding on
-//     PR #203). Pass one or more explicit --session <id> to name a sample directly instead
-//     of auto-selecting one; each named id must have a real session log, or the command
-//     fails loudly rather than silently treating a typo as a session with no evidence at
-//     all (also a Stage 1 review finding on PR #203).
+//   node tools/telemetry/coverage.mjs [--all | --sample <n> | --since <iso-timestamp>]
+//                                      [--exclude-session <id>]... [--exclude-ids-file <path>]
+//                                      [--record-ids <path>] [--session <id>]... [--json]
+//
+//     The telemetry-battery skill's recommended weekly invocation is:
+//       --all --exclude-ids-file <path> --exclude-session <this session's id, if known>
+//     `--all` selects every session not already excluded, regardless of mtime — the
+//     correctness of "not already excluded" comes entirely from --exclude-ids-file (a
+//     durable JSON array of already-sampled ids, growing via --record-ids — see below),
+//     never from mtime. Do NOT pass --record-ids on this same invocation: record ids only
+//     after the battery's result row has been durably written (e.g. appended to
+//     docs/telemetry-battery-log.md), by re-invoking with the exact ids this run reported,
+//     e.g. `--session <id1> --session <id2> ... --record-ids <path>`. Recording before the
+//     result is durable would let an interrupted run silently exclude sessions from every
+//     future battery despite no record of their evidence existing anywhere (Stage 1 review
+//     finding on PR #205).
+//
+//     --sample <n> (default 10, when neither --all nor --since is given) and --since
+//     <iso-timestamp> both narrow the candidate set by mtime instead — useful for one-off
+//     inspection, or once session history grows large enough that scanning all of it is
+//     genuinely costly, but neither is a disjointness guarantee: a resumed or still-running
+//     session's file keeps getting touched, so its mtime can cross a --since cutoff again
+//     even though it was already counted (Stage 2 audit finding on PR #203), and relying on
+//     an advancing cutoff can permanently drop a session that was only ever temporarily
+//     excluded, never recorded (Stage 1 review finding on PR #205) — --all sidesteps both
+//     failure modes by not filtering on mtime at all. Pass --exclude-session <id>
+//     (repeatable) with the invoking session's own id (when known) so a still-running
+//     battery session, which necessarily has no SessionEnd/whole-session measurement yet,
+//     never injects a guaranteed partial/unavailable result into its own sample — and,
+//     unlike --exclude-ids-file, this exclusion is intentionally not durable: the session
+//     stays eligible for a later run once it completes (Stage 1 review finding on PR #203).
+//     Pass one or more explicit --session <id> to name a sample directly instead of
+//     auto-selecting one (this is also how a deferred --record-ids call names exactly which
+//     ids to append); each named id must have a real session log, or the command fails
+//     loudly rather than silently treating a typo as a session with no evidence at all
+//     (Stage 1 review finding on PR #203).
 
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { SESSIONS_DIR } from "./collect.mjs";
@@ -150,23 +170,82 @@ function listSessionFiles(dir) {
     .map((name) => ({ id: name.replace(/\.jsonl$/, ""), mtimeMs: statSync(join(dir, name)).mtimeMs }));
 }
 
-export function listRecentSessionIds(limit, excludeSessionId = null, dir = SESSIONS_DIR) {
+// excludeIds: an array/Set of session ids to omit regardless of mtime. `--since`/mtime
+// alone cannot guarantee a session is genuinely new: a resumed or still-running session's
+// file keeps getting touched (its own SessionStart/hook writes advance its mtime), so it
+// can cross a previous run's `--since` cutoff again even though it was already sampled, or
+// was excluded that run precisely because it was still live (Stage 2 audit finding on PR
+// #203 — the exact case demonstrated by this very repository's own live battery session,
+// whose mtime kept advancing well past the cutoff its own excluded run recorded). Passing
+// the durable id list from `--exclude-ids-file` (see resolveSessionIds/writeIdsFile below)
+// is what actually guarantees two runs' samples are disjoint; `--since` only narrows how
+// much history gets scanned, it does not by itself prove nothing was already counted.
+export function listRecentSessionIds(limit, excludeIds = [], dir = SESSIONS_DIR) {
+  const excluded = new Set(excludeIds);
   return listSessionFiles(dir)
-    .filter((entry) => entry.id !== excludeSessionId)
+    .filter((entry) => !excluded.has(entry.id))
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
     .slice(0, limit)
     .map((entry) => entry.id);
 }
 
-export function listSessionIdsSince(sinceMs, excludeSessionId = null, dir = SESSIONS_DIR) {
+export function listSessionIdsSince(sinceMs, excludeIds = [], dir = SESSIONS_DIR) {
+  const excluded = new Set(excludeIds);
   return listSessionFiles(dir)
-    .filter((entry) => entry.id !== excludeSessionId && entry.mtimeMs > sinceMs)
+    .filter((entry) => !excluded.has(entry.id) && entry.mtimeMs > sinceMs)
+    .sort((a, b) => a.mtimeMs - b.mtimeMs)
+    .map((entry) => entry.id);
+}
+
+// Every session not already excluded, regardless of mtime — the battery's actual default
+// (see --all below). A session deliberately left out of --exclude-ids-file this run (e.g.
+// the invoking session itself, via --exclude-session) stays eligible for a future run no
+// matter what its mtime does in between: --since's cutoff-based filtering could otherwise
+// permanently drop a session whose mtime happened to be exceeded by some sibling session's
+// even-later write in an intervening run, if that session then stops advancing before ever
+// crossing the new cutoff (e.g. it never got a SessionEnd write — a documented structural
+// occurrence, see tools/telemetry/README.md) — found in Stage 1 review of PR #205.
+export function listAllSessionIds(excludeIds = [], dir = SESSIONS_DIR) {
+  const excluded = new Set(excludeIds);
+  return listSessionFiles(dir)
+    .filter((entry) => !excluded.has(entry.id))
     .sort((a, b) => a.mtimeMs - b.mtimeMs)
     .map((entry) => entry.id);
 }
 
 function sessionFileExists(sessionId, dir) {
   return existsSync(join(dir, `${sessionId}.jsonl`));
+}
+
+// Reads the durable JSON array of session ids a prior run already counted (see
+// --exclude-ids-file/--record-ids). A genuinely missing file means "no history yet" — the
+// very first battery run has nothing to exclude — and returns []. Anything else that fails
+// to parse as a JSON array (truncated write, merge-conflict markers, corrupted content) is
+// a real problem, not an empty-history case: silently treating it as [] would let
+// writeIdsFile() below overwrite the damaged file with only the newly selected ids,
+// permanently losing the rest of the disjointness history without any error (Stage 1
+// review finding on PR #205) — so this throws instead, the same "fail loudly on invalid
+// state" rule resolveSessionIds already applies to a bad --sample/--since/--session.
+// Exported so tests exercise this exact implementation rather than a parallel copy of it.
+export function readIdsFile(path) {
+  if (!existsSync(path)) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    throw new Error(`${path}: exists but is not valid JSON (${err.message}) — fix or remove it rather than losing its exclusion history silently`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${path}: exists but does not contain a JSON array — fix or remove it rather than losing its exclusion history silently`);
+  }
+  return parsed;
+}
+
+// Merges newIds into whatever is already recorded at path (deduped, sorted for a stable
+// diff), so this file only ever grows and never loses a previously-recorded id.
+export function writeIdsFile(path, newIds) {
+  const merged = [...new Set([...readIdsFile(path), ...newIds])].sort();
+  writeFileSync(path, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
 }
 
 // The "as of" cutoff a subsequent run should pass as --since, so next week's sample never
@@ -212,7 +291,7 @@ function renderReport(report, asOf) {
 }
 
 function parseArgs(argv) {
-  const args = { sample: null, since: null, sessions: [], excludeSession: null, json: false };
+  const args = { sample: null, since: null, all: false, sessions: [], excludeSessions: [], excludeIdsFile: null, recordIds: null, json: false };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     if (flag === "--sample") {
@@ -221,11 +300,19 @@ function parseArgs(argv) {
     } else if (flag === "--since") {
       args.since = argv[i + 1];
       i += 1;
+    } else if (flag === "--all") {
+      args.all = true;
     } else if (flag === "--session") {
       args.sessions.push(argv[i + 1]);
       i += 1;
     } else if (flag === "--exclude-session") {
-      args.excludeSession = argv[i + 1];
+      args.excludeSessions.push(argv[i + 1]);
+      i += 1;
+    } else if (flag === "--exclude-ids-file") {
+      args.excludeIdsFile = argv[i + 1];
+      i += 1;
+    } else if (flag === "--record-ids") {
+      args.recordIds = argv[i + 1];
       i += 1;
     } else if (flag === "--json") {
       args.json = true;
@@ -248,14 +335,18 @@ export function resolveSessionIds(args, dir = SESSIONS_DIR) {
     }
     return args.sessions;
   }
+  const excludeIds = [...args.excludeSessions, ...(args.excludeIdsFile ? readIdsFile(args.excludeIdsFile) : [])];
+  if (args.all) {
+    return listAllSessionIds(excludeIds, dir);
+  }
   if (args.since !== null) {
     const sinceMs = Date.parse(args.since);
     if (Number.isNaN(sinceMs)) throw new Error(`--since ${args.since}: not a valid ISO timestamp`);
-    return listSessionIdsSince(sinceMs, args.excludeSession, dir);
+    return listSessionIdsSince(sinceMs, excludeIds, dir);
   }
   const sample = args.sample === null ? 10 : Number(args.sample);
   if (!Number.isInteger(sample) || sample <= 0) throw new Error(`--sample ${args.sample}: must be a positive integer`);
-  return listRecentSessionIds(sample, args.excludeSession, dir);
+  return listRecentSessionIds(sample, excludeIds, dir);
 }
 
 function main() {
@@ -272,6 +363,10 @@ function main() {
   const records = sessionIds.map((id) => reduceSession(id));
   const report = buildCoverageReport(records);
   const asOf = latestMtimeIso(sessionIds, SESSIONS_DIR);
+  // Recorded after resolving the sample (never before), and merged with whatever was
+  // already there: this is what makes a *future* run's --exclude-ids-file exclusion
+  // durable and cumulative, independent of any session's mtime moving again afterward.
+  if (args.recordIds) writeIdsFile(args.recordIds, sessionIds);
   if (args.json) {
     console.log(JSON.stringify({ sessionIds, asOf, ...report }, null, 2));
   } else {
