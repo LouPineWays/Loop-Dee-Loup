@@ -44,7 +44,7 @@ const SOURCE_ONLY_START = "<!-- ldl:source-only:start -->";
 const SOURCE_ONLY_END = "<!-- ldl:source-only:end -->";
 
 // The reusable engine/runtime material this repository distributes. Everything else in
-// Loop-Dee-Loup (its own docs, its own Burn Order, its own dogfooding history) is
+// Loop-Dee-Loup (its own docs, its own priority horizons, its own dogfooding history) is
 // development state, not consumer-installable machinery — see docs/consumer-contract.md.
 // AGENTS.md is handled separately in run(), since its destination depends on consumer
 // repository state, not source repository state.
@@ -355,7 +355,7 @@ export function parseArgs(argv) {
 }
 
 // Strips every <!-- ldl:source-only:start/end --> block (Loop-Dee-Loup's own instance
-// state — its own Burn Order, its own prototype trial) out of Loop-Dee-Loup's own
+// state — its own priority horizons, its own prototype trial) out of Loop-Dee-Loup's own
 // AGENTS.md, leaving the generic operating contract a consumer repository actually needs.
 // Pure string transform so it is trivially unit-testable without touching the filesystem.
 export function deriveConsumerAgents(sourceText) {

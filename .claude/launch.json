@@ -1,11 +1,4 @@
 {
   "version": "0.0.1",
-  "configurations": [
-    {
-      "name": "burn-order",
-      "runtimeExecutable": "node",
-      "runtimeArgs": ["tools/burn-order/server.mjs"],
-      "port": 4137
-    }
-  ]
+  "configurations": []
 }

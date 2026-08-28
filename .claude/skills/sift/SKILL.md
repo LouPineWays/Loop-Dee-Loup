@@ -18,4 +18,4 @@ Evaluate:
 
 Return one verdict: ADOPT, ADAPT, REIMPLEMENT, DEFER, or REJECT. Name the smallest useful piece, required obligations, destination authority, validation method, and what must not be imported.
 
-Do not create backlog work from speculative value. Only a founder-accepted, independently valuable outcome may enter the Burn Order.
+Do not create backlog work from speculative value. Only a founder-accepted, independently valuable outcome may become backlog work — a priority-horizon-labeled GitHub Issue, or, in a target repository, that repository's own Burn Order.

@@ -1,5 +1,5 @@
 name: Idea intake
-description: Log something you want added to Loop-Dee-Loup without free-form writing. Gets ironed out and folded into the Loop-Dee-Loup Burn Order.
+description: Log something you want added to Loop-Dee-Loup without free-form writing. Gets ironed out into a priority-horizon-labeled GitHub Issue.
 title: "[Idea] "
 labels: ["idea-intake"]
 body:

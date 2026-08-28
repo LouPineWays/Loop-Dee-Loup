@@ -1,0 +1,36 @@
+name: Priority labels
+
+# Loop-Dee-Loup's own backlog lives on GitHub Issues as priority:now / priority:soon /
+# priority:later / priority:wishes labels rather than a separate ordinal file (see
+# docs/priority-horizons.md, which replaced the retired Burn Order in issue #192). GitHub
+# has no native mutually-exclusive label group, so this workflow is the "obvious detection"
+# mechanism: it fires whenever a label lands on an Issue and fails loudly if that Issue now
+# carries more than one priority:* label. workflow_dispatch allows an on-demand full scan.
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch: {}
+
+concurrency:
+  group: priority-labels-${{ github.event.issue.number || 'manual' }}
+  cancel-in-progress: true
+
+permissions:
+  issues: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for conflicting priority-horizon labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${{ github.event.issue.number }}" ]; then
+            node tools/check-priority-labels.mjs "${{ github.event.issue.number }}"
+          else
+            node tools/check-priority-labels.mjs
+          fi

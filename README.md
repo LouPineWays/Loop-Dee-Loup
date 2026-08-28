@@ -136,7 +136,7 @@ After I return it, the agent:
 
 1. records the settled answers in the parent snapshot;
 2. converts the critical-path outcome into executable slices;
-3. routes accepted independent outcomes to the correct Burn Order;
+3. routes accepted independent outcomes to the correct backlog — a target repository's own Burn Order, or a priority-horizon label on a Loop-Dee-Loup Issue;
 4. drops rejected options instead of turning every idea into backlog work;
 5. creates another form only if my answers exposed a new founder-level blocker that couldn't reasonably have been asked the first time.
 

@@ -21,7 +21,7 @@ When the accepted outcome does not yet support an implementable vertical slice:
 3. include recommendations, tradeoffs, suggested defaults, per-question comments, and a general comments field;
 4. accept the completed form as one durable response;
 5. write settled decisions into the parent snapshot;
-6. add only founder-accepted independent outcomes as Burn Order candidates;
+6. add only founder-accepted independent outcomes as backlog candidates;
 7. generate another form only for newly exposed critical blockers;
 8. diagnose and redirect the critical path before a third form if two completed forms still yield no implementable slice.
 
