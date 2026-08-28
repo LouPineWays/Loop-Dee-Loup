@@ -177,14 +177,20 @@ test("parseWorkIssueRef: returns null when the field is absent", () => {
   assert.equal(parseWorkIssueRef("no work issue field"), null);
 });
 
-test("parseWorkIssueRef: reads GitHub's own blank-optional-field marker as the explicit no-work-issue state (issue #190)", () => {
-  assert.equal(parseWorkIssueRef("### Work issue\n\n_No response_\n"), "none");
-});
-
-test("parseWorkIssueRef: reads a hand-typed 'none'/'n/a' the same way, case-insensitively", () => {
+test("parseWorkIssueRef: reads a deliberately typed 'none'/'n/a' as the explicit no-work-issue state (issue #190), case-insensitively", () => {
   assert.equal(parseWorkIssueRef("### Work issue\n\nnone\n"), "none");
   assert.equal(parseWorkIssueRef("### Work issue\n\nNone\n"), "none");
   assert.equal(parseWorkIssueRef("### Work issue\n\nN/A\n"), "none");
+});
+
+test("parseWorkIssueRef: does NOT treat GitHub's own '_No response_' marker as the no-work-issue sentinel (Stage 1 review finding on PR #197)", () => {
+  // The Work issue field is required precisely so this marker can never legitimately appear;
+  // if it somehow does anyway, it must fail closed as malformed (null), not be silently read as
+  // an intentional no-work-issue declaration — otherwise an operator who simply forgot to fill
+  // in a real work issue on an audit that has one would have that issue's premature-closure
+  // protection silently stripped, since a forgotten field and a deliberate declaration would
+  // render identically.
+  assert.equal(parseWorkIssueRef("### Work issue\n\n_No response_\n"), null);
 });
 
 // -- checkMergeReady ---------------------------------------------------------------------
@@ -356,6 +362,19 @@ test("checkPostAudit: exits 1 when the audit issue has no Work issue field", asy
   assert.match(result.message, /Work issue/);
 });
 
+test("checkPostAudit: exits 1 (operational error, not ACCEPTED_NO_WORK_ISSUE) when Work issue renders GitHub's '_No response_' marker (Stage 1 review finding on PR #197)", async () => {
+  // Regression test for the exact scenario the reviewer flagged against an earlier,
+  // optional-field version of the template: an audit that DOES gate a real work issue, where
+  // the operator simply forgot to fill in the field. It must not be silently accepted as "no
+  // work issue applies" — that would strip the real work issue's premature-closure protection.
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    { ghIssueViewImpl: async () => ({ body: "### Work issue\n\n_No response_\n\n### Verdict\n\nCLEAN\n", state: "OPEN" }) },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /Work issue/);
+});
+
 test("checkPostAudit: OK — work issue open, verdict PENDING (verification #8)", async () => {
   const result = await checkPostAudit(
     { repo: "owner/repo", "audit-issue": 160 },
@@ -467,7 +486,7 @@ test("checkPostAudit: PREMATURE_CLOSURE — work issue closed and verdict is NOT
 // -- checkPostAudit: explicit no-work-issue state (issue #190) -------------------------
 
 function noWorkIssueAuditBody({ verdict = "PENDING" }) {
-  return `### Work issue\n\n_No response_\n\n### Verdict\n\n${verdict}\n`;
+  return `### Work issue\n\nnone\n\n### Verdict\n\n${verdict}\n`;
 }
 
 test("checkPostAudit: OK — no work issue, verdict PENDING; no implementation issue is fetched", async () => {

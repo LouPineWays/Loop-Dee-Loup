@@ -42,13 +42,13 @@
 //
 // Not every review-worthy PR has a gated work issue to protect: LDL's own recurring
 // consumer-sync PRs (issue #190) are review-worthy but have no per-update implementation
-// issue. `--issue none` (merge-ready) and a blank/"_No response_" `Work issue` template
-// field (post-audit) are the explicit no-work-issue sentinels — deliberately distinct from
-// an omitted/malformed value, which still fails closed as an operational error, so a forgotten
-// argument or a stripped-then-corrupted template field can never silently pass as "no work
-// issue applies." In that explicit state, merge-ready and post-audit still run — Stage 1,
-// Stage 2, CI, and the bounded-reviewer-invocation rules are unaffected — they only skip the
-// closing-reference/premature-closure checks that have no issue to protect.
+// issue. `--issue none` (merge-ready) and the literal typed word "none" in the (still
+// required) `Work issue` template field (post-audit) are the explicit no-work-issue
+// sentinels — deliberately distinct from an omitted/malformed value, which still fails closed
+// as an operational error, so a forgotten argument or a forgotten template field can never
+// silently pass as "no work issue applies." In that explicit state, merge-ready and post-audit
+// still run — Stage 1, Stage 2, CI, and the bounded-reviewer-invocation rules are unaffected —
+// they only skip the closing-reference/premature-closure checks that have no issue to protect.
 //
 // Usage:
 //   node tools/review-watch/lifecycle-gate.mjs merge-ready --repo OWNER/REPO --pr 50 --issue 151
@@ -101,22 +101,26 @@ export function normalizeIssueNumber(raw) {
 
 // Pure. True only for the literal, case-insensitive sentinel "none" — `checkMergeReady`'s
 // explicit no-work-issue declaration for `--issue` (issue #190; the template's `Work issue`
-// field has its own, separately-matched marker set below, since GitHub renders a blank
-// optional field as "_No response_" rather than the literal text "none"). Deliberately narrow:
-// an omitted, empty, or merely unparseable value must keep failing closed as an operational
-// error rather than being silently treated as "no work issue applies," so this never matches
+// field has its own, separately-matched marker set below). Deliberately narrow: an omitted,
+// empty, or merely unparseable value must keep failing closed as an operational error rather
+// than being silently treated as "no work issue applies," so this never matches
 // undefined/null/"" the way normalizeIssueNumber's callers might expect a "no value" case to.
 export function isNoWorkIssueSentinel(raw) {
   return typeof raw === "string" && raw.trim().toLowerCase() === "none";
 }
 
-// Pure. The literal marker GitHub renders for an unanswered *optional* issue-form field
-// ("_No response_"), plus the free-text sentinels a human might type by hand ("none", "n/a")
-// when filing or editing the audit-control issue outside the form UI. Matching this instead of
-// merely "the heading is present with blank content" is what makes the no-work-issue state
-// GitHub's own explicit "answered: nothing" marker rather than an inferred absence (issue
-// #190's requirement to distinguish "not applicable" from "missing by mistake").
-const NO_WORK_ISSUE_FIELD_MARKERS = new Set(["_no response_", "none", "n/a"]);
+// Pure. The free-text sentinels a human deliberately types into the (required — see
+// .github/ISSUE_TEMPLATE/audit-control-issue.yml) "Work issue" field to declare no
+// implementation issue applies. Deliberately does NOT include GitHub's own "_No response_"
+// marker for a left-blank *optional* field: an earlier version of this template made the field
+// optional so a blank render of that exact marker could stand for the sentinel, but that made a
+// deliberate no-work-issue declaration indistinguishable from an operator simply forgetting to
+// fill in a real work issue on an audit that has one — both render identically, silently
+// stripping that issue's premature-closure protection (Stage 1 review finding on PR #197).
+// Keeping the field required and requiring an explicit typed word closes that gap: an omission
+// now fails GitHub's own form validation instead of reaching this parser as ambiguous blank
+// text.
+const NO_WORK_ISSUE_FIELD_MARKERS = new Set(["none", "n/a"]);
 
 // GitHub's own closing-keyword set (close/closes/closed, fix/fixes/fixed, resolve/resolves/
 // resolved), case-insensitive, optionally followed by a colon, before "#N" or GitHub's
@@ -198,9 +202,13 @@ export function parseStage2Verdict(body) {
 // than inferring it from the merged PR's non-closing reference, which is free-text prose and
 // not a structured, machine-checkable source. Accepts "#151", "151", or a full issue URL
 // ending in the number. Returns the literal string "none" for the explicit no-work-issue
-// state (issue #190) — GitHub's own "_No response_" marker for a left-blank optional field, or
-// a hand-typed "none"/"n/a" — kept distinct from `null`, which still means "the heading is
-// missing or its content doesn't parse," an operational error rather than a declared state.
+// state (issue #190) — a deliberately typed "none"/"n/a" in the (required) field — kept
+// distinct from `null`, which still means "the heading is missing or its content doesn't
+// parse," an operational error rather than a declared state. Does not treat GitHub's own
+// "_No response_" marker for an unanswered field as this sentinel: the field is required
+// precisely so that marker can never legitimately appear here (Stage 1 review finding on PR
+// #197 against an earlier, optional-field version of this template) — if it somehow does, it
+// falls through to the unparseable-content branch below and reports as `null`, not "none".
 export function parseWorkIssueRef(body) {
   const value = parseFormField(body, "Work issue");
   if (value === null) return null;
@@ -342,10 +350,9 @@ export async function checkPostAudit(
     return {
       exitCode: 1,
       message:
-        `Could not find a "Work issue" field in audit issue ${repo}#${auditIssue}. The audit-control-issue ` +
-        `template's Work issue field must name the implementation issue this audit gates, or explicitly ` +
-        `declare no work issue applies (leave the field blank so GitHub renders "_No response_", or type ` +
-        `"none").`,
+        `Could not find a valid "Work issue" field in audit issue ${repo}#${auditIssue}. The audit-control-` +
+        `issue template's Work issue field must name the implementation issue this audit gates, or ` +
+        `explicitly type "none" to declare no work issue applies.`,
     };
   }
   // Explicit no-work-issue state (issue #190): distinct from workIssueRef === null above, which
