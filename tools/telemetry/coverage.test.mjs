@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { reduceEvents } from "./reduce.mjs";
 import { CLAIM_REQUIREMENTS } from "./sufficiency.mjs";
-import { buildCoverageReport, decisionCriticalFields, listRecentSessionIds, listSessionIdsSince, resolveSessionIds, readIdsFile, writeIdsFile } from "./coverage.mjs";
+import { buildCoverageReport, decisionCriticalFields, listRecentSessionIds, listSessionIdsSince, listAllSessionIds, resolveSessionIds, readIdsFile, writeIdsFile } from "./coverage.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = join(HERE, "fixtures");
@@ -250,5 +250,64 @@ test("regression (Stage 2 audit, PR #203): writeIdsFile merges with, rather than
     writeIdsFile(idsFile, ["previously-recorded"]);
     writeIdsFile(idsFile, ["new-session"]);
     assert.deepEqual(readIdsFile(idsFile).sort(), ["new-session", "previously-recorded"]);
+  });
+});
+
+test("regression (Stage 1 review, PR #205): readIdsFile throws on malformed existing content instead of silently treating it as empty history", () => {
+  withTempSessionsDir((sessionsDir) => {
+    const idsFile = join(sessionsDir, "recorded-ids.json");
+    writeFileSync(idsFile, "{not valid json", "utf8");
+    assert.throws(() => readIdsFile(idsFile), /not valid JSON/);
+    writeFileSync(idsFile, JSON.stringify({ not: "an array" }), "utf8");
+    assert.throws(() => readIdsFile(idsFile), /does not contain a JSON array/);
+  });
+});
+
+test("regression (Stage 1 review, PR #205): a malformed exclude-ids-file fails resolveSessionIds loudly rather than silently discarding its history", () => {
+  withTempSessionsDir((sessionsDir) => {
+    const idsFile = join(sessionsDir, "recorded-ids.json");
+    writeFileSync(idsFile, "not json at all", "utf8");
+    assert.throws(
+      () => resolveSessionIds({ sessions: [], since: null, sample: "10", all: false, excludeSessions: [], excludeIdsFile: idsFile }, sessionsDir),
+      /not valid JSON/,
+    );
+  });
+});
+
+test("readIdsFile returns [] only for a genuinely missing file, not a present-but-empty one", () => {
+  withTempSessionsDir((sessionsDir) => {
+    const missing = join(sessionsDir, "does-not-exist.json");
+    assert.deepEqual(readIdsFile(missing), []);
+    const present = join(sessionsDir, "present.json");
+    writeFileSync(present, "[]", "utf8");
+    assert.deepEqual(readIdsFile(present), []);
+  });
+});
+
+test("regression (Stage 1 review, PR #205): --all selects every non-excluded session regardless of mtime, so a temporarily-excluded session stays eligible later", () => {
+  withTempSessionsDir((sessionsDir) => {
+    // The exact scenario the finding describes: an excluded live session's mtime is older
+    // than another sampled session's, so a --since-based cutoff would advance past it and
+    // could permanently drop it later if it never gets touched again. --all never looks at
+    // mtime at all, so this can't happen.
+    writeSession(sessionsDir, "excluded-live-session", Date.now() - 50000);
+    writeSession(sessionsDir, "later-sampled-session", Date.now());
+    const firstRun = listAllSessionIds(["excluded-live-session"], sessionsDir);
+    assert.deepEqual(firstRun, ["later-sampled-session"]);
+    // The excluded session is never touched again (e.g. it ended without a SessionEnd
+    // write) and is not recorded anywhere — a later run must still see it as eligible.
+    const secondRun = listAllSessionIds([], sessionsDir);
+    assert.ok(secondRun.includes("excluded-live-session"));
+  });
+});
+
+test("resolveSessionIds honors --all over --sample/--since when set", () => {
+  withTempSessionsDir((sessionsDir) => {
+    writeSession(sessionsDir, "only-session", Date.now() - 1000000);
+    const ids = resolveSessionIds(
+      { sessions: [], since: null, sample: "1", all: true, excludeSessions: [], excludeIdsFile: null },
+      sessionsDir,
+    );
+    assert.deepEqual(ids, ["only-session"]);
   });
 });

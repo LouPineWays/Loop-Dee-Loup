@@ -16,34 +16,36 @@ happened since, say so and stop rather than running again.
 Run:
 
 ```
-node tools/telemetry/coverage.mjs --since <prior As of cutoff, if a prior row exists>
+node tools/telemetry/coverage.mjs --all
     --exclude-ids-file docs/telemetry-battery-log.sessions.json
-    --record-ids docs/telemetry-battery-log.sessions.json
     [--exclude-session <this session's id, if known>]
     --json
 ```
 
-Always pass the same `docs/telemetry-battery-log.sessions.json` path to both
-`--exclude-ids-file` and `--record-ids` — this durable, git-tracked JSON array of
-already-sampled session ids is what actually guarantees two runs never double-count the
-same session. `--since` alone is not sufficient for that: a resumed or still-running
-session's file keeps getting touched, so its mtime can cross a prior cutoff again even
-though it was already counted (this was found, and demonstrated by the battery's own live
-session, in Stage 2 review of PR #203). `--since` still narrows how much history gets
-scanned, so keep passing the prior row's **As of** value when one exists; omit it (and pass
-`--sample 15` instead) on the very first run, when `docs/telemetry-battery-log.sessions.json`
-does not yet exist.
+(On the very first run, `docs/telemetry-battery-log.sessions.json` does not exist yet —
+`--exclude-ids-file` against a missing file is the same as excluding nothing.) Do **not**
+pass `--record-ids` on this invocation — recording happens later, in Step 4, only once the
+result is durably written. `--all` scans every session not already excluded, regardless of
+mtime; `docs/telemetry-battery-log.sessions.json` (durable, git-tracked, growing only via
+`--record-ids`) is what actually guarantees two runs never double-count the same session.
+Neither `--since` nor `--sample` (mtime-based alternatives `coverage.mjs` also supports) is
+a disjointness guarantee: a resumed or still-running session's file keeps getting touched,
+so its mtime can cross a cutoff again even though it was already counted, and an advancing
+cutoff can permanently drop a session that was only ever temporarily excluded (never
+recorded) if it happens to stop being touched before catching up to a later cutoff (both
+found — the first demonstrated by the battery's own live session — in review of PR #203/
+#205). `--all` has neither failure mode because it never filters on mtime.
 
-If the resulting sample is empty, there is not yet enough new activity — say so and stop
-without recording a zero-evidence row (and without running `--record-ids`, so an empty run
-doesn't need any cleanup). Pass `--exclude-session` with this invoking session's own session
-id when it is knowable (e.g. from the running session's own telemetry log); a still-running
-session has no `SessionEnd`/whole-session measurement yet and, left in the sample, would
-inject a guaranteed partial/unavailable result purely from still being open — and unlike a
-completed session, excluding it here is deliberately not durable (do not add it to
-`--record-ids`'s file by hand): once it completes, a later run should be free to sample it
-normally. If the id can't be determined, note that limitation in the run's log row rather
-than silently accepting a skewed sample.
+If the resulting sample is empty, there is not yet enough new activity — say so and stop;
+there is nothing to record. Pass `--exclude-session` with this invoking session's own
+session id when it is knowable (e.g. from the running session's own telemetry log); a
+still-running session has no `SessionEnd`/whole-session measurement yet and, left in the
+sample, would inject a guaranteed partial/unavailable result purely from still being open.
+This exclusion is intentionally not durable (never add it to
+`docs/telemetry-battery-log.sessions.json` by hand): once the session completes, a later
+run's `--all` scan picks it up normally, with no cutoff to catch up to. If the id can't be
+determined, note that limitation in the run's log row rather than silently accepting a
+skewed sample.
 
 This aggregates `sufficiency.mjs`'s existing per-claim evidence requirements —
 `CLAIM_REQUIREMENTS`, the real `/spend` evidence contract — across the sample, applying the
@@ -105,18 +107,35 @@ overall `Telemetry verdict` only to decide whether an *overall* CLEAN summary is
 A `SUFFICIENT` / `CLEAN` / `NO ACTIONABLE FINDINGS` run is a successful result, not a
 prompt to keep searching for a finding. Stop there.
 
-## Step 4 — record the run and check for a trend
+## Step 4 — record the run, then record the ids, then check for a trend
 
-Append one row to `docs/telemetry-battery-log.md`: date, sample size, the sample's **As of**
-cutoff (`coverage.mjs`'s printed value — pass this as the next run's `--since`), coverage
-counts, the three verdicts, and a one-line note.
+First, append one row to `docs/telemetry-battery-log.md`: date, sample size, the sample's
+**As of** value (`coverage.mjs`'s printed value — informational only, not an input to a
+future run), coverage counts, the three verdicts, and a one-line note. `docs/
+telemetry-battery-log.md` is append-only: never edit or rewrite a prior row, even to add
+detail a later mechanism change makes possible — add a new row or a dated note below the
+table instead.
+
+Only once that row is durably written, record this run's sample as counted:
+
+```
+node tools/telemetry/coverage.mjs --session <id1> --session <id2> ... \
+    --record-ids docs/telemetry-battery-log.sessions.json --json
+```
+
+using the exact `sessionIds` array Step 1's JSON output reported (never the excluded
+invoking session's own id — see Step 1). Doing this only after the row exists means an
+interrupted run (crash, context loss, founder interrupt) between Step 1 and this point
+leaves nothing recorded, so a later run's `--all` scan safely re-samples the same sessions
+instead of silently excluding evidence no durable row ever accounted for (Stage 1 review
+finding on PR #205).
 
 Before opening a new issue over a gap or regression, check the log's immediately preceding
-row. Because Step 1's `--exclude-ids-file`/`--record-ids` pair guarantees this run's sample
-shares no session id with any prior run's, a repeated gap across two consecutive rows is
-genuinely two independent confirmations, not the same stale evidence (or the same
-resumed/still-running session) counted twice — treat that repetition (or a field that
-regressed from `captured` to `partial`/`unavailable`) as a persistent trend worth a
-follow-up issue. A gap appearing only in the first-ever run (no prior row to compare
+row. Because every run's sample is guaranteed disjoint from every prior run's (Step 1's
+`--exclude-ids-file`, backed by this step's `--record-ids`), a repeated gap across two
+consecutive rows is genuinely two independent confirmations, not the same stale evidence
+(or the same resumed/still-running session) counted twice — treat that repetition (or a
+field that regressed from `captured` to `partial`/`unavailable`) as a persistent trend worth
+a follow-up issue. A gap appearing only in the first-ever run (no prior row to compare
 against), or one that already has an open tracking issue, is not new escalation-worthy
 evidence.
