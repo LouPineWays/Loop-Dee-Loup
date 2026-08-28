@@ -41,7 +41,7 @@ Before creating a form:
 
 - General comments or constraints
 - New outcome proposals
-- Explicit permission to treat accepted independent outcomes as Burn Order candidates
+- Explicit permission to treat accepted independent outcomes as backlog candidates
 
 ## Answer routing
 
@@ -51,11 +51,11 @@ After return:
 |---|---|
 | Settled product decision | Parent snapshot |
 | Detail of the current slice | Slice contract and acceptance criteria |
-| Accepted independent future outcome | Burn Order candidate with dependency and proposed band |
+| Accepted independent future outcome | Backlog candidate: a target repository's own Burn Order entry, or a `priority:*`-labeled Loop-Dee-Loup Issue, with dependencies noted |
 | Rejected option | Minimal decision record only when needed to prevent repetition |
 | Unresolved or contradictory answer | Next consolidated form if it blocks the critical path |
 
-Do not put raw form discussion into the Burn Order. A target repository's Burn Order (e.g. Covenant's) is that repository's own prioritized backlog, not a Loop-Dee-Loup artifact, and it contains outcomes and priority, not decision transcripts. An accepted outcome about Loop-Dee-Loup itself instead goes to Loop-Dee-Loup's own Burn Order — see `docs/burn-order.md` — never to a target repository's.
+Do not put raw form discussion into the backlog. A target repository's Burn Order (e.g. Covenant's) is that repository's own prioritized backlog, not a Loop-Dee-Loup artifact, and it contains outcomes and priority, not decision transcripts. An accepted outcome about Loop-Dee-Loup itself instead becomes a `priority:*`-labeled GitHub Issue on Loop-Dee-Loup's own repository — see `docs/priority-horizons.md` — never a target repository's Burn Order.
 
 ## Round discipline
 

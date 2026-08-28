@@ -41,9 +41,9 @@ Reusable engine/runtime material distributed from this repository:
   CLAUDE.md special case" below, for the same reason as `AGENTS.md`: a
   consumer repository may already have its own `CLAUDE.md`.
 
-Nothing else in this repository is installed. In particular, `tools/burn-order/`,
-`docs/burn-order.md`, `docs/burn-order.json`, `docs/experiment-brief.md`,
-`tools/check-control-plane-paths.mjs`, this repository's own `README.md`, and
+Nothing else in this repository is installed. In particular, `docs/priority-horizons.md`,
+`docs/experiment-brief.md`, `tools/check-control-plane-paths.mjs`,
+`tools/check-priority-labels.mjs`, this repository's own `README.md`, and
 its GitHub issue/PR history are Loop-Dee-Loup's own development state, not
 reusable machinery, and are never installed into a consumer repository.
 
@@ -128,7 +128,7 @@ recorded under `skipped` if something unmanaged already occupies it.
 ## The AGENTS.md and CLAUDE.md special case
 
 Loop-Dee-Loup's own `AGENTS.md` contains a few sections specific to
-Loop-Dee-Loup's own development (its own Burn Order, its own prototype
+Loop-Dee-Loup's own development (its own priority horizons, its own prototype
 trial). Those sections are wrapped in `<!-- ldl:source-only:start -->` /
 `<!-- ldl:source-only:end -->` markers and are stripped before installation,
 so what a consumer repository receives is the generic operating contract —

@@ -79,7 +79,7 @@ After the founder returns the whole form:
 
 - normalize the answers into settled parent-snapshot decisions;
 - derive implementable vertical slices from the critical path;
-- convert only founder-accepted independent outcomes into Burn Order candidates. A target repository's Burn Order (e.g. Covenant's) is that repository's own prioritized backlog; Loop-Dee-Loup does not create or own it. Loop-Dee-Loup separately maintains its own Burn Order for items about the Loop itself — see `docs/burn-order.md`. Never merge the two;
+- convert only founder-accepted independent outcomes into backlog items. A target repository's Burn Order (e.g. Covenant's) is that repository's own prioritized backlog; Loop-Dee-Loup does not create or own it. An outcome about the Loop itself instead becomes a GitHub Issue on Loop-Dee-Loup's own repository, carrying one `priority:now`/`priority:soon`/`priority:later`/`priority:wishes` label — see `docs/priority-horizons.md`. Never merge the two;
 - record dependencies and proposed priority without duplicating the parent snapshot;
 - discard rejected options and unaccepted suggestions.
 
@@ -184,9 +184,9 @@ A parent issue body is a mutable current-state snapshot, not an append-only diar
 History may remain in comments for auditability, but executors must not normally read it.
 
 <!-- ldl:source-only:start -->
-## Loop-Dee-Loup Burn Order
+## Loop-Dee-Loup priority horizons
 
-Loop-Dee-Loup maintains its own Burn Order — a prioritized backlog of process/tooling items about the Loop itself, distinct from and never merged with any target repository's own Burn Order. Full spec, artifact location, and the idea-intake-to-Burn-Order conversion procedure are in `docs/burn-order.md`.
+Loop-Dee-Loup prioritizes its own process/tooling backlog directly on GitHub Issues — `priority:now`, `priority:soon`, `priority:later`, `priority:wishes` labels, plus native GitHub `blocked by`/`blocking` relationships — distinct from and never merged with any target repository's own backlog mechanism (e.g. Covenant's Burn Order). Full spec, label semantics, and the idea-intake-to-priority-horizon conversion procedure are in `docs/priority-horizons.md`.
 <!-- ldl:source-only:end -->
 
 ## Slice handoff

@@ -66,11 +66,11 @@ Completed answers are routed by meaning:
 
 - **Settled decision:** compress into the parent snapshot.
 - **Current vertical slice:** place in the slice contract and acceptance criteria.
-- **Accepted independent outcome:** create a candidate for the correct Burn Order — a target repository's own prioritized backlog (e.g. Covenant's) when the outcome is a product feature, or Loop-Dee-Loup's own Burn Order (`docs/burn-order.md`) when the outcome is about the Loop itself — with dependencies and proposed position. Never merge the two.
+- **Accepted independent outcome:** create the correct backlog candidate — a target repository's own prioritized backlog (e.g. Covenant's Burn Order) when the outcome is a product feature, or a `priority:*`-labeled GitHub Issue on Loop-Dee-Loup's own repository (`docs/priority-horizons.md`) when the outcome is about the Loop itself — with dependencies noted and, for Loop-Dee-Loup's own Issues, native `blocked by`/`blocking` relationships rather than an ordinal position. Never merge the two.
 - **Rejected option:** retain only if necessary to prevent the same question recurring; do not create work.
 - **Unclear answer:** include with any other newly exposed blockers in the next consolidated form.
 
-A decision is not itself a Burn Order item. Only an accepted outcome requiring independent future work belongs there.
+A decision is not itself a backlog item. Only an accepted outcome requiring independent future work belongs there.
 
 ### Multiple forms
 

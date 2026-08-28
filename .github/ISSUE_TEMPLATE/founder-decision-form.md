@@ -66,12 +66,14 @@ assignees: ""
 
 ## New outcome proposals
 
-<!-- Optional. Accepted independent outcomes may become Burn Order candidates; speculative options will not. -->
+<!-- Optional. Accepted independent outcomes may become backlog candidates; speculative options will not. -->
 
-## Burn Order authorization
+<!-- For each outcome about Loop-Dee-Loup itself, name its priority horizon (now / soon / later / wishes) here — the executor must not guess one (see docs/priority-horizons.md). Leave an outcome's horizon blank only if you want its Issue created without a priority label yet. -->
 
-<!-- A target repository's Burn Order (e.g. Covenant's) is that repository's own prioritized backlog. If this form's outcomes are about Loop-Dee-Loup itself, route them to Loop-Dee-Loup's own Burn Order (docs/burn-order.md) instead — never merge the two. -->
+## Backlog authorization
+
+<!-- A target repository's Burn Order (e.g. Covenant's) is that repository's own prioritized backlog. If this form's outcomes are about Loop-Dee-Loup itself, apply the priority:now/soon/later/wishes label named above on Loop-Dee-Loup's own GitHub Issue instead (docs/priority-horizons.md) — never merge the two. -->
 <!-- Mark one. -->
 
-- [ ] Treat accepted independent outcomes above as Burn Order candidates.
-- [ ] Do not create Burn Order candidates from this form.
+- [ ] Treat accepted independent outcomes above as backlog candidates (a target repository's Burn Order, or a priority-horizon-labeled GitHub Issue on Loop-Dee-Loup itself, as applicable).
+- [ ] Do not create backlog candidates from this form.
