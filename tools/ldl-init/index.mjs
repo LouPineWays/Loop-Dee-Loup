@@ -58,6 +58,7 @@ export const MANAGED_ITEMS = [
   { kind: "dir", src: ".claude/skills/sift", dest: ".claude/skills/sift" },
   { kind: "dir", src: ".claude/skills/skill-maker", dest: ".claude/skills/skill-maker" },
   { kind: "dir", src: ".claude/skills/spend", dest: ".claude/skills/spend" },
+  { kind: "dir", src: ".claude/skills/stage1-classifier-hardening", dest: ".claude/skills/stage1-classifier-hardening" },
   { kind: "file", src: ".claude/personas/audit-verdict-extractor.md", dest: ".claude/personas/audit-verdict-extractor.md" },
   { kind: "dir", src: "tools/local-worker", dest: "tools/local-worker" },
   { kind: "dir", src: "tools/review-watch", dest: "tools/review-watch" },

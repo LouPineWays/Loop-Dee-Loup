@@ -11,11 +11,11 @@ description: Diagnose and fix a reported false-positive or false-negative in Sta
 
 ## Procedure
 
-1. **Reproduce verbatim.** Get the exact reported body / `body_excerpt` text, not a paraphrase or summary of it.
+1. **Reproduce with the real input.** Production callers never classify a full comment body — `findAllMatches` truncates it to `body_excerpt = body.slice(0, 200)` before `isGenuineResponse`/`findExemption` ever see it (`poll.mjs`; consumed in `stage1-gate.mjs`, `trigger.mjs`, `lifecycle-gate.mjs`). Reproduce from that exact 200-character excerpt, not the full reported body — a longer input can hide or reveal signals past character 200 and make the reproduction not match production behavior.
 2. **Rule out a duplicate.** Check the input against every existing guard function (`isCodexCloudSetupPrompt`, `stripLeadingMarkdownWrapper`, `isSelfReferentialRefusal`, `BLOCKED_STATUS_PATTERN`, `ELLIPTICAL_REFUSAL_PATTERN`, `EXEMPTION_PATTERN`/`blankFencedBlocks`) and every case already in `tools/review-watch/*.test.mjs` — this may already be fixed, or be a near-neighbor of a documented boundary.
 3. **Scope the fix.** Fix only in this shared LDL module (`genuine-response.mjs` or `stage1-gate.mjs`). Never patch around it in a consumer/target repository.
 4. **Extend the narrowest primitive.** Locate the single pattern or function whose boundary is wrong and adjust that — don't bolt on a new isolated regex or a parallel classification path.
-5. **Add bidirectional tests.** One test that the reported case now classifies correctly, and one that a genuine review merely discussing or quoting the same syntax still classifies as genuine — a fix that stops the false negative/positive but introduces the other is not done.
+5. **Add bidirectional tests.** Two assertions, in opposite classification directions: (a) the reported case now classifies correctly (a false negative's non-genuine input now returns `false`; a false positive's genuine input now returns `true`), and (b) a near-neighbor case of the *other* class is unaffected — for a false-negative fix (tightening), a genuine review discussing or quoting the same syntax still returns `true`; for a false-positive fix (loosening), a real BLOCKED/refusal/setup-prompt variant still returns `false`. Two tests that both assert the same boolean is not bidirectional and can pass while the fix silently over-loosens or over-tightens the guard.
 6. **Rerun the full suite.** All of `tools/review-watch/*.test.mjs` must still pass — every previously-fixed boundary documented in `genuine-response.mjs`'s own comments must not regress.
 
 ## Stop condition
