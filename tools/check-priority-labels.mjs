@@ -25,6 +25,25 @@ function priorityLabelsOf(issue) {
   return issue.labels.map((l) => l.name).filter((name) => name.startsWith(PRIORITY_PREFIX));
 }
 
+// Pages through every open issue via the REST issues endpoint rather than a single
+// gh issue list --limit call, so a repository with more than one page of open issues
+// cannot silently truncate the scan and report a false OK. The endpoint also returns
+// pull requests, which carry no `priority:*` label anyway but are filtered out here to
+// keep the report scoped to actual issues.
+function listAllOpenIssues() {
+  const issues = [];
+  for (let page = 1; ; page++) {
+    const raw = gh(["api", `repos/{owner}/{repo}/issues?state=open&per_page=100&page=${page}`]);
+    const batch = JSON.parse(raw);
+    if (batch.length === 0) break;
+    for (const item of batch) {
+      if (!item.pull_request) issues.push(item);
+    }
+    if (batch.length < 100) break;
+  }
+  return issues;
+}
+
 const arg = process.argv[2];
 let issues;
 
@@ -36,8 +55,7 @@ if (arg) {
   const raw = gh(["issue", "view", arg, "--json", "number,title,labels,state"]);
   issues = [JSON.parse(raw)];
 } else {
-  const raw = gh(["issue", "list", "--state", "open", "--limit", "500", "--json", "number,title,labels,state"]);
-  issues = JSON.parse(raw);
+  issues = listAllOpenIssues();
 }
 
 const conflicts = issues
