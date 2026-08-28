@@ -219,6 +219,7 @@ Repository-local skills support the Loop without replacing the active issue or t
 - `skill-maker` creates a new narrowly-triggered skill when a recurring judgment-dependent workflow has become stable enough to encode.
 - `local-worker` invokes a configured local LLM for bounded, cheaply-verifiable subtasks that `model-check` routes to local execution; its output is candidate work requiring independent Claude verification before acceptance.
 - `stage1-classifier-hardening` diagnoses and fixes a reported false-positive/false-negative in the Stage 1 genuine-response classifier (`tools/review-watch/genuine-response.mjs`).
+- `telemetry-battery` runs the approximately-weekly `/spend` + maker telemetry validation battery (`docs/telemetry-battery-log.md`), gating optimization conclusions on telemetry coverage rather than assuming instrumentation is sufficient.
 
 Durable personas live under `.claude/personas/*.md`, one file per recurring subagent role (see `persona-maker`). Dispatch a subagent by pointing it at the matching persona file instead of restating its expertise in the prompt.
 
