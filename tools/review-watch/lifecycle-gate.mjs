@@ -40,12 +40,24 @@
 //                  reopen it, this reports the blocked state rather than silently accepting the
 //                  premature closure.
 //
+// Not every review-worthy PR has a gated work issue to protect: LDL's own recurring
+// consumer-sync PRs (issue #190) are review-worthy but have no per-update implementation
+// issue. `--issue none` (merge-ready) and the literal typed word "none" in the (still
+// required) `Work issue` template field (post-audit) are the explicit no-work-issue
+// sentinels — deliberately distinct from an omitted/malformed value, which still fails closed
+// as an operational error, so a forgotten argument or a forgotten template field can never
+// silently pass as "no work issue applies." In that explicit state, merge-ready and post-audit
+// still run — Stage 1, Stage 2, CI, and the bounded-reviewer-invocation rules are unaffected —
+// they only skip the closing-reference/premature-closure checks that have no issue to protect.
+//
 // Usage:
 //   node tools/review-watch/lifecycle-gate.mjs merge-ready --repo OWNER/REPO --pr 50 --issue 151
+//   node tools/review-watch/lifecycle-gate.mjs merge-ready --repo OWNER/REPO --pr 50 --issue none
 //   node tools/review-watch/lifecycle-gate.mjs post-audit --repo OWNER/REPO --audit-issue 160 [--recover true]
 //
-// Exit codes: 0 = MERGE_READY / OK / READY_TO_CLOSE (safe to proceed), 2 = BLOCKED_CLOSING_REFERENCE
-// / PREMATURE_CLOSURE (must not merge / must not treat as accepted), 1 = operational error.
+// Exit codes: 0 = MERGE_READY / MERGE_READY_NO_WORK_ISSUE / OK / READY_TO_CLOSE (safe to
+// proceed), 2 = BLOCKED_CLOSING_REFERENCE / PREMATURE_CLOSURE (must not merge / must not treat
+// as accepted), 1 = operational error.
 //
 // Tests: node --test tools/review-watch/lifecycle-gate.test.mjs
 
@@ -86,6 +98,29 @@ export function normalizeIssueNumber(raw) {
   if (!match) return null;
   return Number(match[1]) > 0 ? match[1] : null;
 }
+
+// Pure. True only for the literal, case-insensitive sentinel "none" — `checkMergeReady`'s
+// explicit no-work-issue declaration for `--issue` (issue #190; the template's `Work issue`
+// field has its own, separately-matched marker set below). Deliberately narrow: an omitted,
+// empty, or merely unparseable value must keep failing closed as an operational error rather
+// than being silently treated as "no work issue applies," so this never matches
+// undefined/null/"" the way normalizeIssueNumber's callers might expect a "no value" case to.
+export function isNoWorkIssueSentinel(raw) {
+  return typeof raw === "string" && raw.trim().toLowerCase() === "none";
+}
+
+// Pure. The free-text sentinels a human deliberately types into the (required — see
+// .github/ISSUE_TEMPLATE/audit-control-issue.yml) "Work issue" field to declare no
+// implementation issue applies. Deliberately does NOT include GitHub's own "_No response_"
+// marker for a left-blank *optional* field: an earlier version of this template made the field
+// optional so a blank render of that exact marker could stand for the sentinel, but that made a
+// deliberate no-work-issue declaration indistinguishable from an operator simply forgetting to
+// fill in a real work issue on an audit that has one — both render identically, silently
+// stripping that issue's premature-closure protection (Stage 1 review finding on PR #197).
+// Keeping the field required and requiring an explicit typed word closes that gap: an omission
+// now fails GitHub's own form validation instead of reaching this parser as ambiguous blank
+// text.
+const NO_WORK_ISSUE_FIELD_MARKERS = new Set(["none", "n/a"]);
 
 // GitHub's own closing-keyword set (close/closes/closed, fix/fixes/fixed, resolve/resolves/
 // resolved), case-insensitive, optionally followed by a colon, before "#N" or GitHub's
@@ -166,10 +201,18 @@ export function parseStage2Verdict(body) {
 // (added alongside this script — see .github/ISSUE_TEMPLATE/audit-control-issue.yml) rather
 // than inferring it from the merged PR's non-closing reference, which is free-text prose and
 // not a structured, machine-checkable source. Accepts "#151", "151", or a full issue URL
-// ending in the number.
+// ending in the number. Returns the literal string "none" for the explicit no-work-issue
+// state (issue #190) — a deliberately typed "none"/"n/a" in the (required) field — kept
+// distinct from `null`, which still means "the heading is missing or its content doesn't
+// parse," an operational error rather than a declared state. Does not treat GitHub's own
+// "_No response_" marker for an unanswered field as this sentinel: the field is required
+// precisely so that marker can never legitimately appear here (Stage 1 review finding on PR
+// #197 against an earlier, optional-field version of this template) — if it somehow does, it
+// falls through to the unparseable-content branch below and reports as `null`, not "none".
 export function parseWorkIssueRef(body) {
   const value = parseFormField(body, "Work issue");
-  if (!value) return null;
+  if (value === null) return null;
+  if (NO_WORK_ISSUE_FIELD_MARKERS.has(value.trim().toLowerCase())) return "none";
   const match = value.match(/#?(\d+)\s*$/);
   return match ? Number(match[1]) : null;
 }
@@ -198,13 +241,31 @@ function closingRefMatchesIssue(ref, repo, issueNumber) {
 // network or `gh` CLI.
 export async function checkMergeReady(args, { ghPrViewImpl = defaultGhPrView } = {}) {
   const { repo, pr } = args;
-  const issue = normalizeIssueNumber(args.issue);
-  if (!repo || !pr || !issue) {
+  const noWorkIssue = isNoWorkIssueSentinel(args.issue);
+  const issue = noWorkIssue ? null : normalizeIssueNumber(args.issue);
+  if (!repo || !pr || (!noWorkIssue && !issue)) {
     return {
       exitCode: 1,
       message:
         "Missing or invalid required args: --repo, --pr are required, and --issue must be a positive integer " +
-        `(optionally prefixed with "#"); got --issue=${JSON.stringify(args.issue)}.`,
+        `(optionally prefixed with "#") or the literal "none" for an explicit no-work-issue state; ` +
+        `got --issue=${JSON.stringify(args.issue)}.`,
+    };
+  }
+
+  // Explicit no-work-issue state (issue #190): there is no work-issue closure invariant to
+  // protect, so this reports that directly instead of inspecting closingIssuesReferences or
+  // commits against a nonexistent issue number. This is scoped narrowly — it says nothing
+  // about whether Stage 1, CI, or any other merge prerequisite is satisfied; those are
+  // separate checks (stage1-gate.mjs, CI) that still apply unchanged.
+  if (noWorkIssue) {
+    return {
+      exitCode: 0,
+      state: "MERGE_READY_NO_WORK_ISSUE",
+      workIssue: null,
+      message:
+        `PR ${repo}#${pr} declares no gated work issue (--issue none); the work-issue closing-reference ` +
+        `check does not apply. This does not evaluate any other merge prerequisite (Stage 1, CI, etc.).`,
     };
   }
 
@@ -284,15 +345,20 @@ export async function checkPostAudit(
     return { exitCode: 1, message: `gh issue view failed for ${repo}#${auditIssue}: ${err.message}` };
   }
 
-  const workIssueNumber = parseWorkIssueRef(auditIssueData.body ?? "");
-  if (!workIssueNumber) {
+  const workIssueRef = parseWorkIssueRef(auditIssueData.body ?? "");
+  if (workIssueRef === null) {
     return {
       exitCode: 1,
       message:
-        `Could not find a "Work issue" field in audit issue ${repo}#${auditIssue}. The audit-control-issue ` +
-        `template's Work issue field must name the implementation issue this audit gates.`,
+        `Could not find a valid "Work issue" field in audit issue ${repo}#${auditIssue}. The audit-control-` +
+        `issue template's Work issue field must name the implementation issue this audit gates, or ` +
+        `explicitly type "none" to declare no work issue applies.`,
     };
   }
+  // Explicit no-work-issue state (issue #190): distinct from workIssueRef === null above, which
+  // is an operational error (missing/malformed field), not a declared state.
+  const noWorkIssue = workIssueRef === "none";
+  const workIssueNumber = noWorkIssue ? null : workIssueRef;
 
   const rawVerdict = parseStage2Verdict(auditIssueData.body ?? "");
 
@@ -314,6 +380,24 @@ export async function checkPostAudit(
       };
     }
     if (!verdictBacked) verdict = null;
+  }
+
+  // Explicit no-work-issue state (issue #190): the Stage 2 response/verdict gate above still
+  // ran unchanged — PENDING/NOT CLEAN/an unbacked CLEAN all remain non-accepted here exactly as
+  // they do with a real work issue — but there is no implementation issue to fetch, reopen, or
+  // close, so this returns before any of that. A genuine backed CLEAN reports the distinct
+  // "accepted" state instead of "OK" so a caller can recognize Stage 2 acceptance without a
+  // `workIssueState: "CLOSED"` to check against.
+  if (noWorkIssue) {
+    return {
+      exitCode: 0,
+      state: verdict === "CLEAN" ? "ACCEPTED_NO_WORK_ISSUE" : "OK",
+      workIssue: null,
+      auditIssue: Number(auditIssue),
+      verdict,
+      rawVerdict,
+      workIssueState: null,
+    };
   }
 
   let workIssueData;
