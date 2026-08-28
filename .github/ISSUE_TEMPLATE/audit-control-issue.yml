@@ -23,8 +23,13 @@ body:
         source of which issue a CLEAN verdict here authorizes closing — per
         docs/bounded-review-cycle.md, merge alone never closes it. Never a closing
         keyword; this field is a plain reference, not a GitHub auto-close mechanism.
+        Leave blank only when this audit genuinely has no gated implementation issue
+        (e.g. an automated recurring consumer-sync PR) — GitHub then renders "_No
+        response_", which post-audit reads as the explicit no-work-issue state, distinct
+        from a forgotten field. Do not leave it blank merely because the work issue is
+        inconvenient to find.
     validations:
-      required: true
+      required: false
   - type: input
     id: merge_commit
     attributes:

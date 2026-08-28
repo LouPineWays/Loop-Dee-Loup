@@ -14,6 +14,7 @@ import {
   checkMergeReady,
   checkPostAudit,
   findClosingKeywordMatch,
+  isNoWorkIssueSentinel,
   normalizeIssueNumber,
   parseArgs,
   parseFormField,
@@ -53,6 +54,22 @@ test("normalizeIssueNumber: rejects 0 and #0 (Stage 2 audit finding on issue #18
   assert.equal(normalizeIssueNumber("0"), null);
   assert.equal(normalizeIssueNumber("#0"), null);
   assert.equal(normalizeIssueNumber("00"), null);
+});
+
+// -- isNoWorkIssueSentinel (issue #190) --------------------------------------------------
+
+test("isNoWorkIssueSentinel: matches only the literal, case-insensitive 'none'", () => {
+  assert.equal(isNoWorkIssueSentinel("none"), true);
+  assert.equal(isNoWorkIssueSentinel("None"), true);
+  assert.equal(isNoWorkIssueSentinel(" NONE "), true);
+});
+
+test("isNoWorkIssueSentinel: does not treat an omitted/empty/non-'none' value as the sentinel", () => {
+  assert.equal(isNoWorkIssueSentinel(undefined), false);
+  assert.equal(isNoWorkIssueSentinel(null), false);
+  assert.equal(isNoWorkIssueSentinel(""), false);
+  assert.equal(isNoWorkIssueSentinel("151"), false);
+  assert.equal(isNoWorkIssueSentinel("n/a"), false);
 });
 
 // -- findClosingKeywordMatch ------------------------------------------------------------
@@ -160,6 +177,16 @@ test("parseWorkIssueRef: returns null when the field is absent", () => {
   assert.equal(parseWorkIssueRef("no work issue field"), null);
 });
 
+test("parseWorkIssueRef: reads GitHub's own blank-optional-field marker as the explicit no-work-issue state (issue #190)", () => {
+  assert.equal(parseWorkIssueRef("### Work issue\n\n_No response_\n"), "none");
+});
+
+test("parseWorkIssueRef: reads a hand-typed 'none'/'n/a' the same way, case-insensitively", () => {
+  assert.equal(parseWorkIssueRef("### Work issue\n\nnone\n"), "none");
+  assert.equal(parseWorkIssueRef("### Work issue\n\nNone\n"), "none");
+  assert.equal(parseWorkIssueRef("### Work issue\n\nN/A\n"), "none");
+});
+
 // -- checkMergeReady ---------------------------------------------------------------------
 
 test("checkMergeReady: exits 1 when required args are missing", async () => {
@@ -265,6 +292,32 @@ test("checkMergeReady: MERGE_READY — only non-closing references are present (
   );
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "MERGE_READY");
+});
+
+// -- checkMergeReady: explicit no-work-issue state (issue #190, reproducing YouTubery PR #19) --
+
+test("checkMergeReady: reproduces the YouTubery PR #19 failure — an undefined --issue fails closed, not MERGE_READY", async () => {
+  const result = await checkMergeReady({ repo: "LouPineWays/YouTubery", pr: 19 });
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /positive integer/);
+  assert.match(result.message, /"none"/);
+});
+
+test("checkMergeReady: MERGE_READY_NO_WORK_ISSUE — '--issue none' skips the closing-reference check without inspecting any issue", async () => {
+  let ghPrViewCalled = false;
+  const result = await checkMergeReady(
+    { repo: "LouPineWays/YouTubery", pr: 19, issue: "none" },
+    { ghPrViewImpl: async () => { ghPrViewCalled = true; return { closingIssuesReferences: [], commits: [] }; } },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "MERGE_READY_NO_WORK_ISSUE");
+  assert.equal(result.workIssue, null);
+  assert.equal(ghPrViewCalled, false, "no-work-issue state must not fabricate a lookup against an unrelated issue");
+});
+
+test("checkMergeReady: MERGE_READY_NO_WORK_ISSUE still requires --repo and --pr", async () => {
+  const result = await checkMergeReady({ issue: "none" });
+  assert.equal(result.exitCode, 1);
 });
 
 test("checkMergeReady: MERGE_READY — a closing reference to a different issue does not block this one", async () => {
@@ -409,6 +462,73 @@ test("checkPostAudit: PREMATURE_CLOSURE — work issue closed and verdict is NOT
   );
   assert.equal(result.exitCode, 2);
   assert.equal(result.state, "PREMATURE_CLOSURE");
+});
+
+// -- checkPostAudit: explicit no-work-issue state (issue #190) -------------------------
+
+function noWorkIssueAuditBody({ verdict = "PENDING" }) {
+  return `### Work issue\n\n_No response_\n\n### Verdict\n\n${verdict}\n`;
+}
+
+test("checkPostAudit: OK — no work issue, verdict PENDING; no implementation issue is fetched", async () => {
+  let issueViewCalls = 0;
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        issueViewCalls++;
+        return number === 160 ? { body: noWorkIssueAuditBody({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK");
+  assert.equal(result.workIssue, null);
+  assert.equal(result.verdict, "PENDING");
+  assert.equal(issueViewCalls, 1, "only the audit issue itself should be fetched — no work issue to look up");
+});
+
+test("checkPostAudit: OK — no work issue, verdict NOT CLEAN, remains non-accepted", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    { ghIssueViewImpl: async () => ({ body: noWorkIssueAuditBody({ verdict: "NOT CLEAN" }), state: "OPEN" }) },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK");
+  assert.equal(result.verdict, "NOT CLEAN");
+});
+
+test("checkPostAudit: no work issue, CLEAN dropdown with no genuine response is not trusted", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async () => ({ body: noWorkIssueAuditBody({ verdict: "CLEAN" }), state: "OPEN" }),
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "an unbacked CLEAN must not authorize acceptance even with no work issue");
+  assert.equal(result.verdict, null);
+  assert.equal(result.rawVerdict, "CLEAN");
+});
+
+test("checkPostAudit: ACCEPTED_NO_WORK_ISSUE — a genuine backed CLEAN verdict with no work issue, no issue-close action attempted", async () => {
+  let issueViewCalls = 0;
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async () => {
+        issueViewCalls++;
+        return { body: noWorkIssueAuditBody({ verdict: "CLEAN" }), state: "OPEN" };
+      },
+      ghApiImpl: withGenuineResponse(),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "ACCEPTED_NO_WORK_ISSUE");
+  assert.equal(result.workIssue, null);
+  assert.equal(result.verdict, "CLEAN");
+  assert.equal(issueViewCalls, 1, "no implementation issue exists to close, so only the audit issue itself is fetched");
 });
 
 test("checkPostAudit: the audit issue and work issue are read as distinct issues, never confused (verification #12)", async () => {
