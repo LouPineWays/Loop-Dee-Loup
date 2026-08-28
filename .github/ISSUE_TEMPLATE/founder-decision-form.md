@@ -68,7 +68,7 @@ assignees: ""
 
 <!-- Optional. Accepted independent outcomes may become backlog candidates; speculative options will not. -->
 
-<!-- For each outcome about Loop-Dee-Loup itself, name its priority horizon (now / soon / later / wishes) here — the executor must not guess one (see docs/priority-horizons.md). Leave an outcome's horizon blank only if you want its Issue created without a priority label yet. -->
+<!-- For each outcome about Loop-Dee-Loup itself, name its priority horizon here: now / soon / later / wishes (see docs/priority-horizons.md). Required for every such outcome — AGENTS.md requires the resulting Issue to carry exactly one priority label, and the executor must not guess one. If genuinely undecided, name `wishes` (a deliberately low-commitment accepted possibility) rather than leaving it unlabeled. -->
 
 ## Backlog authorization
 
