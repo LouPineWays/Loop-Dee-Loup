@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { reduceEvents } from "./reduce.mjs";
 import { CLAIM_REQUIREMENTS } from "./sufficiency.mjs";
-import { buildCoverageReport, decisionCriticalFields, listRecentSessionIds, listSessionIdsSince, resolveSessionIds } from "./coverage.mjs";
+import { buildCoverageReport, decisionCriticalFields, listRecentSessionIds, listSessionIdsSince, resolveSessionIds, readIdsFile, writeIdsFile } from "./coverage.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = join(HERE, "fixtures");
@@ -165,7 +165,7 @@ test("regression (Stage 1 review, PR #203): listRecentSessionIds excludes the in
   withTempSessionsDir((sessionsDir) => {
     writeSession(sessionsDir, "old-session", Date.now() - 60000);
     writeSession(sessionsDir, "live-session", Date.now());
-    const ids = listRecentSessionIds(10, "live-session", sessionsDir);
+    const ids = listRecentSessionIds(10, ["live-session"], sessionsDir);
     assert.deepEqual(ids, ["old-session"]);
   });
 });
@@ -175,7 +175,7 @@ test("regression (Stage 1 review, PR #203): listSessionIdsSince only returns ses
     const cutoff = Date.now() - 30000;
     writeSession(sessionsDir, "before-cutoff", cutoff - 60000);
     writeSession(sessionsDir, "after-cutoff", cutoff + 60000);
-    const ids = listSessionIdsSince(cutoff, null, sessionsDir);
+    const ids = listSessionIdsSince(cutoff, [], sessionsDir);
     assert.deepEqual(ids, ["after-cutoff"]);
   });
 });
@@ -183,17 +183,72 @@ test("regression (Stage 1 review, PR #203): listSessionIdsSince only returns ses
 test("regression (Stage 1 review, PR #203): resolveSessionIds rejects a --session id with no matching log instead of silently reducing an empty record", () => {
   withTempSessionsDir((sessionsDir) => {
     assert.throws(
-      () => resolveSessionIds({ sessions: ["typo-id"], since: null, sample: null, excludeSession: null }, sessionsDir),
+      () => resolveSessionIds({ sessions: ["typo-id"], since: null, sample: null, excludeSessions: [], excludeIdsFile: null }, sessionsDir),
       /no session log found/,
     );
   });
 });
 
 test("regression (Stage 1 review, PR #203): resolveSessionIds rejects a non-numeric or non-positive --sample instead of silently coercing it", () => {
-  assert.throws(() => resolveSessionIds({ sessions: [], since: null, sample: "not-a-number", excludeSession: null }), /must be a positive integer/);
-  assert.throws(() => resolveSessionIds({ sessions: [], since: null, sample: "0", excludeSession: null }), /must be a positive integer/);
+  const base = { sessions: [], since: null, excludeSessions: [], excludeIdsFile: null };
+  assert.throws(() => resolveSessionIds({ ...base, sample: "not-a-number" }), /must be a positive integer/);
+  assert.throws(() => resolveSessionIds({ ...base, sample: "0" }), /must be a positive integer/);
 });
 
 test("regression (Stage 1 review, PR #203): resolveSessionIds rejects a malformed --since timestamp instead of silently returning everything", () => {
-  assert.throws(() => resolveSessionIds({ sessions: [], since: "not-a-date", sample: null, excludeSession: null }), /not a valid ISO timestamp/);
+  assert.throws(
+    () => resolveSessionIds({ sessions: [], since: "not-a-date", sample: null, excludeSessions: [], excludeIdsFile: null }),
+    /not a valid ISO timestamp/,
+  );
+});
+
+test("regression (Stage 2 audit, PR #203): a resumed session's advancing mtime does not let --since re-select an already-recorded id", () => {
+  // The bug: --since alone filters purely on current mtime, so a session file touched
+  // again after being sampled (a resumed/still-running session — this repository's own
+  // live battery session demonstrated exactly this) crosses a prior cutoff again even
+  // though it was already counted. --exclude-ids-file is the durable, mtime-independent
+  // guard against that.
+  withTempSessionsDir((sessionsDir) => {
+    const idsFile = join(sessionsDir, "recorded-ids.json");
+    const firstCutoff = Date.now() - 100000;
+    writeSession(sessionsDir, "resumed-session", firstCutoff + 1000);
+    // First run "counts" resumed-session and records it.
+    const firstRun = listSessionIdsSince(firstCutoff, readIdsFile(idsFile), sessionsDir);
+    assert.deepEqual(firstRun, ["resumed-session"]);
+    writeIdsFile(idsFile, firstRun);
+    // The session is resumed and touched again, well after firstCutoff.
+    writeSession(sessionsDir, "resumed-session", Date.now());
+    writeSession(sessionsDir, "genuinely-new-session", Date.now());
+    // A second run using firstCutoff as --since would (wrongly, without the exclude file)
+    // re-select resumed-session purely because its mtime moved again.
+    const secondRunWithoutGuard = listSessionIdsSince(firstCutoff, [], sessionsDir);
+    assert.ok(secondRunWithoutGuard.includes("resumed-session"), "sanity check: mtime alone does re-select it");
+    // With the durable exclude-ids-file guard, it must not be re-selected.
+    const secondRun = listSessionIdsSince(firstCutoff, readIdsFile(idsFile), sessionsDir);
+    assert.deepEqual(secondRun, ["genuinely-new-session"]);
+  });
+});
+
+test("regression (Stage 2 audit, PR #203): resolveSessionIds combines --exclude-session and --exclude-ids-file", () => {
+  withTempSessionsDir((sessionsDir) => {
+    const idsFile = join(sessionsDir, "recorded-ids.json");
+    writeIdsFile(idsFile, ["already-recorded"]);
+    writeSession(sessionsDir, "already-recorded", Date.now() - 1000);
+    writeSession(sessionsDir, "live-session", Date.now());
+    writeSession(sessionsDir, "fresh-session", Date.now());
+    const ids = resolveSessionIds(
+      { sessions: [], since: null, sample: "10", excludeSessions: ["live-session"], excludeIdsFile: idsFile },
+      sessionsDir,
+    );
+    assert.deepEqual(ids.sort(), ["fresh-session"]);
+  });
+});
+
+test("regression (Stage 2 audit, PR #203): writeIdsFile merges with, rather than overwrites, what's already recorded", () => {
+  withTempSessionsDir((sessionsDir) => {
+    const idsFile = join(sessionsDir, "recorded-ids.json");
+    writeIdsFile(idsFile, ["previously-recorded"]);
+    writeIdsFile(idsFile, ["new-session"]);
+    assert.deepEqual(readIdsFile(idsFile).sort(), ["new-session", "previously-recorded"]);
+  });
 });
