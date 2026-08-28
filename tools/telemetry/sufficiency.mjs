@@ -89,7 +89,8 @@ export function isPresent(value) {
   return true;
 }
 
-function isPositiveNumber(value) {
+// Exported for the same reason as getPath/isPresent above.
+export function isPositiveNumber(value) {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
