@@ -7,7 +7,6 @@ import assert from "node:assert/strict";
 import {
   parseArgs,
   headMarker,
-  ackMarker,
   triggerCommentBody,
   findExistingTrigger,
   extractHeadFromTrigger,
@@ -38,28 +37,6 @@ test("triggerCommentBody: plain trigger text when no head is given", () => {
 test("triggerCommentBody: embeds the head marker when a head is given", () => {
   const body = triggerCommentBody("abc123");
   assert.match(body, /^@codex review\n/);
-  assert.equal(body, `@codex review\n${headMarker("abc123")}`);
-});
-
-test("ackMarker: null when no reason is given", () => {
-  assert.equal(ackMarker(undefined), null);
-});
-
-test("ackMarker: embeds the reason", () => {
-  assert.equal(ackMarker("founder-approved retry"), "<!-- ldl-repeat-round-ack:founder-approved retry -->");
-});
-
-test("ackMarker: escapes an embedded comment-close sequence so the reason can't break out of the marker", () => {
-  assert.equal(ackMarker("x --> y"), "<!-- ldl-repeat-round-ack:x --&gt; y -->");
-});
-
-test("triggerCommentBody: embeds both the head marker and the ack marker when both are given", () => {
-  const body = triggerCommentBody("abc123", "founder said retry");
-  assert.equal(body, `@codex review\n${headMarker("abc123")}\n${ackMarker("founder said retry")}`);
-});
-
-test("triggerCommentBody: omits the ack marker when no reason is given, even with a head", () => {
-  const body = triggerCommentBody("abc123", undefined);
   assert.equal(body, `@codex review\n${headMarker("abc123")}`);
 });
 
@@ -420,10 +397,41 @@ test("run: with --head, refuses to post when an earlier head on this PR already 
   );
 });
 
-test("run: with --head, --ack-repeat-round overrides the cross-head block and records the reason on the posted comment", async () => {
+test("run: --ack-repeat-round is rejected outright (issue #211), even when no cross-head block would otherwise apply", async () => {
+  let ghApiCalls = 0;
   let ghPostCalls = 0;
   const result = await run(
-    { repo: "owner/repo", kind: "pr", number: 164, head: "new-sha", "ack-repeat-round": "founder approved a second round" },
+    { repo: "owner/repo", kind: "pr", number: 50, head: "abc123", "ack-repeat-round": "trust me" },
+    {
+      ghApiImpl: async () => {
+        ghApiCalls += 1;
+        return [];
+      },
+      ghPostImpl: async () => {
+        ghPostCalls += 1;
+        return { created_at: "should-not-be-used" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /--ack-repeat-round has been removed/);
+  assert.equal(ghApiCalls, 0, "the flag is rejected before any read happens");
+  assert.equal(ghPostCalls, 0);
+});
+
+test("run: reproduces YouTubery PR #46 — an executor cannot self-authorize a second Stage 1 round with --ack-repeat-round after a mechanical rebuild changes the head", async () => {
+  // Sequence per issue #211: Stage 1 triggered and genuinely reviewed at "old-sha", the branch
+  // is mechanically rebuilt onto main producing "new-sha", and the executor that trigger.mjs's
+  // cross-head guard just blocked tries to talk its way past it with its own reason string.
+  let ghPostCalls = 0;
+  const result = await run(
+    {
+      repo: "LouPineWays/YouTubery",
+      kind: "pr",
+      number: 46,
+      head: "new-sha",
+      "ack-repeat-round": "old and new content are byte-identical after the rebuild",
+    },
     {
       ghApiImpl: async (path) => {
         if (path.includes("/issues/")) {
@@ -438,17 +446,74 @@ test("run: with --head, --ack-repeat-round overrides the cross-head block and re
         }
         return [];
       },
-      ghPostImpl: async ({ head, ackReason }) => {
+      ghPostImpl: async () => {
         ghPostCalls += 1;
-        assert.equal(head, "new-sha");
-        assert.equal(ackReason, "founder approved a second round");
-        return { created_at: "2026-08-24T09:00:00Z", html_url: "https://github.com/owner/repo/pull/164#c3" };
+        return { created_at: "should-not-be-used" };
       },
     },
   );
-  assert.equal(result.exitCode, 0);
-  assert.equal(ghPostCalls, 1, "the override must let the retry post");
-  assert.equal(result.posted, true);
+  assert.equal(result.exitCode, 1, "the flag is rejected before the cross-head check even runs");
+  assert.match(result.message, /--ack-repeat-round has been removed/);
+  assert.equal(ghPostCalls, 0, "no self-authorized second round may post");
+});
+
+test("run: with --head, the cross-head block has no automated override — a repeat trigger stays blocked with no way for the executor to proceed", async () => {
+  let ghPostCalls = 0;
+  const result = await run(
+    { repo: "owner/repo", kind: "pr", number: 164, head: "new-sha" },
+    {
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { body: triggerCommentBody("old-sha"), created_at: "2026-08-23T13:00:00Z" },
+            {
+              user: { login: "chatgpt-codex-connector[bot]" },
+              created_at: "2026-08-23T13:10:00Z",
+              body: "Found a real off-by-one bug in the loop bound.",
+            },
+          ];
+        }
+        return [];
+      },
+      ghPostImpl: async () => {
+        ghPostCalls += 1;
+        return { created_at: "should-not-be-used" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.priorGenuineHead, "old-sha");
+  assert.match(result.message, /founder interrupt with no automated override/);
+  assert.equal(ghPostCalls, 0);
+});
+
+test("run: --force true never bypasses the cross-head guard, even when it would bypass same-head dedup", async () => {
+  let ghPostCalls = 0;
+  const result = await run(
+    { repo: "owner/repo", kind: "pr", number: 164, head: "new-sha", force: "true" },
+    {
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { body: triggerCommentBody("old-sha"), created_at: "2026-08-23T13:00:00Z" },
+            {
+              user: { login: "chatgpt-codex-connector[bot]" },
+              created_at: "2026-08-23T13:10:00Z",
+              body: "Found a real off-by-one bug in the loop bound.",
+            },
+          ];
+        }
+        return [];
+      },
+      ghPostImpl: async () => {
+        ghPostCalls += 1;
+        return { created_at: "should-not-be-used" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2, "--force only bypasses same-head dedup, never the cross-head block");
+  assert.equal(result.priorGenuineHead, "old-sha");
+  assert.equal(ghPostCalls, 0);
 });
 
 test("run: cross-head block does not apply to --kind issue (Stage 2 audits have no heads)", async () => {

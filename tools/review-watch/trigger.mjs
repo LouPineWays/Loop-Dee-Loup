@@ -44,11 +44,18 @@
 // on (pull-comments, pull-reviews, issue-comments) for a genuine response (reusing
 // genuine-response.mjs's isGenuineResponse — never a second, competing classifier) already
 // attributable to an *earlier* trigger round at a *different* head. If one is found, posting
-// is refused (exit 2) unless `--ack-repeat-round "<reason>"` is given, which records the
-// reason as a durable marker on the newly posted comment and proceeds. Reserve that override
-// for a founder-authorized exception (per AGENTS.md's Founder interrupt conditions) — it exists
-// so a genuinely legitimate second round is not permanently impossible, not so this check can
-// be routinely worked around.
+// is refused unconditionally (exit 2). This block has no automated override: a prior
+// `--ack-repeat-round "<reason>"` flag let the same executor that hit the block satisfy it by
+// supplying its own justification string, which is exactly what let YouTubery PR #46 push a
+// second, unauthorized Stage 1 round (issue #211) — the tool cannot tell a founder-authorized
+// reason from a self-authored one, so no caller-supplied string can be trusted to prove
+// authorization. A genuinely exceptional second Stage 1 round is a founder interrupt per
+// AGENTS.md: the session stops and reports it (see docs/bounded-review-cycle.md Stage 1 step
+// 3), and only the founder, acting outside this script, can post that second trigger comment.
+// Passing `--ack-repeat-round` is rejected outright (exit 1) rather than silently ignored, so
+// a caller relying on stale documentation or memory gets an explicit signal that the flag no
+// longer does anything, instead of a block that looks identical to any other missing-response
+// wait.
 //
 // Idempotent by default: if a comment containing `@codex review` already exists on the
 // thread (scoped to --head when given), this exits 0 without posting a second one. Success
@@ -56,9 +63,10 @@
 // to feed straight into `poll.mjs --since` — with human-readable detail (posted/url) on
 // stderr.
 //
-// Exit codes: 0 = success, 1 = operational error (bad/missing args, `gh` failure, or an
-// unexpected response shape from the comments read), 2 = blocked — an earlier head on this
-// PR already received a genuine response and no --ack-repeat-round override was given.
+// Exit codes: 0 = success, 1 = operational error (bad/missing args, a rejected
+// --ack-repeat-round flag, `gh` failure, or an unexpected response shape from the comments
+// read), 2 = blocked — an earlier head on this PR already received a genuine response; this
+// is a founder interrupt with no automated override (see the Cross-head block comment above).
 //
 // Tests: node --test tools/review-watch/trigger.test.mjs
 
@@ -86,18 +94,8 @@ export function headMarker(head) {
   return head ? `<!-- ldl-trigger-head:${head} -->` : null;
 }
 
-// Records an --ack-repeat-round override as a durable marker on the posted comment, so a
-// second (or later) Stage 1 round at a new head carries visible, recorded justification
-// rather than merely bypassing the check silently. "-->" is escaped so an adversarial or
-// careless reason string can't prematurely close the HTML comment.
-export function ackMarker(reason) {
-  if (!reason) return null;
-  const escaped = reason.replace(/-->/g, "--&gt;");
-  return `<!-- ldl-repeat-round-ack:${escaped} -->`;
-}
-
-export function triggerCommentBody(head, ackReason) {
-  const lines = [TRIGGER_TEXT, headMarker(head), ackMarker(ackReason)].filter(Boolean);
+export function triggerCommentBody(head) {
+  const lines = [TRIGGER_TEXT, headMarker(head)].filter(Boolean);
   return lines.join("\n");
 }
 
@@ -190,10 +188,29 @@ export function findExistingTrigger(comments, { head } = {}) {
 export async function run(args, { ghApiImpl = defaultGhApi, ghPostImpl = defaultGhPost } = {}) {
   const { repo, kind, number, head } = args;
   const force = args.force === "true" || args.force === "1";
-  const ackReason = args["ack-repeat-round"];
 
   if (!repo || !kind || !number) {
     return { exitCode: 1, message: "Missing required args: --repo, --kind, --number are all required." };
+  }
+
+  // Issue #211: --ack-repeat-round let the same executor that a cross-head block just stopped
+  // satisfy that block by supplying its own justification string — a gap observed directly on
+  // YouTubery PR #46, where a self-authored "byte-identical content" rationale unlocked a
+  // second Stage 1 round that then found a real defect, disproving the rationale itself. The
+  // tool has no way to distinguish a founder-authorized reason from a self-authored one, so
+  // no caller-supplied string can ever be trusted here — the flag is rejected outright rather
+  // than silently ignored, so a caller relying on stale docs or memory gets an explicit signal
+  // instead of a block that looks like any other unresolved wait. See the Cross-head block
+  // comment above and docs/bounded-review-cycle.md Stage 1 step 3.
+  if (args["ack-repeat-round"] !== undefined) {
+    return {
+      exitCode: 1,
+      message:
+        "--ack-repeat-round has been removed (issue #211): an executor cannot self-authorize a second Stage 1 " +
+        "round by supplying its own justification string. If the cross-head guard blocks this trigger, stop and " +
+        "report a founder interrupt per AGENTS.md — only the founder, acting outside this script, may post the " +
+        "exceptional second trigger comment. See docs/bounded-review-cycle.md Stage 1 step 3.",
+    };
   }
 
   // Stage 1 review finding on this PR: without this, an omitted --head on a --kind pr call
@@ -267,14 +284,15 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPostImpl = default
     }
 
     const priorHead = findPriorGenuineHead({ comments, otherItems, currentHead: head });
-    if (priorHead && !ackReason) {
+    if (priorHead) {
       return {
         exitCode: 2,
         message:
           `Refusing to post a second Stage 1 trigger on ${repo}#${number}: head ${priorHead} on this PR ` +
           `already received a genuine Codex response. Per docs/bounded-review-cycle.md Stage 1 step 7, a ` +
-          `second invocation is another round and is prohibited by default. Pass ` +
-          `--ack-repeat-round "<reason>" to record an explicit, founder-authorized override and proceed.`,
+          `second invocation is another round and is prohibited by default. This is a founder interrupt with ` +
+          `no automated override — stop and report it per AGENTS.md; only the founder, acting outside this ` +
+          `script, may post the exceptional second trigger comment.`,
         priorGenuineHead: priorHead,
       };
     }
@@ -282,7 +300,7 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPostImpl = default
 
   let posted;
   try {
-    posted = await ghPostImpl({ repo, kind, number, head, ackReason });
+    posted = await ghPostImpl({ repo, kind, number, head });
   } catch (err) {
     return { exitCode: 1, message: `gh comment post failed: ${err.message}` };
   }
@@ -320,9 +338,9 @@ export function findCommentById(comments, id) {
 // thread back and picks out that exact comment by id to obtain its authoritative
 // timestamp/url — never re-derived via trigger-text dedup, which would return a stale
 // pre-existing trigger instead of the one just posted.
-function defaultGhPost({ repo, kind, number, head, ackReason }) {
+function defaultGhPost({ repo, kind, number, head }) {
   const sub = kind === "pr" ? "pr" : "issue";
-  const body = triggerCommentBody(head, ackReason);
+  const body = triggerCommentBody(head);
   const output = execFileSync("gh", [sub, "comment", String(number), "--repo", repo, "--body", body], {
     encoding: "utf8",
   });
