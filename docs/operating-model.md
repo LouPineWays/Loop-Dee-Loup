@@ -28,6 +28,61 @@ These are normally internal steps, not separate issues:
 - address valid inline-review findings;
 - prepare the PR and durable handoff.
 
+## Vertical vs horizontal decomposition
+
+A plan that builds inventories, layers, subsystems, or enabling components across the whole outcome before producing a usable portion of that outcome has failed decomposition, even if every individual ticket looks bounded. Horizontal planning is a process failure, not a lower-priority planning style — it reduces the count of nominally missing pieces without producing anything usable.
+
+**Vertical slice.** Produces a usable, observable portion of the parent outcome end to end — implementation, supporting assets, configuration, tests, documentation, migration, and verification for that bounded outcome, together.
+
+**Horizontal activity.** Produces a layer, inventory, subsystem, or category of inputs without making any portion of the outcome usable — a component library before the first flow that uses it, an asset catalogue before the first shot that consumes it, every endpoint before the first UI that calls one.
+
+**Legitimate enabling slice.** Removes a demonstrated blocker, has independently verifiable value on its own, or is the smallest safe prerequisite for the vertical slice immediately following it.
+
+**Speculative enabling work.** Prepares broadly for possible future slices without evidence that the current slice needs it. Treat this as horizontal activity even when it is organized as several small tickets.
+
+Horizontal activities can and often do exist inside a vertical slice — a slice may need a schema column, a shared component, or a reusable asset along the way. The rule is about default issue boundaries, not about banning foundations: a horizontal activity stops being a problem the moment it is scoped to, and delivered inside, the vertical slice that actually needs it.
+
+### The decomposition self-check
+
+Before creating or accepting a multi-issue plan, apply this test:
+
+> If every planned issue were completed in order, when would the first independently usable, observable, and verified portion of the parent outcome exist?
+
+If the answer is "only after several horizontal issues are all complete," the decomposition is presumptively invalid and must be reframed around vertical outcomes. Work through these questions to locate the failure:
+
+- What usable outcome does each issue leave behind?
+- Does the first issue materially exercise the real product or deliverable path?
+- Are assets, schemas, services, libraries, docs, tests, or infrastructure being produced in bulk before their first concrete consumer?
+- Could the plan instead build the first end-to-end path and create its dependencies just in time?
+- Is enabling work justified by a demonstrated blocker, a safety boundary, an external dependency, or repeated reuse — or only by anticipated future need?
+- Does acceptance verify the resulting capability in context, rather than merely the existence of components?
+
+A decomposition session runs this check before finalizing its slice list (see Decomposition boundary below). An execution session runs it before treating "build the supporting layer first" as the shape of its own slice.
+
+### Correcting a horizontal plan
+
+When horizontal planning is found, mid-plan or mid-execution:
+
+1. preserve already-completed useful infrastructure as completed background work — do not discard it because the plan that produced it was flawed;
+2. identify the next smallest usable portion of the actual parent outcome;
+3. reframe an existing open issue around that outcome where practical, rather than opening a parallel one;
+4. move required assets and enabling tasks inside that slice as just-in-time work;
+5. close or supersede redundant shopping-list or component issues rather than duplicating them;
+6. create only the currently foreseeable follow-on vertical slices;
+7. make dependencies express outcome order, not organizational layer order.
+
+### Before / after examples
+
+**Software feature.** Before: separate issues for the backend endpoints, the frontend screens, and the test suite for one feature. After: one issue (or one small vertical sequence) that ships the first real user flow end to end, including the endpoint, screen, and tests it actually needs; later flows through the same feature become their own vertical slices, not the remaining layers of the first one.
+
+**Media/content deliverable.** Before: an issue to inventory and generate every reusable asset a piece of content might need, followed by an assembly issue once the inventory is "complete." After: an issue that roughs in, sources the assets for, assembles, and verifies one contiguous segment; assets a later segment needs are produced just in time for that segment, and genuinely reusable by-products are kept rather than rebuilt.
+
+**Legitimate infrastructure.** A migration that must run once, cannot be safely split per-feature, and blocks every subsequent slice (e.g. a schema change every later vertical slice depends on) is a valid independent enabling slice — it has demonstrated, immediate consumers rather than speculative ones, and it is itself independently verifiable (the migration runs cleanly and existing behavior still works).
+
+### Issue acceptance criteria
+
+Acceptance criteria such as "files exist," "assets are catalogued," "endpoints are implemented," "components are created," or "tests are written" are insufficient on their own. An issue must also demonstrate its bounded capability or deliverable working in its real context. The canonical issue-format contract (tracked in issue #202) governs issue-body structure; this section governs decomposition validity and applies regardless of which issue template is used.
+
 ## When to create another issue
 
 Create another execution issue only when there is a new independent outcome or a materially different context or authority boundary.
