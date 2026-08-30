@@ -36,7 +36,7 @@ A plan that builds inventories, layers, subsystems, or enabling components acros
 
 **Horizontal activity.** Produces a layer, inventory, subsystem, or category of inputs without making any portion of the outcome usable — a component library before the first flow that uses it, an asset catalogue before the first shot that consumes it, every endpoint before the first UI that calls one.
 
-**Legitimate enabling slice.** Removes a demonstrated blocker, has independently verifiable value on its own, or is the smallest safe prerequisite for the vertical slice immediately following it.
+**Legitimate enabling slice.** Removes a demonstrated blocker, or is a genuine prerequisite for the vertical slice immediately following it — and, either way, has its own independently verifiable outcome. A step that only prepares for a later slice and produces nothing independently verifiable on its own is speculative enabling work, not a legitimate enabling slice, no matter how small.
 
 **Speculative enabling work.** Prepares broadly for possible future slices without evidence that the current slice needs it. Treat this as horizontal activity even when it is organized as several small tickets.
 
@@ -61,15 +61,19 @@ A decomposition session runs this check before finalizing its slice list (see De
 
 ### Correcting a horizontal plan
 
-When horizontal planning is found, mid-plan or mid-execution:
+The correction available depends on who finds the problem.
+
+**A decomposition/planning session** that finds its own not-yet-dispatched plan is horizontal has full authority to fix it before any issue is dispatched:
 
 1. preserve already-completed useful infrastructure as completed background work — do not discard it because the plan that produced it was flawed;
 2. identify the next smallest usable portion of the actual parent outcome;
-3. reframe an existing open issue around that outcome where practical, rather than opening a parallel one;
+3. reframe a draft or existing open issue around that outcome where practical, rather than opening a parallel one;
 4. move required assets and enabling tasks inside that slice as just-in-time work;
 5. close or supersede redundant shopping-list or component issues rather than duplicating them;
-6. create only the currently foreseeable follow-on vertical slices;
+6. create every currently foreseeable follow-on vertical slice, per the Decomposition boundary contract;
 7. make dependencies express outcome order, not organizational layer order.
+
+**An execution session** that discovers mid-slice that its own dispatched issue was itself scoped horizontally does not get the same authority. The active issue's explicit outcome and acceptance criteria are the highest authority (`AGENTS.md` § Authority), so the session may narrow or clarify its remaining work inside that outcome, but must not unilaterally rewrite the issue to a broader end-to-end outcome. If the smallest usable portion the session can identify would exceed what the dispatched issue already authorizes, that is a scope question, not a technical one: apply the founder interrupt conditions, and stay within the standing one-next-slice limit for genuinely new follow-on work (`AGENTS.md` § Session execution) rather than materializing a full follow-on slice list mid-slice.
 
 ### Before / after examples
 
@@ -81,7 +85,7 @@ When horizontal planning is found, mid-plan or mid-execution:
 
 ### Issue acceptance criteria
 
-Acceptance criteria such as "files exist," "assets are catalogued," "endpoints are implemented," "components are created," or "tests are written" are insufficient on their own. An issue must also demonstrate its bounded capability or deliverable working in its real context. The canonical issue-format contract (tracked in issue #202) governs issue-body structure; this section governs decomposition validity and applies regardless of which issue template is used.
+Acceptance criteria such as "files exist," "assets are catalogued," "endpoints are implemented," "components are created," or "tests are written" are insufficient on their own. An execution issue must also demonstrate its bounded capability or deliverable working in its real context. The canonical issue-format contract (tracked in issue #202) governs issue-body structure; this section governs decomposition validity for execution issues, regardless of which execution-issue template is used. Founder-decision-form, audit-control, and idea-intake issues are control boundaries, not product slices — they are judged by the decision, verdict, or intake outcome they exist to produce, not by a working capability in context.
 
 ## When to create another issue
 

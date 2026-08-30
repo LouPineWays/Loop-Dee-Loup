@@ -36,7 +36,7 @@ It must:
 
 Do not create separate execution issues for exploration, implementation layer, tests, documentation, review response, or session continuation when they serve the same outcome. Those are steps inside the slice.
 
-A slice must also be vertical, not horizontal: it must produce a usable, observable portion of the parent outcome, not merely a layer, inventory, subsystem, or category of inputs toward it. Building every layer, or every item in a category, before the first usable portion of the outcome exists is a decomposition failure even when each resulting ticket looks individually bounded. See `docs/operating-model.md` § Vertical vs horizontal decomposition for the full definitions, the decomposition self-check, the correction procedure, and worked examples.
+A slice must also be vertical, not horizontal: it must produce a usable, observable portion of the parent outcome, not merely a layer, inventory, subsystem, or category of inputs toward it. A plan whose first usable portion of the outcome would appear only after every layer or every item in a category is built is a decomposition failure, even when each resulting ticket looks individually bounded and the plan would eventually produce something usable. See `docs/operating-model.md` § Vertical vs horizontal decomposition for the full definitions, the decomposition self-check, the correction procedure, and worked examples.
 
 A founder decision, external manual action, post-merge audit, or genuinely independent correction may create a separate control boundary. Label it by its actual purpose rather than pretending it is a product slice.
 
@@ -50,7 +50,7 @@ If it genuinely requires multiple independently executable vertical slices, the 
 
 Before a decomposition session ends, it must:
 
-1. apply the decomposition self-check (`docs/operating-model.md` § Vertical vs horizontal decomposition) — if every planned issue completed in order would still leave only layers, inventories, or subsystems with no usable portion of the outcome, the plan is horizontal and must be reframed around vertical outcomes before proceeding;
+1. apply the decomposition self-check (`docs/operating-model.md` § Vertical vs horizontal decomposition): ask when, if every planned issue completed in order, the first independently usable, observable, verified portion of the parent outcome would exist — if the answer is only after several horizontal issues are all complete, the plan is horizontal and must be reframed around vertical outcomes before proceeding, even though the finished plan would eventually be usable;
 2. determine every currently foreseeable, implementation-ready vertical slice — not speculative work whose need depends on discoveries not yet made by an earlier slice;
 3. create one self-sufficient execution issue for each slice (the vertical-slice template), containing enough of the outcome, constraints, acceptance criteria, and dependencies that a fresh session can execute it without reconstructing this conversation;
 4. record genuine dependencies between those slices using GitHub's native issue relationships (Blocked by / Blocking), not free-text cross-references alone;
