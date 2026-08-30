@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MANAGED_ITEMS, planAcknowledgeIntegration, run as ldlInit } from "../ldl-init/index.mjs";
+import { MANAGED_ITEMS, SYNC_PR_PERMISSION_WARNING, planAcknowledgeIntegration, run as ldlInit } from "../ldl-init/index.mjs";
 import { parseArgs, planUpdate, run } from "./index.mjs";
 
 const SELF_PATH = fileURLToPath(import.meta.url).replace(/\.test\.mjs$/, ".mjs");
@@ -824,4 +824,31 @@ test("parseArgs: reads --dest and --root flags", () => {
   const args = parseArgs(["--dest", "/tmp/consumer", "--root", "/tmp/ldl"]);
   assert.equal(args.dest, "/tmp/consumer");
   assert.equal(args.root, "/tmp/ldl");
+});
+
+test("run: a genuine change to tools/ldl-sync content on update surfaces the PR-creation-permission warning (issue #217)", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, rootV1, "rev-1");
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const result = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2", now: () => "2026-08-24T00:00:00.000Z" });
+
+  assert.equal(result.exitCode, 0);
+  const parsed = JSON.parse(result.message);
+  assert.equal(parsed.noop, undefined);
+  assert.deepEqual(parsed.warnings, [SYNC_PR_PERMISSION_WARNING]);
+});
+
+test("run: an already-current no-op reports no warnings — a quiet no-op stays quiet (issue #217)", async (t) => {
+  const root = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, root, "rev-1");
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "rev-1" });
+
+  assert.equal(result.exitCode, 0);
+  const parsed = JSON.parse(result.message);
+  assert.equal(parsed.noop, true);
+  assert.equal(parsed.warnings, undefined);
 });

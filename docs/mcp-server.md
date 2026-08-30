@@ -100,6 +100,15 @@ indefinitely — that is expected steady state for a repository that already had
 `AGENTS.md`/`CLAUDE.md`, not a defect. Do not treat a non-empty `pendingManualIntegration` as
 "not yet installed"; treat it as "installed, but not yet active until merged by hand."
 
+`warnings` (issue #217) lists reminders that don't affect `status` itself but still need a
+human's attention. Today the only warning is the one `tools/ldl-sync` (LDL-managed automated
+consumer synchronization — see `docs/consumer-contract.md`, "Automated consumer sync") reports
+on every `ldl_status` call for as long as `tools/ldl-sync/**` is in this repository's managed
+set, reminding the operator that the repository-level "Allow GitHub Actions to create and
+approve pull requests" GitHub setting has not been verified by this tool. It never disappears
+on its own — this server has no GitHub API access and cannot check that setting itself — so
+treat its presence as "confirm the prerequisite manually," not as an error to fix in-repo.
+
 ### `ldl_init`
 
 Bootstraps a consumer repository that has no valid `.ldl/manifest.json` yet. Takes `dest`
