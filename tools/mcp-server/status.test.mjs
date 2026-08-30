@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { MANAGED_ITEMS, planAcknowledgeIntegration, run as ldlInit } from "../ldl-init/index.mjs";
+import { MANAGED_ITEMS, SYNC_PR_PERMISSION_WARNING, planAcknowledgeIntegration, run as ldlInit } from "../ldl-init/index.mjs";
 import { computeStatus, computeStatusAll } from "./status.mjs";
 
 function tempDir(t) {
@@ -112,6 +112,15 @@ test("computeStatus: freshly bootstrapped repo against the same revision is curr
   assert.equal(result.next, "none");
   assert.deepEqual(result.conflicts, []);
   assert.ok(result.managedFileCount > 0);
+});
+
+test("computeStatus: reports the PR-creation-permission warning on a current repository for as long as tools/ldl-sync is managed (issue #217)", async (t) => {
+  const root = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, root, "rev-1");
+  const result = await computeStatus({ dest, root }, { resolveRevisionImpl: () => "rev-1" });
+  assert.equal(result.status, "current");
+  assert.deepEqual(result.warnings, [SYNC_PR_PERMISSION_WARNING]);
 });
 
 test("computeStatus: a consumer-owned CLAUDE.md parked at a template is surfaced as pendingManualIntegration, without affecting current/outdated status", async (t) => {

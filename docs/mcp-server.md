@@ -100,6 +100,15 @@ indefinitely — that is expected steady state for a repository that already had
 `AGENTS.md`/`CLAUDE.md`, not a defect. Do not treat a non-empty `pendingManualIntegration` as
 "not yet installed"; treat it as "installed, but not yet active until merged by hand."
 
+`warnings` (issue #217) lists reminders that don't affect `status` itself but still need a
+human's attention. Today the only warning is the one `tools/ldl-sync` (LDL-managed automated
+consumer synchronization — see `docs/consumer-contract.md`, "Automated consumer sync") reports
+on every `ldl_status` call for as long as `tools/ldl-sync/**` is in this repository's managed
+set, reminding the operator that the repository-level "Allow GitHub Actions to create and
+approve pull requests" GitHub setting has not been verified by this tool. It never disappears
+on its own — this server has no GitHub API access and cannot check that setting itself — so
+treat its presence as "confirm the prerequisite manually," not as an error to fix in-repo.
+
 ### `ldl_init`
 
 Bootstraps a consumer repository that has no valid `.ldl/manifest.json` yet. Takes `dest`
@@ -125,9 +134,16 @@ what changed:
   "conflicts": [],
   "pendingManualIntegration": [],
   "manualIntegrationNeeded": 0,
-  "noop": false
+  "noop": false,
+  "warnings": []
 }
 ```
+
+`warnings` (issue #217) carries forward the same one-shot reminders `tools/ldl-update`'s own CLI
+JSON result reports — today, that this update just installed or changed something under
+`tools/ldl-sync/**` and the GitHub-side automated-sync prerequisite has not been verified. Empty
+on a true no-op update (`noop: true`), matching the CLI's own "quiet no-op" behavior; never
+inferred separately by this server, only ever passed through from the underlying run.
 
 `status` is `"updated"`, `"current"` (a no-op — already up to date, nothing written), or
 `"error"` (refused; `conflicts` lists exactly which managed paths could not be safely

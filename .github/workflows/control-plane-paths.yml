@@ -22,6 +22,7 @@ on:
       - "tools/ldl-update/**"
       - "tools/ldl-ack/**"
       - "tools/mcp-server/**"
+      - "tools/ldl-sync/**"
 
 concurrency:
   group: control-plane-paths-${{ github.ref }}
@@ -61,3 +62,6 @@ jobs:
 
       - name: MCP server tests
         run: node --test tools/mcp-server/*.test.mjs
+
+      - name: LDL-sync tests
+        run: node --test tools/ldl-sync/*.test.mjs

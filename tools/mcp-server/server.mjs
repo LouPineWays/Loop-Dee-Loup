@@ -40,9 +40,10 @@ const TOOLS = [
     description:
       "Report deterministic LDL synchronization status for one or more consumer repositories: " +
       "initialized/current/outdated/conflict, installed vs. canonical revision, managed/skipped " +
-      "file counts, any conflicts, and a recommended next action (ldl_init, ldl_update, or none). " +
-      "Read-only — never writes anything. Cheap enough to call for a whole known repository set " +
-      "in one call.",
+      "file counts, any conflicts, a recommended next action (ldl_init, ldl_update, or none), and " +
+      "any standing warnings (e.g. an unverified automated-sync prerequisite) independent of that " +
+      "status. Read-only — never writes anything. Cheap enough to call for a whole known " +
+      "repository set in one call.",
     inputSchema: {
       type: "object",
       properties: {
@@ -304,6 +305,10 @@ export function createServer({ root: rootOverride } = {}) {
             // count was previously dropped from the MCP ldl_update response entirely).
             manualIntegrationNeeded: payload.manualIntegrationNeeded,
             noop: Boolean(payload.noop),
+            // Sourced from the real run's own payload, same as manualIntegrationNeeded above —
+            // tools/ldl-update/index.mjs's run() only sets this on its non-noop branch (issue
+            // #217), so it's absent, not just empty, on a true no-op update.
+            warnings: payload.warnings || [],
           },
           false,
         );

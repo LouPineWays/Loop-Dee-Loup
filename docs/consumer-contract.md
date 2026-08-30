@@ -412,6 +412,271 @@ revision:
   `pendingManualIntegration` sets) is a predictable no-op: it does not touch
   `.ldl/manifest.json` or any managed file at all.
 
+## Automated consumer sync
+
+`tools/ldl-sync/` (LDL-managed, distributed via `MANAGED_ITEMS` like
+`tools/review-watch/` and `tools/local-worker/`) is a pair of scripts a
+consumer repository's own scheduled CI wires together to keep itself current
+against this repository without a human running `tools/ldl-update` by hand:
+
+- `tools/ldl-sync/verify-scope.mjs` — a defense-in-depth, after-the-fact
+  check that the diff `tools/ldl-update` just produced touches only paths the
+  resulting `.ldl/manifest.json` itself claims as managed (plus the manifest
+  file itself). Exits non-zero and refuses to proceed if anything else
+  changed, so an unattended run never opens a PR carrying an unexpected
+  change.
+- `tools/ldl-sync/pr-permission.mjs` — detects and classifies the specific
+  failure mode where the LDL update and scope verification both succeed but
+  the repository cannot open the resulting pull request. See "The
+  PR-creation prerequisite" below.
+
+Like every other GitHub Actions workflow, the actual scheduled workflow file
+(conventionally `.github/workflows/ldl-sync.yml`) is **consumer-owned CI**,
+not an LDL-managed destination — it is never installed or overwritten by
+`tools/ldl-init`/`tools/ldl-update`, exactly like this repository's own CI
+workflows are never installed into a consumer repository (see "LDL-managed"
+above). A consumer adopts automated sync by copying the example workflow
+below into their own `.github/workflows/` and adjusting it for their
+repository, then owns and can freely modify that file from then on.
+
+### The PR-creation prerequisite
+
+A workflow's own
+
+```yaml
+permissions:
+  contents: write
+  pull-requests: write
+```
+
+grants that specific workflow *run* permission to create pull requests, but
+it does not override a separate, repository-level GitHub setting: **Settings
+→ Actions → General → Workflow permissions → "Allow GitHub Actions to create
+and approve pull requests."** When that repository setting is disabled (it
+is disabled by default on repositories created under an organization with a
+conservative default), `gh pr create`/`gh pr edit` fails with:
+
+```text
+pull request create failed: GraphQL: GitHub Actions is not permitted to create or approve pull requests (createPullRequest)
+```
+
+— even though the workflow's own token has `pull-requests: write`, and even
+after the LDL update and `verify-scope.mjs` have both already succeeded and
+the sync branch has already been pushed. This is a real, reproduced failure
+mode (issue #217, YouTubery scheduled run `33310402496`), not a hypothetical
+one: it leaves the consumer looking auto-sync-configured while `main` stays
+stale and no reviewable PR ever appears.
+
+GitHub does not reliably expose a read of this repository setting to the
+default `GITHUB_TOKEN` — reading it via `GET
+/repos/{owner}/{repo}/actions/permissions/workflow` requires
+`administration: read`, a permission the default token does not carry unless
+a workflow explicitly requests it. `tools/ldl-sync/pr-permission.mjs`
+therefore offers two independent checks rather than one guaranteed
+preflight:
+
+- `preflight --repo <owner/repo>` — a best-effort read of that same API. If
+  the calling token happens to have read access and the setting is
+  disabled, this fails fast (exit `3`) *before* the workflow ever pushes the
+  shared sync branch. If the token lacks access (the common case) or the
+  read fails for any other reason, it reports `status: "unknown"` and exits
+  `0` — deliberately not treated as either "allowed" or "denied", since
+  guessing wrong in either direction would be worse than admitting the
+  preflight can't answer.
+- `classify` — reads a failed `gh pr create`/`gh pr edit` invocation's
+  captured stderr from stdin and reliably recognizes the exact GraphQL error
+  text above, independent of token scope. This is the fallback that always
+  works, because it inspects the actual denial GitHub already returned
+  rather than trying to predict it.
+
+Together these give an `ldl-sync.yml` workflow a fourth, distinct failure
+state instead of collapsing everything into one generic "sync failed":
+
+| State | How it's detected | Meaning |
+| --- | --- | --- |
+| Fully operational | `tools/ldl-update` reports `noop` or opens/updates the PR without error | Nothing to do, or synchronized normally |
+| Managed-file conflict | `tools/ldl-update` exits non-zero | A managed file was edited locally since install — needs manual reconciliation, per "Conflict-safe updates" above |
+| PR creation not permitted | `pr-permission.mjs preflight` exits `3`, or `pr-permission.mjs classify` reports `pr_creation_denied` (exit `4`) | The repository-level setting above is disabled — this section's remediation applies |
+| Unexpected operational failure | Any other non-zero exit | Something else went wrong and needs investigation |
+
+A sync branch that was pushed but has no open pull request is **not**
+synchronization having succeeded — never treat `git push` reaching
+`ldl-sync/auto-update` as equivalent to a consumer being up to date. The
+workflow's job must still report failure, with the exact remediation text
+above in its step summary, whenever the PR-creation-not-permitted state is
+reached.
+
+`tools/ldl-init` and `tools/ldl-update` each report a `warnings` array in
+their JSON result whenever a run installs or changes anything under
+`tools/ldl-sync/`, reminding the operator that this prerequisite has not
+been verified by the tool itself. `tools/mcp-server`'s `ldl_status` (see
+`docs/mcp-server.md`) reports the same warning on every call for as long as
+a repository has `tools/ldl-sync/**` in its managed set, independent of
+`status` — a repository is never reported as fully auto-sync-capable by
+these tools alone; confirming the repository setting itself is a manual
+step outside what a local, GitHub-API-free file-copy tool can check.
+
+### Example workflow
+
+````yaml
+name: LDL Sync
+
+on:
+  schedule:
+    - cron: "22 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ldl-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  SYNC_BRANCH: ldl-sync/auto-update
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: self
+          persist-credentials: false
+
+      - name: Checkout Loop-Dee-Loup source
+        uses: actions/checkout@v4
+        with:
+          repository: LouPineWays/Loop-Dee-Loup
+          ref: main
+          path: ldl-src
+          persist-credentials: false
+
+      - name: Preflight PR-creation permission
+        id: preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          node self/tools/ldl-sync/pr-permission.mjs preflight --repo "$GITHUB_REPOSITORY" > preflight-result.json
+          CODE=$?
+          cat preflight-result.json
+          if [ "$CODE" -eq 3 ]; then
+            {
+              echo "### LDL Sync: PR creation blocked by repository policy"
+              echo
+              echo 'Fix: Settings -> Actions -> General -> Workflow permissions -> "Allow GitHub Actions to create and approve pull requests"'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Record prior revision
+        id: prior
+        working-directory: self
+        run: |
+          REV=$(node -e "console.log(JSON.parse(require('fs').readFileSync('.ldl/manifest.json','utf8')).ldlSourceRevision)")
+          echo "revision=$REV" >> "$GITHUB_OUTPUT"
+
+      - name: Run conflict-safe LDL update
+        run: |
+          set +e
+          node ldl-src/tools/ldl-update/index.mjs --dest "$GITHUB_WORKSPACE/self" >update-result.json 2>update-error.log
+          CODE=$?
+          set -e
+          if [ "$CODE" -ne 0 ]; then
+            echo "::error::LDL update refused — a managed file has diverged since install, or the run failed."
+            cat update-error.log
+            {
+              echo "### LDL Sync: update refused"
+              echo
+              echo '```'
+              cat update-error.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          cat update-result.json
+
+      - name: Determine outcome
+        id: outcome
+        run: |
+          NOOP=$(node -e "console.log(JSON.parse(require('fs').readFileSync('update-result.json','utf8')).noop === true)")
+          echo "noop=$NOOP" >> "$GITHUB_OUTPUT"
+
+      - name: Verify diff stays within the LDL-managed set
+        if: steps.outcome.outputs.noop == 'false'
+        working-directory: self
+        run: node tools/ldl-sync/verify-scope.mjs
+
+      - name: Record target revision
+        id: target
+        if: steps.outcome.outputs.noop == 'false'
+        working-directory: self
+        run: |
+          REV=$(node -e "console.log(JSON.parse(require('fs').readFileSync('.ldl/manifest.json','utf8')).ldlSourceRevision)")
+          echo "revision=$REV" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update sync PR
+        id: open_pr
+        if: steps.outcome.outputs.noop == 'false'
+        working-directory: self
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRIOR_REV: ${{ steps.prior.outputs.revision }}
+          TARGET_REV: ${{ steps.target.outputs.revision }}
+        run: |
+          set +e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          # Fetch any existing remote sync branch first: --force-with-lease's implicit (no
+          # =<expect>) form checks the push against this checkout's own remote-tracking ref for
+          # SYNC_BRANCH, and this job only ever fetched "main" above — without this, a push to an
+          # already-existing sync branch is rejected as stale info before ever reaching gh pr edit.
+          git fetch -q origin "refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" 2>/dev/null || true
+
+          git checkout -B "$SYNC_BRANCH"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -q -m "chore: sync LDL-managed files to ${TARGET_REV}"
+          git push --force-with-lease origin "HEAD:refs/heads/${SYNC_BRANCH}" 2>push-error.log
+          if [ $? -ne 0 ]; then
+            cat push-error.log
+            exit 1
+          fi
+
+          BODY_FILE="$(mktemp)"
+          {
+            echo "Automated Loop-Dee-Loup consumer synchronization — see docs/consumer-contract.md, \"Automated consumer sync\"."
+            echo
+            echo "- Prior LDL revision: \`${PRIOR_REV}\`"
+            echo "- Target LDL revision: \`${TARGET_REV}\`"
+          } > "$BODY_FILE"
+
+          EXISTING_PR="$(gh pr list --head "$SYNC_BRANCH" --base main --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$EXISTING_PR" ]; then
+            gh pr edit "$EXISTING_PR" --title "chore: automated Loop-Dee-Loup sync to ${TARGET_REV}" --body-file "$BODY_FILE" 2>pr-error.log
+          else
+            gh pr create --head "$SYNC_BRANCH" --base main --title "chore: automated Loop-Dee-Loup sync to ${TARGET_REV}" --body-file "$BODY_FILE" 2>pr-error.log
+          fi
+          CODE=$?
+          if [ "$CODE" -ne 0 ]; then
+            node tools/ldl-sync/pr-permission.mjs classify < pr-error.log > classify-result.json
+            node -e "console.log(JSON.parse(require('fs').readFileSync('classify-result.json','utf8')).summary)" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+````
+
+This is a starting point, not a distributed artifact — copy it into your own
+`.github/workflows/ldl-sync.yml`, and adapt scheduling, branch names, and
+error handling to your project's own CI conventions from then on. LDL never
+overwrites it once it exists.
+
 ## Explicitly out of scope for this mechanism
 
 - A package-registry, dependency-resolution, or semantic-versioning system

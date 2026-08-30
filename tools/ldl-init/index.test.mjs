@@ -15,11 +15,13 @@ import { fileURLToPath } from "node:url";
 import {
   BRIDGE_FILES,
   MANAGED_ITEMS,
+  SYNC_PR_PERMISSION_WARNING,
   buildOps,
   contentMatchesHash,
   deriveConsumerAgents,
   defaultResolveRevision,
   derivePendingManualIntegration,
+  deriveSyncPrerequisiteWarnings,
   findBridgeByDestRel,
   isValidManifest,
   looksBinary,
@@ -103,6 +105,8 @@ test("buildOps resolves every MANAGED_ITEMS path against the real repository", (
   assert.ok(dests.includes(".claude/personas/audit-verdict-extractor.md"));
   assert.ok(dests.some((d) => d.startsWith(".claude/skills/sift/")));
   assert.ok(dests.includes("docs/operating-model.md"));
+  assert.ok(dests.includes("tools/ldl-sync/verify-scope.mjs"));
+  assert.ok(dests.includes("tools/ldl-sync/pr-permission.mjs"));
 });
 
 test("buildOps normalizes CRLF source content to LF, regardless of the LDL maintainer's own checkout line endings (issue #146)", (t) => {
@@ -1137,3 +1141,26 @@ test("run: carries forward an existing manualIntegrationAcknowledgements array u
     "an acknowledged bridge must never be added to the managed files[] set",
   );
 });
+
+
+test("deriveSyncPrerequisiteWarnings: warns when a destination path falls under tools/ldl-sync/ (issue #217)", () => {
+  assert.deepEqual(deriveSyncPrerequisiteWarnings(["tools/ldl-sync/verify-scope.mjs", "AGENTS.md"]), [SYNC_PR_PERMISSION_WARNING]);
+});
+
+test("deriveSyncPrerequisiteWarnings: stays empty when no path falls under tools/ldl-sync/", () => {
+  assert.deepEqual(deriveSyncPrerequisiteWarnings(["AGENTS.md", "docs/consumer-contract.md"]), []);
+});
+
+test("deriveSyncPrerequisiteWarnings: does not false-positive on an unrelated path merely prefixed similarly", () => {
+  assert.deepEqual(deriveSyncPrerequisiteWarnings(["tools/ldl-sync-unrelated/file.md"]), []);
+});
+
+test("run: a fresh install of tools/ldl-sync surfaces the PR-creation-permission warning in the result (issue #217)", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha" });
+  assert.equal(result.exitCode, 0);
+  const parsed = JSON.parse(result.message);
+  assert.deepEqual(parsed.warnings, [SYNC_PR_PERMISSION_WARNING]);
+});
+

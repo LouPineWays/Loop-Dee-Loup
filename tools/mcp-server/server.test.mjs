@@ -196,6 +196,29 @@ test("ldl_update reports manualIntegrationNeeded, matching pendingManualIntegrat
   assert.equal(payload.manualIntegrationNeeded, payload.pendingManualIntegration.length);
 });
 
+test("ldl_update propagates the PR-creation-permission warning through the protocol, matching the CLI's own JSON result (issue #217)", async (t) => {
+  // Stage 1 review finding on PR #219: tools/ldl-update/index.mjs's run() reports `warnings`
+  // in its own CLI-style JSON result, but this handler previously rebuilt its response object
+  // by hand without carrying that field through, silently hiding it from an MCP caller.
+  const client = await connectedClient(t);
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await ldlInit({ dest, root: rootV1 });
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const updateResult = await client.callTool({ name: "ldl_update", arguments: { dest, root: rootV2 } });
+  assert.equal(updateResult.isError, false);
+  const payload = JSON.parse(updateResult.content[0].text);
+  assert.equal(payload.warnings.length, 1);
+  assert.match(payload.warnings[0], /tools\/ldl-sync/);
+
+  // A true no-op stays quiet, matching the CLI's own behavior (issue #217).
+  const noopResult = await client.callTool({ name: "ldl_update", arguments: { dest, root: rootV2 } });
+  const noopPayload = JSON.parse(noopResult.content[0].text);
+  assert.equal(noopPayload.noop, true);
+  assert.deepEqual(noopPayload.warnings, []);
+});
+
 test("ldl_acknowledge_integration: full lifecycle through the protocol (issue #153)", async (t) => {
   const client = await connectedClient(t);
   const rootV1 = makeFixtureRoot(t, "rev-1");

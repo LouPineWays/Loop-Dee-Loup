@@ -61,6 +61,7 @@ import {
   contentMatchesHash,
   defaultResolveRevision,
   derivePendingManualIntegration,
+  deriveSyncPrerequisiteWarnings,
   findUnsafeDestReason,
   findUnsafeLdlDirReason,
   isValidManifest,
@@ -388,6 +389,12 @@ export async function run(args, deps = {}) {
       manualIntegrationNeeded: manifest.pendingManualIntegration.length,
       revision: manifest.ldlSourceRevision,
       manifestPath: ".ldl/manifest.json",
+      // Only from paths this run actually just installed/changed (not the full managed set —
+      // see deriveSyncPrerequisiteWarnings's own comment), so an already-current repository's
+      // quiet no-op above never resurfaces this unprompted, and a repository that already has
+      // tools/ldl-sync/** installed from a prior run doesn't see it repeated on every unrelated
+      // update either.
+      warnings: deriveSyncPrerequisiteWarnings(installedFiles.map((f) => f.dest)),
     }),
   };
 }

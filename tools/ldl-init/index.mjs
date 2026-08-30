@@ -62,12 +62,36 @@ export const MANAGED_ITEMS = [
   { kind: "file", src: ".claude/personas/audit-verdict-extractor.md", dest: ".claude/personas/audit-verdict-extractor.md" },
   { kind: "dir", src: "tools/local-worker", dest: "tools/local-worker" },
   { kind: "dir", src: "tools/review-watch", dest: "tools/review-watch" },
+  { kind: "dir", src: "tools/ldl-sync", dest: "tools/ldl-sync" },
   { kind: "file", src: "docs/operating-model.md", dest: "docs/operating-model.md" },
   { kind: "file", src: "docs/bounded-review-cycle.md", dest: "docs/bounded-review-cycle.md" },
   { kind: "file", src: "docs/decision-forms.md", dest: "docs/decision-forms.md" },
   { kind: "file", src: "docs/consumer-contract.md", dest: "docs/consumer-contract.md" },
   { kind: "dir", src: ".github/ISSUE_TEMPLATE", dest: ".github/ISSUE_TEMPLATE" },
 ];
+
+// Automated consumer sync (tools/ldl-sync, distributed above) depends on a GitHub
+// repository-level setting that no MANAGED_ITEMS install/update can verify or set on the
+// consumer's behalf — see docs/consumer-contract.md, "Automated consumer sync", and issue #217.
+// Surfaced (not enforced) at every point a caller already learns tools/ldl-sync/** just became
+// part of this repository's managed set, so a consumer is never told it is fully
+// auto-sync-capable before this prerequisite has actually been confirmed.
+export const SYNC_PR_PERMISSION_WARNING =
+  "Automated consumer sync (tools/ldl-sync) requires this repository to allow GitHub Actions " +
+  'to create pull requests: Settings -> Actions -> General -> Workflow permissions -> "Allow ' +
+  'GitHub Actions to create and approve pull requests". This has not been verified by this ' +
+  'tool. See docs/consumer-contract.md, "Automated consumer sync".';
+
+// Returns [SYNC_PR_PERMISSION_WARNING] when any of the given LDL-managed destination paths
+// falls under tools/ldl-sync/, else []. Takes a plain list of dest strings (not a manifest, not
+// a diff) so tools/ldl-init, tools/ldl-update, and tools/mcp-server/status.mjs can each apply it
+// to whatever set is meaningful for their own moment — every currently managed path for a
+// status check, or only the paths a single run actually just installed/changed for ldl-init/
+// ldl-update, so a quiet no-op update never resurfaces this reminder unprompted.
+export function deriveSyncPrerequisiteWarnings(destPaths) {
+  const hasSyncPaths = destPaths.some((d) => d === "tools/ldl-sync" || d.startsWith("tools/ldl-sync/"));
+  return hasSyncPaths ? [SYNC_PR_PERMISSION_WARNING] : [];
+}
 
 // A "bridge" file's installed destination depends on consumer repository state, not source
 // repository state alone: AGENTS.md (content derived from Loop-Dee-Loup's own AGENTS.md with
@@ -829,6 +853,7 @@ export async function run(args, deps = {}) {
       manualIntegrationNeeded: manifest.pendingManualIntegration.length,
       revision: manifest.ldlSourceRevision,
       manifestPath: ".ldl/manifest.json",
+      warnings: deriveSyncPrerequisiteWarnings(manifest.files.map((f) => f.dest)),
     }),
   };
 }

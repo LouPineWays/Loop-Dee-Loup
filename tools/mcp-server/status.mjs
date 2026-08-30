@@ -13,6 +13,7 @@ import {
   buildOps,
   defaultResolveRevision,
   derivePendingManualIntegration,
+  deriveSyncPrerequisiteWarnings,
   findUnsafeDestReason,
   findUnsafeLdlDirReason,
   isValidManifest,
@@ -225,6 +226,13 @@ export async function computeStatus({ dest, root }, deps = {}) {
       template: p.template,
       reason: p.reason,
     })),
+    // Durable, repeat-call visibility for the automated-sync prerequisite (issue #217): unlike
+    // ldl_init's/ldl_update's own one-shot `warnings`, this is derived from every currently
+    // managed path in the manifest, not just what one run happened to install/change — so a
+    // repository that installed tools/ldl-sync/** in a past run keeps reporting this on every
+    // later ldl_status call until the caller stops seeing it as relevant, rather than only once
+    // at the moment of install.
+    warnings: deriveSyncPrerequisiteWarnings(plan.parsedManifest.files.map((f) => f.dest)),
     next,
   };
 }

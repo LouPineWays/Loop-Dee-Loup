@@ -41,6 +41,7 @@ const pathChecks = [
   { label: "tools/ldl-update/**", ok: () => dirHasFiles("tools/ldl-update") },
   { label: "tools/ldl-ack/**", ok: () => dirHasFiles("tools/ldl-ack") },
   { label: "tools/mcp-server/**", ok: () => dirHasFiles("tools/mcp-server") },
+  { label: "tools/ldl-sync/**", ok: () => dirHasFiles("tools/ldl-sync") },
 ];
 
 // Cross-check: every literal path token this script relies on must still appear
@@ -62,6 +63,7 @@ const requiredLiterals = [
   "tools/ldl-update/**",
   "tools/ldl-ack/**",
   "tools/mcp-server/**",
+  "tools/ldl-sync/**",
 ];
 
 const failures = [];
