@@ -20,6 +20,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 export function parseArgs(argv) {
   const args = { dest: "." };
@@ -32,14 +33,19 @@ export function parseArgs(argv) {
 }
 
 // Pure — no I/O — so tests can exercise the actual scope rule without touching git or the
-// filesystem. `.ldl/manifest.json` is always allowed since a real tools/ldl-update change
-// always rewrites it; every other changed path must appear in `managedPaths` (the *new*
-// manifest's own `files[].dest` list, i.e. what the update itself claims it manages) to be
-// accepted.
+// filesystem. Every changed path under `.ldl/` is always allowed, not just `.ldl/manifest.json`:
+// that whole directory is LDL's own reserved namespace (see docs/consumer-contract.md), and
+// tools/ldl-update legitimately deletes a superseded bridge template (.ldl/AGENTS.template.md or
+// .ldl/CLAUDE.template.md) — dropping it from the *new* manifest's own files[] list entirely —
+// whenever a consumer-owned AGENTS.md/CLAUDE.md that used to force parking is removed or starts
+// matching content again. Checking that deletion against `managedPaths` (which, by construction,
+// never lists a path this update just stopped managing) would wrongly flag a fully valid update
+// as an unexpected change and refuse to proceed. Every other changed path must still appear in
+// `managedPaths` (the *new* manifest's own `files[].dest` list, i.e. what the update itself
+// claims it manages) to be accepted.
 export function findUnexpectedPaths(changedPaths, managedPaths) {
   const allowed = new Set(managedPaths);
-  allowed.add(".ldl/manifest.json");
-  return changedPaths.filter((p) => !allowed.has(p));
+  return changedPaths.filter((p) => !allowed.has(p) && p !== ".ldl/manifest.json" && !p.startsWith(".ldl/"));
 }
 
 // `git status --porcelain=v1` lines are two status columns, one space, then the path (column
@@ -104,8 +110,10 @@ function main() {
   process.exit(result.exitCode);
 }
 
-// Only run as a CLI when invoked directly (`node tools/ldl-sync/verify-scope.mjs ...`), not
-// when the test file imports these functions.
-if (process.argv[1] && process.argv[1].endsWith("verify-scope.mjs")) {
+// Only run as a CLI when this exact file is the process entrypoint, not merely when some
+// other script's argv[1] happens to end in "verify-scope.mjs" (Stage 1 review finding on PR
+// #219) — matching the same exact-identity guard tools/ldl-init/index.mjs and
+// tools/ldl-update/index.mjs already use.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main();
 }

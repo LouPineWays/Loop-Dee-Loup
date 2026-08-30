@@ -4,6 +4,11 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   REMEDIATION,
   classifyPrCreateFailure,
@@ -12,6 +17,8 @@ import {
   parseArgs,
   preflightPrPermission,
 } from "./pr-permission.mjs";
+
+const MODULE_PATH = fileURLToPath(import.meta.url).replace(/\.test\.mjs$/, ".mjs");
 
 // The exact error text observed on YouTubery scheduled run 33310402496 (issue #217) — this is
 // the regression fixture for "update and scope verification succeed but gh pr create is denied
@@ -99,4 +106,16 @@ test("preflightPrPermission: passes the repo through to the gh invocation", () =
 
 test("parseArgs: reads --repo", () => {
   assert.deepEqual(parseArgs(["--repo", "owner/repo"]), { repo: "owner/repo" });
+});
+
+test("entrypoint guard: importing this module from a script whose own path also ends in 'pr-permission.mjs' must not trigger main() (Stage 1 review finding on PR #219)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pr-permission-entrypoint-test-"));
+  try {
+    const importerPath = join(dir, "custom-pr-permission.mjs");
+    writeFileSync(importerPath, `import ${JSON.stringify(pathToFileURL(MODULE_PATH).href)};\nconsole.log("imported ok");\n`);
+    const output = execFileSync(process.execPath, [importerPath], { encoding: "utf8" });
+    assert.equal(output.trim(), "imported ok");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

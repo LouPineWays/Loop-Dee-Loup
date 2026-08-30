@@ -33,6 +33,7 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 export const REMEDIATION =
   'Settings -> Actions -> General -> Workflow permissions -> "Allow GitHub Actions to create and approve pull requests"';
@@ -157,7 +158,10 @@ function main() {
   }
 }
 
-// Only run as a CLI when invoked directly, not when the test file imports these functions.
-if (process.argv[1] && process.argv[1].endsWith("pr-permission.mjs")) {
+// Only run as a CLI when this exact file is the process entrypoint, not merely when some
+// other script's argv[1] happens to end in "pr-permission.mjs" (Stage 1 review finding on PR
+// #219) — matching the same exact-identity guard tools/ldl-init/index.mjs and
+// tools/ldl-update/index.mjs already use.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main();
 }

@@ -634,6 +634,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
+          # Fetch any existing remote sync branch first: --force-with-lease's implicit (no
+          # =<expect>) form checks the push against this checkout's own remote-tracking ref for
+          # SYNC_BRANCH, and this job only ever fetched "main" above — without this, a push to an
+          # already-existing sync branch is rejected as stale info before ever reaching gh pr edit.
+          git fetch -q origin "refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" 2>/dev/null || true
+
           git checkout -B "$SYNC_BRANCH"
           git add -A
           git diff --cached --quiet && exit 0

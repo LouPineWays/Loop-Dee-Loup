@@ -305,6 +305,10 @@ export function createServer({ root: rootOverride } = {}) {
             // count was previously dropped from the MCP ldl_update response entirely).
             manualIntegrationNeeded: payload.manualIntegrationNeeded,
             noop: Boolean(payload.noop),
+            // Sourced from the real run's own payload, same as manualIntegrationNeeded above —
+            // tools/ldl-update/index.mjs's run() only sets this on its non-noop branch (issue
+            // #217), so it's absent, not just empty, on a true no-op update.
+            warnings: payload.warnings || [],
           },
           false,
         );

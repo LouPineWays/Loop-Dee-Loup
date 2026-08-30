@@ -5,7 +5,14 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { findUnexpectedPaths, parseArgs, run } from "./verify-scope.mjs";
+
+const MODULE_PATH = fileURLToPath(import.meta.url).replace(/\.test\.mjs$/, ".mjs");
 
 test("findUnexpectedPaths: allows .ldl/manifest.json even though it's never in the manifest's own files list", () => {
   const unexpected = findUnexpectedPaths([".ldl/manifest.json", "AGENTS.md"], ["AGENTS.md"]);
@@ -23,6 +30,19 @@ test("findUnexpectedPaths: allows every path the new manifest itself claims as m
 test("findUnexpectedPaths: flags a changed path outside both the manifest sentinel and the managed set", () => {
   const unexpected = findUnexpectedPaths([".ldl/manifest.json", "AGENTS.md", "src/some-feature/notes.md"], ["AGENTS.md"]);
   assert.deepEqual(unexpected, ["src/some-feature/notes.md"]);
+});
+
+test("findUnexpectedPaths: allows a superseded bridge template's deletion even though the new manifest no longer lists it (Stage 1 review finding on PR #219)", () => {
+  // A consumer-owned AGENTS.md that used to force .ldl/AGENTS.template.md parking was removed
+  // (or now matches content), so this update installs straight to AGENTS.md and deletes the
+  // now-superseded template — dropping it from the new manifest's files[] entirely, by design.
+  const unexpected = findUnexpectedPaths([".ldl/manifest.json", "AGENTS.md", ".ldl/AGENTS.template.md"], ["AGENTS.md"]);
+  assert.deepEqual(unexpected, []);
+});
+
+test("findUnexpectedPaths: allows any other .ldl/ path to change, not only manifest.json and templates", () => {
+  const unexpected = findUnexpectedPaths([".ldl/some-future-ldl-owned-file.json"], []);
+  assert.deepEqual(unexpected, []);
 });
 
 test("findUnexpectedPaths: returns every unexpected path, not just the first", () => {
@@ -108,4 +128,16 @@ test("run: defaults --dest to the current directory when omitted", () => {
   );
   assert.equal(result.exitCode, 0);
   assert.equal(seenDest, ".");
+});
+
+test("entrypoint guard: importing this module from a script whose own path also ends in 'verify-scope.mjs' must not trigger main() (Stage 1 review finding on PR #219)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "verify-scope-entrypoint-test-"));
+  try {
+    const importerPath = join(dir, "custom-verify-scope.mjs");
+    writeFileSync(importerPath, `import ${JSON.stringify(pathToFileURL(MODULE_PATH).href)};\nconsole.log("imported ok");\n`);
+    const output = execFileSync(process.execPath, [importerPath], { encoding: "utf8" });
+    assert.equal(output.trim(), "imported ok");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

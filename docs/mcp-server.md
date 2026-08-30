@@ -134,9 +134,16 @@ what changed:
   "conflicts": [],
   "pendingManualIntegration": [],
   "manualIntegrationNeeded": 0,
-  "noop": false
+  "noop": false,
+  "warnings": []
 }
 ```
+
+`warnings` (issue #217) carries forward the same one-shot reminders `tools/ldl-update`'s own CLI
+JSON result reports — today, that this update just installed or changed something under
+`tools/ldl-sync/**` and the GitHub-side automated-sync prerequisite has not been verified. Empty
+on a true no-op update (`noop: true`), matching the CLI's own "quiet no-op" behavior; never
+inferred separately by this server, only ever passed through from the underlying run.
 
 `status` is `"updated"`, `"current"` (a no-op — already up to date, nothing written), or
 `"error"` (refused; `conflicts` lists exactly which managed paths could not be safely
