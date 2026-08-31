@@ -26,6 +26,15 @@ const DOC_PATH = join(REPO_ROOT, "docs", "consumer-contract.md");
 const DOC_TEXT = readFileSync(DOC_PATH, "utf8");
 const PATH_SEP = process.platform === "win32" ? ";" : ":";
 
+// bash's own PATH lookup needs a colon-separated value. On a Windows/MSYS toolchain, the OS's
+// $PATH is semicolon-separated and MSYS auto-translates it to POSIX form only for its *own*
+// process's inherited PATH at startup — an arbitrary env var this suite hands a child bash
+// process (LDL_TEST_REAL_PATH, below) never goes through that translation, so passing
+// process.env.PATH straight through leaves the git stub unable to find the real git binary on
+// Windows. Round-tripping through a real bash process (a no-op on Linux, where PATH is already
+// POSIX) gets the form bash itself will actually be able to use.
+const REAL_PATH = execFileSync("bash", ["-c", 'printf "%s" "$PATH"'], { encoding: "utf8" });
+
 // A dependency-free substitute for a real YAML parser (this repository has no npm dependencies
 // at all): locates the workflow step whose YAML carries `id: <stepId>`, then reads its
 // `run: |` block forward until a line indented at or shallower than the `run:` key itself.
@@ -60,14 +69,21 @@ test("extractStepRunBlock: pulls the exact open_pr step body out of the doc", ()
 
 // Redirects `git remote set-url origin <url>` to $TEST_REMOTE_URL instead, so the extracted
 // script's hardcoded github.com URL never has to reach the real network; every other git
-// invocation passes straight through to the real git binary.
-function makeGitStub(binDir, realGit) {
+// invocation passes straight through to the real git binary. Resolves "the real git binary" by
+// re-scoping PATH to $LDL_TEST_REAL_PATH (the PATH captured before this stub's own binDir was
+// prepended to it) for that one lookup, rather than asking Node to locate git's absolute path
+// itself — `command -v git`/`where git` requires spawning a `command`/`where` executable, and on
+// the Ubuntu runner this suite's own CI actually uses, `command` is a shell builtin with no
+// standalone executable at all, so `execFileSync("command", ...)` fails with ENOENT before any
+// fixture even runs (Stage 1 review finding on PR #236).
+function makeGitStub(binDir) {
   const script = [
     "#!/usr/bin/env bash",
     'if [ "$1" = "remote" ] && [ "$2" = "set-url" ]; then',
-    `  exec "${realGit}" remote set-url "$3" "$TEST_REMOTE_URL"`,
+    '  PATH="$LDL_TEST_REAL_PATH" git remote set-url "$3" "$TEST_REMOTE_URL"',
+    "  exit $?",
     "fi",
-    `exec "${realGit}" "$@"`,
+    'PATH="$LDL_TEST_REAL_PATH" exec git "$@"',
     "",
   ].join("\n");
   const gitPath = join(binDir, "git");
@@ -129,10 +145,19 @@ function runExtractedStep(stepId, { cwd, binDir, env }) {
   const summaryPath = join(cwd, "..", "step-summary.md");
   writeFileSync(summaryPath, "");
   const callLogPath = join(cwd, "..", "gh-call-log.txt");
-  const result = spawnSync("bash", ["-c", script], {
+  // GitHub Actions' own default bash shell for `run:` steps is
+  // `bash --noprofile --norc -eo pipefail {0}` — plain `bash -c script` runs with neither `-e`
+  // nor `pipefail`, so a plumbing failure the real workflow would abort on (e.g. `checkout -B`)
+  // would instead let this harness keep running past it, potentially still reaching a later,
+  // unrelated failure (a broken push) and reporting a non-zero exit for the wrong reason. Stage
+  // 1 review on PR #236 confirmed exactly this: the induced-git-failure test below still passed
+  // even with the prohibited blanket `set +e` reintroduced, because the harness itself wasn't
+  // enforcing the abort-on-error semantics it was supposed to be checking for.
+  const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script], {
     cwd,
     env: {
       ...process.env,
+      LDL_TEST_REAL_PATH: REAL_PATH,
       PATH: `${binDir}${PATH_SEP}${process.env.PATH}`,
       GITHUB_STEP_SUMMARY: summaryPath,
       GH_STUB_CALL_LOG: callLogPath,
@@ -156,12 +181,7 @@ function withFixture(fn) {
   const binDir = join(root, "bin");
   mkdirSync(selfDir);
   mkdirSync(binDir);
-  const realGit = execFileSync(process.platform === "win32" ? "where" : "command", process.platform === "win32" ? ["git"] : ["-v", "git"], {
-    encoding: "utf8",
-  })
-    .split("\n")[0]
-    .trim();
-  makeGitStub(binDir, realGit);
+  makeGitStub(binDir);
   initSelfRepo(selfDir);
   try {
     return fn({ root, selfDir, binDir });
@@ -188,11 +208,18 @@ test("open_pr step: a genuine no-op (nothing staged) exits 0 without ever attemp
 
 test("open_pr step: an induced git-plumbing failure (invalid ref name) fails loudly instead of falling through to the no-op branch", () => {
   withFixture(({ selfDir, binDir, root }) => {
+    const headBefore = execFileSync("git", ["rev-parse", "HEAD"], { cwd: selfDir, encoding: "utf8" }).trim();
     writeFileSync(join(selfDir, "managed.txt"), "changed content\n");
     const result = runExtractedStep("open_pr", {
       cwd: selfDir,
       binDir,
       env: {
+        // Point push at a path that doesn't exist, so if execution *incorrectly* reaches the
+        // push line (the bug this test exists to catch) it would still fail there too — a
+        // weaker assertion further down could otherwise mistake that unrelated push failure for
+        // this test having actually verified the checkout failure stopped execution (Stage 1
+        // review finding on PR #236: this exact test still passed with the prohibited blanket
+        // `set +e` reintroduced, purely because the later push also failed).
         TEST_REMOTE_URL: join(root, "does-not-exist.git"),
         // ".." is rejected by `git check-ref-format`, so `git checkout -B` fails outright —
         // this is the exact shape of failure a blanket `set +e` previously swallowed, letting
@@ -206,6 +233,12 @@ test("open_pr step: an induced git-plumbing failure (invalid ref name) fails lou
       /Nothing to commit/,
       "a real git failure must never be reported as the legitimate no-op branch",
     );
+    // The decisive check: execution must never have reached `git commit` at all. A run that
+    // (incorrectly) survives the checkout failure would stage and commit the change before
+    // failing later at push — moving HEAD — even though the overall exit code and stdout checks
+    // above could look identical either way.
+    const headAfter = execFileSync("git", ["rev-parse", "HEAD"], { cwd: selfDir, encoding: "utf8" }).trim();
+    assert.equal(headAfter, headBefore, "no commit should exist — execution must have stopped at the failed checkout, before ever staging or committing");
   });
 });
 
@@ -272,7 +305,8 @@ test("preflight step: an unexpected crash (not the known 'denied' exit code) sti
     );
     const summaryPath = join(selfDir, "..", "step-summary.md");
     writeFileSync(summaryPath, "");
-    const result = spawnSync("bash", ["-c", script], {
+    // Same Actions-faithful shell invocation as runExtractedStep — see its own comment.
+    const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script], {
       cwd: selfDir,
       env: {
         ...process.env,
