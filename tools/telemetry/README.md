@@ -371,6 +371,74 @@ skill checks for this file's absence and applies a fixed per-claim fallback mapp
 (`.claude/skills/spend/SKILL.md`'s "Evidence-sufficiency verdicts" section), never skipping the
 verdict or promoting it to CLEAN merely because this script is unavailable there (issue #152).
 
+## Execution-boundary proving probe (issue #245)
+
+Everything above observes a session from *inside* the process Claude Code itself runs
+(hooks, statusLine, the transcript it writes). Issue #245 tests a different boundary: can
+the **host that launches** a real LDL session capture Claude's own terminal result
+directly, without depending on any repository-local completion signal at all?
+`execution-boundary-probe.mjs` is the minimal proving wrapper for that question — it owns
+only process launch, stdout/stderr handling, terminal-result recognition, exit status, and
+persisting one compact JSON record per proving run. It is explicitly an experiment probe,
+not a production telemetry pipeline, and is not wired into `.claude/settings.json` or any
+other automatic entry point.
+
+```
+node tools/telemetry/execution-boundary-probe.mjs \
+  --task <task-id> --prompt <text> --claude-bin <path to the claude CLI binary> \
+  [--cwd <dir>] [--permission-mode <mode>] [--timeout-ms <n>] \
+  [--kill-after-ms <n>] [--kill-signal <SIGTERM|SIGKILL>] [--out <path>] \
+  [--no-session-persistence] [--note <text>]...
+```
+
+It spawns `<claude-bin> -p --output-format stream-json --verbose <the-rest-of-issue-#245's-
+execution-surface> "<prompt>"` as a **non-bare** child process (so real `CLAUDE.md`/
+`AGENTS.md`/hooks stay active), parses the newline-delimited stream for the terminal
+`type: "result"` message, and writes `docs/execution-boundary-probe-runs/<task-id>.json` by
+default. Two Claude Code result-message semantics are kept explicitly distinct in that
+record, per issue #245: `usage` is the **top-level agent loop only** and excludes subagent
+activity, while `modelUsage`/`model_usage` is per-model usage across the **whole query
+tree**, including subagent requests — `extractTopLevelUsage`/`extractWholeTreeModelUsage`
+never conflate the two. `total_cost_usd` is captured only as `estimated_list_cost_usd`,
+explicitly noted as list-price accounting, never actual subscription spend or billing.
+
+A missing terminal result (a killed, hung, or otherwise abnormal run) is recorded as
+`result_received: false` / `usage_status: "unknown"` and is never backfilled from anything
+else — `buildRecord` computes `top_level_usage`/`whole_tree_model_usage`/
+`estimated_list_cost_usd` only from a genuine terminal result, regardless of what the
+independent hook comparison below shows. This mirrors, deliberately, the same
+"a field that cannot be measured reliably must remain unknown" discipline the rest of this
+directory already follows (see `reduce.mjs`'s `unknown` list).
+
+Because the probed session runs non-bare in this repository, it fires the same
+`SessionStart`/`SubagentStart`/`SubagentStop`/`SessionEnd` hooks as any other session
+(`hook.mjs`, wired in `.claude/settings.json`). `buildHookComparison` reads that session's
+raw event log (`readSessionEvents`, from `collect.mjs`) purely as an independent structural
+cross-check — issue #245's "Comparison with existing telemetry" — never as a second economic
+authority: it can confirm a subagent genuinely ran or that a `SessionEnd` fired, but it never
+feeds into `top_level_usage`, `whole_tree_model_usage`, or `estimated_list_cost_usd`.
+
+Privacy follows the same rule as the rest of this directory, applied to a new record shape:
+only coarse identifiers, counts, and numeric usage/cost fields are ever persisted. The
+terminal result's own `result` field (the assistant's final response text) is read only to
+confirm the message is a `result`; its value is never copied into the record, only its key
+*name* may appear in `result_raw_keys`. `--note` is bounded to the same rule mechanically,
+not just by convention: `parseArgs` rejects a note longer than 200 characters or containing
+a newline, so the flag stays usable for short structured run metadata (e.g. "required test
+3, forced delegation") without becoming an escape hatch for an accidentally-pasted prompt,
+response, or path dump.
+
+A spawn that fails outright (a stale/missing/non-executable `--claude-bin`, or an invalid
+`--cwd`) is recorded the same as any other abnormal run — `result_received: false`,
+`usage_status: "unknown"` — with the failure reason captured only in `spawn_error`, never
+inferred from a partial process that never actually started.
+
+Requires a permission mode (`--permission-mode`, default `bypassPermissions`) because a
+spawned `-p` child has no TTY to answer an interactive tool-approval prompt — an unanswered
+prompt would simply hang the proving run forever. See `docs/execution-boundary-experiment.md`
+for the durable record of real proving runs against this probe and their PASS/FAIL/
+INCONCLUSIVE verdict.
+
 ## Tests
 
 ```
@@ -392,3 +460,10 @@ covers `buildTranscriptUsageEvent` (for `SessionEnd` and `SubagentStop`) and con
 message id, agentType attribution, missing/malformed files, and privacy (no prompt/response/
 description content leaks through). `sufficiency.test.mjs` covers `assessSufficiency`, including
 the issue #120 regression case. `reduce.cli.test.mjs` covers the reducer's CLI plumbing.
+`execution-boundary-probe.test.mjs` (issue #245) covers the proving probe above end-to-end
+against `fixtures/execution-boundary/fake-cli.mjs` (a stand-in for the real `claude` binary,
+covering a normal run, a run with two distinct models in `modelUsage`, an `is_error` run, a
+run that exits without ever emitting a result, and a hung process force-terminated via
+`--kill-after-ms`) — including confirming a completed run's top-level/whole-tree usage split
+and cost label, and that a missing result is reported as `unknown` rather than backfilled from
+hook evidence.

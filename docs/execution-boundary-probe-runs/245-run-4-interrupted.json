@@ -1,0 +1,44 @@
+{
+  "task_id": "245-run-4-interrupted",
+  "execution_surface": "claude -p --output-format stream-json --verbose",
+  "permission_mode": "bypassPermissions",
+  "cwd_basename": "Loop-Dee-Loup",
+  "started_at": "2026-08-31T21:19:44.873Z",
+  "ended_at": "2026-08-31T21:19:48.927Z",
+  "wall_duration_ms": 4054,
+  "process_exit_code": null,
+  "process_signal": "SIGTERM",
+  "result_received": false,
+  "session_id": "30752cb3-600c-4b00-b249-ee090dd13f1d",
+  "init_session_id": "30752cb3-600c-4b00-b249-ee090dd13f1d",
+  "message_types_seen": [
+    "system"
+  ],
+  "result_subtype": null,
+  "is_error": null,
+  "num_turns": null,
+  "duration_ms": null,
+  "duration_api_ms": null,
+  "top_level_usage": null,
+  "top_level_usage_note": "top-level usage: main agent loop only, excludes subagent activity",
+  "whole_tree_model_usage": null,
+  "whole_tree_model_usage_note": "per-model usage across the whole query tree, includes subagent requests",
+  "estimated_list_cost_usd": null,
+  "estimated_list_cost_usd_note": "estimated/list-price accounting -- not actual subscription spend, quota, or billing",
+  "usage_status": "unknown",
+  "result_raw_keys": null,
+  "stderr_byte_length": 0,
+  "hook_comparison": {
+    "hook_event_count": 1,
+    "hook_event_types": [
+      "SessionStart"
+    ],
+    "subagent_start_count": 0,
+    "subagent_stop_count": 0,
+    "session_end_seen": false,
+    "transcript_usage_sample_count": 0
+  },
+  "notes": [
+    "issue #245 required test 4: interrupted/abnormal run, force-killed 4s in (round 8, credential-forwarded)"
+  ]
+}
