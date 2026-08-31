@@ -576,8 +576,13 @@ single spawn, cleared immediately after, never echoed):
   was re-run (same task id, overwriting the invalid first artifact) with a prompt that
   explicitly forbids the top-level agent from searching itself and requires delegation via
   the `Task` tool. The rerun did dispatch a real subagent —
-  `hook_comparison: {subagent_start_count: 1, subagent_stop_count: 2, hook_event_types:
-  ["SessionStart","SubagentStart","SubagentStop","SessionEnd"]}` — and the terminal result
+  `hook_comparison: {subagent_start_count: 1, subagent_stop_count: 1, hook_event_types:
+  ["SessionStart","SubagentStart","SubagentStop","SessionEnd"]}` (Stage 2 audit correction,
+  issue #247: originally recorded as `subagent_stop_count: 2` by the pre-Stage-1-fix
+  `buildHookComparison`, which double-counted the `SubagentStop` hook record together with
+  its `transcript_usage` companion as two completions; recomputed as 1 against the
+  unmodified raw session log after the fix — see the corrected
+  `245-run-3-subagent.json`'s own `notes` field) — and the terminal result
   shows top-level usage strictly smaller than whole-tree usage: top-level
   `{input_tokens: 4, output_tokens: 232, cache_read_input_tokens: 98670,
   cache_creation_input_tokens: 22101}` vs. whole-tree `modelUsage`
@@ -746,11 +751,12 @@ without treating hooks as an economic authority:
 - Runs 1-2: `hook_event_types: ["SessionStart", "SessionEnd"]`, `session_end_seen: true`,
   `subagent_start_count: 0` — matches a normal run with no delegation.
 - Run 3 (accepted v2 attempt): `hook_event_types: ["SessionStart", "SubagentStart",
-  "SubagentStop", "SessionEnd"]`, `subagent_start_count: 1`, `subagent_stop_count: 2` — this
-  is the independent, non-terminal-result confirmation that a subagent genuinely ran,
-  required by issue #245 before whole-tree accounting evidence could be accepted. (The
-  rejected v1 attempt showed `subagent_start_count: 0` here, which is exactly why it was not
-  accepted as valid test-3 evidence.)
+  "SubagentStop", "SessionEnd"]`, `subagent_start_count: 1`, `subagent_stop_count: 1`
+  (corrected post-Stage-1 per issue #247 — see "Round 8" above) — this is the independent,
+  non-terminal-result confirmation that a subagent genuinely ran, required by issue #245
+  before whole-tree accounting evidence could be accepted. (The rejected v1 attempt showed
+  `subagent_start_count: 0` here, which is exactly why it was not accepted as valid test-3
+  evidence.)
 - Run 4: `hook_event_types: ["SessionStart"]` only, `session_end_seen: false` — consistent
   with a process killed mid-flight before completion, corroborating `result_received:
   false` from an independent signal.
