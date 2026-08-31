@@ -8,6 +8,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -181,6 +182,25 @@ test("buildHookComparison does not double-count a SubagentStop that has a transc
   assert.equal(comparison.subagent_start_count, 1);
   assert.equal(comparison.subagent_stop_count, 1);
   assert.equal(comparison.transcript_usage_sample_count, 1);
+});
+
+test("buildHookComparison reproduces the corrected subagent_stop_count on the real run-3 event shape (issue #250)", () => {
+  // Stage 2 audit finding (issue #250): the previous test above validates the ALGORITHM
+  // against a hand-authored input -- it would still pass even if the real run-3 session's
+  // actual raw event log had a different shape. This test instead loads a committed,
+  // privacy-minimal snapshot of the REAL structural kind/event sequence recorded during
+  // 245-run-3-subagent's live proving run (docs/execution-boundary-probe-runs/245-run-3-
+  // subagent.hook-events.json -- kind+event only, no tokens/ids/timestamps), so the
+  // empirical correction from subagent_stop_count: 2 to 1 in that run's committed record
+  // is independently reproducible from repository state alone, not merely asserted.
+  const fixturePath = join(HERE, "..", "..", "docs", "execution-boundary-probe-runs", "245-run-3-subagent.hook-events.json");
+  const events = JSON.parse(readFileSync(fixturePath, "utf8"));
+  const comparison = buildHookComparison(events);
+  assert.equal(comparison.hook_event_count, 6);
+  assert.equal(comparison.subagent_start_count, 1);
+  assert.equal(comparison.subagent_stop_count, 1);
+  assert.equal(comparison.transcript_usage_sample_count, 2);
+  assert.equal(comparison.session_end_seen, true);
 });
 
 test("buildHookComparison handles no events (e.g. no session_id resolved) without throwing", () => {

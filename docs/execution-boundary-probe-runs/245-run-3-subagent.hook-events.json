@@ -1,0 +1,8 @@
+[
+  { "kind": "hook", "event": "SessionStart" },
+  { "kind": "hook", "event": "SubagentStart" },
+  { "kind": "hook", "event": "SubagentStop" },
+  { "kind": "transcript_usage", "event": "SubagentStop" },
+  { "kind": "hook", "event": "SessionEnd" },
+  { "kind": "transcript_usage", "event": "SessionEnd" }
+]

@@ -578,14 +578,18 @@ single spawn, cleared immediately after, never echoed):
   the `Task` tool. The rerun did dispatch a real subagent —
   `hook_comparison: {subagent_start_count: 1, subagent_stop_count: 1, hook_event_types:
   ["SessionStart","SubagentStart","SubagentStop","SessionEnd"]}` (Stage 2 audit correction,
-  issue #247: originally recorded as `subagent_stop_count: 2` by the pre-Stage-1-fix
-  `buildHookComparison`, which double-counted the `SubagentStop` hook record together with
-  its `transcript_usage` companion as two completions; the corrected value of 1 is
-  independently reproducible from `tools/telemetry/execution-boundary-probe.test.mjs`'s
-  committed regression test for exactly this event shape, not from this run's own transient
+  issue #247, refined by issue #250: originally recorded as `subagent_stop_count: 2` by the
+  pre-Stage-1-fix `buildHookComparison`, which double-counted the `SubagentStop` hook record
+  together with its `transcript_usage` companion as two completions; the corrected value of
+  1 is independently reproducible from repository state alone via the committed,
+  privacy-minimal `245-run-3-subagent.hook-events.json` fixture (this specific run's real
+  kind+event sequence, no tokens/ids/timestamps) and its dedicated test in
+  `tools/telemetry/execution-boundary-probe.test.mjs` — not from this run's own transient
   local session log under the gitignored `.claude/telemetry/` directory, which is never
-  durable repository state — see issue #249's Stage 2 audit and the corrected
-  `245-run-3-subagent.json`'s own `notes` field) — and the terminal result
+  durable repository state, and not from a hand-authored regression test alone, which
+  validates only the algorithm rather than this run's actual empirical shape — see issues
+  #249 and #250's Stage 2/Stage 1 findings and the corrected `245-run-3-subagent.json`'s own
+  `notes` field) — and the terminal result
   shows top-level usage strictly smaller than whole-tree usage: top-level
   `{input_tokens: 4, output_tokens: 232, cache_read_input_tokens: 98670,
   cache_creation_input_tokens: 22101}` vs. whole-tree `modelUsage`
