@@ -336,6 +336,21 @@ export async function checkMergeReady(args, { ghPrViewImpl = defaultGhPrView } =
   return { exitCode: 0, state: "MERGE_READY" };
 }
 
+// The moment isCompletedStage2AuditReport's strict evidence contract took effect: the merge
+// time of LDL PR #231, which introduced it. Stage 2 audit finding on that very PR (issue #233):
+// an earlier revision of the legacy-compatibility fallback below was gated only on "is the work
+// issue currently closed," with no check that the backing response actually predates this
+// contract — so a *new*, post-contract audit whose response was merely a terse "CLEAN" (missing
+// the now-required checklist) could still back a closure once the work issue was closed by any
+// means, silently masking exactly the premature-closure class this whole mechanism exists to
+// catch. `beforeTimestamp` below rejects any candidate response timestamped at or after this
+// cutoff outright, in strict mode as well as legacy mode, so only a response that genuinely
+// predates the contract's existence can ever qualify for the relaxed check. `tools/review-watch/`
+// is distributed to consumer repositories via `ldl-init`/`ldl-sync` at various later times, but
+// this exact classifier code did not exist anywhere before this moment, so using it as a single
+// global constant is a safe upper bound everywhere it runs, not merely in this repository.
+const STAGE2_LEGACY_CONTRACT_CUTOFF = "2026-08-31T09:19:22Z";
+
 // Whether the audit issue's comment thread already carries a *completed* Stage 2 audit report
 // (stage2-report.mjs's isCompletedStage2AuditReport) — not merely a genuine-but-incomplete
 // response such as issue #229's "Starting #178." kickoff. Reuses trigger.mjs's dedup read,
@@ -346,8 +361,14 @@ export async function checkMergeReady(args, { ghPrViewImpl = defaultGhPrView } =
 // be considered, not just an excerpt. Scans every post-trigger response, not just the first, so
 // a kickoff/acknowledgement followed later by a genuine completed report on the same thread
 // still gets found (bounded follow-up remains discoverable); the *latest* completed report is
-// authoritative when more than one exists (a retry round). `ghApiImpl` is injected for tests.
-async function findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl, { requireVerificationEvidence = true } = {}) {
+// authoritative when more than one exists (a retry round). `beforeTimestamp`, when given,
+// discards any candidate response timestamped at or after it before evaluation — see
+// STAGE2_LEGACY_CONTRACT_CUTOFF above. `ghApiImpl` is injected for tests.
+async function findStage2ReportEvidence(
+  { repo, auditIssue, bot, mergeCommit },
+  ghApiImpl,
+  { requireVerificationEvidence = true, beforeTimestamp = null } = {},
+) {
   const commentsPath = endpointsFor("issue", repo, auditIssue).find((e) => e.name === "issue-comments").path;
   const comments = await ghApiImpl(commentsPath);
   const trigger = findExistingTrigger(comments, {});
@@ -356,7 +377,11 @@ async function findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, 
   }
 
   const sinceMs = new Date(trigger.created_at).getTime();
-  const candidates = findAllMatches(comments, { bot, sinceMs, endpointName: "issue-comments" });
+  let candidates = findAllMatches(comments, { bot, sinceMs, endpointName: "issue-comments" });
+  if (beforeTimestamp) {
+    const cutoffMs = new Date(beforeTimestamp).getTime();
+    candidates = candidates.filter((match) => new Date(match.created_at).getTime() < cutoffMs);
+  }
   const reports = candidates.map((match) => {
     const full = findCommentById(comments, match.id);
     const evaluation = isCompletedStage2AuditReport(full?.body ?? "", { mergeCommit, requireVerificationEvidence });
@@ -371,7 +396,9 @@ async function findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, 
       responsesSeen: reports.length,
       reason:
         reports.length === 0
-          ? "no post-trigger bot response found on the audit issue thread"
+          ? beforeTimestamp
+            ? `no post-trigger bot response found before the legacy-compatibility cutoff (${beforeTimestamp})`
+            : "no post-trigger bot response found on the audit issue thread"
           : `${reports.length} post-trigger bot response(s) found, none is a completed audit report ` +
             `(${reports.map((r) => r.reasons.join("; ")).join(" | ")})`,
     };
@@ -486,19 +513,23 @@ export async function checkPostAudit(
     } else if (isClosed) {
       // Preserve an already-closed work issue's historical CLEAN closure rather than treating a
       // merely-reformatted, pre-contract response as grounds to reopen it (issue #230 Required
-      // layer 8 / Stage 1 review finding on this PR: without this, rerunning post-audit against
-      // an already-accepted pre-contract audit — e.g. issue #95's terse "CLEAN — ... no
-      // actionable findings. Next: None." shape, with no numbered checklist — reported
-      // PREMATURE_CLOSURE, and its own `--recover true` instruction would have reopened a
-      // legitimately-closed work issue). Only reachable when the work issue is *already*
-      // closed, and only relaxes the verification-checklist signal: commit identity and the
-      // response's own matching verdict are still required, so this can never back a *new*
-      // closure on a currently-open issue, and never accepts a wrong-commit or verdict-
-      // disagreeing response.
+      // layer 8: e.g. issue #95's terse "CLEAN — ... no actionable findings. Next: None." shape,
+      // with no numbered checklist). Only reachable when the work issue is *already* closed, and
+      // only relaxes the verification-checklist signal: commit identity and the response's own
+      // matching verdict are still required. Gated on `beforeTimestamp:
+      // STAGE2_LEGACY_CONTRACT_CUTOFF` (Stage 2 audit finding on this same PR, issue #233): being
+      // closed alone is not evidence of being historical — without the timestamp cutoff, a
+      // *new*, post-contract audit whose response is merely a terse "CLEAN" (missing the
+      // now-required checklist) could still back a closure once its work issue was closed by any
+      // means, silently masking exactly the premature-closure class this mechanism exists to
+      // catch. Requiring the matched response to predate the contract's own introduction closes
+      // that gap: no post-cutoff response can ever qualify for this relaxed path, regardless of
+      // the work issue's current state.
       let legacyEvidence;
       try {
         legacyEvidence = await findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl, {
           requireVerificationEvidence: false,
+          beforeTimestamp: STAGE2_LEGACY_CONTRACT_CUTOFF,
         });
       } catch (err) {
         return {

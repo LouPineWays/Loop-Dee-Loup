@@ -663,6 +663,23 @@ test("checkPostAudit: the legacy-compatibility fallback still rejects a closed w
   assert.equal(result.state, "PREMATURE_CLOSURE", "a wrong-commit response must not be accepted even under the legacy fallback");
 });
 
+test("checkPostAudit: a post-contract terse CLEAN response on a closed work issue is NOT preserved by the legacy fallback (Stage 2 audit finding on PR #231, issue #233)", async () => {
+  // Being closed alone is not evidence of being historical: a *new* audit response posted after
+  // the contract existed, formatted in the terse legacy shape, must not silently mask a genuine
+  // premature closure just because something closed the work issue in the meantime.
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "CLOSED" },
+      ghApiImpl: withLegacyShapedCleanThread({ responseTime: "2026-09-01T00:00:00Z" }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "PREMATURE_CLOSURE", "a post-cutoff terse response must never qualify for the legacy-compatibility fallback");
+  assert.equal(result.verdict, null);
+});
+
 test("checkPostAudit: PREMATURE_CLOSURE — work issue closed with no CLEAN verdict (verification #11, the PR #154/#151 regression)", async () => {
   const result = await checkPostAudit(
     { repo: "owner/repo", "audit-issue": 160 },
