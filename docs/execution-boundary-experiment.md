@@ -580,8 +580,11 @@ single spawn, cleared immediately after, never echoed):
   ["SessionStart","SubagentStart","SubagentStop","SessionEnd"]}` (Stage 2 audit correction,
   issue #247: originally recorded as `subagent_stop_count: 2` by the pre-Stage-1-fix
   `buildHookComparison`, which double-counted the `SubagentStop` hook record together with
-  its `transcript_usage` companion as two completions; recomputed as 1 against the
-  unmodified raw session log after the fix — see the corrected
+  its `transcript_usage` companion as two completions; the corrected value of 1 is
+  independently reproducible from `tools/telemetry/execution-boundary-probe.test.mjs`'s
+  committed regression test for exactly this event shape, not from this run's own transient
+  local session log under the gitignored `.claude/telemetry/` directory, which is never
+  durable repository state — see issue #249's Stage 2 audit and the corrected
   `245-run-3-subagent.json`'s own `notes` field) — and the terminal result
   shows top-level usage strictly smaller than whole-tree usage: top-level
   `{input_tokens: 4, output_tokens: 232, cache_read_input_tokens: 98670,
