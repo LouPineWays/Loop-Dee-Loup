@@ -116,7 +116,16 @@ telemetry-battery-log.md` is append-only: never edit or rewrite a prior row, eve
 detail a later mechanism change makes possible — add a new row or a dated note below the
 table instead.
 
-Only once that row is durably written, record this run's sample as counted:
+Also save this run's Step 1 `coverage.mjs --json` output verbatim to
+`docs/telemetry-battery-log-runs/<date>.json` (a new, durable, git-tracked file per run —
+the raw `.claude/telemetry/sessions/*.jsonl` session logs behind it stay correctly
+local/transient and gitignored, but this JSON output is itself just aggregate counts and
+field statuses, no session content, so it carries no more disclosure risk than the row's own
+summary text already does). Without this, the row's coverage numbers and **As of** value are
+not independently reproducible from a checkout that lacks the original local session logs —
+found by the Stage 2 audit on issue #240 after the 2026-08-31 row shipped without it.
+
+Only once that row and artifact are durably written, record this run's sample as counted:
 
 ```
 node tools/telemetry/coverage.mjs --session <id1> --session <id2> ... \

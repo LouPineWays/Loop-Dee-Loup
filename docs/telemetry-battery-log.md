@@ -31,3 +31,15 @@ the same 15 session ids that row already reported sampling, so the next real bat
 correctly treats them as already counted instead of re-sampling them. The row above is left
 as originally written (append-only) rather than rewritten to claim it used a mechanism that
 did not exist yet.
+
+**2026-08-31 row correction note** (not a battery run — added by the issue #240 Stage 2
+audit correction, after the row above was already written): the raw
+`.claude/telemetry/sessions/*.jsonl` files the 2026-08-31 row's coverage command reads are
+correctly local/transient (gitignored) and are not durable repository state, so the row's
+exact `coverage.mjs --json` command cannot be re-run from a checkout lacking them — a
+limitation shared by every row in this log, not new to this one. To keep the row's central
+coverage claims (`Fields`/`Captured`/`Partial`/`Unavailable`/`As of`/verdict) independently
+checkable without requiring those local files, that run's full `coverage.mjs --json`
+output — an aggregate of counts and field statuses only, no session content — is preserved
+at `docs/telemetry-battery-log-runs/2026-08-31.json`. The row above is left as originally
+written (append-only).

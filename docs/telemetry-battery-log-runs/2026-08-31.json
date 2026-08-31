@@ -1,0 +1,147 @@
+{
+  "sessionIds": [
+    "6b9727d6-c0da-4eab-84d0-f3a0dc5a7990",
+    "6c28f813-e107-491a-b2de-f6acab201639",
+    "4882a147-3541-495f-ac53-47b06e480600",
+    "67e7ca00-263d-42b9-b640-e559a1babacc",
+    "08412ad3-e18f-4d02-af1a-01454d833c95",
+    "f4fe80d7-e0c6-43e7-8716-82f932097a36"
+  ],
+  "asOf": "2026-08-31T10:35:33.303Z",
+  "sampleSize": 6,
+  "requiredFields": [
+    "measured.compaction_events",
+    "measured.cost_usd_by_model",
+    "measured.cost_usd_total",
+    "measured.hook_event_count",
+    "measured.subagent_start_events",
+    "measured.token_usage_is_session_complete",
+    "measured.token_usage_main_total",
+    "measured.token_usage_subagent_total"
+  ],
+  "captured": [
+    "measured.compaction_events",
+    "measured.hook_event_count",
+    "measured.subagent_start_events"
+  ],
+  "derivedFields": [
+    "compaction_count",
+    "cost_usd_peak",
+    "peak_context_used_percentage",
+    "session_wall_duration_ms",
+    "subagent_invocation_count",
+    "subagent_type_counts",
+    "token_usage_grand_total",
+    "token_usage_main_share_of_total"
+  ],
+  "derivedCaptured": [
+    "compaction_count",
+    "subagent_invocation_count"
+  ],
+  "derivedFieldStatus": {
+    "compaction_count": {
+      "status": "captured",
+      "presentInSample": 6,
+      "sampleSize": 6
+    },
+    "cost_usd_peak": {
+      "status": "unavailable",
+      "presentInSample": 0,
+      "sampleSize": 6
+    },
+    "peak_context_used_percentage": {
+      "status": "unavailable",
+      "presentInSample": 0,
+      "sampleSize": 6
+    },
+    "session_wall_duration_ms": {
+      "status": "partial",
+      "presentInSample": 3,
+      "sampleSize": 6
+    },
+    "subagent_invocation_count": {
+      "status": "captured",
+      "presentInSample": 6,
+      "sampleSize": 6
+    },
+    "subagent_type_counts": {
+      "status": "partial",
+      "presentInSample": 2,
+      "sampleSize": 6
+    },
+    "token_usage_grand_total": {
+      "status": "partial",
+      "presentInSample": 3,
+      "sampleSize": 6
+    },
+    "token_usage_main_share_of_total": {
+      "status": "partial",
+      "presentInSample": 3,
+      "sampleSize": 6
+    }
+  },
+  "unavailable": [
+    "measured.cost_usd_by_model",
+    "measured.cost_usd_total",
+    "measured.token_usage_is_session_complete"
+  ],
+  "partial": [
+    "measured.token_usage_main_total",
+    "measured.token_usage_subagent_total"
+  ],
+  "notApplicable": [
+    "per_skill_token_or_cost_attribution",
+    "input_output_cache_token_breakdown_by_individual_turn",
+    "rate_limit_consumption"
+  ],
+  "fieldStatus": {
+    "measured.compaction_events": {
+      "status": "captured",
+      "presentInSample": 6,
+      "sampleSize": 6
+    },
+    "measured.cost_usd_by_model": {
+      "status": "unavailable",
+      "presentInSample": 0,
+      "sampleSize": 6
+    },
+    "measured.cost_usd_total": {
+      "status": "unavailable",
+      "presentInSample": 0,
+      "sampleSize": 6
+    },
+    "measured.hook_event_count": {
+      "status": "captured",
+      "presentInSample": 6,
+      "sampleSize": 6
+    },
+    "measured.subagent_start_events": {
+      "status": "captured",
+      "presentInSample": 6,
+      "sampleSize": 6
+    },
+    "measured.token_usage_is_session_complete": {
+      "status": "unavailable",
+      "presentInSample": 0,
+      "sampleSize": 6
+    },
+    "measured.token_usage_main_total": {
+      "status": "partial",
+      "presentInSample": 3,
+      "sampleSize": 6
+    },
+    "measured.token_usage_subagent_total": {
+      "status": "partial",
+      "presentInSample": 3,
+      "sampleSize": 6
+    }
+  },
+  "decisionCriticalGaps": [
+    "measured.cost_usd_by_model",
+    "measured.cost_usd_total",
+    "measured.token_usage_is_session_complete",
+    "measured.token_usage_main_total",
+    "measured.token_usage_subagent_total"
+  ],
+  "telemetryVerdict": "INSUFFICIENT"
+}
