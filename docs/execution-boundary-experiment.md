@@ -12,11 +12,11 @@ experiment exists to test an alternative to.
 
 ## Status
 
-**BLOCKED — the founder configured `CLAUDE_CODE_OAUTH_TOKEN` as a Windows user
-environment variable to unblock round 2, but this session's own auto-mode classifier
-refuses to let this session thread that credential into a spawned child at all. The
-underlying cause is architectural (see Round 3), not something a further code or prompt
-change in this session can route around. Founder action required.**
+**BLOCKED — a genuine fresh session, in a process tree that restarted after the founder's
+`CLAUDE_CODE_OAUTH_TOKEN` change, still does not inherit the token and still cannot
+authenticate a trivial spawned child (see Round 4). Restarting the harness/host process,
+round 3's proposed fix, is confirmed insufficient by itself. Founder action required,
+scoped tighter than round 3's guess — see Round 4's required action.**
 
 ### Round 1 (resolved): host spawn permission
 
@@ -172,6 +172,72 @@ This blocker, like rounds 1 and 2, is not itself evidence toward the experiment'
 PASS/FAIL/INCONCLUSIVE verdict — it is a host authentication/permission gate on the
 *investigator*, not a property of the terminal-result boundary being tested. It is
 recorded here so a fresh session does not have to rediscover it.
+
+### Round 4 (new, current blocker): a genuine restart still does not propagate the token
+
+This is a fresh session (new conversation, resumed on the same branch), dispatched by the
+founder specifically to retest round 3 after being told `CLAUDE_CODE_OAUTH_TOKEN` is
+configured. Per round 3's own suggested fix, the first step was to verify a trivial
+spawned child could authenticate at all, touching no credential value:
+
+```
+"<claude-bin>" -p --output-format stream-json --verbose --permission-mode bypassPermissions \
+  --no-session-persistence "pong"
+```
+
+Result: identical to rounds 2 and 3 —
+`result.result: "Not logged in · Please run /login"`, `error: "authentication_failed"`,
+`is_error: true`, `usage`: all-zero. No token was read or set for this attempt; the
+spawned child used only ordinary environment inheritance.
+
+This session's own process env still does not carry the token
+(`$env:CLAUDE_CODE_OAUTH_TOKEN` unset in both `Bash` and `PowerShell` tool invocations),
+matching round 3. But this time the process chain was checked all the way up, and it
+shows a genuine restart, not a stale session:
+
+```
+explorer.exe (pid 9688)  started 2026-08-31 15:27:59  (own parent already exited — logon-shaped)
+  -> claude.exe (pid 4536)  started 2026-08-31 15:28:57
+    -> claude.exe (pid 18220) started 2026-08-31 15:29:22
+      -> PowerShell (pid 6200) started 2026-08-31 15:32:52  <- this session's own shell tool
+```
+
+Current time at check: 2026-08-31 15:32:35 — every process in the chain, including
+`explorer.exe` itself, was created only minutes before this check, well after the founder
+says the token was configured. The user-scope registry value is confirmed still present
+and unchanged (`GetEnvironmentVariable(..., "User")`, length 92 — length only, value never
+read). So this is not round 3's scenario (an old process tree that predates the change):
+this is a fully fresh process tree, rooted at what looks like a genuine Explorer/logon
+restart, and the token *still* did not make it into any process in that chain.
+
+**Conclusion**: restarting the harness/host application (round 3's proposed fix) is
+confirmed insufficient by itself. The most likely explanation is one of:
+
+- the token was set *after* this `explorer.exe` instance (pid 9688) was created, so even
+  this "fresh" chain predates the change at the OS level, despite being only minutes old
+  — Windows environment-variable changes only reach processes created after the change,
+  and `explorer.exe` itself must be one of them for its descendants to inherit it; or
+- the mechanism used to set the value (e.g. directly editing the registry rather than
+  `setx`/the System Properties GUI) did not broadcast `WM_SETTINGCHANGE`, so no
+  already-running process — including `explorer.exe` — picked it up, and only a full
+  sign-out/sign-in (not just relaunching the app or `explorer.exe`) would create a process
+  chain that actually postdates the change from the OS's perspective.
+
+This session cannot distinguish between these two, and cannot itself re-set or re-broadcast
+the environment change — doing so would repeat the exact credential-handling boundary
+rounds 1-3 already established as out of bounds. Both explanations point to the same
+required action.
+
+**Required founder action to unblock (round 4)**: outside this session, confirm — in a
+brand-new terminal window opened *after* re-confirming the environment variable is set —
+that `echo $env:CLAUDE_CODE_OAUTH_TOKEN` (PowerShell) actually prints the value, and that a
+bare `claude -p "pong"` from that same fresh window succeeds without `/login`. If that
+still fails, the fix is a full Windows sign-out/sign-in (not just restarting the Claude
+Code app or Explorer), so that a new `explorer.exe` and everything under it is created
+strictly after the environment change. Only once a plain terminal window, opened
+independently of this harness, can see the token and authenticate should this experiment
+be re-dispatched — re-running tests 1-4 against the current process tree would only
+reproduce this same `authentication_failed` result a fourth time.
 
 ## What is ready, pending the permission grant
 
