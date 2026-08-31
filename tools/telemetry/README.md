@@ -176,6 +176,121 @@ invoking any of the hooks Claude Code exposes; it is not fixable by changing thi
 own timeout, retry, or capture logic, and no such fix should be attempted without new evidence
 that a *different* invoked-but-failing hook path (rather than a never-invoked one) is the cause.
 
+### Deterministic post-hoc reconciliation investigated and rejected (issue #178, second round)
+
+Issue #226's 2026-08-31 operational sweep found 0/23 genuine `SessionEnd` captures in the
+post-#180 cohort (8/23 partial `SubagentStop` checkpoints — the mitigation above working exactly
+as documented). That evidence reopened issue #178 to ask a sharper question than "will a genuine
+`SessionEnd` eventually fire again": **can LDL deterministically finalize a completed session's
+transcript-derived token usage from a later session, without depending on `SessionEnd` at all?**
+This section records that investigation's outcome and treats it as **authoritatively
+established**, not a passive monitoring point kept open pending more samples. It corrects issue
+#178's own second comment (2026-08-31, from the #226 sweep), which framed the remaining question
+as "still purely observational... whether a genuine post-#180 `SessionEnd` fires at all" — that
+framing is superseded by this closing investigation, whose answer does not depend on collecting
+more samples of the same non-event.
+
+Five candidate authority boundaries were tested against real on-disk state on the machine that
+actually runs LDL sessions, not against hypotheticals:
+
+1. **Transcript path derivation without a persisted `transcript_path`.** Claude Code stores each
+   session's transcript at `<home>/.claude/projects/<encoded-cwd>/<session_id>.jsonl`, where
+   `<encoded-cwd>` replaces path separators and colons with `-` — confirmed against the real
+   `~/.claude/projects/` directory listing on this machine (e.g. `C:\Loop-Dee-Loup` encodes to
+   `C--Loop-Dee-Loup`; other checkouts on the same machine encode the same way, e.g.
+   `C--Users-Alexander-whetstone`, `C--Word-Burner`). This step **passes** — location is
+   solvable — but it is not the blocker; a reconciler can already find the right file.
+2. **Resume detection via a later `SessionStart`.** `hook.mjs` (lines 58-62) already captures a
+   `reason`/`source` field on `SessionStart` payloads distinguishing `"startup" | "resume" |
+   "clear" | "compact" | "fork"` across the field-naming variants different Claude Code versions
+   have used:
+   ```js
+   // SessionStart carries a start reason ("startup" | "resume" | "clear" | "compact" | "fork");
+   // SessionEnd carries an end reason. Different Claude Code versions have used "source" and
+   // "reason" for this; capture whichever is present under one normalized field.
+   const reason = payload.reason ?? payload.source;
+   if (typeof reason === "string") event.reason = reason;
+   ```
+   So *if* a "finalized" session is later resumed, that resume is technically observable, in
+   principle, via a fresh `SessionStart` event carrying `reason: "resume"` for the same
+   `session_id`. This step **passes in principle but is insufficient alone**: it only reports a
+   resume after the fact, at whatever future point the resume happens — it gives a reconciler no
+   way to know, at the moment it wants to finalize, whether a resume is coming later. A signal
+   that only fires after the failure mode it should have prevented cannot itself be the
+   finalization authority.
+3. **A transcript-level terminal/completion marker.** Tailed
+   `130d784c-1525-4d5b-8a8b-64d970c51990.jsonl` (`C:\Users\<user>\.claude\projects\
+   C--Loop-Dee-Loup\130d784c-1525-4d5b-8a8b-64d970c51990.jsonl`), one of the six sessions in
+   issue #178's original "no genuine SessionEnd, real work lost" cohort. Its last line is an
+   ordinary `"type":"assistant"` message, structurally indistinguishable from any mid-session
+   turn — no "session closed" sentinel, no terminal event of any kind. This step **fails**:
+   Claude Code writes no positive completion marker into the transcript independent of whether a
+   hook fired.
+4. **The global session-state directory (`~/.claude/sessions/`).** Attempting to even list this
+   directory was refused by this environment's own permission classifier, which treats it as
+   sensitive session-internal state. This step **fails**, and fails doubly: even if it held
+   process-liveness information, it is not repository-local state LDL can depend on, and the
+   classifier's own refusal is itself evidence it is not meant to be read this way from a
+   reconciliation script.
+5. **Transcript file mtime staleness as a liveness proxy.** This step **fails**, and is actively
+   unsound rather than merely weak: per point 2, a resumed session can append to the exact same
+   transcript file arbitrarily long after it went quiet, and per point 3 the file's own content
+   carries no marker distinguishing "abandoned forever" from "paused, will resume." Nothing
+   available to a reconciler — neither mtime nor content — tells the two apart.
+
+**Core logical conclusion**: proving a given transcript file will receive no further appends is
+proving a negative about a currently-running-or-not host process. That requires either (a) a
+positive host-provided signal — which is exactly the `SessionEnd` invocation missing in the
+affected cohort — or (b) OS-level process-liveness inspection, which issue #178's own
+"Constraints" section explicitly disallows ("polling for process death"). Points 1-5 above show
+there is no third option inside the interfaces LDL currently has access to: the two building
+blocks that do work (deterministic path derivation, eventual resume detection) locate evidence
+and can retroactively flag a violation, but neither one, nor both together, can establish *at
+finalization time* that no further append is coming.
+
+**Scope note, so this does not overclaim**: the *existing* `SessionEnd`-based "complete" claim
+carries the same theoretical future-resume exposure in principle — a session could in theory be
+resumed even after a genuine `SessionEnd` fired. That is a preexisting, already-accepted risk
+elsewhere in the system and is **not** why reconciliation fails here. Reconciliation fails on a
+different, prior question: whether the process is *currently still writing* at reconciliation
+time. `SessionEnd` answers that question positively by construction when it fires; nothing
+available to a later reconciler can answer it at all, per points 3-5 above.
+
+**What would let this be revisited.** Any one of the following, concretely:
+
+- Claude Code invoking a guaranteed completion signal even under abrupt process supersession or
+  teardown by whatever host/orchestration layer ends the session — not only on a graceful exit
+  that already fires today's `SessionEnd`;
+- a documented transcript-level terminal marker or sentinel line written at process exit
+  regardless of hook delivery, so a later reconciler could treat the file's own content as
+  authority instead of needing a hook to have fired at all; or
+- a safe, non-invasive liveness-check interface (e.g. "is session `<id>` still active") that
+  answers the liveness question directly without requiring OS-level process inspection or
+  polling for process death.
+
+None of these exist in Claude Code's currently documented hook/transcript interfaces.
+
+**Regression protection, unchanged.** `sufficiency.mjs`'s `CLAIM_REQUIREMENTS.token_allocation`
+already sets `requiresTrue: ["measured.token_usage_is_session_complete"]`, and
+`reduce.mjs`'s `pickBestTranscriptUsage` (see "SessionEnd is not always invoked" above) only ever
+sets that field `true` from a genuine `SessionEnd`-captured sample — confirmed by rereading both
+files during this investigation, not assumed. `.claude/skills/spend/SKILL.md`'s consumer-repo
+fallback mapping independently states `token_allocation` is "always INSUFFICIENT." Both were
+already correct before this investigation; **no functional code change was needed or made** —
+this is a documentation-only resolution of issue #178.
+
+**Verification record** (issue #178's "Not recoverable" outcome):
+
+| Attempted authority boundary | Result | Why it fails to clear the authoritative bar |
+| --- | --- | --- |
+| Deterministic transcript path derivation | PASS (not the blocker) | Location is solvable without a persisted `transcript_path`; does not by itself establish completion |
+| Resume detection via later `SessionStart` `reason`/`source` | PASS in principle, insufficient alone | Only reports a resume after it happens; gives no answer at the moment finalization is attempted |
+| Transcript-level terminal/completion marker | FAIL | Real no-`SessionEnd` transcript's last line is an ordinary assistant message; Claude Code writes no such marker |
+| Global session-state directory (`~/.claude/sessions/`) | FAIL | Out of bounds — refused by the environment's own permission classifier; not repository-local state even if useful |
+| Transcript mtime staleness as liveness proxy | FAIL | Unsound: a resumed session can append long after going quiet, and file content carries no distinguishing marker |
+| Deterministic finalization boundary overall | FAIL | Proving "no further writes will occur" needs a positive host signal (`SessionEnd`) or disallowed process-liveness polling; neither is available |
+| `token_allocation` after this investigation | INSUFFICIENT (by design, unchanged) | `sufficiency.mjs` and `spend/SKILL.md` already gate on genuine `SessionEnd`; confirmed correct, no change needed |
+
 ## What it deliberately still cannot measure
 
 No Claude Code interface this collector uses exposes a *skill*-invocation boundary the way the
