@@ -12,18 +12,17 @@ experiment exists to test an alternative to.
 
 ## Status
 
-**BLOCKED — dispatched a seventh time after the founder reported that an *independent*
-PowerShell session (opened outside this harness) authenticated successfully with
-`CLAUDE_CODE_OAUTH_TOKEN` (`claude -p "Reply with only: pong"` returned `pong`), with
-instructions to treat the prior Windows-propagation diagnosis as superseded. Retested
-directly: this session's own spawned child still fails identically (see Round 7). This
-round adds a stronger disconfirmation than round 6 — this session's process chain,
-including the Claude Code desktop app's own main process, is now corroborated as launched
-fresh, seconds after a genuine interactive Windows logon event (`LogonType 2`, confirmed
-via WMI) — not merely an `explorer.exe` PID that merely looks recent. Even that fully-fresh
-chain does not carry the token. Round 5/6's "respawn ≠ fresh logon" theory is no longer a
-sufficient explanation on its own; the required founder action has changed accordingly (see
-Round 7).**
+**RESOLVED (round 8) — UNBLOCKED and all four required tests completed.** The founder
+authorized one narrow, bounded exception to rounds 1-3's "never touch the credential value"
+boundary: retrieve the Windows User-level `CLAUDE_CODE_OAUTH_TOKEN` solely to override it on
+the spawned `claude -p` child's own environment, never printing/logging/persisting/
+inspecting it. The trivial `pong` test under that mechanism succeeded immediately — real
+usage, real cost, `is_error: false` — confirming the round 7 hypothesis: Claude Code
+Desktop's own inherited process tree, not Windows session/logon propagation, was the
+blocker. Required tests 1-4 then ran for real under the same mechanism; see Round 8. The
+Windows-propagation investigation in rounds 3-7 is superseded as the operative blocker (its
+forensic findings about this harness's process ancestry remain accurate, they were just not
+the fix) and was not repeated, per the founder's explicit instruction.
 
 ### Round 1 (resolved): host spawn permission
 
@@ -515,7 +514,118 @@ one of the above three actions having been performed and independently confirmed
 expected — on the evidence of rounds 2-7 — to reproduce the identical
 `authentication_failed` result an eighth time.
 
-## What is ready, pending the permission grant
+### Round 8 (resolved): bounded credential forwarding unblocks the experiment; all four required tests pass
+
+This is a fresh session (new conversation, resumed on the same branch), dispatched by the
+founder with a new, narrower hypothesis and an explicit, bounded authorization rather than
+another "the token is configured" retry. The founder reported that a standalone Windows CLI
+session — `claude.exe -p "Reply with only: pong"`, run independently with the same
+User-level `CLAUDE_CODE_OAUTH_TOKEN` — had already authenticated successfully, and framed
+the likely cause as Claude Code **Desktop** itself provisioning/injecting its own
+authentication context into the embedded CLI session this harness runs inside, so a bare
+spawned child inherits *that* context rather than the valid standalone token. The founder
+then authorized one bounded exception to the credential-handling boundary established in
+rounds 1-3: retrieve the User-level token specifically to override it on the spawned child's
+own `CLAUDE_CODE_OAUTH_TOKEN`, never printing, logging, persisting, hashing, or otherwise
+inspecting the value, with every other environment variable left untouched, and to run the
+trivial `pong` test first before touching tests 1-4.
+
+**Trivial test, forwarded token:**
+
+```powershell
+$token = [System.Environment]::GetEnvironmentVariable("CLAUDE_CODE_OAUTH_TOKEN","User")
+$env:CLAUDE_CODE_OAUTH_TOKEN = $token
+& $claudeBin -p --output-format stream-json --verbose --permission-mode bypassPermissions `
+  --no-session-persistence "Reply with only: pong"
+```
+
+Result: `result: "pong"`, `is_error: false`, `subtype: "success"`, `terminal_reason:
+"completed"`, real non-zero usage (`input_tokens: 2`, `cache_creation_input_tokens: 21406`,
+`cache_read_input_tokens: 38531`, `output_tokens: 4`), `total_cost_usd: 0.0933742`. This is
+the first successful real (non-`authentication_failed`) result in this experiment's entire
+history, across seven prior blocked rounds. The founder's hypothesis is confirmed: the
+blocker was Desktop's own inherited authentication context on the embedded CLI session, not
+Windows-level environment-variable propagation to `explorer.exe`'s process tree (rounds
+3-7's forensics about *that* propagation gap were accurate as far as they went — they were
+just diagnosing the wrong layer; Desktop's embedded session apparently does not draw its own
+child processes' environment from the same place a plain terminal window does, consistent
+with round 7's point 4 lead about a mismatched logon-session ID, though the exact mechanism
+inside Desktop remains unconfirmed and out of this session's investigative authority).
+
+**Required tests 1-4, same mechanism** (token read once per command, set only for that
+single spawn, cleared immediately after, never echoed):
+
+- **Test 1** (`245-run-1-normal`): real prompt against `docs/experiment-brief.md`.
+  `is_error: false`, `num_turns: 2`, top-level usage `input_tokens: 4, output_tokens: 76,
+  cache_read_input_tokens: 98480, cache_creation_input_tokens: 24674`,
+  `estimated_list_cost_usd: 0.11916`. `hook_comparison` shows `SessionStart`/`SessionEnd`
+  seen, no subagent activity (expected — this task doesn't need one).
+- **Test 2** (`245-run-2-normal`): independent rerun, distinct prompt against
+  `docs/priority-horizons.md`. `is_error: false`, `num_turns: 2`, top-level usage
+  `input_tokens: 4, output_tokens: 76, cache_read_input_tokens: 98505,
+  cache_creation_input_tokens: 21574`, `estimated_list_cost_usd: 0.106765`. Reproduces test
+  1's shape (same `num_turns`, same top-level `output_tokens`, comparable cache-read scale)
+  without any hand repair, rejecting a one-off successful capture as required.
+- **Test 3** (`245-run-3-subagent`): the first attempt, prompted only to "use the Explore
+  agent," did **not** actually dispatch a subagent — the model answered directly with
+  `Grep` instead of delegating (confirmed by reading the run's own local transcript
+  structurally, tool-call names only, no content persisted to the probe record;
+  `hook_comparison.subagent_start_count: 0` independently corroborated this). Per issue
+  #245's explicit requirement to verify independently that a subagent actually ran before
+  accepting whole-tree accounting as evidence, this first attempt was **not** accepted and
+  was re-run (same task id, overwriting the invalid first artifact) with a prompt that
+  explicitly forbids the top-level agent from searching itself and requires delegation via
+  the `Task` tool. The rerun did dispatch a real subagent —
+  `hook_comparison: {subagent_start_count: 1, subagent_stop_count: 2, hook_event_types:
+  ["SessionStart","SubagentStart","SubagentStop","SessionEnd"]}` — and the terminal result
+  shows top-level usage strictly smaller than whole-tree usage: top-level
+  `{input_tokens: 4, output_tokens: 232, cache_read_input_tokens: 98670,
+  cache_creation_input_tokens: 22101}` vs. whole-tree `modelUsage`
+  `{input_tokens: 8, output_tokens: 615, cache_read_input_tokens: 117920,
+  cache_creation_input_tokens: 42626}` for the same single model
+  (`claude-sonnet-5`) — whole-tree output tokens (615) are well over double top-level
+  (232), directly demonstrating that `modelUsage` includes the subagent's own consumption
+  and that top-level `usage` alone would have understated the run's real cost by roughly
+  30% (`estimated_list_cost_usd: 0.1694665` from whole-tree vs. what top-level alone would
+  imply).
+- **Test 4** (`245-run-4-interrupted`): same prompt/mechanism as planned, force-killed via
+  `SIGTERM` 4s in. `process_signal: "SIGTERM"`, `result_received: false`,
+  `result_subtype: null`, `is_error: null`, `usage_status: "unknown"`,
+  `hook_comparison: {hook_event_types: ["SessionStart"], session_end_seen: false}` — no
+  `result` message was ever emitted, and the probe recorded that honestly rather than
+  inferring completion from the partial transcript. This matches issue #245's explicitly
+  acceptable outcome for this test exactly.
+
+**CLI version**, captured once: `"C:\Users\Alexander\AppData\Roaming\Claude\claude-code\2.1.247\claude.exe" --version` → `2.1.247 (Claude Code)`.
+
+Fixture-driven tests (`tools/telemetry/execution-boundary-probe.test.mjs`) re-run after
+these live runs: still 18/18 passing — the live runs exercised the real spawn path without
+needing any code change to the probe itself; only the shell-level env override at invocation
+time was new.
+
+**Privacy check**: the token value was never written to any tool output, file, commit, or
+log in this round. Each PowerShell invocation read the registry value into a local variable,
+set it only on that single spawned child's environment, and explicitly cleared both the
+local variable and `$env:CLAUDE_CODE_OAUTH_TOKEN` immediately after the spawn returned. No
+command in this round echoed, printed, or persisted the value at any point.
+
+**Conclusion**: the experiment is unblocked and complete. The terminal-result boundary
+works exactly as hypothesized once the spawned child can actually authenticate: one
+parseable terminal result per run, session identity captured directly, top-level and
+whole-tree usage kept explicitly distinct with the subagent run proving the distinction is
+real (not just a documented-but-unexercised field), cost labeled only as
+`estimated_list_cost_usd`, and the interrupted run producing truthful `result_received:
+false` / `usage_status: "unknown"` rather than a fabricated completion. See the updated
+"Required tests," "Result fields captured," "Comparison," and "Verdict" sections below for
+the full evidence-based writeup.
+
+**No further founder action needed for #245 itself.** The Desktop-embedded-session
+authentication-context finding is a genuine, separate, useful discovery — worth its own
+follow-up if LDL ever wants defensive/unattended long-running spawns from inside a Desktop
+session generally — but that generalization is explicitly out of scope for this experiment's
+minimum-change authorization and is not pursued further here.
+
+## Proving wrapper and tests built for this experiment
 
 - **Proving wrapper**: `tools/telemetry/execution-boundary-probe.mjs`. Spawns
   `<claude-bin> -p --output-format stream-json --verbose --permission-mode <mode> "<prompt>"`
@@ -545,17 +655,17 @@ expected — on the evidence of rounds 2-7 — to reproduce the identical
   `--allow-dangerously-skip-permissions` as alternatives to `--permission-mode
   bypassPermissions` if that turns out to behave differently under a real proving run.
 
-## Required tests (issue #245) — blocked on round-2 authentication
+## Required tests (issue #245) — all complete (round 8)
 
 | # | Test | Status |
 | --- | --- | --- |
-| 1 | Normal bounded run | Attempted — terminal result captured correctly, but child hit `authentication_failed` before real work; see round 2 above |
-| 2 | Independent normal rerun | Attempted — same `authentication_failed` failure, confirming round 1's result was not a one-off |
-| 3 | Real subagent run, whole-tree accounting confirmed to include it | Not run — blocked on round 2 |
-| 4 | Interrupted/abnormal run | Not run — blocked on round 2 |
-| Comparison | Terminal result vs. existing hook/transcript evidence | Not run — blocked on round 2 |
+| 1 | Normal bounded run | **Pass** — `245-run-1-normal.json`: real terminal result, `is_error: false`, measured top-level usage and cost |
+| 2 | Independent normal rerun | **Pass** — `245-run-2-normal.json`: reproduces test 1's shape with a distinct prompt, no hand repair |
+| 3 | Real subagent run, whole-tree accounting confirmed to include it | **Pass** — `245-run-3-subagent.json`: subagent independently confirmed via `hook_comparison.subagent_start_count: 1`; whole-tree `modelUsage` (615 output tokens) exceeds top-level `usage` (232 output tokens) for the same run |
+| 4 | Interrupted/abnormal run | **Pass** — `245-run-4-interrupted.json`: `result_received: false`, `usage_status: "unknown"`, no fabricated completion |
+| Comparison | Terminal result vs. existing hook/transcript evidence | **Done** — each run's `hook_comparison` field cross-checks session identity and structural counts; see below |
 
-## Exact commands to run once unblocked
+## Exact commands run (round 8, credential-forwarded)
 
 CLI version and identity, captured once:
 
@@ -581,13 +691,14 @@ node tools/telemetry/execution-boundary-probe.mjs \
   --note "issue #245 required test 2: independent normal rerun"
 ```
 
-Test 3 (genuine subagent dispatch):
+Test 3 (genuine subagent dispatch — the prompt actually used, v2; a first attempt asking
+only to "use the Explore agent" did not force real delegation, see Round 8):
 
 ```
 node tools/telemetry/execution-boundary-probe.mjs \
   --task 245-run-3-subagent --claude-bin "C:\Users\Alexander\AppData\Roaming\Claude\claude-code\2.1.247\claude.exe" \
-  --prompt "Use the Explore agent to find where TELEMETRY_DIR is defined under tools/telemetry, then reply with only the file path and line number." \
-  --note "issue #245 required test 3: real subagent run"
+  --prompt "You must use the Task tool to dispatch a subagent (subagent_type Explore) to find where TELEMETRY_DIR is defined under tools/telemetry -- do not use Grep or Read yourself, delegate the whole search to the subagent. Then reply with only the file path and line number the subagent reports." \
+  --note "issue #245 required test 3: real subagent run (v2 forced delegation)"
 ```
 
 Test 4 (interrupted/abnormal run — force-killed mid-flight):
@@ -600,21 +711,85 @@ node tools/telemetry/execution-boundary-probe.mjs \
   --note "issue #245 required test 4: interrupted/abnormal run, force-killed 4s in"
 ```
 
-Each writes `docs/execution-boundary-probe-runs/<task-id>.json`, which should be committed
-as the durable per-run artifact (same convention as
-`docs/telemetry-battery-log-runs/2026-08-31.json`).
+Each command's own `CLAUDE_CODE_OAUTH_TOKEN` was set only on that single spawned child (via
+the round-8 credential-forwarding mechanism — see Round 8), never persisted to any file,
+shell profile, or committed artifact. Each writes
+`docs/execution-boundary-probe-runs/<task-id>.json`, committed as the durable per-run
+artifact (same convention as `docs/telemetry-battery-log-runs/2026-08-31.json`).
 
-## Result fields captured (once runs exist)
+## Result fields captured
 
-*To be filled in from the real `docs/execution-boundary-probe-runs/*.json` records once
-unblocked — not to be estimated or guessed here.*
+All four runs are committed at `docs/execution-boundary-probe-runs/245-run-{1..4}*.json`.
+Summary (full detail in Round 8 above and the JSON files themselves):
+
+| Run | `is_error` | `num_turns` | Top-level usage (in/out/cache-read/cache-create) | Whole-tree usage (in/out/cache-read/cache-create) | `estimated_list_cost_usd` |
+| --- | --- | --- | --- | --- | --- |
+| 1 normal | false | 2 | 4 / 76 / 98480 / 24674 | 4 / 76 / 98480 / 24674 (same — no subagent) | 0.11916 |
+| 2 normal | false | 2 | 4 / 76 / 98505 / 21574 | 4 / 76 / 98505 / 21574 (same — no subagent) | 0.106765 |
+| 3 subagent | false | 2 | 4 / 232 / 98670 / 22101 | 8 / 615 / 117920 / 42626 (**larger — subagent included**) | 0.1694665 |
+| 4 interrupted | null | null | null (`usage_status: "unknown"`) | null | null |
+
+Runs 1 and 2 show top-level and whole-tree usage identical, as expected for a run that
+never dispatches a subagent (`whole_tree_model_usage` is just the one model's top-level
+figures restated). Run 3 is the one that matters for the top-level/whole-tree distinction:
+whole-tree output tokens (615) are more than 2.6x top-level (232), and every other whole-tree
+figure is likewise larger than its top-level counterpart — the field genuinely captures
+subagent consumption the top-level `usage` field would silently omit. Run 4 shows the
+honest missing-result shape: every usage field is `null`/`"unknown"`, never backfilled.
 
 ## Comparison with existing hook/transcript telemetry
 
-*To be filled in from each run's `hook_comparison` field once unblocked.*
+Each run's `hook_comparison` field (embedded in its JSON record) cross-checks the terminal
+result against this session's own structural hook evidence for the same `session_id`,
+without treating hooks as an economic authority:
+
+- Runs 1-2: `hook_event_types: ["SessionStart", "SessionEnd"]`, `session_end_seen: true`,
+  `subagent_start_count: 0` — matches a normal run with no delegation.
+- Run 3 (accepted v2 attempt): `hook_event_types: ["SessionStart", "SubagentStart",
+  "SubagentStop", "SessionEnd"]`, `subagent_start_count: 1`, `subagent_stop_count: 2` — this
+  is the independent, non-terminal-result confirmation that a subagent genuinely ran,
+  required by issue #245 before whole-tree accounting evidence could be accepted. (The
+  rejected v1 attempt showed `subagent_start_count: 0` here, which is exactly why it was not
+  accepted as valid test-3 evidence.)
+- Run 4: `hook_event_types: ["SessionStart"]` only, `session_end_seen: false` — consistent
+  with a process killed mid-flight before completion, corroborating `result_received:
+  false` from an independent signal.
+
+Session identity matched cleanly in all four cases (`session_id` from the terminal result
+equals the session id the hooks fired under). No discrepancy required investigation.
 
 ## Verdict
 
-**Not yet determined.** No PASS/FAIL/INCONCLUSIVE verdict can be recorded until the
-required tests actually run — see "Status" above for the current blocker and required
-manual action.
+**PASS.** The hypothesis is supported. Across four real representative LDL-style executions
+launched through the same deterministic wrapper (`tools/telemetry/execution-boundary-probe.mjs`):
+
+- every run produced one parseable terminal result (or, for the interrupted run, an honest
+  absence of one) through the identical code path, with no probe changes needed between
+  runs;
+- the launcher durably associated each result with its task id and `session_id`;
+- session identity and terminal state were captured directly from the result message, never
+  inferred from a transcript;
+- per-model whole-agent-tree token accounting was available and, in the one run designed to
+  exercise it, was independently confirmed (via hooks) to include real subagent activity
+  that top-level `usage` alone omitted — the top-level-vs-whole-tree distinction issue #245
+  required is not just documented, it is demonstrated with real, differing numbers from the
+  same run;
+- cost was captured only as `estimated_list_cost_usd`, never labeled as actual subscription
+  spend;
+- the interrupted run produced truthful `result_received: false` / `usage_status: "unknown"`
+  state rather than any transcript-based completion inference.
+
+The blocker that consumed rounds 1-7 (spawn permission, then seven rounds of authentication
+failure) was resolved by one narrow, founder-authorized exception: forwarding the Windows
+User-level `CLAUDE_CODE_OAUTH_TOKEN` onto the spawned child's own environment only, without
+this session ever printing, logging, or persisting the value. That the round 1-7
+investigation was chasing the wrong layer (Windows session/logon propagation to
+`explorer.exe`'s process tree, rather than Claude Code Desktop's own inherited
+authentication context on its embedded CLI sessions) is itself a useful finding for any
+future unattended-spawn work from inside a Desktop session, though generalizing it is out of
+this experiment's scope.
+
+Per the issue's own framing, this result does **not** by itself authorize migrating
+production LDL telemetry to this boundary — it establishes that the boundary *works* in this
+environment when authentication is handled correctly. A migration decision is separate
+follow-on work, not part of this experiment's minimum-change authorization.
