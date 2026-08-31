@@ -336,6 +336,32 @@ export async function checkMergeReady(args, { ghPrViewImpl = defaultGhPrView } =
   return { exitCode: 0, state: "MERGE_READY" };
 }
 
+// The moment isCompletedStage2AuditReport's strict evidence contract took effect: the merge
+// time of LDL PR #231, which introduced it. Stage 2 audit finding on that very PR (issue #233):
+// an earlier revision of the legacy-compatibility fallback below was gated only on "is the work
+// issue currently closed," with no check that the backing response actually predates this
+// contract — so a *new*, post-contract audit whose response was merely a terse "CLEAN" (missing
+// the now-required checklist) could still back a closure once the work issue was closed by any
+// means, silently masking exactly the premature-closure class this whole mechanism exists to
+// catch. A candidate response timestamped at or after this cutoff is never eligible for the
+// relaxed check, only for the strict one — see findStage2ReportEvidence's `legacyCutoff` option.
+//
+// This is a single global LDL-repository timestamp, not a per-consumer-repository adoption
+// time (Stage 1 review finding on PR #234, P2/deliberately deferred): `tools/review-watch/` is
+// distributed to consumer repositories via `ldl-init`/`ldl-sync` (docs/consumer-contract.md) at
+// various later times, so a consumer that has not yet synced past this LDL merge could in
+// principle still legitimately accept a terse audit response *after* this cutoff under its own
+// then-current, unsynced rules — a later `post-audit` re-run in that consumer would treat that
+// response as post-contract and report PREMATURE_CLOSURE, reopening a work issue that consumer
+// accepted validly under its own installed revision at the time. Deriving a true per-consumer
+// adoption boundary would need a durable per-file sync-version marker this repository does not
+// currently track anywhere reachable from this script, and is a distinct, larger mechanism than
+// this correction's scope (gating a Loop-Dee-Loup-side evidence-contract bug). The failure mode
+// is a recoverable, visible reopen-with-explanation (recoverPrematureClosure), not a silent
+// false acceptance — the asymmetric-but-lesser risk this fix's own non-goals accept rather than
+// chase indefinitely (see genuine-response.mjs's own "smallest reliable boundary" precedent).
+const STAGE2_LEGACY_CONTRACT_CUTOFF = "2026-08-31T09:19:22Z";
+
 // Whether the audit issue's comment thread already carries a *completed* Stage 2 audit report
 // (stage2-report.mjs's isCompletedStage2AuditReport) — not merely a genuine-but-incomplete
 // response such as issue #229's "Starting #178." kickoff. Reuses trigger.mjs's dedup read,
@@ -345,9 +371,20 @@ export async function checkMergeReady(args, { ghPrViewImpl = defaultGhPrView } =
 // body_excerpt — issue #230 acceptance criteria: evidence beyond the first 200 characters must
 // be considered, not just an excerpt. Scans every post-trigger response, not just the first, so
 // a kickoff/acknowledgement followed later by a genuine completed report on the same thread
-// still gets found (bounded follow-up remains discoverable); the *latest* completed report is
-// authoritative when more than one exists (a retry round). `ghApiImpl` is injected for tests.
-async function findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl, { requireVerificationEvidence = true } = {}) {
+// still gets found (bounded follow-up remains discoverable); the *latest complete* report is
+// authoritative when more than one exists (a retry round).
+//
+// `legacyCutoff`, when given, relaxes the verification-checklist signal *only* for a candidate
+// whose own timestamp predates it (see STAGE2_LEGACY_CONTRACT_CUTOFF) — every candidate is
+// still evaluated and kept in chronological order, never discarded up front by timestamp alone
+// (Stage 1 review finding on PR #234: an earlier revision filtered candidates to
+// timestamp-eligible ones *before* evaluating them, so a pre-cutoff terse CLEAN response could
+// still be selected as "latest complete" even when a *later*, fully complete NOT CLEAN report
+// existed on the same thread — the older grandfathered response silently outranked newer,
+// definitive evidence. Evaluating every candidate and keeping the true chronological order means
+// a later complete report — of either verdict — always wins over an older, merely-relaxed one).
+// `ghApiImpl` is injected for tests.
+async function findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl, { legacyCutoff = null } = {}) {
   const commentsPath = endpointsFor("issue", repo, auditIssue).find((e) => e.name === "issue-comments").path;
   const comments = await ghApiImpl(commentsPath);
   const trigger = findExistingTrigger(comments, {});
@@ -357,10 +394,17 @@ async function findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, 
 
   const sinceMs = new Date(trigger.created_at).getTime();
   const candidates = findAllMatches(comments, { bot, sinceMs, endpointName: "issue-comments" });
+  const cutoffMs = legacyCutoff ? new Date(legacyCutoff).getTime() : null;
   const reports = candidates.map((match) => {
     const full = findCommentById(comments, match.id);
-    const evaluation = isCompletedStage2AuditReport(full?.body ?? "", { mergeCommit, requireVerificationEvidence });
-    return { id: match.id, url: match.url, ...evaluation };
+    const body = full?.body ?? "";
+    const strict = isCompletedStage2AuditReport(body, { mergeCommit, requireVerificationEvidence: true });
+    const isPreCutoff = cutoffMs !== null && new Date(match.created_at).getTime() < cutoffMs;
+    if (strict.complete || !isPreCutoff) {
+      return { id: match.id, url: match.url, legacyCompatible: false, ...strict };
+    }
+    const relaxed = isCompletedStage2AuditReport(body, { mergeCommit, requireVerificationEvidence: false });
+    return { id: match.id, url: match.url, legacyCompatible: relaxed.complete, ...relaxed };
   });
 
   const completed = reports.filter((r) => r.complete);
@@ -378,7 +422,13 @@ async function findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, 
   }
 
   const latest = completed[completed.length - 1];
-  return { backed: true, verdict: latest.verdict, responsesSeen: reports.length, matchedCommentUrl: latest.url };
+  return {
+    backed: true,
+    verdict: latest.verdict,
+    responsesSeen: reports.length,
+    matchedCommentUrl: latest.url,
+    legacyCompatible: latest.legacyCompatible,
+  };
 }
 
 // `ghIssueViewImpl` and `ghApiImpl` are injected so tests can drive this end-to-end without
@@ -473,48 +523,30 @@ export async function checkPostAudit(
   let verdict = rawVerdict;
   let reportEvidence = null;
   if (rawVerdict === "CLEAN") {
+    // Legacy compatibility (issue #230 Required layer 8: preserve an already-closed work
+    // issue's historical CLEAN closure — e.g. issue #95's terse "CLEAN — ... no actionable
+    // findings. Next: None." shape, with no numbered checklist — rather than treating it as
+    // grounds to reopen the issue) only applies when the work issue is *already* closed, and
+    // only relaxes the verification-checklist signal for a candidate response that itself
+    // predates STAGE2_LEGACY_CONTRACT_CUTOFF (Stage 2 audit finding on issue #233: being closed
+    // alone is not evidence of being historical — without the cutoff, a *new*, post-contract
+    // audit whose response is merely terse "CLEAN" could still back a closure once its work
+    // issue was closed by any means). findStage2ReportEvidence evaluates every candidate in
+    // chronological order regardless of the cutoff (Stage 1 review finding on PR #234: an
+    // earlier revision filtered out later candidates before evaluating them, so a later, fully
+    // complete NOT CLEAN report could be silently outranked by an older grandfathered CLEAN) —
+    // the *latest* complete response, of either verdict, is always authoritative.
     try {
-      reportEvidence = await findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl);
+      reportEvidence = await findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl, {
+        legacyCutoff: isClosed ? STAGE2_LEGACY_CONTRACT_CUTOFF : null,
+      });
     } catch (err) {
       return {
         exitCode: 1,
         message: `gh api call failed while verifying the CLEAN verdict on ${repo}#${auditIssue}: ${err.message}`,
       };
     }
-    if (reportEvidence.backed && reportEvidence.verdict === "CLEAN") {
-      verdict = "CLEAN";
-    } else if (isClosed) {
-      // Preserve an already-closed work issue's historical CLEAN closure rather than treating a
-      // merely-reformatted, pre-contract response as grounds to reopen it (issue #230 Required
-      // layer 8 / Stage 1 review finding on this PR: without this, rerunning post-audit against
-      // an already-accepted pre-contract audit — e.g. issue #95's terse "CLEAN — ... no
-      // actionable findings. Next: None." shape, with no numbered checklist — reported
-      // PREMATURE_CLOSURE, and its own `--recover true` instruction would have reopened a
-      // legitimately-closed work issue). Only reachable when the work issue is *already*
-      // closed, and only relaxes the verification-checklist signal: commit identity and the
-      // response's own matching verdict are still required, so this can never back a *new*
-      // closure on a currently-open issue, and never accepts a wrong-commit or verdict-
-      // disagreeing response.
-      let legacyEvidence;
-      try {
-        legacyEvidence = await findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl, {
-          requireVerificationEvidence: false,
-        });
-      } catch (err) {
-        return {
-          exitCode: 1,
-          message: `gh api call failed while verifying the CLEAN verdict on ${repo}#${auditIssue}: ${err.message}`,
-        };
-      }
-      if (legacyEvidence.backed && legacyEvidence.verdict === "CLEAN") {
-        verdict = "CLEAN";
-        reportEvidence = { ...legacyEvidence, legacyCompatible: true };
-      } else {
-        verdict = null;
-      }
-    } else {
-      verdict = null;
-    }
+    verdict = reportEvidence.backed && reportEvidence.verdict === "CLEAN" ? "CLEAN" : null;
   }
 
   if (isClosed && verdict !== "CLEAN") {
