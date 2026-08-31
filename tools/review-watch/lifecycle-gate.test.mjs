@@ -598,6 +598,71 @@ test("checkPostAudit: OK — verdict CLEAN (backed) and work issue already close
   assert.equal(result.state, "OK");
 });
 
+// -- checkPostAudit: legacy-compatibility preservation for an already-closed work issue --------
+// (issue #230 Required layer 8 / Stage 1 review finding on PR #231)
+
+// The exact terse shape issue #95's real, already-accepted audit used: an explicit CLEAN status
+// line and the correct commit, but no numbered verification checklist — the strict contract
+// (isCompletedStage2AuditReport's default) rejects this, but a work issue already closed under
+// it must not be reopened on a fresh recheck.
+function legacyShapedCleanThread({ triggerTime = "2026-08-20T00:00:00Z", responseTime = "2026-08-20T00:05:00Z", commit = MERGE_COMMIT } = {}) {
+  return [
+    { id: 1, body: triggerCommentBody(), created_at: triggerTime },
+    {
+      id: 2,
+      user: { login: "chatgpt-codex-connector[bot]" },
+      body: `CLEAN — Stage 2 audit at \`${commit}\`; no actionable findings. Next: None.`,
+      created_at: responseTime,
+    },
+  ];
+}
+
+function withLegacyShapedCleanThread(opts) {
+  return async (path) => (path.includes("/issues/") ? legacyShapedCleanThread(opts) : []);
+}
+
+test("checkPostAudit: OK — a pre-contract terse CLEAN response is preserved (not PREMATURE_CLOSURE) when the work issue is already closed", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "CLOSED" },
+      ghApiImpl: withLegacyShapedCleanThread(),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "a legacy-shaped CLEAN backing an already-closed work issue must not be reopened");
+  assert.equal(result.verdict, "CLEAN");
+  assert.equal(result.reportEvidence.legacyCompatible, true);
+});
+
+test("checkPostAudit: the legacy-compatibility fallback does not apply to an open work issue — a terse legacy-shaped response cannot authorize a new closure", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withLegacyShapedCleanThread(),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "an open work issue must still require the full strict contract, never READY_TO_CLOSE via the legacy fallback");
+  assert.equal(result.verdict, null);
+});
+
+test("checkPostAudit: the legacy-compatibility fallback still rejects a closed work issue's response addressing the wrong commit", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "CLOSED" },
+      ghApiImpl: withLegacyShapedCleanThread({ commit: "deadbeef00000000000000000000000000000000" }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "PREMATURE_CLOSURE", "a wrong-commit response must not be accepted even under the legacy fallback");
+});
+
 test("checkPostAudit: PREMATURE_CLOSURE — work issue closed with no CLEAN verdict (verification #11, the PR #154/#151 regression)", async () => {
   const result = await checkPostAudit(
     { repo: "owner/repo", "audit-issue": 160 },

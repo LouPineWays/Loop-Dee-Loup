@@ -347,7 +347,7 @@ export async function checkMergeReady(args, { ghPrViewImpl = defaultGhPrView } =
 // a kickoff/acknowledgement followed later by a genuine completed report on the same thread
 // still gets found (bounded follow-up remains discoverable); the *latest* completed report is
 // authoritative when more than one exists (a retry round). `ghApiImpl` is injected for tests.
-async function findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl) {
+async function findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl, { requireVerificationEvidence = true } = {}) {
   const commentsPath = endpointsFor("issue", repo, auditIssue).find((e) => e.name === "issue-comments").path;
   const comments = await ghApiImpl(commentsPath);
   const trigger = findExistingTrigger(comments, {});
@@ -359,7 +359,7 @@ async function findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, 
   const candidates = findAllMatches(comments, { bot, sinceMs, endpointName: "issue-comments" });
   const reports = candidates.map((match) => {
     const full = findCommentById(comments, match.id);
-    const evaluation = isCompletedStage2AuditReport(full?.body ?? "", { mergeCommit });
+    const evaluation = isCompletedStage2AuditReport(full?.body ?? "", { mergeCommit, requireVerificationEvidence });
     return { id: match.id, url: match.url, ...evaluation };
   });
 
@@ -417,6 +417,47 @@ export async function checkPostAudit(
   const rawVerdict = parseStage2Verdict(auditIssueData.body ?? "");
   const mergeCommit = parseMergeCommitRef(auditIssueData.body ?? "");
 
+  // Explicit no-work-issue state (issue #190): evaluated first and independently — always
+  // strictly (there is no already-closed work issue whose historical closure could need
+  // preserving here, so the legacy-compatibility fallback below never applies). An unbacked
+  // CLEAN just reports OK; nothing is fetched, reopened, or closed.
+  if (noWorkIssue) {
+    let verdict = rawVerdict;
+    let reportEvidence = null;
+    if (rawVerdict === "CLEAN") {
+      try {
+        reportEvidence = await findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl);
+      } catch (err) {
+        return {
+          exitCode: 1,
+          message: `gh api call failed while verifying the CLEAN verdict on ${repo}#${auditIssue}: ${err.message}`,
+        };
+      }
+      if (!reportEvidence.backed || reportEvidence.verdict !== "CLEAN") verdict = null;
+    }
+    return {
+      exitCode: 0,
+      state: verdict === "CLEAN" ? "ACCEPTED_NO_WORK_ISSUE" : "OK",
+      workIssue: null,
+      auditIssue: Number(auditIssue),
+      verdict,
+      rawVerdict,
+      workIssueState: null,
+      ...(reportEvidence ? { reportEvidence } : {}),
+    };
+  }
+
+  // Fetched before the CLEAN-evidence decision below (not after, as an earlier revision did) so
+  // an already-closed work issue can fall back to the relaxed legacy-compatibility check without
+  // a second, separately-ordered round trip.
+  let workIssueData;
+  try {
+    workIssueData = await ghIssueViewImpl({ repo, number: workIssueNumber });
+  } catch (err) {
+    return { exitCode: 1, message: `gh issue view failed for ${repo}#${workIssueNumber}: ${err.message}` };
+  }
+  const isClosed = workIssueData.state === "CLOSED";
+
   // A CLEAN dropdown value is only trusted once a *completed* Stage 2 audit report backs it —
   // not merely a genuine-but-incomplete response (Stage 1 review finding on this PR's earlier
   // revision: the template exposes CLEAN as a selectable value at issue *creation*, before
@@ -440,36 +481,41 @@ export async function checkPostAudit(
         message: `gh api call failed while verifying the CLEAN verdict on ${repo}#${auditIssue}: ${err.message}`,
       };
     }
-    if (!reportEvidence.backed || reportEvidence.verdict !== "CLEAN") verdict = null;
+    if (reportEvidence.backed && reportEvidence.verdict === "CLEAN") {
+      verdict = "CLEAN";
+    } else if (isClosed) {
+      // Preserve an already-closed work issue's historical CLEAN closure rather than treating a
+      // merely-reformatted, pre-contract response as grounds to reopen it (issue #230 Required
+      // layer 8 / Stage 1 review finding on this PR: without this, rerunning post-audit against
+      // an already-accepted pre-contract audit — e.g. issue #95's terse "CLEAN — ... no
+      // actionable findings. Next: None." shape, with no numbered checklist — reported
+      // PREMATURE_CLOSURE, and its own `--recover true` instruction would have reopened a
+      // legitimately-closed work issue). Only reachable when the work issue is *already*
+      // closed, and only relaxes the verification-checklist signal: commit identity and the
+      // response's own matching verdict are still required, so this can never back a *new*
+      // closure on a currently-open issue, and never accepts a wrong-commit or verdict-
+      // disagreeing response.
+      let legacyEvidence;
+      try {
+        legacyEvidence = await findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl, {
+          requireVerificationEvidence: false,
+        });
+      } catch (err) {
+        return {
+          exitCode: 1,
+          message: `gh api call failed while verifying the CLEAN verdict on ${repo}#${auditIssue}: ${err.message}`,
+        };
+      }
+      if (legacyEvidence.backed && legacyEvidence.verdict === "CLEAN") {
+        verdict = "CLEAN";
+        reportEvidence = { ...legacyEvidence, legacyCompatible: true };
+      } else {
+        verdict = null;
+      }
+    } else {
+      verdict = null;
+    }
   }
-
-  // Explicit no-work-issue state (issue #190): the Stage 2 response/verdict gate above still
-  // ran unchanged — PENDING/NOT CLEAN/an unbacked CLEAN all remain non-accepted here exactly as
-  // they do with a real work issue — but there is no implementation issue to fetch, reopen, or
-  // close, so this returns before any of that. A genuine backed CLEAN reports the distinct
-  // "accepted" state instead of "OK" so a caller can recognize Stage 2 acceptance without a
-  // `workIssueState: "CLOSED"` to check against.
-  if (noWorkIssue) {
-    return {
-      exitCode: 0,
-      state: verdict === "CLEAN" ? "ACCEPTED_NO_WORK_ISSUE" : "OK",
-      workIssue: null,
-      auditIssue: Number(auditIssue),
-      verdict,
-      rawVerdict,
-      workIssueState: null,
-      ...(reportEvidence ? { reportEvidence } : {}),
-    };
-  }
-
-  let workIssueData;
-  try {
-    workIssueData = await ghIssueViewImpl({ repo, number: workIssueNumber });
-  } catch (err) {
-    return { exitCode: 1, message: `gh issue view failed for ${repo}#${workIssueNumber}: ${err.message}` };
-  }
-
-  const isClosed = workIssueData.state === "CLOSED";
 
   if (isClosed && verdict !== "CLEAN") {
     return {

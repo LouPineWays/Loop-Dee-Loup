@@ -101,6 +101,19 @@ test("extractResponseVerdict: an unrelated later mention of CLEAN/NOT CLEAN with
   assert.equal(extractResponseVerdict("Reviewed the diff.\n\nThe helper function itself looks clean, will report back."), null);
 });
 
+test("extractResponseVerdict: findings prose that merely contains the word 'verdict' does not short-circuit before the real labelled verdict (Stage 1 review finding on PR #231)", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. Prevent a CLEAN verdict from overriding contradictory evidence — see below.",
+    "",
+    "### Verdict",
+    "",
+    "NOT CLEAN",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
 // -- hasVerificationEvidence -----------------------------------------------------------------
 
 test("hasVerificationEvidence: true with a 'verif...' mention and a numbered item", () => {
@@ -180,4 +193,60 @@ test("isCompletedStage2AuditReport: reports every failed signal when multiple ar
   const result = isCompletedStage2AuditReport("Looks fine to me.", { mergeCommit: MERGE_COMMIT });
   assert.equal(result.complete, false);
   assert.equal(result.reasons.length, 3);
+});
+
+test("isCompletedStage2AuditReport: a NOT CLEAN report is not misread as CLEAN via a findings sentence that merely mentions the word 'verdict' (Stage 1 review finding on PR #231)", () => {
+  const body = validReport({ verdictLine: "### Verdict\n\nNOT CLEAN" }).replace(
+    "1. Confirmed the classifier rejects the exact #229 kickoff — CONFIRMED",
+    "1. Prevent a CLEAN verdict from overriding contradictory evidence — CONFIRMED",
+  );
+  const result = isCompletedStage2AuditReport(body, { mergeCommit: MERGE_COMMIT });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "NOT CLEAN", "must read the real trailing Verdict field, not the findings prose mentioning the word");
+});
+
+test("isCompletedStage2AuditReport: a refusal disclosed past the first 200 characters is still rejected (Stage 1 review finding on PR #231)", () => {
+  // The commit/verdict/checklist all sit within the first 200 characters; the self-referential
+  // refusal only appears later in the body. An earlier revision only classified the 200-char
+  // excerpt for genuineness, so this refusal was invisible to that check.
+  const body = [
+    `CLEAN — audit of \`${MERGE_COMMIT}\`.`,
+    "",
+    "### Verification checklist",
+    "",
+    "1. Confirmed the fix — CONFIRMED",
+    "",
+    "Verdict: CLEAN",
+    "",
+    "I also tried to push a small formatting fix directly. I don't have write access to this branch.",
+  ].join("\n");
+  assert.ok(body.indexOf("write access") > 200, "the refusal must fall past the 200-char excerpt boundary for this test to be meaningful");
+  const result = isCompletedStage2AuditReport(body, { mergeCommit: MERGE_COMMIT });
+  assert.equal(result.complete, false, "a refused mutation attempt anywhere in the body must not back a completed report");
+});
+
+// -- isCompletedStage2AuditReport: requireVerificationEvidence (legacy-compatibility mode) ----
+
+test("isCompletedStage2AuditReport: requireVerificationEvidence: false accepts a terse legacy-shaped CLEAN response with no checklist", () => {
+  const legacy = `CLEAN — Stage 2 audit of PR #94 at \`${MERGE_COMMIT}\`; no actionable findings. Next: None.`;
+  const strict = isCompletedStage2AuditReport(legacy, { mergeCommit: MERGE_COMMIT });
+  assert.equal(strict.complete, false, "the strict default must still reject the terse legacy shape");
+
+  const relaxed = isCompletedStage2AuditReport(legacy, { mergeCommit: MERGE_COMMIT, requireVerificationEvidence: false });
+  assert.equal(relaxed.complete, true, "legacy-compatibility mode must accept it");
+  assert.equal(relaxed.verdict, "CLEAN");
+});
+
+test("isCompletedStage2AuditReport: requireVerificationEvidence: false still requires the correct commit and an explicit verdict", () => {
+  const wrongCommit = isCompletedStage2AuditReport("CLEAN — audit of `deadbeef00000000000000000000000000000000`.", {
+    mergeCommit: MERGE_COMMIT,
+    requireVerificationEvidence: false,
+  });
+  assert.equal(wrongCommit.complete, false, "legacy-compatibility mode must not accept a report addressing a different commit");
+
+  const noVerdict = isCompletedStage2AuditReport(`Looked at \`${MERGE_COMMIT}\`, nothing else to add.`, {
+    mergeCommit: MERGE_COMMIT,
+    requireVerificationEvidence: false,
+  });
+  assert.equal(noVerdict.complete, false, "legacy-compatibility mode must not accept a response with no explicit verdict");
 });

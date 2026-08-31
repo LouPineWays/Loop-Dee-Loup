@@ -73,7 +73,16 @@ export function bodyReferencesCommit(text, mergeCommit) {
 // genuine-response.mjs's BLOCKED_STATUS_PATTERN family tolerates it.
 const LEADING_VERDICT_PATTERN =
   /^(?:\s|>+|#{1,6}(?=\s)|[-+*](?=\s)|\d{1,3}[.)](?=\s)|[*_]{1,3}(?=\S))*\s*(NOT CLEAN|CLEAN)\b/i;
-const LABEL_PATTERN = /\bverdict\b/i;
+// A genuine "Verdict" *label* line — a heading ("### Verdict"), a bold/plain label with an
+// optional colon ("Verdict:", "**Verdict:**"), optionally followed by the value on the same
+// line — anchored to the start of the (trimmed) line. Stage 1 review finding on this PR: an
+// earlier version matched the bare word "verdict" appearing *anywhere* in a line, so a NOT
+// CLEAN report's own findings prose — e.g. "Prevent a CLEAN verdict from overriding
+// contradictory evidence" — was read as a same-line label with value "CLEAN", short-circuiting
+// before the report's actual "Verdict: NOT CLEAN" line was ever reached. Anchoring to the start
+// of the line (after optional heading/bold markup) means only an actual label field can supply
+// the verdict, never a sentence that merely contains the word.
+const VERDICT_LABEL_LINE_PATTERN = /^(?:#{1,6}\s*)?\*{0,2}verdict\*{0,2}\s*:?\s*\*{0,2}\s*(.*)$/i;
 const VERDICT_TOKEN_PATTERN = /\b(NOT CLEAN|CLEAN)\b/i;
 
 function normalizeVerdictToken(token) {
@@ -94,9 +103,14 @@ export function extractResponseVerdict(text) {
 
   const lines = normalized.split("\n");
   for (let i = 0; i < lines.length; i++) {
-    if (!LABEL_PATTERN.test(lines[i])) continue;
-    const sameLine = VERDICT_TOKEN_PATTERN.exec(lines[i].replace(LABEL_PATTERN, ""));
-    if (sameLine) return normalizeVerdictToken(sameLine[1]);
+    const labelMatch = VERDICT_LABEL_LINE_PATTERN.exec(lines[i].trim());
+    if (!labelMatch) continue;
+    const rest = labelMatch[1].trim();
+    if (rest) {
+      const sameLine = VERDICT_TOKEN_PATTERN.exec(rest);
+      if (sameLine) return normalizeVerdictToken(sameLine[1]);
+      continue;
+    }
     for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
       const candidate = lines[j].trim();
       if (candidate === "") continue;
@@ -122,11 +136,29 @@ export function hasVerificationEvidence(text) {
 // Combines the three signals into one completion decision. `reasons` lists every failed
 // signal — issue #230's acceptance criteria requires that "a fresh session can determine ...
 // verification limitations ... from durable state," so a bare true/false is not enough.
-export function isCompletedStage2AuditReport(body, { mergeCommit } = {}) {
+//
+// `requireVerificationEvidence` (default true) lets a caller relax signal 3 only — used
+// exclusively by lifecycle-gate.mjs when checking whether an *already-closed* work issue's
+// historical CLEAN closure should be preserved on a fresh post-audit re-run (issue #230
+// Required layer 8 / Stage 1 review finding on this PR: without this, rerunning post-audit
+// against an already-accepted pre-contract audit — e.g. issue #95's terse "CLEAN — ... no
+// actionable findings. Next: None." shape, with no numbered checklist — reports
+// PREMATURE_CLOSURE and its own recovery instruction would reopen a legitimately-closed work
+// issue). Signals 1 and 2 (commit identity, the response's own matching verdict) are still
+// required even in this mode, so it never backs a report addressing the wrong commit or
+// lacking any verdict at all — it only forgives the newly-required checklist format a
+// pre-existing response could never have followed.
+export function isCompletedStage2AuditReport(body, { mergeCommit, requireVerificationEvidence = true } = {}) {
   const text = body ?? "";
   const reasons = [];
 
-  if (!isGenuineResponse(text.slice(0, 200))) {
+  // Evaluated against the *full* body, not a 200-character excerpt (Stage 1 review finding on
+  // this PR): isSelfReferentialRefusal scans every sentence in whatever text it is given, not
+  // just the start, so a response that places the commit/checklist/verdict within its first 200
+  // characters but *later* discloses a refused mutation attempt ("I tried to push a fix but
+  // don't have write access") must still be excluded — that refusal is a violated reviewer-role
+  // boundary per AGENTS.md's Code Review Rules regardless of where in the message it appears.
+  if (!isGenuineResponse(text)) {
     reasons.push("not a genuine response (BLOCKED, a refused mutation attempt, or a setup prompt)");
     return { complete: false, verdict: null, reasons };
   }
@@ -140,8 +172,14 @@ export function isCompletedStage2AuditReport(body, { mergeCommit } = {}) {
   if (!verdict) reasons.push("no explicit CLEAN/NOT CLEAN verdict");
 
   const hasVerification = hasVerificationEvidence(text);
-  if (!hasVerification) reasons.push("no verification-results content (a numbered checklist walk-through)");
+  if (!hasVerification) {
+    reasons.push(
+      requireVerificationEvidence
+        ? "no verification-results content (a numbered checklist walk-through)"
+        : "no verification-results content (a numbered checklist walk-through) — not required in legacy-compatibility mode",
+    );
+  }
 
-  const complete = hasCommit && verdict !== null && hasVerification;
+  const complete = hasCommit && verdict !== null && (hasVerification || !requireVerificationEvidence);
   return { complete, verdict: complete ? verdict : null, reasons };
 }
