@@ -12,17 +12,18 @@ experiment exists to test an alternative to.
 
 ## Status
 
-**BLOCKED — dispatched a sixth time after the founder again said `CLAUDE_CODE_OAUTH_TOKEN`
-"is now configured," using the same wording as round 5's dispatch. A trivial spawned child
-still fails to authenticate identically (see Round 6). Unlike round 5, the token's
-User-registry length this time is unchanged from round 5's (108 → 108) — the founder did not
-re-set the value between the two rounds, only `explorer.exe` respawned again (a new, later
-PID). This is now the second consecutive round in which an `explorer.exe` respawn alone —
-with no corroborating evidence of a real sign-out/sign-in — fails to propagate the token,
-directly matching round 5's prediction. Round 5's required action stands unchanged: only a
-verified full Windows sign-out/sign-in, checked from a brand-new terminal window opened
-outside this harness, should be treated as sufficient before re-dispatching this experiment
-again.**
+**BLOCKED — dispatched a seventh time after the founder reported that an *independent*
+PowerShell session (opened outside this harness) authenticated successfully with
+`CLAUDE_CODE_OAUTH_TOKEN` (`claude -p "Reply with only: pong"` returned `pong`), with
+instructions to treat the prior Windows-propagation diagnosis as superseded. Retested
+directly: this session's own spawned child still fails identically (see Round 7). This
+round adds a stronger disconfirmation than round 6 — this session's process chain,
+including the Claude Code desktop app's own main process, is now corroborated as launched
+fresh, seconds after a genuine interactive Windows logon event (`LogonType 2`, confirmed
+via WMI) — not merely an `explorer.exe` PID that merely looks recent. Even that fully-fresh
+chain does not carry the token. Round 5/6's "respawn ≠ fresh logon" theory is no longer a
+sufficient explanation on its own; the required founder action has changed accordingly (see
+Round 7).**
 
 ### Round 1 (resolved): host spawn permission
 
@@ -393,6 +394,126 @@ from a plain terminal window opened independently of any harness or IDE:
 same window succeeds without `/login`. Re-dispatching this experiment again without that
 independent confirmation is expected, on the evidence of rounds 4-6, to reproduce the
 identical `authentication_failed` result a seventh time.
+
+### Round 7 (new, current blocker): a fully fresh app+logon chain still does not propagate the token, superseding the respawn theory
+
+This is a fresh session (new conversation, resumed on the same branch), dispatched by the
+founder with a materially different instruction than rounds 4-6: rather than "the token is
+now configured," the founder reported that an **independent PowerShell session, opened
+outside this harness, already authenticated successfully** —
+`claude -p "Reply with only: pong"` returned `pong` — and asked this session to treat the
+prior Windows-propagation diagnosis as superseded, then verify the spawned child can
+authenticate before continuing tests 1-4.
+
+The first step, touching no credential value, was the same trivial spawned child used in
+every prior round, run twice (once via the `Bash` tool, once as a direct `claude.exe`
+invocation to rule out a `Bash`-specific issue):
+
+```
+"<claude-bin>" -p --output-format stream-json --verbose --permission-mode bypassPermissions \
+  --no-session-persistence "Reply with only: pong"
+```
+
+Result, both times: identical to every prior round —
+`result.result: "Not logged in · Please run /login"`, `error: "authentication_failed"`,
+`is_error: true`, `usage`: all-zero, `terminal_reason: "api_error"`. The founder's
+independently-verified success does **not** reproduce inside this session — the token
+works somewhere on this machine right now, just not for anything this session spawns.
+
+This round went further than rounds 4-6 in characterizing *why*, using only process
+metadata (PIDs, timestamps, logon types) — never the credential value itself, consistent
+with the boundary established in rounds 1-3:
+
+**1. This session's process env still lacks the token**, in both `Bash` and `PowerShell`
+tool invocations (`$env:CLAUDE_CODE_OAUTH_TOKEN` unset in-process), while the User-registry
+value is confirmed present and unchanged at length 108 (same as rounds 5-6).
+
+**2. This session's ancestry is a fully fresh chain, including the desktop app's own main
+process, not just `explorer.exe`:**
+
+```
+explorer.exe (pid 9428)  started 2026-08-31 16:08:34
+  -> Claude.exe (pid 18720, main Electron app) started 2026-08-31 16:08:56  <- 22s after explorer
+    -> claude.exe (pid 22384, CLI host)          started 2026-08-31 16:09:19
+      -> pwsh (pid 16344)                        started 2026-08-31 16:10:02  <- this session's own shell tool
+```
+
+Every prior round (4-6) could only observe that `explorer.exe` had a new PID and a recent
+timestamp, then infer the CLI's authentication state from that. This round additionally
+confirms, via `Get-CimInstance Win32_Process`, that the **Claude Code desktop app's own
+main process** (`Claude.exe`, PID 18720 — the Electron app, parent of every `claude.exe`
+CLI child including this session's) was itself created only 22 seconds after that
+`explorer.exe`, i.e. the whole application was relaunched fresh as part of this same chain,
+not merely a new tab/window inside a long-lived app instance. This rules out the
+"long-lived Electron main process retains a stale env snapshot" explanation as the sole
+cause — the main process here is genuinely new.
+
+**3. That `explorer.exe` timestamp is independently corroborated by an actual interactive
+logon event, not just a plausible-looking PID.** `Get-CimInstance Win32_LogonSession`
+shows two `LogonType 2` (interactive) sessions starting at `2026-08-31 16:08:33` — one
+second before this chain's `explorer.exe` was created. This is the first round with direct
+evidence that the `explorer.exe` respawn coincides with a genuine interactive logon, not an
+Explorer-only crash/restart. Round 5/6's leading hypothesis (an `explorer.exe` respawn is
+not itself a fresh logon, so naturally it wouldn't pick up the change) does not fit this
+case — this looks like an actual fresh sign-in, and the token still did not reach it.
+
+**4. A secondary discrepancy, noted but not resolved:** `whoami /logonid` for this
+session's own shell process reports logon ID `553779` (in `S-1-5-5-0-<id>` form), which
+does not match either of the two `LogonType 2` session IDs WMI reports as newest
+(`554501`, `554235`). `Win32_LogonSession` could not be queried for `553779` directly (no
+matching row returned, and WMI's `Win32_LogonSession` class is known to have incomplete
+visibility into interactively-authenticated sessions from a non-elevated caller) so this
+could not be fully resolved without deeper privilege this session should not seek out. It
+is recorded as a candidate lead for a future round, not as an established cause: it would be
+consistent with this session's processes running under an authentication context that is
+not actually a plain child of the interactive desktop logon it appears to descend from
+(e.g. a cached/fast-resume token distinct from `userinit.exe`'s fresh environment read), but
+that is not confirmed here.
+
+**Conclusion**: the round 5/6 explanation ("mere `explorer.exe` respawn ≠ fresh logon, so of
+course it doesn't propagate") is no longer sufficient by itself — this round has a
+corroborated fresh interactive logon *and* a freshly-relaunched main application process,
+and the token still did not reach a child spawned from that chain. The founder's
+independent-session success proves the token itself is valid and does authenticate
+somewhere on this machine right now; the gap is specific to whatever authentication/
+environment context this harness's own process tree runs under, which — per point 4 — may
+not be the same logon session as the one the founder's independent terminal used, even
+though both currently coexist on the same interactive desktop (`Session Name: Console`,
+confirmed via `tasklist` for every running `claude.exe`, ruling out a separate RDP/service
+session as the simplest version of that theory).
+
+This session cannot itself distinguish further between "the fresh logon's environment
+snapshot raced the token being written" (unlikely — the registry value has been unchanged
+since round 5, well before this logon) and "this harness's session-launch mechanism does not
+draw its environment from the visible interactive logon the same way a plain terminal does."
+Investigating the latter further would mean inspecting how this session itself is
+provisioned/authenticated, which round 2 already established this session is not permitted
+to do.
+
+**Required founder action to unblock (round 7, escalated from round 6):** the sign-out/
+sign-in fix is not confirmed sufficient — this round had an even stronger version of it
+(corroborated fresh interactive logon plus a freshly relaunched app) and still failed.
+Before re-dispatching this experiment again:
+
+1. Fully quit the Claude Code desktop application via its own Quit command (not just
+   closing the window), confirm via Task Manager that no `Claude.exe`/`claude.exe`
+   processes remain, then relaunch it and start a brand-new session. This is a cheaper test
+   than a full reboot and was not cleanly isolated before this round (round 4's "restart the
+   host app" was tested against a token that had not yet been re-set at all).
+2. If step 1 still reproduces `authentication_failed`, perform a full OS restart
+   (`shutdown /r`, not sign-out/sign-in) so that every process on the machine, including any
+   supervisor or launcher this harness itself depends on, restarts from a true cold state.
+3. If a full restart still fails, the remaining hypothesis is that this harness's session
+   -launch mechanism does not inherit the interactive desktop's environment block the way a
+   plain terminal does, regardless of logon state — at that point unblocking requires
+   identifying, outside this session's own investigative authority, how this specific
+   harness provisions the environment for the sessions it launches, and threading the token
+   through that mechanism directly rather than relying on OS-level inheritance.
+
+Re-dispatching this experiment with only "the token is configured" as the trigger, without
+one of the above three actions having been performed and independently confirmed, is
+expected — on the evidence of rounds 2-7 — to reproduce the identical
+`authentication_failed` result an eighth time.
 
 ## What is ready, pending the permission grant
 
