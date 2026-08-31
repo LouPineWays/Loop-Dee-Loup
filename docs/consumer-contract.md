@@ -516,6 +516,32 @@ a repository has `tools/ldl-sync/**` in its managed set, independent of
 these tools alone; confirming the repository setting itself is a manual
 step outside what a local, GitHub-API-free file-copy tool can check.
 
+### Sync failures must be loud, not merely non-fatal
+
+`tools/ldl-update`, `tools/ldl-sync/verify-scope.mjs`, and
+`tools/ldl-sync/pr-permission.mjs` each already fail with a non-zero exit
+and a specific message when their own required work doesn't complete (see
+their own test suites) — a locally modified managed file makes the whole
+update refuse to write anything, and a diff that strays outside the
+declared managed set refuses to let the workflow proceed. That guarantee
+only reaches a real consumer repository if the CI orchestration wrapping
+these scripts propagates their exit codes faithfully, rather than masking
+a failure behind a broader `set +e` block whose later commands happen to
+look like a legitimate no-op (issue #232).
+
+The example workflow below applies that rule at every step: `set +e` is
+only ever used narrowly around a single command whose stderr the step
+needs to inspect itself (a push, a `gh pr create`/`gh pr edit` attempt, a
+preflight check), immediately followed by `set -e` again — never left
+covering the ordinary git plumbing (`checkout`, `add`, `commit`) a real
+failure could hide behind. Every step that can fail also writes what
+failed to `$GITHUB_STEP_SUMMARY`, the durable, easily-surfaced record a
+fresh session can read without reconstructing the run from conversation
+history or raw job logs. A genuine no-op (nothing changed) is still
+reported distinctly from a failure — see the state table above — by
+checking `git diff --cached --quiet` explicitly rather than treating any
+early exit from that line as proof nothing needed to happen.
+
 ### Example workflow
 
 ````yaml
@@ -572,6 +598,19 @@ jobs:
               echo 'Fix: Settings -> Actions -> General -> Workflow permissions -> "Allow GitHub Actions to create and approve pull requests"'
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
+          elif [ "$CODE" -ne 0 ]; then
+            # Any other nonzero exit (a crash, a missing dependency, an unhandled error) is not
+            # a known "denied" verdict — it must still fail the run rather than fall through
+            # unnoticed (issue #232: a preflight check that only reacts to exit 3 silently
+            # treats every other failure as if the check had passed).
+            {
+              echo "### LDL Sync: preflight check failed unexpectedly (exit $CODE)"
+              echo
+              echo '```'
+              cat preflight-result.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
 
       - name: Record prior revision
@@ -610,7 +649,25 @@ jobs:
       - name: Verify diff stays within the LDL-managed set
         if: steps.outcome.outputs.noop == 'false'
         working-directory: self
-        run: node tools/ldl-sync/verify-scope.mjs
+        run: |
+          set +e
+          node tools/ldl-sync/verify-scope.mjs > verify-scope-result.json 2>verify-scope-error.log
+          CODE=$?
+          set -e
+          if [ "$CODE" -ne 0 ]; then
+            cat verify-scope-error.log
+            {
+              echo "### LDL Sync: scope verification failed"
+              echo
+              echo "The LDL update touched a path outside its own declared managed set — refusing to open a PR."
+              echo
+              echo '```'
+              cat verify-scope-error.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          cat verify-scope-result.json
 
       - name: Record target revision
         id: target
@@ -629,7 +686,16 @@ jobs:
           PRIOR_REV: ${{ steps.prior.outputs.revision }}
           TARGET_REV: ${{ steps.target.outputs.revision }}
         run: |
-          set +e
+          # Deliberately no blanket `set +e` here (issue #232): the default GitHub Actions bash
+          # shell already runs with `-e -o pipefail`, so `git config`/`remote set-url`/`fetch`
+          # (explicitly tolerated below)/`checkout -B`/`add` each abort the step loudly on their
+          # own failure. A blanket `set +e` covering this plumbing previously let a failed
+          # `checkout -B` (or any earlier command) fall through into `git diff --cached --quiet`
+          # reporting "nothing staged" and the step exiting 0 as if there were genuinely nothing
+          # to sync — the exact silent-drift shape this issue exists to close, independent of
+          # the specific PR-creation-permission failure issue #217 already covers. `set +e` is
+          # re-enabled only narrowly below, around the two commands whose stderr this step
+          # inspects itself (push, gh pr create/edit).
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
@@ -642,11 +708,27 @@ jobs:
 
           git checkout -B "$SYNC_BRANCH"
           git add -A
-          git diff --cached --quiet && exit 0
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit — sync branch already matches the LDL update content-for-content."
+            exit 0
+          fi
+
           git commit -q -m "chore: sync LDL-managed files to ${TARGET_REV}"
+
+          set +e
           git push --force-with-lease origin "HEAD:refs/heads/${SYNC_BRANCH}" 2>push-error.log
-          if [ $? -ne 0 ]; then
+          CODE=$?
+          set -e
+          if [ "$CODE" -ne 0 ]; then
             cat push-error.log
+            {
+              echo "### LDL Sync: failed to push the sync branch"
+              echo
+              echo '```'
+              cat push-error.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
@@ -659,14 +741,24 @@ jobs:
           } > "$BODY_FILE"
 
           EXISTING_PR="$(gh pr list --head "$SYNC_BRANCH" --base main --state open --json number --jq '.[0].number // empty')"
+
+          set +e
           if [ -n "$EXISTING_PR" ]; then
             gh pr edit "$EXISTING_PR" --title "chore: automated Loop-Dee-Loup sync to ${TARGET_REV}" --body-file "$BODY_FILE" 2>pr-error.log
           else
             gh pr create --head "$SYNC_BRANCH" --base main --title "chore: automated Loop-Dee-Loup sync to ${TARGET_REV}" --body-file "$BODY_FILE" 2>pr-error.log
           fi
           CODE=$?
+          set -e
           if [ "$CODE" -ne 0 ]; then
+            # classify itself exits non-zero by design (4 for a recognized denial, 1 otherwise —
+            # see tools/ldl-sync/pr-permission.mjs) as its own caller-facing signal, not a shell
+            # error, so it must run with `set +e` too or its own exit here would abort the script
+            # before the summary below is ever written (the exact quiet-failure shape issue #232
+            # exists to close, caught by tools/ldl-sync/workflow-example.test.mjs).
+            set +e
             node tools/ldl-sync/pr-permission.mjs classify < pr-error.log > classify-result.json
+            set -e
             node -e "console.log(JSON.parse(require('fs').readFileSync('classify-result.json','utf8')).summary)" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
