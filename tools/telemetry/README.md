@@ -466,4 +466,12 @@ covering a normal run, a run with two distinct models in `modelUsage`, an `is_er
 run that exits without ever emitting a result, and a hung process force-terminated via
 `--kill-after-ms`) — including confirming a completed run's top-level/whole-tree usage split
 and cost label, and that a missing result is reported as `unknown` rather than backfilled from
-hook evidence.
+hook evidence. It also covers each Stage 1/Stage 2 review correction (issues #247/#249/#250):
+`buildHookComparison` excluding `transcript_usage` companion records from structural
+start/stop counts, `spawnAndCapture` resolving (not crashing) on a child-process spawn error,
+`parseArgs` rejecting non-finite/non-positive timer arguments and an oversized/multiline
+`--note`, and — reading `../../docs/execution-boundary-probe-runs/245-run-3-subagent.hook-
+events.json`, a committed privacy-minimal kind+event-only snapshot of that specific proving
+run's real structural event sequence — that the corrected `subagent_stop_count: 1` in
+`docs/execution-boundary-probe-runs/245-run-3-subagent.json` is reproducible from repository
+state alone, not merely from an abstract hand-authored test case.
