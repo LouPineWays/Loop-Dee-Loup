@@ -45,6 +45,55 @@ test("parseArgs applies documented defaults and collects repeated --note", () =>
   assert.deepEqual(args.notes, ["a", "b"]);
 });
 
+test("parseArgs rejects a non-numeric or non-positive --timeout-ms instead of silently producing NaN/0", () => {
+  assert.throws(
+    () => parseArgs(["--task", "t1", "--prompt", "x", "--claude-bin", "claude", "--timeout-ms", "not-a-number"]),
+    /--timeout-ms must be a finite positive number/,
+  );
+  assert.throws(
+    () => parseArgs(["--task", "t1", "--prompt", "x", "--claude-bin", "claude", "--timeout-ms", "0"]),
+    /--timeout-ms must be a finite positive number/,
+  );
+  assert.throws(
+    () => parseArgs(["--task", "t1", "--prompt", "x", "--claude-bin", "claude", "--timeout-ms", "-5"]),
+    /--timeout-ms must be a finite positive number/,
+  );
+});
+
+test("parseArgs rejects a non-numeric or non-positive --kill-after-ms instead of silently disabling the kill timer", () => {
+  assert.throws(
+    () => parseArgs(["--task", "t1", "--prompt", "x", "--claude-bin", "claude", "--kill-after-ms", "soon"]),
+    /--kill-after-ms must be a finite positive number/,
+  );
+  assert.throws(
+    () => parseArgs(["--task", "t1", "--prompt", "x", "--claude-bin", "claude", "--kill-after-ms", "-1"]),
+    /--kill-after-ms must be a finite positive number/,
+  );
+});
+
+test("parseArgs accepts valid --timeout-ms and --kill-after-ms", () => {
+  const args = parseArgs(["--task", "t1", "--prompt", "x", "--claude-bin", "claude", "--timeout-ms", "5000", "--kill-after-ms", "1000"]);
+  assert.equal(args.timeoutMs, 5000);
+  assert.equal(args.killAfterMs, 1000);
+});
+
+test("parseArgs rejects a --note that exceeds the length bound or carries a newline", () => {
+  const tooLong = "x".repeat(201);
+  assert.throws(
+    () => parseArgs(["--task", "t1", "--prompt", "x", "--claude-bin", "claude", "--note", tooLong]),
+    /--note must be a single line of at most 200 characters/,
+  );
+  assert.throws(
+    () => parseArgs(["--task", "t1", "--prompt", "x", "--claude-bin", "claude", "--note", "line one\nline two"]),
+    /--note must be a single line/,
+  );
+});
+
+test("parseArgs accepts a short single-line --note", () => {
+  const args = parseArgs(["--task", "t1", "--prompt", "x", "--claude-bin", "claude", "--note", "required test 1"]);
+  assert.deepEqual(args.notes, ["required test 1"]);
+});
+
 test("buildCliArgs matches issue #245's exact execution surface, plus the required permission mode", () => {
   const cliArgs = buildCliArgs({ permissionMode: "bypassPermissions", prompt: "do the thing" });
   assert.deepEqual(cliArgs, ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "do the thing"]);
@@ -110,10 +159,28 @@ test("buildHookComparison counts structural events without touching content", ()
   const comparison = buildHookComparison(events);
   assert.equal(comparison.hook_event_count, 6);
   assert.equal(comparison.subagent_start_count, 2);
-  assert.equal(comparison.subagent_stop_count, 2);
+  // Only 1, not 2: the transcript_usage companion record carries the same `event:
+  // "SubagentStop"` as its structural sibling but must not count as a second completion.
+  assert.equal(comparison.subagent_stop_count, 1);
   assert.equal(comparison.session_end_seen, true);
   assert.equal(comparison.transcript_usage_sample_count, 1);
   assert.deepEqual(comparison.hook_event_types.sort(), ["SessionEnd", "SessionStart", "SubagentStart", "SubagentStop"]);
+});
+
+test("buildHookComparison does not double-count a SubagentStop that has a transcript_usage companion", () => {
+  // Reproduces the real shape hook.mjs emits for one genuine subagent completion with a
+  // readable transcript: two records sharing `event: "SubagentStop"`, distinguished only
+  // by `kind`. This is exactly the committed 245-run-3-subagent.json scenario (one
+  // subagent start, and -- before this fix -- a reported stop count of two).
+  const events = [
+    { kind: "hook", event: "SubagentStart" },
+    { kind: "hook", event: "SubagentStop" },
+    { kind: "transcript_usage", event: "SubagentStop" },
+  ];
+  const comparison = buildHookComparison(events);
+  assert.equal(comparison.subagent_start_count, 1);
+  assert.equal(comparison.subagent_stop_count, 1);
+  assert.equal(comparison.transcript_usage_sample_count, 1);
 });
 
 test("buildHookComparison handles no events (e.g. no session_id resolved) without throwing", () => {
@@ -172,6 +239,49 @@ test("spawnAndCapture: killAfterMs force-terminates a hanging process and still 
   // Exit is abnormal (killed), never a clean 0 -- confirms the process didn't just finish
   // on its own before the kill fired.
   assert.notEqual(result.exitCode, 0);
+});
+
+test("spawnAndCapture: a spawn failure (stale/missing binary) resolves instead of crashing the probe", async () => {
+  const result = await spawnAndCapture("this-binary-definitely-does-not-exist-anywhere-xyz", ["--version"], {
+    cwd: HERE,
+    timeoutMs: 10_000,
+  });
+  assert.equal(result.resultReceived, false);
+  assert.equal(result.terminalResult, null);
+  assert.equal(result.exitCode, null);
+  assert.equal(typeof result.spawnError, "string");
+  assert.ok(result.spawnError.length > 0);
+});
+
+test("buildRecord: a spawn failure is recorded as spawn_error with an honest unknown-usage status", async () => {
+  const spawnResult = await spawnAndCapture("this-binary-definitely-does-not-exist-anywhere-xyz", [], {
+    cwd: HERE,
+    timeoutMs: 10_000,
+  });
+  const record = buildRecord({
+    taskId: "test-task-spawn-error",
+    permissionMode: "bypassPermissions",
+    cwd: HERE,
+    spawnResult,
+    hookEvents: [],
+    notes: [],
+  });
+  assert.equal(record.result_received, false);
+  assert.equal(record.usage_status, "unknown");
+  assert.equal(typeof record.spawn_error, "string");
+});
+
+test("buildRecord: a normal completed run reports spawn_error as null", async () => {
+  const spawnResult = await spawnAndCapture(process.execPath, [FAKE_CLI, "normal"], { cwd: HERE, timeoutMs: 10_000 });
+  const record = buildRecord({
+    taskId: "test-task-normal-spawn-error-null",
+    permissionMode: "bypassPermissions",
+    cwd: HERE,
+    spawnResult,
+    hookEvents: [],
+    notes: [],
+  });
+  assert.equal(record.spawn_error, null);
 });
 
 test("buildRecord: a completed run separates top-level usage from whole-tree model usage and labels cost as estimated", async () => {

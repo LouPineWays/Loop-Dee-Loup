@@ -47,6 +47,22 @@ export function numOrNull(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+// --note is documented metadata about the run itself (e.g. "required test 3, forced
+// delegation"), not a place for prompt/response/tool-output content -- the same
+// coarse-identifiers-only privacy rule the rest of this record follows (see the header
+// comment and tools/telemetry/README.md's "Privacy and data minimization"). Bounding
+// length and shape here is a mechanical backstop for that rule, not a byte-for-byte
+// content filter: it catches an accidentally-pasted transcript excerpt or path dump, the
+// realistic misuse this flag invites, without trying to detect every possible secret.
+const MAX_NOTE_LENGTH = 200;
+
+function requirePositiveMs(name, value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${name} must be a finite positive number of milliseconds`);
+  }
+  return value;
+}
+
 export function parseArgs(argv) {
   const args = {
     permissionMode: "bypassPermissions",
@@ -88,9 +104,16 @@ export function parseArgs(argv) {
       case "--no-session-persistence":
         args.noSessionPersistence = true;
         break;
-      case "--note":
-        args.notes.push(argv[++i]);
+      case "--note": {
+        const note = argv[++i];
+        if (typeof note !== "string" || /[\r\n]/.test(note) || note.length > MAX_NOTE_LENGTH) {
+          throw new Error(
+            `--note must be a single line of at most ${MAX_NOTE_LENGTH} characters (short structured metadata only -- never prompt, response, or tool-output content)`,
+          );
+        }
+        args.notes.push(note);
         break;
+      }
       default:
         throw new Error(`Unknown argument: ${a}`);
     }
@@ -98,6 +121,8 @@ export function parseArgs(argv) {
   if (!args.task) throw new Error("--task is required");
   if (!args.prompt) throw new Error("--prompt is required");
   if (!args.claudeBin) throw new Error("--claude-bin (or LDL_CLAUDE_BIN) is required");
+  requirePositiveMs("--timeout-ms", args.timeoutMs);
+  if (args.killAfterMs !== undefined) requirePositiveMs("--kill-after-ms", args.killAfterMs);
   return args;
 }
 
@@ -151,11 +176,19 @@ export function extractWholeTreeModelUsage(result) {
 // regardless of what the hook log shows.
 export function buildHookComparison(events) {
   const list = Array.isArray(events) ? events : [];
+  // hook.mjs (SubagentStop, SessionEnd, PreCompact) appends a companion `kind:
+  // "transcript_usage"` record carrying the SAME `event` name alongside the structural
+  // `kind: "hook"` record whenever the transcript is readable -- one real SubagentStop
+  // firing therefore yields two entries with `event: "SubagentStop"`. Counting by `event`
+  // alone double-counts that completion (already observable in the committed
+  // 245-run-3-subagent.json: one subagent start, two "stops"). Structural counts must
+  // exclude the transcript-usage companion; it has its own dedicated count below.
+  const structural = list.filter((e) => e?.kind !== "transcript_usage");
   return {
     hook_event_count: list.length,
     hook_event_types: [...new Set(list.map((e) => e?.event).filter(Boolean))],
-    subagent_start_count: list.filter((e) => e?.event === "SubagentStart").length,
-    subagent_stop_count: list.filter((e) => e?.event === "SubagentStop").length,
+    subagent_start_count: structural.filter((e) => e?.event === "SubagentStart").length,
+    subagent_stop_count: structural.filter((e) => e?.event === "SubagentStop").length,
     session_end_seen: list.some((e) => e?.event === "SessionEnd"),
     transcript_usage_sample_count: list.filter((e) => e?.kind === "transcript_usage").length,
   };
@@ -209,7 +242,36 @@ export function spawnAndCapture(bin, cliArgs, { cwd, timeoutMs = 120_000, killAf
       child.kill("SIGKILL");
     }, timeoutMs);
 
+    // Node's `ChildProcess` emits `error` (never `close`, in the common case of a spawn
+    // that fails outright -- a stale/missing/non-executable --claude-bin, or an invalid
+    // --cwd) as an ordinary EventEmitter event. With no listener, that throws and crashes
+    // the whole probe process before it ever writes a record -- silently destroying the
+    // abnormal-run evidence this script otherwise promises to always persist. Treat it the
+    // same as any other abnormal termination: resolve with `resultReceived: false` and
+    // record the failure reason instead of the process's identifiers, which never existed.
+    let settled = false;
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (killTimer) clearTimeout(killTimer);
+      resolve({
+        startedAt,
+        endedAt: new Date().toISOString(),
+        exitCode: null,
+        signal: null,
+        resultReceived: false,
+        terminalResult: null,
+        initSessionId: null,
+        messageTypesSeen: [],
+        stderrByteLength: 0,
+        spawnError: err?.message ?? String(err),
+      });
+    });
+
     child.on("close", (exitCode, signal) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeoutTimer);
       if (killTimer) clearTimeout(killTimer);
       resolve({
@@ -262,6 +324,9 @@ export function buildRecord({ taskId, permissionMode, cwd, spawnResult, hookEven
     usage_status: resultReceived ? "measured" : "unknown",
     result_raw_keys: result ? Object.keys(result) : null,
     stderr_byte_length: spawnResult.stderrByteLength,
+    // Present only when spawn() itself failed (bad --claude-bin/--cwd) before any process
+    // ever ran -- distinct from a real child that ran and produced no result.
+    spawn_error: spawnResult.spawnError ?? null,
     hook_comparison: buildHookComparison(hookEvents),
     notes,
   };

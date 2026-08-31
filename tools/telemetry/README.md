@@ -422,7 +422,16 @@ Privacy follows the same rule as the rest of this directory, applied to a new re
 only coarse identifiers, counts, and numeric usage/cost fields are ever persisted. The
 terminal result's own `result` field (the assistant's final response text) is read only to
 confirm the message is a `result`; its value is never copied into the record, only its key
-*name* may appear in `result_raw_keys`.
+*name* may appear in `result_raw_keys`. `--note` is bounded to the same rule mechanically,
+not just by convention: `parseArgs` rejects a note longer than 200 characters or containing
+a newline, so the flag stays usable for short structured run metadata (e.g. "required test
+3, forced delegation") without becoming an escape hatch for an accidentally-pasted prompt,
+response, or path dump.
+
+A spawn that fails outright (a stale/missing/non-executable `--claude-bin`, or an invalid
+`--cwd`) is recorded the same as any other abnormal run — `result_received: false`,
+`usage_status: "unknown"` — with the failure reason captured only in `spawn_error`, never
+inferred from a partial process that never actually started.
 
 Requires a permission mode (`--permission-mode`, default `bypassPermissions`) because a
 spawned `-p` child has no TTY to answer an interactive tool-approval prompt — an unanswered
