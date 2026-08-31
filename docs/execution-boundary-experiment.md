@@ -12,11 +12,16 @@ experiment exists to test an alternative to.
 
 ## Status
 
-**BLOCKED — a genuine fresh session, in a process tree that restarted after the founder's
-`CLAUDE_CODE_OAUTH_TOKEN` change, still does not inherit the token and still cannot
-authenticate a trivial spawned child (see Round 4). Restarting the harness/host process,
-round 3's proposed fix, is confirmed insufficient by itself. Founder action required,
-scoped tighter than round 3's guess — see Round 4's required action.**
+**BLOCKED — dispatched to retest after the founder confirmed `CLAUDE_CODE_OAUTH_TOKEN` is
+configured. This session's process tree is now genuinely fresh (a different, newer
+`explorer.exe` than round 4's), and the token's registry value itself changed since round 4
+(length 92 → 108, i.e. it was re-set, not just re-confirmed) — yet a trivial spawned child
+still fails to authenticate identically (see Round 5). This rules out round 4's first
+hypothesis (a stale, pre-change process tree) and strengthens its second: an `explorer.exe`
+respawn is not equivalent to a full sign-out/sign-in, so descendant processes still don't
+inherit the registry change. Round 4's required action stands, sharpened: only a verified
+full Windows sign-out/sign-in, checked from a brand-new terminal window opened outside this
+harness, should be treated as sufficient before re-dispatching this experiment again.**
 
 ### Round 1 (resolved): host spawn permission
 
@@ -238,6 +243,76 @@ strictly after the environment change. Only once a plain terminal window, opened
 independently of this harness, can see the token and authenticate should this experiment
 be re-dispatched — re-running tests 1-4 against the current process tree would only
 reproduce this same `authentication_failed` result a fourth time.
+
+### Round 5 (new, current blocker): a fresh `explorer.exe` respawn still does not propagate a re-set token
+
+This is a fresh session (new conversation, resumed on the same branch), dispatched by the
+founder specifically to retest after being told `CLAUDE_CODE_OAUTH_TOKEN` "is now
+configured" — the same wording used to dispatch round 4. Per the instruction, the first
+step, touching no credential value, was again a trivial spawned child:
+
+```
+"<claude-bin>" -p --output-format stream-json --verbose --permission-mode bypassPermissions \
+  --no-session-persistence "pong"
+```
+
+Result: identical to every prior round — `result.result: "Not logged in · Please run
+/login"`, `error: "authentication_failed"`, `is_error: true`, `usage`: all-zero,
+`terminal_reason: "api_error"`.
+
+Two checks distinguish this from round 4's finding, rather than merely reproducing it:
+
+**1. The registry value itself changed.** Round 3/4 recorded the User-scope
+`CLAUDE_CODE_OAUTH_TOKEN` value at length 92. This session's check (length only, value never
+read) found length **108** — the founder re-set the token between round 4 and this
+dispatch, it is not the same stale value round 4 already ruled insufficient.
+
+**2. The process chain is genuinely newer, not the same stale tree round 4 found.** Walking
+this session's ancestry:
+
+```
+explorer.exe (pid 9380)  started 2026-08-31 15:52:12
+  -> claude.exe (pid 16764) started 2026-08-31 15:52:19
+    -> claude.exe (pid 20460) started 2026-08-31 15:52:35
+      -> pwsh (pid 2280)      started 2026-08-31 15:53:28  <- this session's own shell tool
+```
+
+Round 4's chain was rooted at a *different* `explorer.exe` (pid 9688, started 15:27:59).
+This chain's `explorer.exe` (pid 9380, started 15:52:12) is a distinct, later process —
+this is not round 4's stale tree recurring; something did respawn `explorer.exe` again
+between the two checks. Despite that, this session's own process env still does not carry
+the token (`$env:CLAUDE_CODE_OAUTH_TOKEN` unset in both `Bash` and `PowerShell` tool
+invocations, confirmed present at User registry scope with length 108), and the spawned
+child's authentication result is unchanged.
+
+**Conclusion**: round 4's first candidate explanation (the process tree predates the
+token change at the OS level) is now ruled out directly — this chain's `explorer.exe` is
+newer than a token change we can independently confirm happened (via the length delta) at
+some point at or before this check. That leaves round 4's second explanation as the
+remaining, now-strengthened candidate: whatever causes `explorer.exe` to acquire a new PID
+here (a crash/restart, an RDP session reconnect, or similar) does not create a new *logon
+session environment block* — it inherits the existing one from its own parent at
+`CreateProcess` time, in memory, not by re-reading `HKCU\Environment` from the registry.
+Only `userinit.exe` at a genuine interactive logon reads that registry key fresh. An
+`explorer.exe` respawn that is not itself preceded by a full sign-out/sign-in will never
+pick up the change, no matter how many times it happens or how recent its own PID/timestamp
+looks — "new PID" and "new logon session" are not the same event on Windows, and this round
+is the first direct evidence in this experiment's record that they have diverged here.
+
+This session cannot force a sign-out/sign-in, and per rounds 1-3's established boundary,
+must not attempt to read, re-set, or re-broadcast the credential value itself to work
+around this. Both remain out of bounds for the same reason recorded in round 3.
+
+**Required founder action to unblock (round 5)**: perform an actual interactive Windows
+sign-out followed by sign-in (Start menu → sign out, or `shutdown /l`) — not an application
+restart, not an Explorer restart, not a lock/unlock, and not an RDP disconnect/reconnect,
+none of which are confirmed to create a fresh logon session environment block on this
+machine. After signing back in, before re-dispatching this experiment, verify from a plain
+terminal window opened independently of any harness or IDE: `echo $env:CLAUDE_CODE_OAUTH_TOKEN`
+prints the token, and a bare `claude -p "pong"` from that same window succeeds without
+`/login`. Only dispatch this experiment again once both of those independently succeed —
+otherwise this round's evidence indicates a sixth dispatch would reproduce the identical
+`authentication_failed` result.
 
 ## What is ready, pending the permission grant
 
