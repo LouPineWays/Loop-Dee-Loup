@@ -90,14 +90,22 @@ body:
   - type: markdown
     attributes:
       value: |
-        **Required findings structure:** the audit response must replace "Pending" below with:
-        (1) a severity table with a count per severity (e.g. Critical/High/Medium/Low or P0-P3);
-        (2) one entry per finding, deduplicated by root cause, each with exact evidence (file/line,
-        command output, or quoted text), consequence, and smallest correction; (3) a
-        verification-performed checklist that works through every item in the Verification
-        checklist field above and states its result; (4) whether founder judgment is required for
-        any finding. A report that nothing material remains is a successful audit — state it in
-        this structure rather than a bare "looks fine."
+        **Required findings structure:** the audit response comment must replace "Pending" below
+        with: (0) a restatement of the exact merge commit named above; (1) a severity table with
+        a count per severity (e.g. Critical/High/Medium/Low or P0-P3); (2) one entry per finding,
+        deduplicated by root cause, each with exact evidence (file/line, command output, or
+        quoted text), consequence, and smallest correction; (3) a verification-performed
+        checklist that works through every item in the Verification checklist field above,
+        numbered the same way, and states its result (including an explicit "unable to
+        verify"/"blocked" result where applicable — never silently omitted); (4) whether founder
+        judgment is required for any finding; (5) an explicit `CLEAN` or `NOT CLEAN` verdict,
+        either as a leading status line ("CLEAN — ...") or a labelled "Verdict: CLEAN"/"Verdict:
+        NOT CLEAN" line. A report that nothing material remains is a successful audit — state it
+        in this full structure rather than a bare "looks fine." `tools/review-watch/lifecycle-
+        gate.mjs`'s post-audit check parses the response comment itself for the merge commit,
+        the verdict, and the verification-checklist walk-through (issue #230) — a response
+        missing any of these three cannot back a CLEAN closure, even once this issue's own
+        Verdict dropdown below is set to CLEAN by hand.
   - type: textarea
     id: findings
     attributes:

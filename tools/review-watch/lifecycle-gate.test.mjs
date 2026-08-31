@@ -18,19 +18,60 @@ import {
   normalizeIssueNumber,
   parseArgs,
   parseFormField,
+  parseMergeCommitRef,
   parseStage2Verdict,
   parseWorkIssueRef,
   recoverPrematureClosure,
 } from "./lifecycle-gate.mjs";
 import { triggerCommentBody } from "./trigger.mjs";
 
-// A genuine post-trigger Codex response on an issue-comments thread, for tests that need
-// checkPostAudit's CLEAN-verdict provenance check to find one.
-function genuineAuditThread({ triggerTime = "2026-08-20T00:00:00Z", responseTime = "2026-08-20T00:05:00Z" } = {}) {
+const MERGE_COMMIT = "b281dbd5e7590b8ac2992753cd875f5e6472d556";
+
+// A *completed* Stage 2 audit report (issue #230's evidence contract: references the exact
+// merge commit, states an explicit verdict, and shows verification-results content) on an
+// issue-comments thread, for tests that need checkPostAudit's CLEAN-verdict provenance check to
+// find one. This replaces an earlier, looser "genuine response" fixture that this same contract
+// would now correctly reject — see the dedicated kickoff/incomplete-response tests below for
+// the shapes that must still fail.
+function completedAuditThread({
+  triggerTime = "2026-08-20T00:00:00Z",
+  responseTime = "2026-08-20T00:05:00Z",
+  verdict = "CLEAN",
+  commit = MERGE_COMMIT,
+} = {}) {
+  const body = [
+    `${verdict} — Stage 2 audit of the merge commit \`${commit}\`.`,
+    "",
+    "### Verification checklist",
+    "",
+    "1. Confirmed the change against the merge commit — CONFIRMED",
+    "2. Confirmed no regressions in adjacent behavior — CONFIRMED",
+    "",
+    `Verdict: ${verdict}`,
+  ].join("\n");
   return [
     { id: 1, body: triggerCommentBody(), created_at: triggerTime },
-    { id: 2, user: { login: "chatgpt-codex-connector[bot]" }, body: "Reviewed the merge commit. Nothing material remains.", created_at: responseTime },
+    { id: 2, user: { login: "chatgpt-codex-connector[bot]" }, body, created_at: responseTime },
   ];
+}
+
+// The exact reproduced defect from issue #229: a kickoff acknowledgement followed by a task
+// link, with no commit reference, no explicit verdict, and no verification content. A genuine
+// response (it is not BLOCKED/refused/a setup prompt), but not a completed audit report.
+function kickoffOnlyThread({ triggerTime = "2026-08-20T00:00:00Z", responseTime = "2026-08-20T00:00:42Z" } = {}) {
+  return [
+    { id: 1, body: triggerCommentBody(), created_at: triggerTime },
+    {
+      id: 2,
+      user: { login: "chatgpt-codex-connector[bot]" },
+      body: "Starting #178.\n\n [View task →](https://chatgpt.com/s/cd_6a953a6d05888191ac802c3305e114db)",
+      created_at: responseTime,
+    },
+  ];
+}
+
+function auditBodyWithCommit({ workIssue = 151, verdict = "PENDING", commit = MERGE_COMMIT }) {
+  return `### Work issue\n\n#${workIssue}\n\n### Exact merge commit\n\n${commit}\n\n### Verdict\n\n${verdict}\n`;
 }
 
 // -- normalizeIssueNumber ----------------------------------------------------------------
@@ -181,6 +222,21 @@ test("parseWorkIssueRef: reads a deliberately typed 'none'/'n/a' as the explicit
   assert.equal(parseWorkIssueRef("### Work issue\n\nnone\n"), "none");
   assert.equal(parseWorkIssueRef("### Work issue\n\nNone\n"), "none");
   assert.equal(parseWorkIssueRef("### Work issue\n\nN/A\n"), "none");
+});
+
+test("parseMergeCommitRef: reads the Exact merge commit field", () => {
+  assert.equal(parseMergeCommitRef(`### Exact merge commit\n\n${MERGE_COMMIT}\n`), MERGE_COMMIT);
+});
+
+test("parseMergeCommitRef: returns null when the field is absent", () => {
+  assert.equal(parseMergeCommitRef("no merge commit field"), null);
+});
+
+test("parseMergeCommitRef: extracts the SHA out of backticks and trailing annotation (the real shape issue #95's audit used)", () => {
+  assert.equal(
+    parseMergeCommitRef(`### Exact merge commit\n\n\`${MERGE_COMMIT}\` (on \`main\`)\n`),
+    MERGE_COMMIT,
+  );
 });
 
 test("parseWorkIssueRef: does NOT treat GitHub's own '_No response_' marker as the no-work-issue sentinel (Stage 1 review finding on PR #197)", () => {
@@ -341,10 +397,16 @@ function auditBody({ workIssue = 151, verdict = "PENDING" }) {
   return `### Work issue\n\n#${workIssue}\n\n### Verdict\n\n${verdict}\n`;
 }
 
-// A ghApiImpl that returns a genuine post-trigger response for the audit issue's
-// issue-comments endpoint and an empty array for anything else.
-function withGenuineResponse() {
-  return async (path) => (path.includes("/issues/") ? genuineAuditThread() : []);
+// A ghApiImpl that returns a completed Stage 2 audit report (issue #230's evidence contract)
+// for the audit issue's issue-comments endpoint and an empty array for anything else.
+function withCompletedAuditReport(opts) {
+  return async (path) => (path.includes("/issues/") ? completedAuditThread(opts) : []);
+}
+
+// A ghApiImpl that returns only the exact #229 kickoff-and-task-link reply — a genuine
+// response, but not a completed audit report — for the audit issue's issue-comments endpoint.
+function withKickoffOnly() {
+  return async (path) => (path.includes("/issues/") ? kickoffOnlyThread() : []);
 }
 
 test("checkPostAudit: exits 1 when required args are missing", async () => {
@@ -401,13 +463,13 @@ test("checkPostAudit: OK — work issue open, verdict NOT CLEAN (verification #9
   assert.equal(result.verdict, "NOT CLEAN");
 });
 
-test("checkPostAudit: READY_TO_CLOSE — verdict CLEAN backed by a genuine response, work issue still open (verification #10)", async () => {
+test("checkPostAudit: READY_TO_CLOSE — verdict CLEAN backed by a completed audit report, work issue still open (verification #10)", async () => {
   const result = await checkPostAudit(
     { repo: "owner/repo", "audit-issue": 160 },
     {
       ghIssueViewImpl: async ({ number }) =>
-        number === 160 ? { body: auditBody({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "OPEN" },
-      ghApiImpl: withGenuineResponse(),
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport(),
     },
   );
   assert.equal(result.exitCode, 0);
@@ -420,7 +482,7 @@ test("checkPostAudit: a CLEAN dropdown with no genuine post-trigger response is 
     { repo: "owner/repo", "audit-issue": 160 },
     {
       ghIssueViewImpl: async ({ number }) =>
-        number === 160 ? { body: auditBody({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "OPEN" },
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "OPEN" },
       ghApiImpl: async () => [], // no trigger, no response at all
     },
   );
@@ -430,18 +492,97 @@ test("checkPostAudit: a CLEAN dropdown with no genuine post-trigger response is 
   assert.equal(result.rawVerdict, "CLEAN");
 });
 
+test("checkPostAudit: a CLEAN dropdown backed only by the exact #229 kickoff-and-task-link reply is not trusted (issue #230's reproduced defect)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withKickoffOnly(),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "a kickoff/acknowledgement alone must not authorize READY_TO_CLOSE");
+  assert.equal(result.verdict, null);
+  assert.equal(result.rawVerdict, "CLEAN");
+});
+
+test("checkPostAudit: a bounded follow-up report after the kickoff is still discoverable and backs CLEAN", async () => {
+  // Requirement 4 of issue #230: a later valid report must remain discoverable — this
+  // combines the kickoff with a subsequent completed report on the same thread.
+  const ghApiImpl = async (path) => {
+    if (!path.includes("/issues/")) return [];
+    const [trigger, kickoffResponse] = kickoffOnlyThread();
+    const [, reportResponse] = completedAuditThread({ responseTime: "2026-08-20T00:10:00Z" });
+    return [trigger, kickoffResponse, { ...reportResponse, id: 3 }];
+  };
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl,
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "READY_TO_CLOSE");
+});
+
+test("checkPostAudit: a completed report addressing the wrong merge commit does not back CLEAN", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport({ commit: "deadbeef00000000000000000000000000000000" }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "a report addressing a different commit must not authorize READY_TO_CLOSE");
+  assert.equal(result.verdict, null);
+});
+
+test("checkPostAudit: a completed report whose own verdict disagrees with the CLEAN dropdown does not back CLEAN", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport({ verdict: "NOT CLEAN" }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "a contradictory response verdict must not authorize READY_TO_CLOSE");
+  assert.equal(result.verdict, null);
+  assert.equal(result.rawVerdict, "CLEAN");
+});
+
 test("checkPostAudit: PREMATURE_CLOSURE — work issue closed and the recorded CLEAN has no genuine response behind it", async () => {
   const result = await checkPostAudit(
     { repo: "owner/repo", "audit-issue": 160 },
     {
       ghIssueViewImpl: async ({ number }) =>
-        number === 160 ? { body: auditBody({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "CLOSED" },
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "CLOSED" },
       ghApiImpl: async () => [],
     },
   );
   assert.equal(result.exitCode, 2);
   assert.equal(result.state, "PREMATURE_CLOSURE");
-  assert.match(result.message, /no genuine post-trigger Codex response/);
+  assert.match(result.message, /no completed Stage 2 audit report/);
+});
+
+test("checkPostAudit: PREMATURE_CLOSURE — work issue closed and the recorded CLEAN is backed only by the #229 kickoff reply", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "CLOSED" },
+      ghApiImpl: withKickoffOnly(),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "PREMATURE_CLOSURE");
+  assert.match(result.message, /no completed Stage 2 audit report/);
 });
 
 test("checkPostAudit: OK — verdict CLEAN (backed) and work issue already closed", async () => {
@@ -449,12 +590,77 @@ test("checkPostAudit: OK — verdict CLEAN (backed) and work issue already close
     { repo: "owner/repo", "audit-issue": 160 },
     {
       ghIssueViewImpl: async ({ number }) =>
-        number === 160 ? { body: auditBody({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "CLOSED" },
-      ghApiImpl: withGenuineResponse(),
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "CLOSED" },
+      ghApiImpl: withCompletedAuditReport(),
     },
   );
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "OK");
+});
+
+// -- checkPostAudit: legacy-compatibility preservation for an already-closed work issue --------
+// (issue #230 Required layer 8 / Stage 1 review finding on PR #231)
+
+// The exact terse shape issue #95's real, already-accepted audit used: an explicit CLEAN status
+// line and the correct commit, but no numbered verification checklist — the strict contract
+// (isCompletedStage2AuditReport's default) rejects this, but a work issue already closed under
+// it must not be reopened on a fresh recheck.
+function legacyShapedCleanThread({ triggerTime = "2026-08-20T00:00:00Z", responseTime = "2026-08-20T00:05:00Z", commit = MERGE_COMMIT } = {}) {
+  return [
+    { id: 1, body: triggerCommentBody(), created_at: triggerTime },
+    {
+      id: 2,
+      user: { login: "chatgpt-codex-connector[bot]" },
+      body: `CLEAN — Stage 2 audit at \`${commit}\`; no actionable findings. Next: None.`,
+      created_at: responseTime,
+    },
+  ];
+}
+
+function withLegacyShapedCleanThread(opts) {
+  return async (path) => (path.includes("/issues/") ? legacyShapedCleanThread(opts) : []);
+}
+
+test("checkPostAudit: OK — a pre-contract terse CLEAN response is preserved (not PREMATURE_CLOSURE) when the work issue is already closed", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "CLOSED" },
+      ghApiImpl: withLegacyShapedCleanThread(),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "a legacy-shaped CLEAN backing an already-closed work issue must not be reopened");
+  assert.equal(result.verdict, "CLEAN");
+  assert.equal(result.reportEvidence.legacyCompatible, true);
+});
+
+test("checkPostAudit: the legacy-compatibility fallback does not apply to an open work issue — a terse legacy-shaped response cannot authorize a new closure", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withLegacyShapedCleanThread(),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "an open work issue must still require the full strict contract, never READY_TO_CLOSE via the legacy fallback");
+  assert.equal(result.verdict, null);
+});
+
+test("checkPostAudit: the legacy-compatibility fallback still rejects a closed work issue's response addressing the wrong commit", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "CLOSED" },
+      ghApiImpl: withLegacyShapedCleanThread({ commit: "deadbeef00000000000000000000000000000000" }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "PREMATURE_CLOSURE", "a wrong-commit response must not be accepted even under the legacy fallback");
 });
 
 test("checkPostAudit: PREMATURE_CLOSURE — work issue closed with no CLEAN verdict (verification #11, the PR #154/#151 regression)", async () => {
@@ -485,8 +691,8 @@ test("checkPostAudit: PREMATURE_CLOSURE — work issue closed and verdict is NOT
 
 // -- checkPostAudit: explicit no-work-issue state (issue #190) -------------------------
 
-function noWorkIssueAuditBody({ verdict = "PENDING" }) {
-  return `### Work issue\n\nnone\n\n### Verdict\n\n${verdict}\n`;
+function noWorkIssueAuditBody({ verdict = "PENDING", commit = MERGE_COMMIT }) {
+  return `### Work issue\n\nnone\n\n### Exact merge commit\n\n${commit}\n\n### Verdict\n\n${verdict}\n`;
 }
 
 test("checkPostAudit: OK — no work issue, verdict PENDING; no implementation issue is fetched", async () => {
@@ -540,7 +746,7 @@ test("checkPostAudit: ACCEPTED_NO_WORK_ISSUE — a genuine backed CLEAN verdict 
         issueViewCalls++;
         return { body: noWorkIssueAuditBody({ verdict: "CLEAN" }), state: "OPEN" };
       },
-      ghApiImpl: withGenuineResponse(),
+      ghApiImpl: withCompletedAuditReport(),
     },
   );
   assert.equal(result.exitCode, 0);

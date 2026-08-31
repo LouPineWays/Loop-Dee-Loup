@@ -30,14 +30,18 @@
 //                  a second, separately-tracked mapping) and reports whether current repository
 //                  state matches the invariant: PREMATURE_CLOSURE (work issue closed without a
 //                  CLEAN verdict — the exact defect PR #154 produced), READY_TO_CLOSE (a CLEAN
-//                  verdict backed by a genuine post-trigger Codex response is recorded but the
+//                  verdict backed by a *completed* Stage 2 audit report is recorded but the
 //                  work issue is still open), or OK (already consistent). A CLEAN dropdown value
-//                  with no genuine response behind it (e.g. set by hand before Stage 2 actually
-//                  ran) is never trusted — it is treated the same as no verdict, per the
-//                  "modify nothing without provenance" reasoning already governing Stage 1/Stage
-//                  2 responses elsewhere in this cycle. `--recover true` reopens a
-//                  PREMATURE_CLOSURE work issue and records why; if the environment cannot
-//                  reopen it, this reports the blocked state rather than silently accepting the
+//                  is never trusted on its own (e.g. set by hand before Stage 2 actually ran) —
+//                  it is treated the same as no verdict unless stage2-report.mjs's
+//                  isCompletedStage2AuditReport finds a post-trigger response that references the
+//                  exact merge commit, states an explicit CLEAN verdict of its own, and shows
+//                  verification-results content; a genuine-but-incomplete response — e.g. issue
+//                  #229's "Starting #178." kickoff, which findStage2ReportEvidence below
+//                  evaluates and correctly rejects — does not count (issue #230). `--recover
+//                  true` reopens a PREMATURE_CLOSURE work issue and records why; if the
+//                  environment cannot reopen it, this reports the blocked state rather than
+//                  silently accepting the
 //                  premature closure.
 //
 // Not every review-worthy PR has a gated work issue to protect: LDL's own recurring
@@ -63,8 +67,8 @@
 
 import { execFileSync } from "node:child_process";
 import { endpointsFor, findAllMatches } from "./poll.mjs";
-import { findExistingTrigger } from "./trigger.mjs";
-import { isGenuineResponse } from "./genuine-response.mjs";
+import { findExistingTrigger, findCommentById } from "./trigger.mjs";
+import { isCompletedStage2AuditReport } from "./stage2-report.mjs";
 
 const DEFAULT_BOT = "chatgpt-codex-connector[bot]";
 
@@ -217,6 +221,24 @@ export function parseWorkIssueRef(body) {
   return match ? Number(match[1]) : null;
 }
 
+const SHA_TOKEN_PATTERN = /\b[0-9a-f]{7,40}\b/i;
+
+// Pure. Reads the audit-control-issue template's "Exact merge commit" field — the target
+// identity a completed Stage 2 audit response must reference (stage2-report.mjs's
+// bodyReferencesCommit), so a genuine response's own evidence is checked against the same
+// commit this audit was actually opened for, never a different one. Extracts the standalone
+// hex SHA token from the field's rendered value rather than trusting it to be a bare SHA —
+// real audit issues wrap it in backticks with trailing annotation (e.g. "`<sha>` (on `main`)",
+// the exact shape issue #95's audit used), and requiring the whole field value to be pure hex
+// would silently fail to match every real-world entry. Returns null when the heading is absent
+// or no hex-looking token is found in its value.
+export function parseMergeCommitRef(body) {
+  const value = parseFormField(body, "Exact merge commit");
+  if (!value) return null;
+  const match = SHA_TOKEN_PATTERN.exec(value);
+  return match ? match[0] : null;
+}
+
 // Pure. The repository an issue/PR URL belongs to ("owner/repo"), or null if `url` doesn't
 // match GitHub's issue URL shape.
 function extractRepoFromIssueUrl(url) {
@@ -314,17 +336,49 @@ export async function checkMergeReady(args, { ghPrViewImpl = defaultGhPrView } =
   return { exitCode: 0, state: "MERGE_READY" };
 }
 
-// Whether the audit issue's comment thread already carries a genuine post-trigger Codex
-// response — reusing trigger.mjs's dedup read and genuine-response.mjs's classifier, never a
-// second, competing definition of "did Stage 2 actually happen" (the same reuse discipline
-// stage1-gate.mjs already follows for Stage 1). `ghApiImpl` is injected for tests.
-async function hasGenuineAuditResponse({ repo, auditIssue, bot }, ghApiImpl) {
+// Whether the audit issue's comment thread already carries a *completed* Stage 2 audit report
+// (stage2-report.mjs's isCompletedStage2AuditReport) — not merely a genuine-but-incomplete
+// response such as issue #229's "Starting #178." kickoff. Reuses trigger.mjs's dedup read,
+// never a second, competing definition of "did Stage 2 actually happen" (the same reuse
+// discipline stage1-gate.mjs already follows for Stage 1). Every post-trigger bot comment is
+// evaluated against its own *full* body (via findCommentById), not findAllMatches' 200-character
+// body_excerpt — issue #230 acceptance criteria: evidence beyond the first 200 characters must
+// be considered, not just an excerpt. Scans every post-trigger response, not just the first, so
+// a kickoff/acknowledgement followed later by a genuine completed report on the same thread
+// still gets found (bounded follow-up remains discoverable); the *latest* completed report is
+// authoritative when more than one exists (a retry round). `ghApiImpl` is injected for tests.
+async function findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl, { requireVerificationEvidence = true } = {}) {
   const commentsPath = endpointsFor("issue", repo, auditIssue).find((e) => e.name === "issue-comments").path;
   const comments = await ghApiImpl(commentsPath);
   const trigger = findExistingTrigger(comments, {});
-  if (!trigger) return false;
+  if (!trigger) {
+    return { backed: false, verdict: null, responsesSeen: 0, reason: "no @codex review trigger found on the audit issue thread" };
+  }
+
   const sinceMs = new Date(trigger.created_at).getTime();
-  return findAllMatches(comments, { bot, sinceMs, endpointName: "issue-comments" }).some((m) => isGenuineResponse(m.body_excerpt));
+  const candidates = findAllMatches(comments, { bot, sinceMs, endpointName: "issue-comments" });
+  const reports = candidates.map((match) => {
+    const full = findCommentById(comments, match.id);
+    const evaluation = isCompletedStage2AuditReport(full?.body ?? "", { mergeCommit, requireVerificationEvidence });
+    return { id: match.id, url: match.url, ...evaluation };
+  });
+
+  const completed = reports.filter((r) => r.complete);
+  if (completed.length === 0) {
+    return {
+      backed: false,
+      verdict: null,
+      responsesSeen: reports.length,
+      reason:
+        reports.length === 0
+          ? "no post-trigger bot response found on the audit issue thread"
+          : `${reports.length} post-trigger bot response(s) found, none is a completed audit report ` +
+            `(${reports.map((r) => r.reasons.join("; ")).join(" | ")})`,
+    };
+  }
+
+  const latest = completed[completed.length - 1];
+  return { backed: true, verdict: latest.verdict, responsesSeen: reports.length, matchedCommentUrl: latest.url };
 }
 
 // `ghIssueViewImpl` and `ghApiImpl` are injected so tests can drive this end-to-end without
@@ -361,34 +415,26 @@ export async function checkPostAudit(
   const workIssueNumber = noWorkIssue ? null : workIssueRef;
 
   const rawVerdict = parseStage2Verdict(auditIssueData.body ?? "");
+  const mergeCommit = parseMergeCommitRef(auditIssueData.body ?? "");
 
-  // A CLEAN dropdown value is only trusted once a genuine post-trigger Codex response backs
-  // it (Stage 1 review finding on this PR: the template exposes CLEAN as a selectable value
-  // at issue *creation*, before Stage 2 has run at all, so reading the field alone would let
-  // the gate authorize closing on an unreviewed audit). Any other raw value passes through
-  // unchanged — PENDING/NOT CLEAN/malformed all correctly keep the work issue open regardless
-  // of response provenance.
-  let verdict = rawVerdict;
-  let verdictBacked = null;
-  if (rawVerdict === "CLEAN") {
-    try {
-      verdictBacked = await hasGenuineAuditResponse({ repo, auditIssue, bot }, ghApiImpl);
-    } catch (err) {
-      return {
-        exitCode: 1,
-        message: `gh api call failed while verifying the CLEAN verdict on ${repo}#${auditIssue}: ${err.message}`,
-      };
-    }
-    if (!verdictBacked) verdict = null;
-  }
-
-  // Explicit no-work-issue state (issue #190): the Stage 2 response/verdict gate above still
-  // ran unchanged — PENDING/NOT CLEAN/an unbacked CLEAN all remain non-accepted here exactly as
-  // they do with a real work issue — but there is no implementation issue to fetch, reopen, or
-  // close, so this returns before any of that. A genuine backed CLEAN reports the distinct
-  // "accepted" state instead of "OK" so a caller can recognize Stage 2 acceptance without a
-  // `workIssueState: "CLOSED"` to check against.
+  // Explicit no-work-issue state (issue #190): evaluated first and independently — always
+  // strictly (there is no already-closed work issue whose historical closure could need
+  // preserving here, so the legacy-compatibility fallback below never applies). An unbacked
+  // CLEAN just reports OK; nothing is fetched, reopened, or closed.
   if (noWorkIssue) {
+    let verdict = rawVerdict;
+    let reportEvidence = null;
+    if (rawVerdict === "CLEAN") {
+      try {
+        reportEvidence = await findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl);
+      } catch (err) {
+        return {
+          exitCode: 1,
+          message: `gh api call failed while verifying the CLEAN verdict on ${repo}#${auditIssue}: ${err.message}`,
+        };
+      }
+      if (!reportEvidence.backed || reportEvidence.verdict !== "CLEAN") verdict = null;
+    }
     return {
       exitCode: 0,
       state: verdict === "CLEAN" ? "ACCEPTED_NO_WORK_ISSUE" : "OK",
@@ -397,17 +443,79 @@ export async function checkPostAudit(
       verdict,
       rawVerdict,
       workIssueState: null,
+      ...(reportEvidence ? { reportEvidence } : {}),
     };
   }
 
+  // Fetched before the CLEAN-evidence decision below (not after, as an earlier revision did) so
+  // an already-closed work issue can fall back to the relaxed legacy-compatibility check without
+  // a second, separately-ordered round trip.
   let workIssueData;
   try {
     workIssueData = await ghIssueViewImpl({ repo, number: workIssueNumber });
   } catch (err) {
     return { exitCode: 1, message: `gh issue view failed for ${repo}#${workIssueNumber}: ${err.message}` };
   }
-
   const isClosed = workIssueData.state === "CLOSED";
+
+  // A CLEAN dropdown value is only trusted once a *completed* Stage 2 audit report backs it —
+  // not merely a genuine-but-incomplete response (Stage 1 review finding on this PR's earlier
+  // revision: the template exposes CLEAN as a selectable value at issue *creation*, before
+  // Stage 2 has run at all, so reading the field alone would let the gate authorize closing on
+  // an unreviewed audit; issue #230's reproduced defect: a kickoff/acknowledgement reply,
+  // classified as merely "genuine" rather than "complete," previously satisfied this same
+  // check). A completed report whose own stated verdict disagrees with the dropdown — e.g. the
+  // dropdown says CLEAN but the actual response says NOT CLEAN — must not back a CLEAN closure
+  // either (issue #230 acceptance criteria: "CLEAN entered into the issue body cannot override
+  // ... contradictory ... response evidence"). Any raw value other than CLEAN passes through
+  // unchanged — PENDING/NOT CLEAN/malformed all correctly keep the work issue open regardless
+  // of response provenance.
+  let verdict = rawVerdict;
+  let reportEvidence = null;
+  if (rawVerdict === "CLEAN") {
+    try {
+      reportEvidence = await findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl);
+    } catch (err) {
+      return {
+        exitCode: 1,
+        message: `gh api call failed while verifying the CLEAN verdict on ${repo}#${auditIssue}: ${err.message}`,
+      };
+    }
+    if (reportEvidence.backed && reportEvidence.verdict === "CLEAN") {
+      verdict = "CLEAN";
+    } else if (isClosed) {
+      // Preserve an already-closed work issue's historical CLEAN closure rather than treating a
+      // merely-reformatted, pre-contract response as grounds to reopen it (issue #230 Required
+      // layer 8 / Stage 1 review finding on this PR: without this, rerunning post-audit against
+      // an already-accepted pre-contract audit — e.g. issue #95's terse "CLEAN — ... no
+      // actionable findings. Next: None." shape, with no numbered checklist — reported
+      // PREMATURE_CLOSURE, and its own `--recover true` instruction would have reopened a
+      // legitimately-closed work issue). Only reachable when the work issue is *already*
+      // closed, and only relaxes the verification-checklist signal: commit identity and the
+      // response's own matching verdict are still required, so this can never back a *new*
+      // closure on a currently-open issue, and never accepts a wrong-commit or verdict-
+      // disagreeing response.
+      let legacyEvidence;
+      try {
+        legacyEvidence = await findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl, {
+          requireVerificationEvidence: false,
+        });
+      } catch (err) {
+        return {
+          exitCode: 1,
+          message: `gh api call failed while verifying the CLEAN verdict on ${repo}#${auditIssue}: ${err.message}`,
+        };
+      }
+      if (legacyEvidence.backed && legacyEvidence.verdict === "CLEAN") {
+        verdict = "CLEAN";
+        reportEvidence = { ...legacyEvidence, legacyCompatible: true };
+      } else {
+        verdict = null;
+      }
+    } else {
+      verdict = null;
+    }
+  }
 
   if (isClosed && verdict !== "CLEAN") {
     return {
@@ -417,17 +525,25 @@ export async function checkPostAudit(
       auditIssue: Number(auditIssue),
       verdict,
       rawVerdict,
+      ...(reportEvidence ? { reportEvidence } : {}),
       message:
         `Work issue ${repo}#${workIssueNumber} is closed but audit issue ${repo}#${auditIssue} records no ` +
         `verified CLEAN verdict (found: ${rawVerdict ?? "none/malformed"}${
-          rawVerdict === "CLEAN" ? ", but no genuine post-trigger Codex response backs it" : ""
+          rawVerdict === "CLEAN" ? `, but no completed Stage 2 audit report backs it (${reportEvidence?.reason ?? "not evaluated"})` : ""
         }). Per docs/bounded-review-cycle.md, only a CLEAN Stage 2 disposition may close the work issue. ` +
         `Re-run with --recover true to reopen it.`,
     };
   }
 
   if (!isClosed && verdict === "CLEAN") {
-    return { exitCode: 0, state: "READY_TO_CLOSE", workIssue: workIssueNumber, auditIssue: Number(auditIssue), verdict };
+    return {
+      exitCode: 0,
+      state: "READY_TO_CLOSE",
+      workIssue: workIssueNumber,
+      auditIssue: Number(auditIssue),
+      verdict,
+      ...(reportEvidence ? { reportEvidence } : {}),
+    };
   }
 
   return {
@@ -438,6 +554,7 @@ export async function checkPostAudit(
     verdict,
     rawVerdict,
     workIssueState: workIssueData.state,
+    ...(reportEvidence ? { reportEvidence } : {}),
   };
 }
 
