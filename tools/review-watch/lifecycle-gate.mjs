@@ -193,6 +193,41 @@ export function parseFormField(body, label) {
   return null;
 }
 
+// Pure. Like parseFormField, but returns the field's *entire* rendered block (every line under
+// the heading up to the next "### " heading or end of body, trimmed), not just the first
+// non-blank line — for a multi-line textarea field such as "Verification checklist" where the
+// first line alone would discard every item after it. Returns null when the heading is absent
+// or its block is empty / GitHub's own "_No response_" marker for an unanswered field.
+export function parseFormFieldBlock(body, label) {
+  const lines = (body ?? "").split("\n");
+  const heading = `### ${label}`;
+  let headingIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim() === heading) {
+      headingIdx = i;
+      break;
+    }
+  }
+  if (headingIdx === -1) return null;
+  const collected = [];
+  for (let i = headingIdx + 1; i < lines.length; i++) {
+    if (lines[i].trim().startsWith("### ")) break;
+    collected.push(lines[i]);
+  }
+  const text = collected.join("\n").trim();
+  return text === "" || text === "_No response_" ? null : text;
+}
+
+// Pure. Reads the audit-control-issue template's "Verification checklist" field — the
+// change-specific, numbered list of checks the audit response is required to work through (see
+// .github/ISSUE_TEMPLATE/audit-control-issue.yml). Passed to stage2-report.mjs's
+// isCompletedStage2AuditReport as `requestedChecklist` so a response's own checklist
+// walk-through is checked for completeness against what was actually requested, not merely
+// checked for presence (issue #268 finding 2).
+export function parseVerificationChecklistRef(body) {
+  return parseFormFieldBlock(body, "Verification checklist");
+}
+
 // Pure. The audit-control-issue template's Verdict dropdown only ever renders one of these
 // three literal values; anything else (a missing heading, a stripped/edited field) is
 // treated as "no verdict" rather than guessed at.
@@ -383,8 +418,16 @@ const STAGE2_LEGACY_CONTRACT_CUTOFF = "2026-08-31T09:19:22Z";
 // existed on the same thread — the older grandfathered response silently outranked newer,
 // definitive evidence. Evaluating every candidate and keeping the true chronological order means
 // a later complete report — of either verdict — always wins over an older, merely-relaxed one).
+// `requestedChecklist`, when given (the audit issue's own "Verification checklist" field text
+// via parseVerificationChecklistRef), is passed through to isCompletedStage2AuditReport so the
+// completeness check in issue #268 finding 2 applies; omitted for the relaxed legacy-
+// compatibility evaluation, which already forgives the checklist signal entirely.
 // `ghApiImpl` is injected for tests.
-async function findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl, { legacyCutoff = null } = {}) {
+async function findStage2ReportEvidence(
+  { repo, auditIssue, bot, mergeCommit, requestedChecklist = null },
+  ghApiImpl,
+  { legacyCutoff = null } = {},
+) {
   const commentsPath = endpointsFor("issue", repo, auditIssue).find((e) => e.name === "issue-comments").path;
   const comments = await ghApiImpl(commentsPath);
   const trigger = findExistingTrigger(comments, {});
@@ -398,7 +441,7 @@ async function findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, 
   const reports = candidates.map((match) => {
     const full = findCommentById(comments, match.id);
     const body = full?.body ?? "";
-    const strict = isCompletedStage2AuditReport(body, { mergeCommit, requireVerificationEvidence: true });
+    const strict = isCompletedStage2AuditReport(body, { mergeCommit, requireVerificationEvidence: true, requestedChecklist });
     const isPreCutoff = cutoffMs !== null && new Date(match.created_at).getTime() < cutoffMs;
     if (strict.complete || !isPreCutoff) {
       return { id: match.id, url: match.url, legacyCompatible: false, ...strict };
@@ -466,6 +509,7 @@ export async function checkPostAudit(
 
   const rawVerdict = parseStage2Verdict(auditIssueData.body ?? "");
   const mergeCommit = parseMergeCommitRef(auditIssueData.body ?? "");
+  const requestedChecklist = parseVerificationChecklistRef(auditIssueData.body ?? "");
 
   // Explicit no-work-issue state (issue #190): evaluated first and independently — always
   // strictly (there is no already-closed work issue whose historical closure could need
@@ -476,7 +520,7 @@ export async function checkPostAudit(
     let reportEvidence = null;
     if (rawVerdict === "CLEAN") {
       try {
-        reportEvidence = await findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl);
+        reportEvidence = await findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit, requestedChecklist }, ghApiImpl);
       } catch (err) {
         return {
           exitCode: 1,
@@ -537,7 +581,7 @@ export async function checkPostAudit(
     // complete NOT CLEAN report could be silently outranked by an older grandfathered CLEAN) —
     // the *latest* complete response, of either verdict, is always authoritative.
     try {
-      reportEvidence = await findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit }, ghApiImpl, {
+      reportEvidence = await findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit, requestedChecklist }, ghApiImpl, {
         legacyCutoff: isClosed ? STAGE2_LEGACY_CONTRACT_CUTOFF : null,
       });
     } catch (err) {

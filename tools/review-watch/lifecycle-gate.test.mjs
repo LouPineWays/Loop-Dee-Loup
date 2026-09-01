@@ -18,8 +18,10 @@ import {
   normalizeIssueNumber,
   parseArgs,
   parseFormField,
+  parseFormFieldBlock,
   parseMergeCommitRef,
   parseStage2Verdict,
+  parseVerificationChecklistRef,
   parseWorkIssueRef,
   recoverPrematureClosure,
 } from "./lifecycle-gate.mjs";
@@ -72,6 +74,16 @@ function kickoffOnlyThread({ triggerTime = "2026-08-20T00:00:00Z", responseTime 
 
 function auditBodyWithCommit({ workIssue = 151, verdict = "PENDING", commit = MERGE_COMMIT }) {
   return `### Work issue\n\n#${workIssue}\n\n### Exact merge commit\n\n${commit}\n\n### Verdict\n\n${verdict}\n`;
+}
+
+// Like auditBodyWithCommit, but also carries a "Verification checklist" field — for tests of
+// issue #268 finding 2's completeness check, which compares a response's own checklist
+// walk-through against this field's requested item count.
+function auditBodyWithChecklist({ workIssue = 151, verdict = "PENDING", commit = MERGE_COMMIT, checklist }) {
+  return (
+    `### Work issue\n\n#${workIssue}\n\n### Exact merge commit\n\n${commit}\n\n` +
+    `### Verification checklist\n\n${checklist}\n\n### Verdict\n\n${verdict}\n`
+  );
 }
 
 // -- normalizeIssueNumber ----------------------------------------------------------------
@@ -247,6 +259,40 @@ test("parseWorkIssueRef: does NOT treat GitHub's own '_No response_' marker as t
   // protection silently stripped, since a forgotten field and a deliberate declaration would
   // render identically.
   assert.equal(parseWorkIssueRef("### Work issue\n\n_No response_\n"), null);
+});
+
+// -- parseFormFieldBlock / parseVerificationChecklistRef ---------------------------------
+
+test("parseFormFieldBlock: reads every line under a heading, not just the first", () => {
+  const body = "### Verification checklist\n\n1. Confirm A.\n2. Confirm B.\n3. Confirm C.\n\n### Findings\n\nPending";
+  assert.equal(parseFormFieldBlock(body, "Verification checklist"), "1. Confirm A.\n2. Confirm B.\n3. Confirm C.");
+});
+
+test("parseFormFieldBlock: returns null when the heading is absent, empty, or '_No response_'", () => {
+  assert.equal(parseFormFieldBlock("no headings here", "Verification checklist"), null);
+  assert.equal(parseFormFieldBlock("### Verification checklist\n\n### Findings\n\nPending", "Verification checklist"), null);
+  assert.equal(parseFormFieldBlock("### Verification checklist\n\n_No response_\n\n### Findings", "Verification checklist"), null);
+});
+
+test("parseVerificationChecklistRef: reads the audit-control-issue template's Verification checklist field", () => {
+  const body = [
+    "### Exact merge commit",
+    "",
+    MERGE_COMMIT,
+    "",
+    "### Verification checklist",
+    "",
+    "1. Confirm the classifier rejects the exact #229 kickoff.",
+    "2. Confirm a valid report is still accepted.",
+    "",
+    "### Findings",
+    "",
+    "Pending — awaiting Stage 2 audit response.",
+  ].join("\n");
+  assert.equal(
+    parseVerificationChecklistRef(body),
+    "1. Confirm the classifier rejects the exact #229 kickoff.\n2. Confirm a valid report is still accepted.",
+  );
 });
 
 // -- checkMergeReady ---------------------------------------------------------------------
@@ -475,6 +521,63 @@ test("checkPostAudit: READY_TO_CLOSE — verdict CLEAN backed by a completed aud
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "READY_TO_CLOSE");
   assert.equal(result.workIssue, 151);
+});
+
+test("checkPostAudit: READY_TO_CLOSE — a response's checklist walk-through meeting the audit issue's own requested item count is trusted (issue #268 finding 2)", async () => {
+  const requestedChecklist = [
+    "1. Confirmed the change against the merge commit.",
+    "2. Confirmed no regressions in adjacent behavior.",
+  ].join("\n");
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160
+          ? { body: auditBodyWithChecklist({ verdict: "CLEAN", checklist: requestedChecklist }), state: "OPEN" }
+          : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport(),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "READY_TO_CLOSE");
+  assert.equal(result.verdict, "CLEAN");
+});
+
+test("checkPostAudit: a CLEAN dropdown backed only by a response whose checklist walk-through is shorter than the audit issue's own requested checklist is not trusted (issue #268 finding 2)", async () => {
+  const requestedChecklist = [
+    "1. Confirm the classifier rejects the exact #229 kickoff.",
+    "2. Confirm a valid report is still accepted.",
+    "3. Verify evidence beyond the first 200 characters is read.",
+  ].join("\n");
+  const truncatedResponseThread = () => {
+    const body = [
+      `CLEAN — Stage 2 audit of the merge commit \`${MERGE_COMMIT}\`.`,
+      "",
+      "### Verification checklist",
+      "",
+      "1. Confirmed the classifier rejects the exact #229 kickoff — CONFIRMED",
+      "",
+      "Verdict: CLEAN",
+    ].join("\n");
+    return [
+      { id: 1, body: triggerCommentBody(), created_at: "2026-08-20T00:00:00Z" },
+      { id: 2, user: { login: "chatgpt-codex-connector[bot]" }, body, created_at: "2026-08-20T00:05:00Z" },
+    ];
+  };
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160
+          ? { body: auditBodyWithChecklist({ verdict: "CLEAN", checklist: requestedChecklist }), state: "OPEN" }
+          : { body: "", state: "OPEN" },
+      ghApiImpl: async (path) => (path.includes("issues") ? truncatedResponseThread() : []),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "a checklist walk-through shorter than what was requested must not authorize READY_TO_CLOSE");
+  assert.equal(result.verdict, null);
+  assert.equal(result.rawVerdict, "CLEAN");
 });
 
 test("checkPostAudit: a CLEAN dropdown with no genuine post-trigger response is not trusted (Stage 1 review finding on PR #186)", async () => {
