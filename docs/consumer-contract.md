@@ -73,6 +73,70 @@ touches a path outside the LDL-managed list above, and never overwrites a
 destination path that already exists and was not itself installed by a
 prior `tools/ldl-init` run (see "Safety and idempotency" below).
 
+## Defects found in LDL-managed content
+
+A consumer session working a slice can discover, while reading, testing, or
+getting a change reviewed, that some *installed* file — one on the
+LDL-managed list above — is itself defective: wrong logic, a bad regex, a
+gap a reviewer flags. The default disposition below governs that case. It
+was established after issue #268: a Codex review of a YouTubery consumer-
+sync PR found two real defects in vendored `tools/review-watch/**`;
+YouTubery neither patched the vendored file nor blocked its otherwise-valid
+sync PR on the finding — it merged the PR unchanged and filed the defect
+upstream as Loop-Dee-Loup issue #268 for correction there.
+
+**Distinguish upstream-owned from consumer-owned before deciding disposition.**
+A defect is upstream-owned only when both hold:
+
+- the defective path is on the LDL-managed list above (or is bridge content
+  derived from it, e.g. the installed `AGENTS.md`/`CLAUDE.md`); and
+- the on-disk content matches what `tools/ldl-init`/`tools/ldl-update`
+  actually installed — i.e. it has not been hand-edited since install. A
+  divergent hash relative to `.ldl/manifest.json`'s recorded provenance
+  (the same check `tools/ldl-update`'s conflict-safe update uses) means a
+  local edit already happened; that edit, and any defect it introduced or
+  left uncorrected, is consumer-owned, not upstream-owned.
+
+Anything else — project source, project-specific configuration, an
+LDL-managed file already diverged from its recorded provenance, or a defect
+in how the installed machinery is *used* rather than in the machinery
+itself — is consumer-owned. Normal target-repository blocking rules apply
+to it without exception.
+
+**Default disposition for an upstream-owned defect:**
+
+1. Do not edit the LDL-managed file in the consumer repository to fix it,
+   even as a "temporary" or "obviously correct" local patch. A local edit
+   makes the file's on-disk hash diverge from the recorded provenance, and
+   the next `tools/ldl-update` then refuses the entire run — writing
+   nothing — until the divergence is manually reconciled (see "Conflict-safe
+   updates" below); it also duplicates a fix that belongs in Loop-Dee-Loup.
+2. Preserve the finding durably. If the session has GitHub access to create
+   issues in the Loop-Dee-Loup repository this installation was derived
+   from, file an upstream issue there with enough evidence to reproduce and
+   fix the problem — the exact file, the defective logic, and a concrete
+   failing case, the same evidence shape issue #268 recorded. If that access
+   is unavailable or the source repository is unclear, record the same
+   evidence durably in the consumer repository's own work/review record (the
+   PR thread and/or its work issue) instead of only in transient session
+   output, so the founder can file it upstream later.
+3. Do not hold open, rewrite, or otherwise block the consumer change solely
+   because it carries this inherited defect. If the change otherwise
+   satisfies its own merge requirements and its LDL-managed content
+   accurately reflects current upstream, let it merge unchanged — an
+   upstream-owned finding is not one of the "valid findings" a bounded
+   review cycle's correction pass fixes locally (see
+   `docs/bounded-review-cycle.md`). An independent defect in the consumer's
+   own change is still a normal blocker regardless of this rule.
+4. Let the eventual upstream fix reach this repository the ordinary way,
+   through the next `tools/ldl-update` run — do not build a parallel
+   tracking or sync mechanism for it.
+
+This is a default disposition, not license to suppress a finding, weaken any
+consumer-local correctness/safety/review/CI gate, or wave through a change
+that is independently invalid, unsafe, or incomplete for reasons separate
+from merely inheriting the upstream defect.
+
 ## How to bootstrap
 
 From a local clone of Loop-Dee-Loup, run:

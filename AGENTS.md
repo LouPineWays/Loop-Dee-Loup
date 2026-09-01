@@ -100,6 +100,10 @@ If exactly one unforeseeable founder question blocks an in-progress slice, a dir
 - Do not expand scope merely because adjacent work is visible.
 - Preserve the target repository's IP boundary, branching, testing, review, merge, release, and destructive-action rules.
 
+## Upstream-owned defects in LDL-managed content
+
+If this repository has installed LDL-managed content (per `docs/consumer-contract.md`) and a session discovers a defect inside it — not in this repository's own project code — the default disposition is: do not edit the LDL-managed file locally; file the finding as an issue in the Loop-Dee-Loup repository this installation was derived from when the session has access to do so, otherwise record it durably in the consumer PR/issue record for the founder to file; and do not hold open or rewrite an otherwise-valid change solely because it inherits that defect. See `docs/consumer-contract.md` § Defects found in LDL-managed content for the upstream-vs-consumer-owned test and the full disposition. This does not excuse an independent, consumer-owned blocker in the same change.
+
 ## Session execution
 
 After dispatch, first apply the Decomposition boundary: determine whether the active issue is one bounded vertical slice or genuinely requires decomposition into multiple. A multi-slice determination ends the session there, per that section.
