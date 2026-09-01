@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import {
   bodyReferencesCommit,
   countNumberedItems,
+  countVerificationWalkthroughItems,
   extractResponseVerdict,
   hasCompleteVerificationEvidence,
   hasVerificationEvidence,
@@ -138,6 +139,48 @@ test("countNumberedItems: zero for missing/empty text", () => {
   assert.equal(countNumberedItems(undefined), 0);
 });
 
+// -- countVerificationWalkthroughItems -----------------------------------------------------
+
+test("countVerificationWalkthroughItems: counts only the last freshly-restarted-at-1 numbered run, not numbered findings entries earlier in the body (Stage 1 review finding on this PR)", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. First finding — root cause X.",
+    "2. Second finding — root cause Y.",
+    "",
+    "### Verification checklist",
+    "",
+    "1. Confirmed finding 1 is fixed — CONFIRMED",
+    "2. Confirmed finding 2 is fixed — CONFIRMED",
+    "3. Confirmed no regressions — CONFIRMED",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 3, "must count only the checklist's 3 items, not 5 (2 findings + 3 checklist)");
+});
+
+test("countVerificationWalkthroughItems: a checklist truncated after item 1 is not padded out by earlier numbered findings entries", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. First finding — root cause X.",
+    "2. Second finding — root cause Y.",
+    "",
+    "### Verification checklist",
+    "",
+    "1. Confirmed finding 1 is fixed — CONFIRMED",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 1, "must report the truncated checklist's true length (1), not 3 (2 findings + 1 checklist)");
+});
+
+test("countVerificationWalkthroughItems: a single numbered list with no earlier findings still counts normally", () => {
+  assert.equal(countVerificationWalkthroughItems("1. one\n2. two\n3. three"), 3);
+});
+
+test("countVerificationWalkthroughItems: zero for missing/empty text or text with no numbered items", () => {
+  assert.equal(countVerificationWalkthroughItems(""), 0);
+  assert.equal(countVerificationWalkthroughItems(null), 0);
+  assert.equal(countVerificationWalkthroughItems("no numbered content here"), 0);
+});
+
 // -- hasVerificationEvidence -----------------------------------------------------------------
 
 test("hasVerificationEvidence: true with a 'verif...' mention and a numbered item", () => {
@@ -169,6 +212,25 @@ test("hasCompleteVerificationEvidence: true when the response's checklist meets 
   const requested = "1. Confirm A.\n2. Confirm B.";
   const fullResponse = "Verification checklist:\n1. Confirmed A — CONFIRMED.\n2. Confirmed B — CONFIRMED.";
   assert.equal(hasCompleteVerificationEvidence(fullResponse, requested), true);
+});
+
+test("hasCompleteVerificationEvidence: false when a truncated checklist is padded out by earlier numbered findings entries (Stage 1 review finding on this PR)", () => {
+  const requested = "1. Confirm the classifier rejects the exact #229 kickoff.\n2. Confirm a valid report is still accepted.\n3. Verify evidence beyond the first 200 characters is read.";
+  const body = [
+    "### Findings",
+    "",
+    "1. First finding — root cause X.",
+    "2. Second finding — root cause Y.",
+    "",
+    "### Verification checklist",
+    "",
+    "1. Confirmed the classifier rejects the exact #229 kickoff — CONFIRMED",
+  ].join("\n");
+  assert.equal(
+    hasCompleteVerificationEvidence(body, requested),
+    false,
+    "2 findings entries + 1 truncated checklist item must not be read as satisfying a 3-item request",
+  );
 });
 
 test("hasCompleteVerificationEvidence: falls back to presence-only when no requested checklist is given", () => {
@@ -316,6 +378,26 @@ test("isCompletedStage2AuditReport: a checklist walk-through truncated partway t
   assert.equal(result.complete, false);
   assert.equal(result.verdict, null);
   assert.ok(result.reasons.some((r) => r.includes("incomplete")), `expected an incompleteness reason, got: ${result.reasons}`);
+});
+
+test("isCompletedStage2AuditReport: a truncated checklist is not accepted merely because earlier numbered findings entries pad the total count (Stage 1 review finding on this PR)", () => {
+  const body = [
+    `CLEAN — Stage 2 audit of the merge commit \`${MERGE_COMMIT}\`.`,
+    "",
+    "### Findings",
+    "",
+    "1. First finding — root cause X, now fixed.",
+    "2. Second finding — root cause Y, now fixed.",
+    "",
+    "### Verification checklist",
+    "",
+    "1. Confirmed the classifier rejects the exact #229 kickoff — CONFIRMED",
+    "",
+    "Verdict: CLEAN",
+  ].join("\n");
+  const result = isCompletedStage2AuditReport(body, { mergeCommit: MERGE_COMMIT, requestedChecklist: REQUESTED_CHECKLIST });
+  assert.equal(result.complete, false, "2 findings + 1 checklist item (3 numbered lines total) must not satisfy a 3-item checklist request");
+  assert.equal(result.verdict, null);
 });
 
 test("isCompletedStage2AuditReport: a checklist walk-through meeting the requested item count is accepted", () => {

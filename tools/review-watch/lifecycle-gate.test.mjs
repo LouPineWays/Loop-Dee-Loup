@@ -274,6 +274,36 @@ test("parseFormFieldBlock: returns null when the heading is absent, empty, or '_
   assert.equal(parseFormFieldBlock("### Verification checklist\n\n_No response_\n\n### Findings", "Verification checklist"), null);
 });
 
+test("parseFormFieldBlock: anchors to the FIRST matching heading — the opposite of parseFormField's last-match convention (Stage 1 review finding on this PR)", () => {
+  // "Verification checklist" renders before "Findings" in the template, so a response later
+  // pasted into Findings that echoes its own "### Verification checklist" heading (per the
+  // required response structure's item 3) sits *after* the real field, not before it — the
+  // reverse of Verdict's problem. Matching last would read that pasted, possibly-truncated
+  // section as the "requested" checklist instead of the original authored one.
+  const body = [
+    "### Verification checklist",
+    "",
+    "1. Confirm the classifier rejects the exact #229 kickoff.",
+    "2. Confirm a valid report is still accepted.",
+    "3. Verify evidence beyond the first 200 characters is read.",
+    "",
+    "### Findings",
+    "",
+    "### Verification checklist",
+    "",
+    "1. Confirmed the classifier rejects the exact #229 kickoff — CONFIRMED",
+    "",
+    "### Verdict",
+    "",
+    "CLEAN",
+  ].join("\n");
+  assert.equal(
+    parseFormFieldBlock(body, "Verification checklist"),
+    "1. Confirm the classifier rejects the exact #229 kickoff.\n2. Confirm a valid report is still accepted.\n3. Verify evidence beyond the first 200 characters is read.",
+    "must read the original 3-item field, not the shorter 1-item section echoed later inside Findings",
+  );
+});
+
 test("parseVerificationChecklistRef: reads the audit-control-issue template's Verification checklist field", () => {
   const body = [
     "### Exact merge commit",
