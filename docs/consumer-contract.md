@@ -88,19 +88,31 @@ upstream as Loop-Dee-Loup issue #268 for correction there.
 **Distinguish upstream-owned from consumer-owned before deciding disposition.**
 A defect is upstream-owned only when both hold:
 
-- the defective path is on the LDL-managed list above (or is bridge content
-  derived from it, e.g. the installed `AGENTS.md`/`CLAUDE.md`); and
+- the defective path is recorded as LDL-managed in `.ldl/manifest.json`'s
+  `files[]` — either because it is on the LDL-managed list above (or is
+  bridge content derived from it, e.g. the installed `AGENTS.md`/
+  `CLAUDE.md`), or because it was LDL-managed in an earlier revision and
+  `tools/ldl-update` carried its provenance forward after a later upstream
+  revision dropped it from the current list (see "How to update" below —
+  a retired managed path is left on disk and kept recorded, never silently
+  deleted). Manifest membership, not current-list membership alone, is the
+  authority; and
 - the on-disk content matches what `tools/ldl-init`/`tools/ldl-update`
-  actually installed — i.e. it has not been hand-edited since install. A
-  divergent hash relative to `.ldl/manifest.json`'s recorded provenance
-  (the same check `tools/ldl-update`'s conflict-safe update uses) means a
-  local edit already happened; that edit, and any defect it introduced or
-  left uncorrected, is consumer-owned, not upstream-owned.
+  actually installed — i.e. it has not been hand-edited since install.
+  Compare using the same line-ending-tolerant check `tools/ldl-update`'s
+  conflict-safe update itself uses (`contentMatchesHash`: an LF/CRLF-only
+  difference from the recorded hash still counts as a match), not a raw
+  byte-for-byte hash comparison — otherwise a plain Windows/`core.autocrlf`
+  checkout of an untouched file reads as locally modified. Only a content
+  difference that survives that tolerant comparison means a local edit
+  already happened; that edit, and any defect it introduced or left
+  uncorrected, is consumer-owned, not upstream-owned.
 
 Anything else — project source, project-specific configuration, an
-LDL-managed file already diverged from its recorded provenance, or a defect
-in how the installed machinery is *used* rather than in the machinery
-itself — is consumer-owned. Normal target-repository blocking rules apply
+LDL-managed file already diverged from its recorded provenance under that
+tolerant comparison, or a defect in how the installed machinery is *used*
+rather than in the machinery itself — is consumer-owned. Normal
+target-repository blocking rules apply
 to it without exception.
 
 **Default disposition for an upstream-owned defect:**
