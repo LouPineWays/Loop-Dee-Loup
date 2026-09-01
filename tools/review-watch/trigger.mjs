@@ -33,6 +33,14 @@
 // that prior trigger as already-satisfied and refuse to post the retry. --force only bypasses
 // the *same-head* dedup check above — it never bypasses the cross-head block described next.
 //
+// Stage 2 genuine-response block (issue #259): for --kind issue, --force additionally never
+// bypasses hasPriorGenuineIssueResponse, below — a *genuine* Codex response already on the
+// thread (complete or not) is not the silent/BLOCKED/failed case --force exists for, and
+// force-reposting `@codex review` at it anyway is exactly the retriggering that let the
+// #253/#255 incident happen (two more force-retriggers off a merely differently-formatted
+// genuine reply, the last one accompanied by a comment coaching Codex on the exact reply
+// shape to use). This block has no automated override, the same as the cross-head block.
+//
 // Cross-head block (issue #165): per-head dedup alone does not stop a session from pushing a
 // fix commit (a new head) and re-triggering `@codex review` at that new head, repeatedly,
 // even after an *earlier* head on the same PR already drew a genuine Stage 1 response.
@@ -165,6 +173,44 @@ export function findPriorGenuineHead({ comments, otherItems = [], currentHead, b
   return null;
 }
 
+// Pure. The earliest trigger comment on an issue-kind (Stage 2) thread — no head marker,
+// unlike Stage 1's per-head triggers, since a fresh audit issue is opened per merge commit
+// (step 2 of Stage 2) and its whole thread already corresponds to one commit; see the module
+// header comment on --head.
+export function findEarliestIssueTrigger(comments) {
+  const matches = comments.filter((c) => (c.body ?? "").includes(TRIGGER_TEXT));
+  if (matches.length === 0) return null;
+  matches.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+  return matches[0];
+}
+
+// Pure. Whether a genuine (not BLOCKED/refused-mutation/setup-prompt) Codex response already
+// exists on an issue-kind (Stage 2) thread, posted at or after that thread's earliest trigger.
+//
+// Issue #259 (the #253/#255 incident): the actual failure was never a silent or BLOCKED Stage 2
+// response — the only cases docs/bounded-review-cycle.md Stage 2 step 10 and this file's own
+// --force comment authorize retrying. Codex's first reply was genuine and substantively
+// complete; it just used a reply shape (a combined "## Stage 2 Audit Verdict: **CLEAN**"
+// heading) that stage2-report.mjs's isCompletedStage2AuditReport doesn't recognize as a
+// standalone "Verdict"-labelled line. Instead of treating that mismatch as a real finding, the
+// controlling session force-retriggered Stage 2 twice more on the same thread — and on the
+// third attempt, told Codex the exact literal heading/structure to reply with, coaching an
+// independent reviewer toward a specific output shape.
+//
+// This check makes the *retriggering* half of that failure mechanically impossible. It does not
+// know or care whether a genuine response is a *completed* report — that is stage2-report.mjs's
+// job, consulted separately by lifecycle-gate.mjs post-audit. Any genuine response at all,
+// complete or not, means this thread has already had its one round, exactly like Stage 1's
+// cross-head block (findPriorGenuineHead, above) treats any genuine response as closing that
+// round regardless of what it says.
+export function hasPriorGenuineIssueResponse(comments, { bot = DEFAULT_BOT } = {}) {
+  const earliest = findEarliestIssueTrigger(comments);
+  if (!earliest) return false;
+  const sinceMs = new Date(earliest.created_at).getTime();
+  const matches = findAllMatches(comments, { bot, sinceMs, endpointName: "issue-comments" });
+  return matches.some((m) => isGenuineResponse(m.body_excerpt));
+}
+
 // Pure — no I/O — so tests can exercise it without a network call or `gh`. Returns the
 // earliest comment containing the trigger text (and, when `head` is given, that head's
 // marker), or null if none exists. Earliest, not latest, so a re-run always reports the
@@ -238,9 +284,13 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPostImpl = default
     return { exitCode: 1, message: `No issue-comments endpoint resolved for --kind ${kind}.` };
   }
 
-  // The cross-head block below needs the full issue-comments thread even under --force,
-  // since --force only bypasses the same-head repost dedup, never the cross-head check.
-  const needsCommentsRead = !force || (kind === "pr" && head);
+  // The cross-head block below needs the full issue-comments thread even under --force, since
+  // --force only bypasses the same-head repost dedup, never the cross-head check. Stage 2
+  // (--kind issue) needs the same unconditional read for its own guard just below (issue #259):
+  // hasPriorGenuineIssueResponse must see the thread even when --force would otherwise skip
+  // every read, or a forced Stage 2 retrigger after a genuine-but-non-conforming response (the
+  // #253/#255 incident) would sail through unchecked.
+  const needsCommentsRead = !force || (kind === "pr" && head) || kind === "issue";
   let comments = null;
   if (needsCommentsRead) {
     try {
@@ -255,6 +305,26 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPostImpl = default
         message: `Ambiguous existing-trigger read: expected an array of comments from ${commentsEndpoint.path}.`,
       };
     }
+  }
+
+  // Issue #259: --force is only for a silent, BLOCKED, or otherwise-failed trigger (per
+  // docs/bounded-review-cycle.md Stage 2 step 10) — never for a genuine response the controlling
+  // session merely finds inconveniently formatted. Checked before the same-head dedup below (and
+  // unconditionally on the force path, since dedup itself is skipped under --force) so a forced
+  // Stage 2 retrigger can never post once this thread has had its one genuine round, complete or
+  // not. No automated override, matching the Stage 1 cross-head block's own philosophy: an
+  // executor cannot self-authorize a second round by supplying its own justification.
+  if (force && kind === "issue" && hasPriorGenuineIssueResponse(comments)) {
+    return {
+      exitCode: 2,
+      message:
+        `Refusing to force a second Stage 2 trigger on ${repo}#${number}: this audit issue already received a ` +
+        `genuine Codex response. Per docs/bounded-review-cycle.md Stage 2 step 10, --force is only for a silent, ` +
+        `BLOCKED, or otherwise-failed trigger — a genuine response, even one that is not a mechanically completed ` +
+        `report, has already used this thread's one round. This is a founder interrupt with no automated ` +
+        `override — stop and report it per AGENTS.md; only the founder, acting outside this script, may post the ` +
+        `exceptional second trigger comment.`,
+    };
   }
 
   if (!force) {

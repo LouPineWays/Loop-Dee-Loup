@@ -13,6 +13,8 @@ import {
   findTriggerRounds,
   attributeRound,
   findPriorGenuineHead,
+  findEarliestIssueTrigger,
+  hasPriorGenuineIssueResponse,
   extractCommentId,
   findCommentById,
   run,
@@ -541,7 +543,7 @@ test("run: cross-head block does not apply to --kind issue (Stage 2 audits have 
   assert.equal(ghPostCalls, 0);
 });
 
-test("run: --force true bypasses dedup and reposts even when a trigger already exists", async () => {
+test("run: --force true bypasses dedup and reposts when a trigger exists but drew no genuine response yet", async () => {
   let ghApiCalls = 0;
   let ghPostCalls = 0;
   const result = await run(
@@ -558,10 +560,102 @@ test("run: --force true bypasses dedup and reposts even when a trigger already e
     },
   );
   assert.equal(result.exitCode, 0);
-  assert.equal(ghApiCalls, 0, "--force must skip the dedup read entirely");
-  assert.equal(ghPostCalls, 1, "--force must post a fresh retry trigger");
+  assert.equal(
+    ghApiCalls,
+    1,
+    "issue #259: --force must still read the thread for kind issue, to check for a prior genuine response",
+  );
+  assert.equal(ghPostCalls, 1, "--force must post a fresh retry trigger when the only prior state is silence");
   assert.equal(result.posted, true);
   assert.equal(result.timestamp, "2026-08-24T09:00:00Z");
+});
+
+test("run: --force true on --kind issue refuses to repost once a genuine response already exists (issue #259, reproduces the #253/#255 incident)", async () => {
+  let ghPostCalls = 0;
+  const result = await run(
+    { repo: "owner/repo", kind: "issue", number: 255, force: "true" },
+    {
+      ghApiImpl: async () => [
+        { body: "@codex review", created_at: "2026-08-23T13:00:00Z" },
+        {
+          user: { login: "chatgpt-codex-connector[bot]" },
+          created_at: "2026-08-23T13:10:00Z",
+          body: "## Stage 2 Audit Verdict: **CLEAN**\n\nNo actionable findings were identified at exact merge commit abc123.",
+        },
+      ],
+      ghPostImpl: async () => {
+        ghPostCalls += 1;
+        return { created_at: "should-not-be-used" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.match(result.message, /already received a genuine Codex response/);
+  assert.match(result.message, /founder interrupt with no automated override/);
+  assert.equal(ghPostCalls, 0, "must not force-retrigger off a genuine response merely formatted differently than expected");
+});
+
+test("run: --force true on --kind issue still posts when the prior response was BLOCKED, not genuine", async () => {
+  let ghPostCalls = 0;
+  const result = await run(
+    { repo: "owner/repo", kind: "issue", number: 53, force: "true" },
+    {
+      ghApiImpl: async () => [
+        { body: "@codex review", created_at: "2026-08-23T13:00:00Z" },
+        {
+          user: { login: "chatgpt-codex-connector[bot]" },
+          created_at: "2026-08-23T13:10:00Z",
+          body: "BLOCKED — checkout unavailable.",
+        },
+      ],
+      ghPostImpl: async () => {
+        ghPostCalls += 1;
+        return { created_at: "2026-08-24T09:00:00Z" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0, "a BLOCKED reply is exactly the case --force exists to retry");
+  assert.equal(ghPostCalls, 1);
+});
+
+test("findEarliestIssueTrigger: returns the earliest trigger comment, ignoring head markers unlike Stage 1's findExistingTrigger", () => {
+  const match = findEarliestIssueTrigger([
+    { body: "@codex review", created_at: "2026-08-23T15:00:00Z" },
+    { body: "@codex review", created_at: "2026-08-23T14:00:00Z" },
+  ]);
+  assert.equal(match.created_at, "2026-08-23T14:00:00Z");
+});
+
+test("findEarliestIssueTrigger: null when no comment contains the trigger text", () => {
+  assert.equal(findEarliestIssueTrigger([{ body: "looks good", created_at: "2026-08-23T14:00:00Z" }]), null);
+});
+
+test("hasPriorGenuineIssueResponse: false when no trigger has been posted yet", () => {
+  assert.equal(hasPriorGenuineIssueResponse([]), false);
+});
+
+test("hasPriorGenuineIssueResponse: true once a genuine reply lands after the trigger, regardless of its reply shape", () => {
+  const comments = [
+    { body: "@codex review", created_at: "2026-08-23T13:00:00Z" },
+    {
+      user: { login: "chatgpt-codex-connector[bot]" },
+      created_at: "2026-08-23T13:10:00Z",
+      body: "## Stage 2 Audit Verdict: **CLEAN**\n\nNo actionable findings.",
+    },
+  ];
+  assert.equal(hasPriorGenuineIssueResponse(comments), true);
+});
+
+test("hasPriorGenuineIssueResponse: false when the only reply is BLOCKED", () => {
+  const comments = [
+    { body: "@codex review", created_at: "2026-08-23T13:00:00Z" },
+    {
+      user: { login: "chatgpt-codex-connector[bot]" },
+      created_at: "2026-08-23T13:10:00Z",
+      body: "BLOCKED — checkout unavailable.",
+    },
+  ];
+  assert.equal(hasPriorGenuineIssueResponse(comments), false);
 });
 
 test("run: surfaces a gh api read failure as exit 1 without attempting to post", async () => {
