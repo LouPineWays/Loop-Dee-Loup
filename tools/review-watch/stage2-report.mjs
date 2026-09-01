@@ -38,6 +38,11 @@
 //      Verification checklist field ... and states its result," and states a "no findings"
 //      audit must still report "in this structure," not a bare one-liner. This module makes
 //      that existing prose requirement mechanically enforced rather than only aspirational.
+//      When the caller supplies the audit issue's own requested checklist text (`isCompleted
+//      Stage2AuditReport`'s `requestedChecklist` option), this signal additionally requires the
+//      response's numbered-item count to meet the requested count (issue #268 finding 2) — a
+//      response truncated partway through a multi-item checklist no longer passes on the
+//      strength of its first item alone.
 //
 // A historical response that predates this contract (e.g. issue #95's terse "CLEAN — ... no
 // actionable findings. Next: None.", which has no numbered checklist walk-through) would report
@@ -82,7 +87,16 @@ const LEADING_VERDICT_PATTERN =
 // before the report's actual "Verdict: NOT CLEAN" line was ever reached. Anchoring to the start
 // of the line (after optional heading/bold markup) means only an actual label field can supply
 // the verdict, never a sentence that merely contains the word.
-const VERDICT_LABEL_LINE_PATTERN = /^(?:#{1,6}\s*)?\*{0,2}verdict\*{0,2}\s*:?\s*\*{0,2}\s*(.*)$/i;
+//
+// Issue #268: anchoring alone was not enough — the colon was optional (`:?`), so a prose
+// sentence that merely *opens* with "Verdict" (e.g. "Verdict handling must not allow CLEAN to
+// override evidence") still matched as a label, with the rest of the sentence read as its
+// value. A real label line either ends right after "verdict" (a bare heading like "### Verdict",
+// whose value follows on the next non-blank line) or is immediately followed by a colon before
+// any other text. There is no third shape: requiring one of those two — instead of merely
+// optional, freely-skippable punctuation — is what actually distinguishes a label from a
+// sentence that happens to start with the same word.
+const VERDICT_LABEL_LINE_PATTERN = /^(?:#{1,6}\s*)?\*{0,2}verdict\*{0,2}\s*(?::\s*\*{0,2}\s*(.*))?$/i;
 const VERDICT_TOKEN_PATTERN = /\b(NOT CLEAN|CLEAN)\b/i;
 
 function normalizeVerdictToken(token) {
@@ -105,7 +119,7 @@ export function extractResponseVerdict(text) {
   for (let i = 0; i < lines.length; i++) {
     const labelMatch = VERDICT_LABEL_LINE_PATTERN.exec(lines[i].trim());
     if (!labelMatch) continue;
-    const rest = labelMatch[1].trim();
+    const rest = (labelMatch[1] ?? "").trim();
     if (rest) {
       const sameLine = VERDICT_TOKEN_PATTERN.exec(rest);
       if (sameLine) return normalizeVerdictToken(sameLine[1]);
@@ -124,6 +138,8 @@ export function extractResponseVerdict(text) {
 
 const VERIFICATION_MENTION_PATTERN = /\bverif(?:y|ies|ied|ication|ying)\b/i;
 const NUMBERED_ITEM_PATTERN = /^\s*\d{1,3}[.)]\s+\S/m;
+const NUMBERED_ITEM_PATTERN_GLOBAL = /^\s*\d{1,3}[.)]\s+\S/gm;
+const NUMBERED_ITEM_NUMBER_PATTERN = /^\s*(\d{1,3})[.)]\s+\S/gm;
 
 // Pure. Whether `text` shows actual verification-results content: a numbered checklist
 // walk-through together with some mention of verification itself, rather than a bare verdict
@@ -131,6 +147,69 @@ const NUMBERED_ITEM_PATTERN = /^\s*\d{1,3}[.)]\s+\S/m;
 export function hasVerificationEvidence(text) {
   const normalized = text ?? "";
   return VERIFICATION_MENTION_PATTERN.test(normalized) && NUMBERED_ITEM_PATTERN.test(normalized);
+}
+
+// Pure. Counts top-level numbered list lines ("1. ...", "2) ...") in `text`. Used against the
+// audit-control issue's own Verification checklist field, which contains nothing but the
+// requested list, so a plain count of every numbered line in it is accurate. Do not reuse this
+// against a full response body — see countVerificationWalkthroughItems below for why a response
+// needs its checklist section isolated first.
+export function countNumberedItems(text) {
+  const normalized = text ?? "";
+  const matches = normalized.match(NUMBERED_ITEM_PATTERN_GLOBAL);
+  return matches ? matches.length : 0;
+}
+
+// Pure. Counts the numbered items in `text`'s *verification-checklist walk-through* specifically
+// — not every numbered line in the response body. Stage 1 review finding on this PR: the
+// required response structure's item (2), one numbered entry per finding, precedes item (3), the
+// checklist walk-through — so a response with two numbered findings plus only item 1 of a
+// three-item requested checklist has three numbered lines total, and a plain count would call it
+// complete against a 3-item request while checklist items 2-3 were never actually addressed.
+//
+// A genuine checklist walk-through is its own freshly-numbered list, restarting at 1, and per the
+// required structure's ordering it is the *last* numbered list before the verdict. This returns
+// the length of the last contiguous run of numbered items that begins at 1 and increases by
+// exactly 1 each step — deliberately a numbering-sequence heuristic, not heading-text matching
+// (which response authors are not required to phrase identically), consistent with this module's
+// Non-goals (no arbitrary Markdown parsing, no semantic adjudication of finding content).
+export function countVerificationWalkthroughItems(text) {
+  const normalized = text ?? "";
+  const numbers = [];
+  NUMBERED_ITEM_NUMBER_PATTERN.lastIndex = 0;
+  let match;
+  while ((match = NUMBERED_ITEM_NUMBER_PATTERN.exec(normalized)) !== null) {
+    numbers.push(Number(match[1]));
+  }
+  if (numbers.length === 0) return 0;
+  let runStart = numbers.length - 1;
+  for (let i = numbers.length - 1; i > 0; i--) {
+    if (numbers[i] === numbers[i - 1] + 1) {
+      runStart = i - 1;
+    } else {
+      break;
+    }
+  }
+  return numbers[runStart] === 1 ? numbers.length - runStart : 0;
+}
+
+// Pure. Whether `text`'s verification-results content is *complete* against `requestedChecklist`
+// — the audit-control issue's own Verification checklist field text — rather than merely
+// present. issue #268 finding 2: `hasVerificationEvidence` alone accepts any single numbered
+// line plus a mention of "verif*", so a response truncated after item 1 of a multi-item
+// requested checklist still passed as a complete walk-through. Requires the response's own
+// checklist walk-through (countVerificationWalkthroughItems, scoped to just that section — see
+// its own comment for why an unscoped count is unsafe) to carry at least as many items as were
+// requested; deliberately count-based, not a semantic item-by-item match, consistent with this
+// module's Non-goals (no arbitrary Markdown parsing, no semantic adjudication of whether findings
+// are correct). When `requestedChecklist` has no countable items itself (missing, blank, or
+// unparseable), completeness falls back to `hasVerificationEvidence` — there is nothing concrete
+// to compare a count against.
+export function hasCompleteVerificationEvidence(text, requestedChecklist) {
+  if (!hasVerificationEvidence(text)) return false;
+  const requestedCount = countNumberedItems(requestedChecklist);
+  if (requestedCount === 0) return true;
+  return countVerificationWalkthroughItems(text) >= requestedCount;
 }
 
 // Combines the three signals into one completion decision. `reasons` lists every failed
@@ -148,7 +227,16 @@ export function hasVerificationEvidence(text) {
 // required even in this mode, so it never backs a report addressing the wrong commit or
 // lacking any verdict at all — it only forgives the newly-required checklist format a
 // pre-existing response could never have followed.
-export function isCompletedStage2AuditReport(body, { mergeCommit, requireVerificationEvidence = true } = {}) {
+//
+// `requestedChecklist` (default null), when given the audit-control issue's own Verification
+// checklist field text, makes signal 3 completeness-checked rather than presence-checked (issue
+// #268 finding 2) — see hasCompleteVerificationEvidence. Ignored when
+// `requireVerificationEvidence` is false: legacy-compatibility mode already forgives the
+// checklist signal entirely, so there is nothing to compare completeness against.
+export function isCompletedStage2AuditReport(
+  body,
+  { mergeCommit, requireVerificationEvidence = true, requestedChecklist = null } = {},
+) {
   const text = body ?? "";
   const reasons = [];
 
@@ -172,14 +260,20 @@ export function isCompletedStage2AuditReport(body, { mergeCommit, requireVerific
   if (!verdict) reasons.push("no explicit CLEAN/NOT CLEAN verdict");
 
   const hasVerification = hasVerificationEvidence(text);
+  const meetsChecklist = requestedChecklist ? hasCompleteVerificationEvidence(text, requestedChecklist) : hasVerification;
   if (!hasVerification) {
     reasons.push(
       requireVerificationEvidence
         ? "no verification-results content (a numbered checklist walk-through)"
         : "no verification-results content (a numbered checklist walk-through) — not required in legacy-compatibility mode",
     );
+  } else if (!meetsChecklist) {
+    reasons.push(
+      `verification checklist walk-through is incomplete (response has ${countVerificationWalkthroughItems(text)} numbered ` +
+        `item(s), requested checklist has ${countNumberedItems(requestedChecklist)})`,
+    );
   }
 
-  const complete = hasCommit && verdict !== null && (hasVerification || !requireVerificationEvidence);
+  const complete = hasCommit && verdict !== null && (meetsChecklist || !requireVerificationEvidence);
   return { complete, verdict: complete ? verdict : null, reasons };
 }
