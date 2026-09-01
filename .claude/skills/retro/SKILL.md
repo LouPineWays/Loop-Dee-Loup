@@ -21,6 +21,8 @@ Look for:
 
 Separate observed waste from hypotheses. Compare against a relevant baseline when available.
 
+Start from evidence generated since the last retro or applied correction for a given recurring signal; look further back into repository history only when that new evidence makes an older, previously insufficient or declined signal plausible again — do not reload full project history by default. Do not re-propose a correction already applied, and do not reopen a prior no-correction-needed verdict without new material evidence; cite what changed, not that time passed.
+
 Propose at most three corrections, ranked by expected validated progress per token. Each correction must name the evidence, root cause, smallest governing artifact to change, enforcement rung (advice, checklist, script, CI/gate), verification, and rollback condition.
 
 Prefer moving one proven rule up one enforcement rung over adding broad instructions. Apply an approved low-risk correction at the earliest safe boundary; otherwise return it as one founder-accepted independent outcome. Do not manufacture a process backlog.
