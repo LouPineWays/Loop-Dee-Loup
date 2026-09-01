@@ -98,8 +98,12 @@ triggered by session or sample count alone (a large cohort establishes that enou
 work happened to inspect; it is not itself evidence of a reusable pattern).
 
 1. Start from new durable repository evidence since the last maker analysis/battery:
-   relevant issues, PRs, review/audit outcomes, and closure comments. `/spend` findings
-   from Steps 1 and 3 of this same run are part of that evidence.
+   relevant issues, PRs, review/audit outcomes, and closure comments, plus this run's own
+   `/spend` evidence. Compute this run's Spend verdict now, before finishing this discovery
+   pass, by applying Step 3's per-claim evidence-sufficiency rules
+   (`.claude/skills/spend/SKILL.md`) to Step 1's coverage output — Step 3 is where that
+   verdict is *rendered* together with the other two, but discovery needs it as an input
+   here, not merely as something rendered afterward.
 2. Use session telemetry only for claims it can actually support (structural
    subagent/compaction patterns, token allocation where sufficient). Do not mine raw
    prompt/reasoning transcripts for semantic recurrence merely to manufacture a candidate.
@@ -131,9 +135,12 @@ work happened to inspect; it is not itself evidence of a reusable pattern).
    windows, why an existing mechanism does not already solve it, and why this is the
    cheapest safe mechanism) or an evidence-backed `NO CHANGE WARRANTED`.
 
-The battery does not implement a `CANDIDATE` finding itself. A qualified independent
-recommendation becomes its own implementation-ready issue under normal LDL issue-intake
-rules — the battery run stops at the recommendation, same as a maker sweep stops at intake.
+The battery does not implement a `CANDIDATE` finding itself, and a `CANDIDATE` does not halt
+the run: Step 3 still renders the combined verdict and Step 4 still records the log row, the
+run artifact, and the sampled session ids exactly as it would for `NO CHANGE WARRANTED`. A
+qualified independent recommendation instead becomes its own implementation-ready issue
+under normal LDL issue-intake rules — intake, not the battery run, stops at the
+recommendation without implementing it.
 
 ## Step 3 — render the combined verdict
 
