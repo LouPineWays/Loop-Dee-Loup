@@ -730,7 +730,12 @@ export function isValidManifest(value) {
         typeof p.template === "string" &&
         p.template.length > 0 &&
         typeof p.reason === "string" &&
-        p.reason.length > 0,
+        p.reason.length > 0 &&
+        // `parkedSha256` (issue #282) is optional and only ever set by tools/ldl-activate on a
+        // parked capability file, never on a bridge entry — but when present it must be a real
+        // sha256 hex digest, matching the same why-optional-fields-are-still-shape-checked
+        // rigor `manualIntegrationAcknowledgements` below already applies to its own hash field.
+        (p.parkedSha256 === undefined || SHA256_HEX.test(p.parkedSha256)),
     );
     if (!pendingValid) return false;
   }

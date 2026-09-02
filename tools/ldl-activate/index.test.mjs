@@ -7,7 +7,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -475,4 +475,103 @@ test("deriveActivatedCapabilityReminder: names every activated capability id", (
   assert.equal(reminder.length, 1);
   assert.match(reminder[0], /consumer-sync/);
   assert.match(reminder[0], /tools\/ldl-activate\/index\.mjs/);
+});
+
+// --- Stage 1 review regressions (PR #284) ---------------------------------------------------
+
+// Finding: a fresh (never-activated) target whose path is unsafe used to be silently classified
+// "skip-unsafe" and dropped, so run() reported exit 0/noop:true with no record of why nothing
+// happened. Every unsafe-path hazard is now a "conflict", refusing the whole activation.
+test("run: an unsafe path at a fresh target refuses the whole activation instead of silently reporting a no-op success", async (t) => {
+  const root = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, root);
+  // Replace .github itself with a symlink, making both target destRels unsafe to write through.
+  // bootstrap() already created a real .github/ISSUE_TEMPLATE (a MANAGED_ITEMS entry), so it
+  // must be removed before a symlink can take its place at the same path.
+  rmSync(join(dest, ".github"), { recursive: true, force: true });
+  const elsewhere = tempDir(t);
+  try {
+    symlinkSync(elsewhere, join(dest, ".github"), "junction");
+  } catch (err) {
+    t.skip(`symlink creation not permitted in this environment: ${err.message}`);
+    return;
+  }
+
+  const manifestPath = join(dest, ".ldl", "manifest.json");
+  const beforeBytes = readFileSync(manifestPath);
+
+  const result = await run({ dest, root, capability: "consumer-sync" });
+
+  assert.equal(result.exitCode, 1, "must refuse, not report exit 0/noop:true");
+  assert.match(result.message, /symlink/);
+  assert.deepEqual(readFileSync(manifestPath), beforeBytes, "nothing must be written on refusal");
+});
+
+// Finding: a park write went straight to templateDestRel without checking it was safe to write
+// through first, so a symlink at .ldl/templates/consumer-sync could redirect the generated
+// workflow content outside --dest. planCapabilityFile must classify this as a conflict before
+// run() ever attempts to write anything, for any file in the same activation.
+test("run: an unsafe park target (.ldl/templates/<id> replaced by a symlink) refuses the whole activation before writing anything", async (t) => {
+  const root = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, root);
+  mkdirSync(join(dest, ".github", "workflows"), { recursive: true });
+  writeFileSync(join(dest, SYNC_YML), "name: My Own Custom Sync\non: push\n");
+  mkdirSync(join(dest, ".ldl", "templates"), { recursive: true });
+  const elsewhere = tempDir(t);
+  try {
+    symlinkSync(elsewhere, join(dest, ".ldl", "templates", "consumer-sync"), "junction");
+  } catch (err) {
+    t.skip(`symlink creation not permitted in this environment: ${err.message}`);
+    return;
+  }
+
+  const manifestPath = join(dest, ".ldl", "manifest.json");
+  const beforeBytes = readFileSync(manifestPath);
+
+  const result = await run({ dest, root, capability: "consumer-sync" });
+
+  assert.equal(result.exitCode, 1, "must refuse the whole activation, not park through the symlink or install the other file");
+  assert.match(result.message, /cannot park/);
+  assert.ok(!existsSync(join(dest, REVIEW_YML)), "the unrelated, otherwise-installable file must not be written either");
+  assert.deepEqual(readFileSync(manifestPath), beforeBytes, "nothing must be written on refusal");
+});
+
+// Finding: a parked template's on-disk content was compared only against the *current* target,
+// so a human hand-editing a parked template while adapting it for their repository had that
+// edit silently discarded the moment upstream content changed and activation re-ran.
+test("run: a locally-edited parked template is preserved (not overwritten) across an upstream content change, and the divergence is reported", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, rootV1);
+  mkdirSync(join(dest, ".github", "workflows"), { recursive: true });
+  writeFileSync(join(dest, SYNC_YML), "name: My Own Custom Sync\non: push\n");
+
+  const first = await run({ dest, root: rootV1, capability: "consumer-sync" }, { now: () => "2026-01-02T00:00:00.000Z" });
+  assert.equal(JSON.parse(first.message).parked, 1);
+
+  const templatePath = join(dest, ".ldl", "templates", "consumer-sync", "ldl-sync.yml");
+  const handEdited = "name: LDL Sync (rev-1, hand-adapted for our repo)\n";
+  writeFileSync(templatePath, handEdited);
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const result = await run({ dest, root: rootV2, capability: "consumer-sync" }, { now: () => "2026-01-03T00:00:00.000Z" });
+
+  assert.equal(result.exitCode, 0);
+  const parsed = JSON.parse(result.message);
+  assert.equal(parsed.parkedLocallyModified, 1);
+  assert.equal(readFileSync(templatePath, "utf8"), handEdited, "the hand-edited parked template must not be overwritten");
+
+  const manifest = readManifest(dest);
+  const pendingEntry = manifest.pendingManualIntegration.find((p) => p.dest === SYNC_YML);
+  assert.ok(pendingEntry, "the conflicting file must still be reported as pending");
+  assert.match(pendingEntry.reason, /locally modified/);
+
+  // A second, unmodified run must keep reporting the same divergence rather than treating it
+  // as resolved merely because nothing changed on this run.
+  const rootV3 = makeFixtureRoot(t, "rev-3");
+  const again = await run({ dest, root: rootV3, capability: "consumer-sync" }, { now: () => "2026-01-04T00:00:00.000Z" });
+  assert.equal(JSON.parse(again.message).parkedLocallyModified, 1);
+  assert.equal(readFileSync(templatePath, "utf8"), handEdited, "still preserved after a second upstream change");
 });

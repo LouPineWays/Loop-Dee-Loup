@@ -931,3 +931,52 @@ test("run: surfaces the activated-capability staleness reminder in warnings only
   const parsed = JSON.parse(changedResult.message);
   assert.ok(parsed.warnings.some((w) => w.includes("consumer-sync") && w.includes("tools/ldl-activate")));
 });
+
+// Stage 1 review finding (PR #284): pendingManualIntegration is shared state with
+// tools/ldl-activate's capability-park mechanism (issue #282), but this module's own
+// pendingManualIntegration computation only ever derived the bridge-file (AGENTS.md/CLAUDE.md)
+// portion of it and then used that alone as the *entire* new value — silently dropping any
+// capability-owned entry (e.g. a parked conflicting ldl-sync.yml) the moment an otherwise
+// unrelated update ran, and forcing a manifest rewrite to do it (the stale full existing array
+// never matched the freshly derived bridge-only array), even when nothing else needed
+// reconciling. Regression guard: a capability-owned pending entry must survive both a run that
+// is genuinely a no-op for everything else, and one that genuinely changes something else.
+test("run: preserves a capability-owned pendingManualIntegration entry across an update, in both the no-op and genuine-change paths (issue #282 Stage 1 finding)", async (t) => {
+  const capabilityPendingEntry = {
+    dest: ".github/workflows/ldl-sync.yml",
+    template: ".ldl/templates/consumer-sync/ldl-sync.yml",
+    parkedSha256: createHash("sha256").update("parked content").digest("hex"),
+    reason: "a pre-existing .github/workflows/ldl-sync.yml was not overwritten — review and merge it in by hand",
+  };
+
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const destNoop = tempDir(t);
+  await bootstrap(destNoop, rootV1, "rev-1");
+  const noopManifestPath = join(destNoop, ".ldl", "manifest.json");
+  const noopManifest = readManifest(destNoop);
+  noopManifest.pendingManualIntegration = [capabilityPendingEntry];
+  noopManifest.activatedCapabilities = [{ id: "consumer-sync", activatedAt: "2026-01-01T00:00:00.000Z", files: [] }];
+  writeFileSync(noopManifestPath, JSON.stringify(noopManifest, null, 2) + "\n");
+
+  const noopResult = await run({ dest: destNoop, root: rootV1 }, { resolveRevisionImpl: () => "rev-1" });
+  assert.equal(JSON.parse(noopResult.message).noop, true, "must still be a true no-op — a capability-owned entry alone must not force a rewrite");
+  assert.deepEqual(readManifest(destNoop).pendingManualIntegration, [capabilityPendingEntry]);
+
+  const destChanged = tempDir(t);
+  await bootstrap(destChanged, rootV1, "rev-1");
+  const changedManifestPath = join(destChanged, ".ldl", "manifest.json");
+  const changedManifest = readManifest(destChanged);
+  changedManifest.pendingManualIntegration = [capabilityPendingEntry];
+  changedManifest.activatedCapabilities = [{ id: "consumer-sync", activatedAt: "2026-01-01T00:00:00.000Z", files: [] }];
+  writeFileSync(changedManifestPath, JSON.stringify(changedManifest, null, 2) + "\n");
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const changedResult = await run({ dest: destChanged, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+  assert.notEqual(JSON.parse(changedResult.message).noop, true, "sanity check: this run must genuinely rewrite the manifest");
+  assert.ok(
+    readManifest(destChanged).pendingManualIntegration.some(
+      (p) => p.dest === capabilityPendingEntry.dest && p.parkedSha256 === capabilityPendingEntry.parkedSha256,
+    ),
+    "the capability-owned pending entry must survive a genuine content update untouched, not be silently dropped",
+  );
+});

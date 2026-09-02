@@ -57,6 +57,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+  BRIDGE_FILES,
   buildOps,
   contentMatchesHash,
   defaultResolveRevision,
@@ -300,7 +301,22 @@ export async function run(args, deps = {}) {
   // acknowledgement's hash and becomes pending again automatically — no separate staleness
   // tracking needed.
   const manualIntegrationAcknowledgements = parsedManifest.manualIntegrationAcknowledgements || [];
-  const pendingManualIntegration = derivePendingManualIntegration(bridgePlans, toSkip, manualIntegrationAcknowledgements);
+  // derivePendingManualIntegration only ever computes the bridge-file (AGENTS.md/CLAUDE.md)
+  // portion of pendingManualIntegration — tools/ldl-activate's capability-park mechanism (issue
+  // #282) shares this same array (e.g. a parked conflicting ldl-sync.yml), but this module never
+  // evaluates capability files itself (see tools/ldl-activate/index.mjs's own header comment on
+  // why it isn't taught to). Overwriting the whole array with just the freshly derived bridge
+  // portion would silently drop any capability-owned entry the moment an otherwise-unrelated
+  // update ran (Stage 1 review finding on this mechanism's own PR, #284) — worse, the no-op
+  // comparison just below would then never see the *existing* manifest's capability entries as
+  // matched, forcing an update that discards them even when nothing else needed reconciling.
+  // Preserve every existing entry whose `dest` doesn't belong to a bridge file untouched.
+  const bridgeDestRels = new Set(BRIDGE_FILES.map((b) => b.destRel));
+  const existingCapabilityPending = (parsedManifest.pendingManualIntegration || []).filter((p) => !bridgeDestRels.has(p.dest));
+  const pendingManualIntegration = [
+    ...derivePendingManualIntegration(bridgePlans, toSkip, manualIntegrationAcknowledgements),
+    ...existingCapabilityPending,
+  ];
 
   // Issue #282: activatedCapabilities (tools/ldl-activate's own durable record of which
   // optional integrations this consumer has turned on) must survive an update exactly like

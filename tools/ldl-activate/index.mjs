@@ -147,9 +147,21 @@ export function buildCapabilityOps(root, capability) {
 export function planCapabilityFile({ destRel, content, destRoot, activatedFileRecord, capabilityId }) {
   const unsafeReason = findUnsafeDestReason(destRoot, destRel);
   if (unsafeReason) {
-    return activatedFileRecord
-      ? { action: "conflict", destRel, reason: `${unsafeReason} — this path was previously activated and is not safe to update` }
-      : { action: "skip-unsafe", destRel, reason: unsafeReason };
+    // A never-activated destRel with an unsafe path used to be classified "skip-unsafe" and
+    // silently dropped by run() below (Stage 1 review finding on this mechanism's own PR,
+    // #284): the caller would report exit 0/noop:true with no record of why nothing happened —
+    // e.g. `.github` replaced by a symlink after bootstrap made activation look like a clean
+    // no-op instead of the refusal it actually needed to be. Every unsafe-path hazard this
+    // function finds is now a "conflict", so run() refuses the whole activation up front (before
+    // writing anything) and reports exactly why, the same fail-closed treatment already applied
+    // to an unsafe path under an already-activated file just below.
+    return {
+      action: "conflict",
+      destRel,
+      reason: activatedFileRecord
+        ? `${unsafeReason} — this path was previously activated and is not safe to update`
+        : `${unsafeReason} — refusing to activate this capability`,
+    };
   }
 
   const absDest = join(destRoot, destRel);
@@ -186,6 +198,22 @@ export function planCapabilityFile({ destRel, content, destRoot, activatedFileRe
     return { action: "unchanged", destRel, sha256: targetHash };
   }
   const templateDestRel = `.ldl/templates/${capabilityId}/${destRel.split("/").pop()}`;
+  // The park destination itself must be safe to write through, checked here — before this plan
+  // is ever returned — rather than at write time (Stage 1 review finding on this mechanism's
+  // own PR, #284). run() below refuses the whole activation on any "conflict" plan before
+  // writing anything for any file, so classifying an unsafe park target as a conflict here
+  // guarantees it is caught in that same pre-write pass; discovering it only when run() actually
+  // tried to write the template could otherwise leave an earlier file in the same run already
+  // written (a partial, unmanifested activation) or — worse — silently write the proposed
+  // workflow content through a symlink to somewhere outside destRoot entirely.
+  const unsafeTemplateReason = findUnsafeDestReason(destRoot, templateDestRel);
+  if (unsafeTemplateReason) {
+    return {
+      action: "conflict",
+      destRel,
+      reason: `cannot park a proposed ${templateDestRel} for manual review: ${unsafeTemplateReason}`,
+    };
+  }
   return {
     action: "park",
     destRel,
@@ -284,13 +312,6 @@ export async function run(args, deps = {}) {
   const parked = plans.filter((p) => p.action === "park");
   const unchanged = plans.filter((p) => p.action === "unchanged");
   const toWrite = plans.filter((p) => p.action === "install" || p.action === "update");
-  // Not applied to any output today (an unsafe path component under a fresh, never-activated
-  // destRel has nothing recorded to protect), but classified distinctly from a conflict —
-  // exactly as tools/ldl-init's planInstall/tools/ldl-update's planUpdate treat an unsafe
-  // never-managed path as a skip, not a refusal — so a future caller can surface it without
-  // this function's own classification needing to change.
-  const skippedUnsafe = plans.filter((p) => p.action === "skip-unsafe");
-  void skippedUnsafe;
 
   if (conflicts.length > 0) {
     const detail = conflicts.map((c) => `${c.destRel} (${c.reason})`).join("; ");
@@ -312,27 +333,60 @@ export async function run(args, deps = {}) {
     else updatedCount++;
   }
 
-  // A parked template is only rewritten when its on-disk bytes actually differ from the
-  // current target — avoids a needless rewrite/timestamp bump on every repeat run merely
-  // because the capability's target content hasn't changed (mirrors tools/ldl-init's own
-  // "don't rewrite what already matches" discipline for bridge templates).
+  // A parked template's provenance is tracked via `parkedSha256` on its pendingManualIntegration
+  // entry (issue #282 Stage 1 review finding on this mechanism's own PR, #284): without it, an
+  // operator who starts hand-adapting a parked template (e.g. filling in project-specific
+  // details before merging it into the conflicting consumer file) would have that edit silently
+  // discarded the next time this capability's upstream doc content changes and activation
+  // re-runs, because nothing distinguished "still exactly what we last wrote" from "a human has
+  // touched this since." Three cases per parked file:
+  //   - no template on disk yet -> write it, record the new content's hash as parkedSha256;
+  //   - on-disk content already matches the *current* target -> nothing to do (whether it was
+  //     just written, or a human already brought it in line with upstream by hand);
+  //   - on-disk content differs from the target but matches the *previously recorded*
+  //     parkedSha256 -> untouched since this mechanism last wrote it, safe to refresh;
+  //   - anything else (on-disk content matches neither, or there is no prior recorded hash to
+  //     compare against) -> treat as a local edit and leave it alone; the previously recorded
+  //     parkedSha256 (or, if this is the first time provenance was ever tracked for it, the
+  //     current on-disk hash) is preserved as-is rather than advanced to the new target, so the
+  //     divergence keeps being reported on every subsequent run until the operator actually
+  //     resolves the underlying conflict at `destRel` (the real activation success condition —
+  //     not merely a settled parked template).
   let parkedChangedCount = 0;
+  const parkedProvenanceByDestRel = new Map();
+  const existingPendingByDest = new Map((manifest.pendingManualIntegration || []).map((p) => [p.dest, p]));
   for (const p of parked) {
     const absTemplate = join(destRoot, p.templateDestRel);
-    let alreadyMatches = false;
+    const existingEntry = existingPendingByDest.get(p.destRel);
+    const targetTemplateHash = sha256(p.content);
+    let onDiskRaw = null;
     if (existsSync(absTemplate)) {
       try {
-        alreadyMatches = contentMatchesHash(readFileSync(absTemplate), sha256(p.content));
+        onDiskRaw = readFileSync(absTemplate);
       } catch {
-        alreadyMatches = false; // unreadable (e.g. a directory) — fall through to (re)writing it
+        onDiskRaw = null; // unreadable (e.g. a directory) — treated as "no template on disk" below
       }
     }
-    if (!alreadyMatches) {
+
+    if (onDiskRaw === null) {
       mkdirSync(dirname(absTemplate), { recursive: true });
       writeFileSync(absTemplate, p.content);
       parkedChangedCount++;
+      parkedProvenanceByDestRel.set(p.destRel, { parkedSha256: targetTemplateHash, locallyModified: false });
+    } else if (contentMatchesHash(onDiskRaw, targetTemplateHash)) {
+      parkedProvenanceByDestRel.set(p.destRel, { parkedSha256: targetTemplateHash, locallyModified: false });
+    } else if (existingEntry?.parkedSha256 && contentMatchesHash(onDiskRaw, existingEntry.parkedSha256)) {
+      writeFileSync(absTemplate, p.content);
+      parkedChangedCount++;
+      parkedProvenanceByDestRel.set(p.destRel, { parkedSha256: targetTemplateHash, locallyModified: false });
+    } else {
+      parkedProvenanceByDestRel.set(p.destRel, {
+        parkedSha256: existingEntry?.parkedSha256 || sha256(onDiskRaw),
+        locallyModified: true,
+      });
     }
   }
+  const parkedLocallyModifiedCount = [...parkedProvenanceByDestRel.values()].filter((v) => v.locallyModified).length;
 
   // A parked file is deliberately excluded here — it never joins the capability's own managed
   // files[] set, exactly as a parked bridge template never joins tools/ldl-init's manifest
@@ -347,7 +401,17 @@ export async function run(args, deps = {}) {
   // leaving every bridge-file or other-capability entry completely untouched.
   const capabilityDestRels = new Set(ops.map((op) => op.destRel));
   const filteredPending = (manifest.pendingManualIntegration || []).filter((p) => !capabilityDestRels.has(p.dest));
-  const newPendingEntries = parked.map((p) => ({ dest: p.destRel, template: p.templateDestRel, reason: p.reason }));
+  const newPendingEntries = parked.map((p) => {
+    const provenance = parkedProvenanceByDestRel.get(p.destRel);
+    return {
+      dest: p.destRel,
+      template: p.templateDestRel,
+      parkedSha256: provenance.parkedSha256,
+      reason: provenance.locallyModified
+        ? `${p.reason} (note: ${p.templateDestRel} has been locally modified since it was parked and was left untouched even though the canonical content may have changed upstream — resolve manually)`
+        : p.reason,
+    };
+  });
   const pendingManualIntegration = [...filteredPending, ...newPendingEntries];
 
   const activatedAt = existingCapEntry?.activatedAt || now();
@@ -370,6 +434,7 @@ export async function run(args, deps = {}) {
         updated: 0,
         unchanged: unchanged.length,
         parked: parked.length,
+        parkedLocallyModified: parkedLocallyModifiedCount,
         pendingManualIntegration: (manifest.pendingManualIntegration || []).length,
         noop: true,
       }),
@@ -391,6 +456,7 @@ export async function run(args, deps = {}) {
       updated: updatedCount,
       unchanged: unchanged.length,
       parked: parked.length,
+      parkedLocallyModified: parkedLocallyModifiedCount,
       pendingManualIntegration: pendingManualIntegration.length,
       noop: false,
     }),
