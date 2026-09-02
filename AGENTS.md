@@ -68,7 +68,7 @@ After dispatch, first apply the Decomposition boundary: determine whether the ac
 
 For a single bounded vertical slice, the session must:
 
-1. load the parent snapshot and active slice;
+1. load the parent snapshot and identify the active slice — read that slice's own body directly only when implementing it inline rather than dispatching a fresh subagent worker per Subagent dispatch's two-plane rule below;
 2. complete all internal steps required by the slice without routine founder confirmation;
 3. independently verify the claimed outcome;
 4. update the parent snapshot with durable facts only;

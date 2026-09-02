@@ -65,9 +65,10 @@ body:
     attributes:
       label: Minimum authority
       description: >-
-        List only the issue bodies and repository files required for the next transition — point
-        to the active execution Issue, do not paraphrase its requirements or acceptance criteria
-        into this field.
+        List only the issue bodies and repository files required for the next transition. When an
+        execution Issue is currently active, point to it — do not paraphrase its requirements or
+        acceptance criteria into this field. Write None, or only the applicable minimum authority,
+        for a state with no active execution Issue (e.g. PROPOSED, NEEDS_FOUNDER, DECOMPOSED).
     validations:
       required: true
   - type: textarea
