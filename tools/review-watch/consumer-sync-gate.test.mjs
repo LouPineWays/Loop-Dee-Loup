@@ -118,10 +118,10 @@ test("isEligibleForRepair: single commit after the bare trigger -> ineligible, n
   assert.equal(isEligibleForRepair(bare, HEAD, commits), false);
 });
 
-test("isEligibleForRepair: two commits, trigger between them, head is the second (later) commit -> eligible (the ordinary multi-push case, not the adversarial one)", () => {
+test("isEligibleForRepair: two commits, trigger between them, head is the second (later) commit -> ineligible (Stage 2 audit finding on issue #278/#274: any commit after the trigger makes it permanently ineligible, even when head is that very commit -- Codex's response never saw it)", () => {
   const bare = { created_at: "2026-08-20T12:00:00Z" };
   const commits = [commit("commit1", "2026-08-20T00:00:00Z"), commit(HEAD, "2026-08-21T00:00:00Z")];
-  assert.equal(isEligibleForRepair(bare, HEAD, commits), true);
+  assert.equal(isEligibleForRepair(bare, HEAD, commits), false);
 });
 
 test("isEligibleForRepair: two commits, trigger between them, head is the EARLIER commit -> ineligible (head has fallen behind a commit that already exists)", () => {
@@ -138,6 +138,45 @@ test("isEligibleForRepair: an OTHER, earlier post-trigger commit qualifies and i
     commit(HEAD, "2026-08-21T00:00:00Z"),
   ];
   assert.equal(isEligibleForRepair(bare, HEAD, commits), false);
+});
+
+// -- isEligibleForRepair: Stage 2 audit regression, issue #278/#274 (merge commit 07b1215) ---
+//
+// The P1 finding this correction PR addresses: head `A` exists when a bare `@codex review`
+// trigger is posted (so `A` is grounding). Codex genuinely reviews `A` and replies cleanly.
+// Later, commit `B` is pushed (`B` is "after"). The removed case (b) treated `B` as a safe
+// repair target because it was the earliest post-trigger commit -- but Codex's response only
+// ever reviewed `A`'s content, never `B`'s. Repairing the trigger to carry `B`'s head marker
+// would let `A`'s stale response satisfy `B`'s gate even though `B` was never reviewed.
+
+test("isEligibleForRepair: exact audit scenario -- head A is grounding, commit B lands after the trigger -> ineligible for head B (issue #278)", () => {
+  const bare = { created_at: "2026-08-20T12:00:00Z" };
+  const commitA = commit("A", "2026-08-20T00:00:00Z");
+  const commitB = commit("B", "2026-08-21T00:00:00Z");
+  assert.equal(isEligibleForRepair(bare, "B", [commitA, commitB]), false);
+});
+
+test("run: exact audit scenario -- a bare trigger grounded on head A must not be repaired or attempted against a later head B (issue #278)", async () => {
+  const bareComment = { id: 7, body: "@codex review", created_at: "2026-08-20T12:00:00Z" };
+  let patchCalls = 0;
+  const result = await run(
+    { repo: REPO, pr: PR, head: "B" },
+    {
+      ghApiImpl: async () => [bareComment],
+      ghPatchImpl: async () => {
+        patchCalls += 1;
+      },
+      ghPrCommitsImpl: async () => [commit("A", "2026-08-20T00:00:00Z"), commit("B", "2026-08-21T00:00:00Z")],
+      runMergeReadyGateImpl: async () => ({
+        exitCode: 2,
+        state: "BLOCKED",
+        blockedBy: [{ component: "stage1", state: "NOT_REQUESTED" }],
+      }),
+    },
+  );
+  assert.equal(patchCalls, 0, "the trigger grounded on A must never be repaired against B");
+  assert.equal(result.repaired, false);
+  assert.equal(result.status, "not_requested");
 });
 
 // -- findRepairableBareTrigger (Stage 1 review finding #4 on this PR, issue #274/#276) --------
@@ -280,13 +319,43 @@ test("run: does not repair when a marked trigger for this head already exists", 
   assert.equal(result.repaired, false);
 });
 
-test("run: repairs a bare trigger onto the SECOND of two commits when the trigger falls between them (Stage 1 review finding #1 on this PR, issue #274/#276 -- ordinary multi-push case, not the adversarial one)", async () => {
+test("run: does NOT repair a bare trigger onto a commit pushed after it, even when that commit is head (Stage 2 audit finding on issue #278/#274, merge commit 07b1215 -- the removed case (b): the trigger's response never saw this commit's content)", async () => {
   const bareComment = { id: 7, body: "@codex review", created_at: "2026-08-20T12:00:00Z" };
-  let patchArgs;
+  let patchCalls = 0;
   const result = await run(
     { repo: REPO, pr: PR, head: HEAD },
     {
       ghApiImpl: async () => [bareComment],
+      ghPatchImpl: async () => {
+        patchCalls += 1;
+      },
+      ghPrCommitsImpl: async () => [
+        commit("commit1", "2026-08-20T00:00:00Z"),
+        commit(HEAD, "2026-08-21T00:00:00Z"),
+      ],
+      runMergeReadyGateImpl: async () => ({
+        exitCode: 2,
+        state: "BLOCKED",
+        blockedBy: [{ component: "stage1", state: "NOT_REQUESTED" }],
+      }),
+    },
+  );
+  assert.equal(patchCalls, 0, "must never repair a trigger onto a commit pushed after it, even when that commit is head");
+  assert.equal(result.repaired, false);
+  assert.equal(result.status, "not_requested");
+});
+
+test("run: a fresh bare trigger posted after the head settles IS repairable -- the documented recovery path for the trigger above (issue #278)", async () => {
+  // The founder's recovery action for the case above: once head settles at HEAD (no further
+  // commits land), a fresh bare `@codex review` comment posted after that head is grounding
+  // for it and is repairable, distinct from the earlier, now-permanently-ineligible trigger.
+  const staleBare = { id: 7, body: "@codex review", created_at: "2026-08-20T12:00:00Z" };
+  const freshBare = { id: 8, body: "@codex review", created_at: "2026-08-22T00:00:00Z" };
+  let patchArgs;
+  const result = await run(
+    { repo: REPO, pr: PR, head: HEAD },
+    {
+      ghApiImpl: async () => [staleBare, freshBare],
       ghPatchImpl: async (args) => {
         patchArgs = args;
       },
@@ -298,7 +367,7 @@ test("run: repairs a bare trigger onto the SECOND of two commits when the trigge
     },
   );
   assert.equal(result.repaired, true);
-  assert.equal(patchArgs.commentId, 7);
+  assert.equal(patchArgs.commentId, 8, "must repair the fresh, grounded trigger, not the stale ineligible one");
   assert.equal(patchArgs.body, `@codex review\n${headMarker(HEAD)}`);
 });
 

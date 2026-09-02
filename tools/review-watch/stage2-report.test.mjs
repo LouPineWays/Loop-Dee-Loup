@@ -126,6 +126,46 @@ test("extractResponseVerdict: a bare prose sentence opening with 'Verdict' and n
   assert.equal(extractResponseVerdict("Verdict handling must not allow CLEAN to override evidence."), null);
 });
 
+// -- extractResponseVerdict: combined "Stage 2 Audit ... <verdict>" heading (issue #259 recurred
+// a second time on issue #278) --------------------------------------------------------------
+
+test("extractResponseVerdict: a combined 'Stage 2 Audit Verdict: **CLEAN**' heading (issue #259's observed shape)", () => {
+  assert.equal(extractResponseVerdict("## Stage 2 Audit Verdict: **CLEAN**\n\nSome report body follows."), "CLEAN");
+});
+
+test("extractResponseVerdict: a combined 'Stage 2 Audit — NOT CLEAN' heading (issue #278's observed shape)", () => {
+  assert.equal(extractResponseVerdict("## Stage 2 Audit — NOT CLEAN\n\nSome report body follows."), "NOT CLEAN");
+});
+
+test("extractResponseVerdict: a genuine sentence that merely mentions 'Stage 2 Audit' later in a sentence, not as the line's own opening, is not read as a verdict declaration", () => {
+  assert.equal(
+    extractResponseVerdict("Reviewed the diff for compliance with the Stage 2 Audit process described in the runbook."),
+    null,
+  );
+});
+
+test("extractResponseVerdict: a 'Stage 2 Audit' heading merely naming its topic, with no declaring separator before the token, is not read as a verdict (Stage 1 review finding on PR #279)", () => {
+  // Reproduces the exact false positive Codex found: a heading about the topic of clean-close
+  // behavior, not a declaration of this report's own verdict.
+  assert.equal(extractResponseVerdict("## Stage 2 Audit of clean-close behavior\n\nFindings below."), null);
+});
+
+test("extractResponseVerdict: a 'Stage 2 Audit' heading mentioning both tokens without a declaring separator falls through to a real Verdict line, never picks the wrong (first) token (Stage 1 review finding on PR #279)", () => {
+  // Reproduces Codex's second scenario: the heading alone must not resolve the verdict --
+  // MUST fall through to the actual "Verdict: NOT CLEAN" label line elsewhere in the body,
+  // not stop at the first CLEAN/NOT CLEAN token it happens to see on the heading line.
+  const body =
+    "## Stage 2 Audit status was CLEAN, now NOT CLEAN\n\nSome findings.\n\nVerdict: NOT CLEAN";
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("extractResponseVerdict: the same ambiguous heading with no real verdict line anywhere else extracts nothing, rather than guessing", () => {
+  assert.equal(
+    extractResponseVerdict("## Stage 2 Audit status was CLEAN, now NOT CLEAN\n\nSome prose with no verdict label."),
+    null,
+  );
+});
+
 // -- countNumberedItems ------------------------------------------------------------------------
 
 test("countNumberedItems: counts each top-level numbered line", () => {
@@ -260,6 +300,25 @@ test("isCompletedStage2AuditReport: accepts the leading-status-line shape as wel
   const result = isCompletedStage2AuditReport(body, { mergeCommit: MERGE_COMMIT });
   assert.equal(result.complete, true);
   assert.equal(result.verdict, "CLEAN");
+});
+
+// -- isCompletedStage2AuditReport: combined "Stage 2 Audit ... <verdict>" heading (issue #259
+// recurred a second time on issue #278) -------------------------------------------------------
+
+test("isCompletedStage2AuditReport: accepts a full realistic report opening with the observed '## Stage 2 Audit Verdict: **CLEAN**' heading (issue #259)", () => {
+  const body = validReport({ verdictLine: "", leading: "## Stage 2 Audit Verdict: **CLEAN**" });
+  const result = isCompletedStage2AuditReport(body, { mergeCommit: MERGE_COMMIT });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "CLEAN");
+  assert.deepEqual(result.reasons, []);
+});
+
+test("isCompletedStage2AuditReport: accepts a full realistic report opening with the observed '## Stage 2 Audit — NOT CLEAN' heading (issue #278)", () => {
+  const body = validReport({ verdictLine: "", leading: "## Stage 2 Audit — NOT CLEAN" });
+  const result = isCompletedStage2AuditReport(body, { mergeCommit: MERGE_COMMIT });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "NOT CLEAN");
+  assert.deepEqual(result.reasons, []);
 });
 
 test("isCompletedStage2AuditReport: a report addressing the wrong commit is rejected", () => {

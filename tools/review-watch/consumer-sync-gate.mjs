@@ -44,7 +44,13 @@
 //      commit_id) genuine response it already drew would then wrongly satisfy a head it
 //      never actually reviewed. When the earliest bare trigger fails that check, later bare
 //      triggers on the same thread are still considered in order (findRepairableBareTrigger)
-//      rather than giving up after the first failure;
+//      rather than giving up after the first failure. A bare trigger becomes permanently
+//      ineligible for repair the moment the PR head advances past what existed when it was
+//      posted -- by design (Stage 2 audit finding on issue #278/#274, merge commit 07b1215):
+//      Codex's response only ever reviewed the content that existed at trigger time, so no
+//      later head can safely borrow it. Recovery is a fresh bare `@codex review` comment once
+//      the new head is up -- findRepairableBareTrigger's multi-candidate iteration then finds
+//      and repairs that trigger against the new head via the grounding-only case below;
 //   3. runs merge-ready-gate.mjs with the explicit no-work-issue sentinel every recurring
 //      sync PR needs (issue #190), since this script is scoped to exactly that PR shape;
 //   4. additionally requires the genuine Stage 1 response to be recognizably a *clean*
@@ -155,13 +161,23 @@ export function findBareTrigger(comments) {
 // after `bare`:
 //   - no grounding commit at all -> refuse. The trigger predates every known commit, so
 //     there is nothing to safely attribute it to (the single-commit "stale trigger" case).
-//   - a grounding commit exists and nothing landed after `bare` -> safe exactly when `head`
-//     is that latest grounding commit, i.e. the PR is unchanged since the trigger was posted
-//     (the original, still-supported single-commit repair case).
-//   - a grounding commit exists and something landed after `bare` -> safe only when `head`
-//     is the EARLIEST such post-trigger commit. If some other, earlier post-trigger commit
-//     also qualifies and isn't `head`, `head` has skipped past a commit the trigger's
-//     response never covered, so refuse.
+//   - a grounding commit exists -> safe iff `head` is that latest grounding commit, i.e. the
+//     PR is unchanged since the trigger was posted (the original, still-supported
+//     single-commit repair case).
+//
+// Any commit strictly after `bare` -- ANY of them, regardless of whether `head` happens to be
+// the earliest one -- makes this trigger permanently ineligible for repair against `head`, by
+// design (Stage 2 audit finding on issue #278/#274, merge commit 07b1215): an earlier revision
+// of this function treated `head` being the earliest post-trigger commit as a second safe
+// case, reasoning that it was "the very next commit pushed after this trigger". But Codex's
+// response only ever reviewed the content that existed *at trigger time* -- it never saw that
+// later commit's content, however "next" it was. Repairing the trigger to carry that later
+// head's marker would let a stale, pre-existing response satisfy a head it never actually
+// reviewed, defeating the frozen-head requirement stage1-gate.mjs's matchBelongsToHead (issue
+// #163) depends on. Recovery is not this function's job: the founder posts a *fresh* bare
+// `@codex review` comment once the new head is up, and findRepairableBareTrigger's
+// multi-candidate iteration finds and repairs that fresh trigger via the grounding-only case
+// above -- see this file's header comment.
 export function isEligibleForRepair(bare, head, commits) {
   const bareMs = new Date(bare.created_at).getTime();
   const sorted = [...(commits ?? [])].sort(
@@ -170,8 +186,8 @@ export function isEligibleForRepair(bare, head, commits) {
   const grounding = sorted.filter((c) => new Date(c.commit.committer.date).getTime() <= bareMs);
   if (grounding.length === 0) return false;
   const after = sorted.filter((c) => new Date(c.commit.committer.date).getTime() > bareMs);
-  if (after.length === 0) return head === grounding[grounding.length - 1].sha;
-  return head === after[0].sha;
+  if (after.length > 0) return false;
+  return head === grounding[grounding.length - 1].sha;
 }
 
 // Pure. Iterates bare-trigger candidates oldest-first and returns the first one eligible for
