@@ -40,6 +40,7 @@ const pathChecks = [
   { label: "tools/ldl-init/**", ok: () => dirHasFiles("tools/ldl-init") },
   { label: "tools/ldl-update/**", ok: () => dirHasFiles("tools/ldl-update") },
   { label: "tools/ldl-ack/**", ok: () => dirHasFiles("tools/ldl-ack") },
+  { label: "tools/ldl-activate/**", ok: () => dirHasFiles("tools/ldl-activate") },
   { label: "tools/mcp-server/**", ok: () => dirHasFiles("tools/mcp-server") },
   { label: "tools/ldl-sync/**", ok: () => dirHasFiles("tools/ldl-sync") },
 ];
@@ -62,6 +63,7 @@ const requiredLiterals = [
   "tools/ldl-init/**",
   "tools/ldl-update/**",
   "tools/ldl-ack/**",
+  "tools/ldl-activate/**",
   "tools/mcp-server/**",
   "tools/ldl-sync/**",
 ];

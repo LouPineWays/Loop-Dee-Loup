@@ -488,6 +488,58 @@ revision:
   `pendingManualIntegration` sets) is a predictable no-op: it does not touch
   `.ldl/manifest.json` or any managed file at all.
 
+## Optional integration activation
+
+Installing LDL core (`tools/ldl-init`) never turns on any optional
+repository integration — core install and optional activation are two
+separate steps. `tools/ldl-init`/`tools/ldl-update` only ever install and
+keep current the LDL-managed material listed above; whether a consumer also
+wants an optional capability like automated consumer sync is a separate,
+explicit choice (issue #282).
+
+`tools/ldl-activate/index.mjs` is the deterministic activation mechanism for
+that choice. Like `tools/ldl-init`/`tools/ldl-update`/`tools/ldl-ack`, it is
+run from a local Loop-Dee-Loup clone against `--dest <consumer-repo>`, not
+distributed into the consumer repository itself:
+
+```bash
+node <path-to-loop-dee-loup-clone>/tools/ldl-activate/index.mjs --dest <path-to-your-project> --list
+node <path-to-loop-dee-loup-clone>/tools/ldl-activate/index.mjs --dest <path-to-your-project> --capability <id>
+```
+
+`--list` enumerates every capability this script knows how to activate
+(today, only `consumer-sync` — see below); `--capability <id>` activates
+one. It requires an already-`tools/ldl-init`-bootstrapped `--dest`, exactly
+like `tools/ldl-update`.
+
+Activation is idempotent and conflict-safe using the same 3-way hash
+comparison `tools/ldl-update` already applies to `MANAGED_ITEMS` content
+(current on-disk content vs. the recorded activation hash vs. the new
+target content) — see "Conflict-safe updates" above for the mechanism;
+`tools/ldl-activate` applies it per activated file instead of per
+`MANAGED_ITEMS` entry. A pre-existing consumer-owned file already sitting at
+a capability's target path is never overwritten: it is parked at
+`.ldl/templates/<id>/<file>` for manual review, exactly the same disposition
+a pre-existing `AGENTS.md`/`CLAUDE.md` gets (see "The AGENTS.md and CLAUDE.md
+special case" above), and recorded in `.ldl/manifest.json`'s
+`pendingManualIntegration` array alongside any pending bridge file.
+
+An already-activated capability is **not** kept current automatically by
+`tools/ldl-update` — that mechanism only ever touches `MANAGED_ITEMS`
+content and the AGENTS.md/CLAUDE.md bridge. Re-run `tools/ldl-activate` with
+the same `--capability` to pick up an upstream correction to that
+capability's canonical content; it detects local divergence the same way
+and refuses an unsafe overwrite the same way. `tools/ldl-init` and
+`tools/ldl-update` both surface a reminder of this in their own `warnings`
+result whenever a consumer repository has any capability activated, so this
+does not depend on a human remembering it.
+
+The one capability proven today is `consumer-sync` (`.ldl/manifest.json`'s
+`activatedCapabilities` array records its id, activation time, and the
+per-file provenance hashes tools/ldl-activate compares against on every
+later run) — it installs the two workflows documented next, "Automated
+consumer sync" and "Automated Stage 1 and merge-ready bookkeeping".
+
 ## Automated consumer sync
 
 `tools/ldl-sync/` (LDL-managed, distributed via `MANAGED_ITEMS` like
@@ -511,9 +563,13 @@ Like every other GitHub Actions workflow, the actual scheduled workflow file
 not an LDL-managed destination — it is never installed or overwritten by
 `tools/ldl-init`/`tools/ldl-update`, exactly like this repository's own CI
 workflows are never installed into a consumer repository (see "LDL-managed"
-above). A consumer adopts automated sync by copying the example workflow
-below into their own `.github/workflows/` and adjusting it for their
-repository, then owns and can freely modify that file from then on.
+above). `tools/ldl-activate/index.mjs --dest <consumer-repo> --capability
+consumer-sync` (see "Optional integration activation" above) is now the
+supported deterministic way to install this file. Copying the example
+workflow below by hand and adjusting it yourself remains equally valid for a
+consumer who wants full manual control from the start — activation is not
+mandatory, and either path leaves the consumer owning and free to modify
+that file from then on.
 
 ### The PR-creation prerequisite
 
@@ -945,9 +1001,13 @@ bookkeeping around a clean pass, never the judgment a real finding needs.
 
 ### Example workflow
 
-Copy this alongside `ldl-sync.yml` as `.github/workflows/ldl-sync-review.yml`
-— it watches the same fixed sync branch, so it only ever acts on LDL's own
-recurring sync PR, never an arbitrary one:
+`tools/ldl-activate/index.mjs --dest <consumer-repo> --capability
+consumer-sync` (see "Optional integration activation" above) installs this
+workflow alongside `ldl-sync.yml` in one deterministic step. Copying it by
+hand as `.github/workflows/ldl-sync-review.yml` and adjusting it yourself
+remains equally valid — activation is not mandatory. Either way it watches
+the same fixed sync branch, so it only ever acts on LDL's own recurring sync
+PR, never an arbitrary one:
 
 ````yaml
 name: LDL Sync Review

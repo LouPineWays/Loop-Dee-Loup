@@ -46,6 +46,17 @@ your repository, and writes `.ldl/manifest.json` recording exactly what it
 installed. It is safe to run against an already-in-progress project, and
 safe to run again.
 
+## 2b. Optional: activate integrations
+
+Core install never turns on any optional repository integration —
+installing LDL and activating an integration are two separate, explicit
+steps. Run `node <path-to-loop-dee-loup-clone>/tools/ldl-activate/index.mjs
+--dest <path-to-your-project> --list` to see what's available; today that's
+`consumer-sync`, the automated LDL sync PR plus its review-gate bookkeeping.
+Activation is optional and idempotent — see `docs/consumer-contract.md`,
+"Optional integration activation", for the full mechanism and conflict-safe
+guarantees.
+
 ## 3. What gets installed vs. what stays yours
 
 `tools/ldl-init` only ever writes the specific LDL-managed paths listed in

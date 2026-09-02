@@ -37,7 +37,6 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-
 const LDL_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 const SOURCE_ONLY_START = "<!-- ldl:source-only:start -->";
@@ -91,6 +90,62 @@ export const SYNC_PR_PERMISSION_WARNING =
 export function deriveSyncPrerequisiteWarnings(destPaths) {
   const hasSyncPaths = destPaths.some((d) => d === "tools/ldl-sync" || d.startsWith("tools/ldl-sync/"));
   return hasSyncPaths ? [SYNC_PR_PERMISSION_WARNING] : [];
+}
+
+// Reminds an operator that an already-activated optional capability's consumer-owned wiring
+// (e.g. .github/workflows/ldl-sync.yml, via tools/ldl-activate) is not automatically kept
+// current by tools/ldl-update the way MANAGED_ITEMS content is — issue #282 requirement 7
+// deliberately chose a "deterministic re-apply command" (re-run tools/ldl-activate) over
+// teaching tools/ldl-update to also own updating capability wiring, so as not to touch its
+// already-tested conflict-accumulation logic in planUpdate(). Without a reminder, an activated
+// capability's wiring would otherwise go "unknowably stale" the moment its extracted doc
+// content changes upstream, even though tools/ldl-update keeps every other managed file
+// current automatically. Lives here (not in tools/ldl-activate) for the same reason
+// deriveSyncPrerequisiteWarnings does: both tools/ldl-init and tools/ldl-update need to call
+// it from their own result-building step, and this file is the shared base both already
+// depend on one-directionally — putting it in tools/ldl-activate instead would make
+// tools/ldl-init and tools/ldl-update each import back from a tool that itself imports
+// shared primitives from tools/ldl-init, a circular import with no benefit. Re-exported from
+// tools/ldl-activate/index.mjs for callers that reasonably look for a capability-activation
+// reminder there instead.
+export function deriveActivatedCapabilityReminder(activatedCapabilities) {
+  if (!activatedCapabilities || activatedCapabilities.length === 0) return [];
+  const ids = activatedCapabilities.map((c) => c.id).join(", ");
+  return [
+    `Activated optional capabilities (${ids}) are not updated by this run — re-run ` +
+      `tools/ldl-activate/index.mjs --dest <this repo> --capability <id> for each to pick up any upstream correction. ` +
+      `See docs/consumer-contract.md, "Optional integration activation".`,
+  ];
+}
+
+// Order-independent comparison of two `skipped` entry lists by dest+reason, used to decide
+// whether a newly computed skip set differs from what the existing manifest already
+// recorded — a run that finds nothing new to skip is still a true no-op. Compares each entry
+// as a [dest, reason] pair via JSON.stringify rather than joining into one delimited string,
+// so no delimiter choice can ever be ambiguous against arbitrary dest/reason text.
+// Lives here (not tools/ldl-update, which first defined it) so tools/mcp-server/status.mjs and
+// tools/ldl-activate can both use the exact same comparison without either importing it via
+// tools/ldl-update — re-exported from tools/ldl-update/index.mjs for that existing call site.
+export function skipListsEqual(a, b) {
+  const normalize = (list) =>
+    JSON.stringify(
+      list
+        .map((s) => [s.dest, s.reason])
+        .sort((x, y) => (x[0] === y[0] ? x[1].localeCompare(y[1]) : x[0].localeCompare(y[0]))),
+    );
+  return normalize(a) === normalize(b);
+}
+
+// Same order-independent comparison as skipListsEqual, applied to `pendingManualIntegration`
+// entries instead: lets a run whose set of bridge/capability files awaiting manual merge
+// hasn't changed still count as a true no-op, without a bespoke third comparison for a third
+// array shape. Lives here for the same reason as skipListsEqual above.
+export function pendingIntegrationListsEqual(a, b) {
+  const normalize = (list) =>
+    JSON.stringify(
+      list.map((p) => [p.dest, p.template, p.reason]).sort((x, y) => (x[0] === y[0] ? x[1].localeCompare(y[1]) : x[0].localeCompare(y[0]))),
+    );
+  return normalize(a) === normalize(b);
 }
 
 // A "bridge" file's installed destination depends on consumer repository state, not source
@@ -675,7 +730,12 @@ export function isValidManifest(value) {
         typeof p.template === "string" &&
         p.template.length > 0 &&
         typeof p.reason === "string" &&
-        p.reason.length > 0,
+        p.reason.length > 0 &&
+        // `parkedSha256` (issue #282) is optional and only ever set by tools/ldl-activate on a
+        // parked capability file, never on a bridge entry — but when present it must be a real
+        // sha256 hex digest, matching the same why-optional-fields-are-still-shape-checked
+        // rigor `manualIntegrationAcknowledgements` below already applies to its own hash field.
+        (p.parkedSha256 === undefined || SHA256_HEX.test(p.parkedSha256)),
     );
     if (!pendingValid) return false;
   }
@@ -700,6 +760,36 @@ export function isValidManifest(value) {
         a.acknowledgedAt.length > 0,
     );
     if (!acknowledgementsValid) return false;
+  }
+  // `activatedCapabilities` (issue #282) is optional for the same reason as the fields above
+  // (an older or hand-authored manifest may predate tools/ldl-activate entirely). Each entry
+  // is one optional integration's durable activation record: a non-empty `id`, a non-empty
+  // `activatedAt`, and a `files` array of complete {dest, sha256} pairs — the exact same shape
+  // discipline `files` itself gets above, for the exact same reason: an incomplete entry would
+  // otherwise be trusted as an LDL ownership claim over a consumer-owned path it was never
+  // actually written to.
+  if (value.activatedCapabilities !== undefined) {
+    if (!Array.isArray(value.activatedCapabilities)) return false;
+    const activatedCapabilitiesValid = value.activatedCapabilities.every(
+      (c) =>
+        c &&
+        typeof c === "object" &&
+        typeof c.id === "string" &&
+        c.id.length > 0 &&
+        typeof c.activatedAt === "string" &&
+        c.activatedAt.length > 0 &&
+        Array.isArray(c.files) &&
+        c.files.every(
+          (f) =>
+            f &&
+            typeof f === "object" &&
+            typeof f.dest === "string" &&
+            f.dest.length > 0 &&
+            typeof f.sha256 === "string" &&
+            SHA256_HEX.test(f.sha256),
+        ),
+    );
+    if (!activatedCapabilitiesValid) return false;
   }
   return true;
 }
@@ -832,6 +922,15 @@ export async function run(args, deps = {}) {
   const manualIntegrationAcknowledgements = existingManifest?.manualIntegrationAcknowledgements || [];
   const pendingManualIntegration = derivePendingManualIntegration(bridgePlans, toSkip, manualIntegrationAcknowledgements);
 
+  // Issue #282: activatedCapabilities (tools/ldl-activate's own durable record of which
+  // optional integrations this consumer has turned on) must survive a reinit exactly like
+  // manualIntegrationAcknowledgements above — this manifest object is a fresh literal, not a
+  // spread of existingManifest, so any field not explicitly carried forward here is silently
+  // wiped on every re-run. Missing this carry-forward would mean re-running tools/ldl-init
+  // against an already-activated consumer repository silently erases its activation record —
+  // a real data-loss bug, not merely a missed reminder.
+  const activatedCapabilities = existingManifest?.activatedCapabilities || [];
+
   const manifest = {
     schemaVersion: 1,
     ldlSourceRevision: resolveRevisionImpl(root),
@@ -840,6 +939,7 @@ export async function run(args, deps = {}) {
     skipped: toSkip,
     pendingManualIntegration,
     manualIntegrationAcknowledgements,
+    activatedCapabilities,
   };
 
   mkdirSync(join(destRoot, ".ldl"), { recursive: true });
@@ -853,7 +953,13 @@ export async function run(args, deps = {}) {
       manualIntegrationNeeded: manifest.pendingManualIntegration.length,
       revision: manifest.ldlSourceRevision,
       manifestPath: ".ldl/manifest.json",
-      warnings: deriveSyncPrerequisiteWarnings(manifest.files.map((f) => f.dest)),
+      // deriveActivatedCapabilityReminder itself no-ops on an empty array, so this is safe to
+      // call unconditionally rather than gating it on whether existingManifest carried any
+      // activated capabilities forward.
+      warnings: [
+        ...deriveSyncPrerequisiteWarnings(manifest.files.map((f) => f.dest)),
+        ...deriveActivatedCapabilityReminder(manifest.activatedCapabilities),
+      ],
     }),
   };
 }

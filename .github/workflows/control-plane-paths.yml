@@ -21,6 +21,7 @@ on:
       - "tools/ldl-init/**"
       - "tools/ldl-update/**"
       - "tools/ldl-ack/**"
+      - "tools/ldl-activate/**"
       - "tools/mcp-server/**"
       - "tools/ldl-sync/**"
 
@@ -55,6 +56,9 @@ jobs:
 
       - name: LDL-ack (manual integration acknowledgement) tests
         run: node --test tools/ldl-ack/index.test.mjs
+
+      - name: LDL-activate tests
+        run: node --test tools/ldl-activate/*.test.mjs
 
       - name: Install mcp-server dependencies
         run: npm ci
