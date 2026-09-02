@@ -185,6 +185,22 @@ One Claude Code session owns one vertical slice:
 - when this slice's completion exposes new follow-on work not already foreseeable at dispatch, prepare at most one next slice — see Decomposition boundary for issues that require multiple slices;
 - stop.
 
+## Two-plane Issue dispatch
+
+A dispatched Issue can carry two distinct kinds of authority, and a session must not collapse them into one read.
+
+**Control-plane authority** is lifecycle truth: accepted outcome, current state, the pointer to whichever execution Issue is currently authoritative, PR/review/audit status, blocker and founder-decision state. The `parent-execution` template is this plane. **Execution-plane authority** is the actual requirements, acceptance criteria, verification, and constraints a worker needs to produce the outcome. The `work-packet` (vertical-slice) template is this plane. Neither plane duplicates the other: updating lifecycle state does not require rewriting the execution spec into the control Issue, and updating execution requirements does not create a second detailed spec there.
+
+The orchestrating session normally reads only control-plane state — the parent snapshot and the fields of the active slice it is about to hand off, not that slice's full body merely because a subagent will eventually need it. When a subagent is doing the actual implementation work and a self-sufficient execution Issue already exists for it, dispatch by reference: Issue number, controlling Issue, and route/persona if already settled. Do not read that execution Issue into the orchestrating session first, and do not reconstruct its requirements, acceptance criteria, or test plan into the subagent prompt — the worker reads the execution Issue and governing repository authority directly. Issue #283 (the #282 incident) is the record of this failure: a controller reconstructed most of a self-sufficient execution Issue into a bespoke subagent prompt and then also told the worker to read the same Issue, paying for one specification twice and loading implementation detail into the orchestrating session for no benefit.
+
+This does not change how subagents should be briefed for genuinely ambiguous or undocumented work — situational framing, prior findings, and specific file/line context still belong in the prompt when no durable spec covers them. It narrows only the case where a complete, self-sufficient execution Issue already exists: there, the Issue is the spec, and re-explaining it into the prompt is waste, not diligence.
+
+**Legacy unsplit Issues.** Not every Issue is split into control/execution planes. If routing/control state (outcome, state, route, blocker) can be extracted from an unsplit Issue deterministically, do that instead of a full orchestrator read. If judgment is required, dispatch a fresh routing worker that reads the full Issue and returns only a compact projection — outcome shape, executor/persona, blocker state, authority conflicts — never a prose implementation summary — for the orchestrating session to act on. This fallback is not license to make a full orchestrator read routine for newly created or migrated watched work; prefer the split.
+
+**Direct-inspection fallback.** An orchestrating session may read execution-plane authority directly to resolve a genuine exception: conflicting authority between the two planes, corrupt or missing control-Issue state, an Issue whose shape routing analysis failed to resolve, a worker escalation whose consequence cannot be judged from compact control state, or a founder decision whose exact wording matters to the next control action. This is an explicit exception path, not a routine one.
+
+**No message bus.** A worker's return to the orchestrating session stays compact and control-oriented — complete, blocked, founder decision required, or the next authorized transition — not a narrative of implementation detail for the orchestrator to relay into a later worker's prompt. When one worker's output is needed by another, put it in durable repository/GitHub state and reference it there, rather than routing it through orchestrator chat.
+
 ## Decomposition boundary
 
 Decomposition and execution are separate control boundaries. An issue completable as one bounded vertical slice executes normally under Session role above.

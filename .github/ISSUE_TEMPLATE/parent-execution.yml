@@ -64,7 +64,10 @@ body:
     id: authority
     attributes:
       label: Minimum authority
-      description: List only the issue bodies and repository files required for the next transition.
+      description: >-
+        List only the issue bodies and repository files required for the next transition — point
+        to the active execution Issue, do not paraphrase its requirements or acceptance criteria
+        into this field.
     validations:
       required: true
   - type: textarea
