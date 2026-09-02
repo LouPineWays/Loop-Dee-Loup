@@ -903,11 +903,24 @@ primitive:
    marker — mechanically automating the exact hand-edit
    docs/bounded-review-cycle.md Stage 1 step 3 currently documents as a
    manual recovery, and the exact step YouTubery PR #98 needed a founder
-   to do by hand;
+   to do by hand. It refuses to repair a bare comment posted *before* the
+   current head's own commit (a Stage 1 review finding on this mechanism's
+   own PR, #275): a trigger from an earlier head must never be relabeled
+   onto a later one the PR has since advanced to, or a stale, unbound
+   response could wrongly satisfy a head it never actually reviewed;
 3. it runs `merge-ready-gate.mjs --issue none` (issue #190's explicit
    no-work-issue sentinel — every recurring sync PR has no dedicated
-   implementation issue to check a closing reference against) and reports
-   one of `ready` / `not_requested` / `pending` / `blocked` / `error`.
+   implementation issue to check a closing reference against), and
+   additionally requires the genuine response to be recognizably *clean* —
+   `merge-ready-gate.mjs` only proves a genuine response arrived, never
+   that it is finding-free (another Stage 1 review finding on this PR,
+   reproduced live by that very review's own 7 findings). It recognizes
+   Codex's fixed clean-pass phrasing ("`Codex Review: Didn't find any
+   major issues.`", observed unchanged on this repository's own merged
+   PRs) and reports `blocked` for anything else genuine, including a real
+   finding-bearing review;
+4. it reports one of `ready` / `not_requested` / `pending` / `blocked` /
+   `error`.
 
 `--set-status true` turns that result into a GitHub commit status on the
 PR's head, under the context `ldl-sync/merge-ready` — a conspicuous
@@ -919,7 +932,7 @@ to see it:
 | `ready` | success | Clean genuine Codex review + composed gate pass. Founder just clicks Merge. |
 | `not_requested` | pending | No trigger yet. Founder's one action: comment `@codex review` on the PR. |
 | `pending` | pending | Trigger exists; waiting on a genuine Codex response. Nothing to do yet. |
-| `blocked` | failure | A closing-reference violation or other non-pending block. See PR comments / Actions log. |
+| `blocked` | failure | A closing-reference violation, a genuine response not recognized as clean (may carry findings), or other non-pending block. See PR comments / Actions log. |
 | `error` | error | An operational failure (a `gh` call failed, malformed gate output). See Actions log. |
 
 `blocked`/`error` never produce the `ready` state, `not_requested` and
@@ -943,6 +956,10 @@ on:
   pull_request:
     types: [opened, synchronize]
     branches: [main]
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
   issue_comment:
     types: [created]
   schedule:
@@ -950,6 +967,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  contents: read
   pull-requests: write
   issues: write
   statuses: write
@@ -964,18 +982,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Determine the sync PR number
+      - name: Determine the sync PR number and branch
         id: find_pr
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          # A fork PR's branch name is attacker-controlled and can contain shell
+          # metacharacters (e.g. "$(...)") -- passed through env, never interpolated
+          # directly into the script body below, so it is only ever used as inert data.
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_NUMBER_FROM_EVENT: ${{ github.event.pull_request.number || github.event.issue.number }}
         run: |
-          case "${{ github.event_name }}" in
-            pull_request)
-              PR="${{ github.event.pull_request.number }}"
-              REF="${{ github.event.pull_request.head.ref }}"
+          case "$EVENT_NAME" in
+            pull_request|pull_request_review|pull_request_review_comment)
+              PR="$PR_NUMBER_FROM_EVENT"
+              REF="$PR_HEAD_REF"
               ;;
             issue_comment)
-              PR="${{ github.event.issue.number }}"
+              PR="$PR_NUMBER_FROM_EVENT"
               REF="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefName -q .headRefName)"
               ;;
             *)
@@ -994,15 +1018,29 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # `bash -e -o pipefail` (GitHub Actions' default shell) would otherwise abort this
+          # step the instant consumer-sync-gate.mjs exits 2 for its own normal not_requested/
+          # pending states, before the summary below ever runs -- narrowly disabled around
+          # just this invocation, matching every other step in this file that inspects a
+          # command's own documented non-zero exit rather than treating it as a shell failure.
+          set +e
           node tools/review-watch/consumer-sync-gate.mjs \
             --repo "$GITHUB_REPOSITORY" --pr "${{ steps.find_pr.outputs.pr }}" --set-status true \
-            | tee gate-result.json
+            > gate-result.json
+          set -e
+          cat gate-result.json
           STATUS=$(node -e "console.log(JSON.parse(require('fs').readFileSync('gate-result.json','utf8')).status)")
           {
             echo "### LDL Sync Review: $STATUS"
             echo
             cat gate-result.json
           } >> "$GITHUB_STEP_SUMMARY"
+          # not_requested/pending are normal waiting states, already visible via the
+          # ldl-sync/merge-ready commit status above -- only blocked/error fail this Actions
+          # run itself, so the Actions tab stays quiet while nothing actually needs attention.
+          if [ "$STATUS" = "blocked" ] || [ "$STATUS" = "error" ]; then
+            exit 1
+          fi
 ````
 
 This is a starting point, not a distributed artifact — copy it into your
