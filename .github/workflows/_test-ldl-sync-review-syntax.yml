@@ -1,0 +1,91 @@
+name: LDL Sync Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main]
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: "*/20 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+
+env:
+  SYNC_BRANCH: ldl-sync/auto-update
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request != null
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine the sync PR number and branch
+        id: find_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          # A fork PR's branch name is attacker-controlled and can contain shell
+          # metacharacters (e.g. "$(...)") -- passed through env, never interpolated
+          # directly into the script body below, so it is only ever used as inert data.
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_NUMBER_FROM_EVENT: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request|pull_request_review|pull_request_review_comment)
+              PR="$PR_NUMBER_FROM_EVENT"
+              REF="$PR_HEAD_REF"
+              ;;
+            issue_comment)
+              PR="$PR_NUMBER_FROM_EVENT"
+              REF="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefName -q .headRefName)"
+              ;;
+            *)
+              PR="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number // empty')"
+              REF="$SYNC_BRANCH"
+              ;;
+          esac
+          if [ -z "$PR" ] || [ "$REF" != "$SYNC_BRANCH" ]; then
+            echo "pr=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "pr=$PR" >> "$GITHUB_OUTPUT"
+
+      - name: Run consumer-sync-gate.mjs
+        if: steps.find_pr.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # `bash -e -o pipefail` (GitHub Actions' default shell) would otherwise abort this
+          # step the instant consumer-sync-gate.mjs exits 2 for its own normal not_requested/
+          # pending states, before the summary below ever runs -- narrowly disabled around
+          # just this invocation, matching every other step in this file that inspects a
+          # command's own documented non-zero exit rather than treating it as a shell failure.
+          set +e
+          node tools/review-watch/consumer-sync-gate.mjs \
+            --repo "$GITHUB_REPOSITORY" --pr "${{ steps.find_pr.outputs.pr }}" --set-status true \
+            > gate-result.json
+          set -e
+          cat gate-result.json
+          STATUS=$(node -e "console.log(JSON.parse(require('fs').readFileSync('gate-result.json','utf8')).status)")
+          {
+            echo "### LDL Sync Review: $STATUS"
+            echo
+            cat gate-result.json
+          } >> "$GITHUB_STEP_SUMMARY"
+          # not_requested/pending are normal waiting states, already visible via the
+          # ldl-sync/merge-ready commit status above -- only blocked/error fail this Actions
+          # run itself, so the Actions tab stays quiet while nothing actually needs attention.
+          if [ "$STATUS" = "blocked" ] || [ "$STATUS" = "error" ]; then
+            exit 1
+          fi
