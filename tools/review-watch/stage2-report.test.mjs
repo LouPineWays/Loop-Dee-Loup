@@ -144,6 +144,28 @@ test("extractResponseVerdict: a genuine sentence that merely mentions 'Stage 2 A
   );
 });
 
+test("extractResponseVerdict: a 'Stage 2 Audit' heading merely naming its topic, with no declaring separator before the token, is not read as a verdict (Stage 1 review finding on PR #279)", () => {
+  // Reproduces the exact false positive Codex found: a heading about the topic of clean-close
+  // behavior, not a declaration of this report's own verdict.
+  assert.equal(extractResponseVerdict("## Stage 2 Audit of clean-close behavior\n\nFindings below."), null);
+});
+
+test("extractResponseVerdict: a 'Stage 2 Audit' heading mentioning both tokens without a declaring separator falls through to a real Verdict line, never picks the wrong (first) token (Stage 1 review finding on PR #279)", () => {
+  // Reproduces Codex's second scenario: the heading alone must not resolve the verdict --
+  // MUST fall through to the actual "Verdict: NOT CLEAN" label line elsewhere in the body,
+  // not stop at the first CLEAN/NOT CLEAN token it happens to see on the heading line.
+  const body =
+    "## Stage 2 Audit status was CLEAN, now NOT CLEAN\n\nSome findings.\n\nVerdict: NOT CLEAN";
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("extractResponseVerdict: the same ambiguous heading with no real verdict line anywhere else extracts nothing, rather than guessing", () => {
+  assert.equal(
+    extractResponseVerdict("## Stage 2 Audit status was CLEAN, now NOT CLEAN\n\nSome prose with no verdict label."),
+    null,
+  );
+});
+
 // -- countNumberedItems ------------------------------------------------------------------------
 
 test("countNumberedItems: counts each top-level numbered line", () => {
