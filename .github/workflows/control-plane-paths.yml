@@ -14,6 +14,7 @@ on:
       - ".github/workflows/**"
       - ".claude/**"
       - "tools/check-control-plane-paths.mjs"
+      - "tools/check-startup-budget.mjs"
       - "tools/check-priority-labels.mjs"
       - "tools/local-worker/**"
       - "tools/review-watch/**"
@@ -38,6 +39,9 @@ jobs:
 
       - name: Verify control-plane path list
         run: node tools/check-control-plane-paths.mjs
+
+      - name: Verify startup-context budget
+        run: node tools/check-startup-budget.mjs
 
       - name: Local-worker adapter tests
         run: node --test tools/local-worker/adapter.test.mjs
