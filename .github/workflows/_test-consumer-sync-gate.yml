@@ -8,11 +8,9 @@ name: (temporary) consumer-sync-gate empirical trigger test
 # that introduces tools/review-watch/consumer-sync-gate.mjs.
 
 on:
-  workflow_dispatch:
-    inputs:
-      pr:
-        description: "PR number to run consumer-sync-gate.mjs against"
-        required: true
+  pull_request:
+    types: [synchronize]
+    branches: [main]
 
 permissions:
   contents: read
@@ -22,6 +20,11 @@ permissions:
 
 jobs:
   test:
+    # workflow_dispatch needs the workflow file already on the default branch to be
+    # discoverable via API/CLI (a separate GitHub limitation from this issue's own
+    # native-trigger question) -- pull_request:synchronize runs from the PR branch's own
+    # workflow definition instead, so this throwaway probe can run before merge.
+    if: github.event.pull_request.number != null
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,4 +33,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           node tools/review-watch/consumer-sync-gate.mjs \
-            --repo "$GITHUB_REPOSITORY" --pr "${{ inputs.pr }}" --set-status true
+            --repo "$GITHUB_REPOSITORY" --pr "${{ github.event.pull_request.number }}" --set-status true
