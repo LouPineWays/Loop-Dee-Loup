@@ -845,6 +845,171 @@ This is a starting point, not a distributed artifact — copy it into your own
 error handling to your project's own CI conventions from then on. LDL never
 overwrites it once it exists.
 
+## Automated Stage 1 and merge-ready bookkeeping
+
+Getting a sync PR opened is only half of "no reasoning session needed" —
+issue #274 closes the other half: taking that PR from open to an obvious
+"ready for manual merge" state without the founder discovering a PR head
+SHA, authoring the hidden `ldl-trigger-head` marker, remembering
+`--issue none`, or running `tools/review-watch/merge-ready-gate.mjs` by
+hand.
+
+### The empirical finding: a bot-authored trigger cannot get a real review
+
+Before building this, issue #274 asked a concrete question: can a
+`GITHUB_TOKEN`-authenticated (`github-actions[bot]`-authored) `@codex
+review` comment draw a genuine Codex response, the same way a human-typed
+one does? This was tested for real rather than assumed — on this
+repository's own LDL PR #275, a Stage 1 trigger comment posted as
+`github-actions[bot]` drew:
+
+```text
+To use Codex here, [create a Codex account and connect to github](https://chatgpt.com/codex/cloud/settings/connectors).
+```
+
+Codex's connector does receive the webhook for a bot-authored comment — it
+is not silently dropped — but it replies with a fixed Codex Cloud
+connector-setup prompt instead of a review, because the commenting identity
+(a repository's default Actions bot) has no Codex account connected to it.
+This is a structural limitation of a bot identity, not a flaky or
+improvable one: no repository setting or workflow change makes a bot
+account "connect a Codex account." Automating the trigger post itself would
+therefore only add a dead-end exchange to every consumer-sync PR, never a
+real review — so `tools/review-watch/consumer-sync-gate.mjs` (below)
+deliberately never posts `@codex review` on the founder's behalf.
+
+(That reply also exposed a real gap in
+`tools/review-watch/genuine-response.mjs`'s `isCodexCloudSetupPrompt`,
+which only recognized the sibling "create an environment for this repo"
+phrasing — fixed alongside this mechanism so a connector-setup reply is
+never misclassified as a genuine response.)
+
+### The supported path: one fixed founder action, everything else automated
+
+Given that finding, the founder's one remaining action for a routine sync
+PR is exactly what they already do for any other PR: comment `@codex
+review`. Nothing about that action is volatile — no SHA, no marker, no
+issue number, no command syntax. Everything downstream of that comment is
+automated by `tools/review-watch/consumer-sync-gate.mjs`, composing
+`trigger.mjs` and `merge-ready-gate.mjs` (unchanged) plus one new
+primitive:
+
+1. it derives the PR's current head automatically (`gh pr view`) when not
+   given one directly by the calling workflow;
+2. if the founder's `@codex review` comment has no head marker yet (the
+   normal case — a human typing it by hand, per above, never adds one) and
+   no marked trigger for the current head already exists, it repairs that
+   comment in place by appending the current head's `ldl-trigger-head`
+   marker — mechanically automating the exact hand-edit
+   docs/bounded-review-cycle.md Stage 1 step 3 currently documents as a
+   manual recovery, and the exact step YouTubery PR #98 needed a founder
+   to do by hand;
+3. it runs `merge-ready-gate.mjs --issue none` (issue #190's explicit
+   no-work-issue sentinel — every recurring sync PR has no dedicated
+   implementation issue to check a closing reference against) and reports
+   one of `ready` / `not_requested` / `pending` / `blocked` / `error`.
+
+`--set-status true` turns that result into a GitHub commit status on the
+PR's head, under the context `ldl-sync/merge-ready` — a conspicuous
+success/pending/failure state on the PR itself, with no terminal required
+to see it:
+
+| `consumer-sync-gate.mjs` status | Commit status state | Meaning |
+| --- | --- | --- |
+| `ready` | success | Clean genuine Codex review + composed gate pass. Founder just clicks Merge. |
+| `not_requested` | pending | No trigger yet. Founder's one action: comment `@codex review` on the PR. |
+| `pending` | pending | Trigger exists; waiting on a genuine Codex response. Nothing to do yet. |
+| `blocked` | failure | A closing-reference violation or other non-pending block. See PR comments / Actions log. |
+| `error` | error | An operational failure (a `gh` call failed, malformed gate output). See Actions log. |
+
+`blocked`/`error` never produce the `ready` state, `not_requested` and
+`pending` never do either — only a real `merge-ready-gate.mjs` exit 0 does,
+the same fail-closed authority docs/bounded-review-cycle.md already
+requires for every other merge-ready decision. A genuine review finding
+still needs a founder or coding-agent session to evaluate, per issue #269's
+upstream-vs-consumer disposition rule; this mechanism only removes the
+bookkeeping around a clean pass, never the judgment a real finding needs.
+
+### Example workflow
+
+Copy this alongside `ldl-sync.yml` as `.github/workflows/ldl-sync-review.yml`
+— it watches the same fixed sync branch, so it only ever acts on LDL's own
+recurring sync PR, never an arbitrary one:
+
+````yaml
+name: LDL Sync Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main]
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: "*/20 * * * *"
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+  issues: write
+  statuses: write
+
+env:
+  SYNC_BRANCH: ldl-sync/auto-update
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request != null
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine the sync PR number
+        id: find_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "${{ github.event_name }}" in
+            pull_request)
+              PR="${{ github.event.pull_request.number }}"
+              REF="${{ github.event.pull_request.head.ref }}"
+              ;;
+            issue_comment)
+              PR="${{ github.event.issue.number }}"
+              REF="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefName -q .headRefName)"
+              ;;
+            *)
+              PR="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number // empty')"
+              REF="$SYNC_BRANCH"
+              ;;
+          esac
+          if [ -z "$PR" ] || [ "$REF" != "$SYNC_BRANCH" ]; then
+            echo "pr=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "pr=$PR" >> "$GITHUB_OUTPUT"
+
+      - name: Run consumer-sync-gate.mjs
+        if: steps.find_pr.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node tools/review-watch/consumer-sync-gate.mjs \
+            --repo "$GITHUB_REPOSITORY" --pr "${{ steps.find_pr.outputs.pr }}" --set-status true \
+            | tee gate-result.json
+          STATUS=$(node -e "console.log(JSON.parse(require('fs').readFileSync('gate-result.json','utf8')).status)")
+          {
+            echo "### LDL Sync Review: $STATUS"
+            echo
+            cat gate-result.json
+          } >> "$GITHUB_STEP_SUMMARY"
+````
+
+This is a starting point, not a distributed artifact — copy it into your
+own `.github/workflows/ldl-sync-review.yml` and adapt the schedule and
+branch filtering to your project's own CI conventions from then on, the
+same as `ldl-sync.yml` above. LDL never overwrites it once it exists.
+
 ## Explicitly out of scope for this mechanism
 
 - A package-registry, dependency-resolution, or semantic-versioning system
