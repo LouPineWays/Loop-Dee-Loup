@@ -35,28 +35,45 @@
 //      remaining founder action the required fallback allows (a fixed, zero-computation
 //      comment, typed by a human so Codex actually reviews it) -- by appending the current
 //      head's marker to it, so a genuine response that comment already drew becomes
-//      attributable without anyone hand-editing anything;
+//      attributable without anyone hand-editing anything. Repair only happens when the bare
+//      comment is not older than the current head's own commit (Stage 1 review finding on
+//      this PR): a trigger posted for an earlier head, before the PR advanced to a new head,
+//      must never be relabeled onto that later head -- an unbound (no commit_id) genuine
+//      response it already drew would then wrongly satisfy the new head's gate;
 //   3. runs merge-ready-gate.mjs with the explicit no-work-issue sentinel every recurring
-//      sync PR needs (issue #190), since this script is scoped to exactly that PR shape.
+//      sync PR needs (issue #190), since this script is scoped to exactly that PR shape;
+//   4. additionally requires the genuine Stage 1 response to be recognizably a *clean*
+//      review (Stage 1 review finding on this PR): merge-ready-gate.mjs's exit 0 only proves
+//      a genuine response arrived, never that it is finding-free -- that judgment normally
+//      belongs to the controlling session under docs/bounded-review-cycle.md Stage 1 steps
+//      4-6, which this fully unattended path has no session to perform. `isCleanStage1Response`
+//      recognizes Codex's own fixed clean-pass phrasing ("Codex Review: Didn't find any major
+//      issues.", observed live on this repository's own merged PRs, e.g. #257/#266) and
+//      reports "blocked" instead of "ready" for anything else genuine, including a
+//      finding-bearing review -- reproduced live on this very PR (#275, 7 findings).
 //
 // This does not reimplement trigger.mjs, stage1-gate.mjs, poll.mjs, or merge-ready-gate.mjs --
 // it composes them (via findExistingTrigger/headMarker and merge-ready-gate.mjs's `run`),
-// plus the one new primitive (bare-trigger repair) none of them provide.
+// plus the two new primitives (bare-trigger repair, clean-response recognition) none of them
+// provide.
 //
 // Usage:
 //   node tools/review-watch/consumer-sync-gate.mjs --repo OWNER/REPO --pr 50 [--head <sha>]
 //   node tools/review-watch/consumer-sync-gate.mjs --repo OWNER/REPO --pr 50 --set-status true
 //
 // Result `status` (also the composed exit code below):
-//   "ready"          (exit 0) -- merge-ready-gate.mjs returned PRE_MERGE_READY_NO_WORK_ISSUE.
+//   "ready"          (exit 0) -- merge-ready-gate.mjs returned PRE_MERGE_READY_NO_WORK_ISSUE
+//                                AND the genuine Stage 1 response is recognized as clean.
 //                                Safe to surface a conspicuous "ready for manual merge" state.
 //   "not_requested"  (exit 2) -- no Stage 1 trigger (marked or bare) exists yet at all. The
 //                                founder's one remaining action: comment `@codex review` on
 //                                this PR -- nothing to compute or copy.
 //   "pending"        (exit 2) -- a trigger exists (repaired or already marked) but no genuine
 //                                response yet. Not an error -- the normal in-flight state.
-//   "blocked"        (exit 2) -- a closing-reference violation or any other non-pending
-//                                BLOCKED composed-gate state. Must never be reported as ready.
+//   "blocked"        (exit 2) -- a closing-reference violation, a genuine response that is not
+//                                recognized as clean (i.e. it may carry findings), or any other
+//                                non-pending BLOCKED composed-gate state. Must never be
+//                                reported as ready.
 //   "error"          (exit 1) -- an operational failure (bad args, a `gh` failure, malformed
 //                                gate output). Never treated as a pass.
 //
@@ -109,15 +126,39 @@ function statusForGateBlock(gate) {
   return "blocked";
 }
 
-// `ghApiImpl`/`ghPatchImpl`/`ghPrViewImpl`/`runMergeReadyGateImpl`/`setStatusImpl` are all
-// injected so tests can drive `run` end-to-end against fakes, never the real network or
-// `gh` CLI.
+// Codex's own fixed clean-pass phrasing, observed live and unchanged across this
+// repository's own merged PRs (e.g. #257, #266): "Codex Review: Didn't find any major
+// issues." followed by a varying second sentence. A finding-bearing review instead opens
+// "### 💡 Codex Review\n\nHere are some automated review suggestions..." (reproduced live on
+// this very PR, #275) -- a structurally different message, never this fixed prefix.
+const CLEAN_REVIEW_PATTERN = /^Codex Review: Didn't find any major issues\./;
+
+// Pure. `stage1` is stage1-gate.mjs's own result (nested under merge-ready-gate.mjs's
+// composed `gate.stage1`). A genuine response existing (RESPONSE_RECEIVED) only proves Stage
+// 1 happened -- stage1-gate.mjs's own header comment is explicit that it "does not evaluate
+// whether a reported finding is valid" -- so this script must not treat every
+// RESPONSE_RECEIVED as clean. Requires every bound genuine match to carry the known
+// clean-pass phrasing; anything else (including a real finding-bearing review) is not
+// recognized as clean. EXEMPT is trusted as-is -- a human already declared Stage 1 doesn't
+// apply, per docs/bounded-review-cycle.md's own EXEMPT semantics.
+export function isCleanStage1Response(stage1) {
+  if (!stage1) return false;
+  if (stage1.state === "EXEMPT") return true;
+  if (stage1.state !== "RESPONSE_RECEIVED") return false;
+  const matches = stage1.matches ?? [];
+  return matches.length > 0 && matches.every((m) => CLEAN_REVIEW_PATTERN.test(m.body_excerpt ?? ""));
+}
+
+// `ghApiImpl`/`ghPatchImpl`/`ghPrViewImpl`/`ghCommitDateImpl`/`runMergeReadyGateImpl`/
+// `setStatusImpl` are all injected so tests can drive `run` end-to-end against fakes, never
+// the real network or `gh` CLI.
 export async function run(
   args,
   {
     ghApiImpl = defaultGhApi,
     ghPatchImpl = defaultGhPatch,
     ghPrViewImpl = defaultGhPrView,
+    ghCommitDateImpl = defaultGhCommitDate,
     runMergeReadyGateImpl = runMergeReadyGate,
     setStatusImpl = defaultSetStatus,
   } = {},
@@ -140,19 +181,46 @@ export async function run(
     }
   }
 
+  // From here on `head` is known, so every remaining early return routes through `finalize`
+  // instead of returning directly (Stage 1 review finding on this PR): otherwise, when
+  // --set-status is requested and an operational failure happens after this point, a prior
+  // run's "success" status posted on this same SHA would be left standing, silently
+  // misrepresenting a run that could not actually verify anything as still ready.
+  const finalize = async (result) => {
+    if (setStatus) {
+      try {
+        await setStatusImpl({ repo, head, result });
+      } catch (err) {
+        return {
+          exitCode: 1,
+          status: "error",
+          message: `setting commit status failed: ${err.message}`,
+          repaired: result.repaired ?? false,
+        };
+      }
+    }
+    return result;
+  };
+
   const commentsPath = `repos/${repo}/issues/${pr}/comments`;
   let comments;
   try {
     comments = await ghApiImpl(commentsPath);
   } catch (err) {
-    return { exitCode: 1, status: "error", message: `gh api call failed for ${commentsPath}: ${err.message}` };
+    return finalize({
+      exitCode: 1,
+      status: "error",
+      message: `gh api call failed for ${commentsPath}: ${err.message}`,
+      repaired: false,
+    });
   }
   if (!Array.isArray(comments)) {
-    return {
+    return finalize({
       exitCode: 1,
       status: "error",
       message: `Ambiguous comments read: expected an array from ${commentsPath}.`,
-    };
+      repaired: false,
+    });
   }
 
   // Repair only when no marked trigger for this exact head exists yet -- a marked trigger
@@ -163,20 +231,40 @@ export async function run(
   if (!findExistingTrigger(comments, { head })) {
     const bare = findBareTrigger(comments);
     if (bare) {
-      const newBody = `${bare.body}\n${headMarker(head)}`;
+      let headCommitDate;
       try {
-        await ghPatchImpl({ repo, commentId: bare.id, body: newBody });
+        headCommitDate = await ghCommitDateImpl({ repo, head });
       } catch (err) {
-        return {
+        return finalize({
           exitCode: 1,
           status: "error",
-          message: `gh comment edit failed for comment ${bare.id}: ${err.message}`,
-        };
+          message: `gh commit lookup failed for ${head}: ${err.message}`,
+          repaired: false,
+        });
       }
-      repaired = true;
-      // Reflect the edit locally instead of re-reading, so merge-ready-gate.mjs's own reads
-      // (a fresh `gh api` call inside stage1-gate.mjs) still land after this PATCH is durable.
-      comments = comments.map((c) => (c.id === bare.id ? { ...c, body: newBody } : c));
+      // Stage 1 review finding on this PR: a bare trigger posted *before* this head's own
+      // commit existed cannot be durably associated with this head -- the PR may have moved
+      // on since, and an unbound genuine response it already drew would then wrongly satisfy
+      // a head it never actually reviewed. Left unrepaired, the current head simply has no
+      // trigger yet, which merge-ready-gate.mjs correctly reports as NOT_REQUESTED.
+      if (new Date(bare.created_at).getTime() >= new Date(headCommitDate).getTime()) {
+        const newBody = `${bare.body}\n${headMarker(head)}`;
+        try {
+          await ghPatchImpl({ repo, commentId: bare.id, body: newBody });
+        } catch (err) {
+          return finalize({
+            exitCode: 1,
+            status: "error",
+            message: `gh comment edit failed for comment ${bare.id}: ${err.message}`,
+            repaired: false,
+          });
+        }
+        repaired = true;
+        // Reflect the edit locally instead of re-reading, so merge-ready-gate.mjs's own reads
+        // (a fresh `gh api` call inside stage1-gate.mjs) still land after this PATCH is
+        // durable.
+        comments = comments.map((c) => (c.id === bare.id ? { ...c, body: newBody } : c));
+      }
     }
   }
 
@@ -184,7 +272,7 @@ export async function run(
   try {
     gate = await runMergeReadyGateImpl({ repo, pr, head, issue: "none" });
   } catch (err) {
-    return { exitCode: 1, status: "error", message: `merge-ready-gate threw: ${err.message}`, repaired };
+    return finalize({ exitCode: 1, status: "error", message: `merge-ready-gate threw: ${err.message}`, repaired });
   }
 
   let result;
@@ -192,19 +280,21 @@ export async function run(
     result = { exitCode: 1, status: "error", message: gate.message, repaired, gate };
   } else if (gate.exitCode === 2) {
     result = { exitCode: 2, status: statusForGateBlock(gate), repaired, gate };
-  } else {
+  } else if (isCleanStage1Response(gate.stage1)) {
     result = { exitCode: 0, status: "ready", repaired, gate };
+  } else {
+    result = {
+      exitCode: 2,
+      status: "blocked",
+      repaired,
+      gate,
+      message:
+        "A genuine Codex response was received but is not recognized as a clean, finding-free review -- " +
+        "needs founder/session review before merge.",
+    };
   }
 
-  if (setStatus) {
-    try {
-      await setStatusImpl({ repo, head, result });
-    } catch (err) {
-      return { exitCode: 1, status: "error", message: `setting commit status failed: ${err.message}`, repaired };
-    }
-  }
-
-  return result;
+  return finalize(result);
 }
 
 const STATUS_STATE = {
@@ -255,6 +345,11 @@ function defaultGhPrView({ repo, number }) {
     encoding: "utf8",
   });
   return JSON.parse(raw).headRefOid ?? null;
+}
+
+function defaultGhCommitDate({ repo, head }) {
+  const raw = execFileSync("gh", ["api", `repos/${repo}/commits/${head}`], { encoding: "utf8" });
+  return JSON.parse(raw).commit.committer.date;
 }
 
 async function main() {
