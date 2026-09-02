@@ -35,22 +35,31 @@
 //      remaining founder action the required fallback allows (a fixed, zero-computation
 //      comment, typed by a human so Codex actually reviews it) -- by appending the current
 //      head's marker to it, so a genuine response that comment already drew becomes
-//      attributable without anyone hand-editing anything. Repair only happens when the bare
-//      comment is not older than the current head's own commit (Stage 1 review finding on
-//      this PR): a trigger posted for an earlier head, before the PR advanced to a new head,
-//      must never be relabeled onto that later head -- an unbound (no commit_id) genuine
-//      response it already drew would then wrongly satisfy the new head's gate;
+//      attributable without anyone hand-editing anything. Repair only happens when the PR's
+//      full commit history shows `head` is safely attributable to that bare trigger --
+//      isEligibleForRepair's commit-chain check, not a single trigger-vs-head date compare
+//      (Stage 1 review findings #1 and #4 on this PR, issue #274/#276): a trigger posted for
+//      an earlier head, before the PR advanced to a new head that skipped over an
+//      intervening commit, must never be relabeled onto that later head -- an unbound (no
+//      commit_id) genuine response it already drew would then wrongly satisfy a head it
+//      never actually reviewed. When the earliest bare trigger fails that check, later bare
+//      triggers on the same thread are still considered in order (findRepairableBareTrigger)
+//      rather than giving up after the first failure;
 //   3. runs merge-ready-gate.mjs with the explicit no-work-issue sentinel every recurring
 //      sync PR needs (issue #190), since this script is scoped to exactly that PR shape;
 //   4. additionally requires the genuine Stage 1 response to be recognizably a *clean*
-//      review (Stage 1 review finding on this PR): merge-ready-gate.mjs's exit 0 only proves
-//      a genuine response arrived, never that it is finding-free -- that judgment normally
-//      belongs to the controlling session under docs/bounded-review-cycle.md Stage 1 steps
-//      4-6, which this fully unattended path has no session to perform. `isCleanStage1Response`
-//      recognizes Codex's own fixed clean-pass phrasing ("Codex Review: Didn't find any major
-//      issues.", observed live on this repository's own merged PRs, e.g. #257/#266) and
-//      reports "blocked" instead of "ready" for anything else genuine, including a
-//      finding-bearing review -- reproduced live on this very PR (#275, 7 findings).
+//      review (Stage 1 review findings #2 and #5 on this PR): merge-ready-gate.mjs's exit 0
+//      only proves a genuine response arrived, never that it is finding-free -- that
+//      judgment normally belongs to the controlling session under
+//      docs/bounded-review-cycle.md Stage 1 steps 4-6, which this fully unattended path has
+//      no session to perform. `isCleanStage1Response` recognizes Codex's own fixed
+//      clean-pass phrasing ("Codex Review: Didn't find any major issues.", observed live on
+//      this repository's own merged PRs, e.g. #257/#266), refuses to call it clean when
+//      stage1-gate.mjs also reports an unbound genuine match it couldn't attribute to this
+//      head, and reports "blocked" instead of "ready" for anything else genuine, including a
+//      real finding-bearing review (its own fixed preamble, reproduced live on this very PR,
+//      #275, 7 findings) -- while still tolerating a generic ack/kickoff comment alongside a
+//      genuine clean-pass reply.
 //
 // This does not reimplement trigger.mjs, stage1-gate.mjs, poll.mjs, or merge-ready-gate.mjs --
 // it composes them (via findExistingTrigger/headMarker and merge-ready-gate.mjs's `run`),
@@ -102,19 +111,78 @@ export function parseArgs(argv) {
   return args;
 }
 
-// Pure. The earliest comment on the thread whose trimmed body is *exactly* the trigger
-// phrase and that carries no head marker anywhere in it -- i.e. a plain human-typed
-// `@codex review` trigger, the zero-computation founder action this issue's Required
-// fallback section describes. Deliberately an exact match on the trimmed body, not a
+// Pure. Every comment on the thread whose trimmed body is *exactly* the trigger phrase and
+// that carries no head marker anywhere in it -- i.e. a plain human-typed `@codex review`
+// trigger, the zero-computation founder action this issue's Required fallback section
+// describes -- sorted oldest first. Deliberately an exact match on the trimmed body, not a
 // substring: trigger.mjs's own findTriggerRounds comment explains why a loose substring
 // match is unsafe -- a thread discussing this exact mechanism (this file's own review
 // thread included) can easily mention the phrase in ordinary prose without it being a
 // deliberate trigger.
-export function findBareTrigger(comments) {
+//
+// Returns every candidate, not just the earliest (Stage 1 review finding #4 on this PR,
+// issue #274/#276): a thread can carry more than one bare trigger over time (an old one that
+// turns out ineligible for repair, followed by a fresh one posted after the PR moved on), and
+// `run` needs to consider each in turn rather than getting stuck on whichever is earliest.
+export function findBareTriggers(comments) {
   const matches = (comments ?? []).filter((c) => (c.body ?? "").trim() === TRIGGER_TEXT);
-  if (matches.length === 0) return null;
   matches.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
-  return matches[0];
+  return matches;
+}
+
+// Pure. Convenience wrapper over findBareTriggers for callers that only ever want the
+// earliest candidate (kept for any external caller/test relying on the single-result shape).
+export function findBareTrigger(comments) {
+  const matches = findBareTriggers(comments);
+  return matches.length === 0 ? null : matches[0];
+}
+
+// Pure. Stage 1 review finding #1 on this PR (issue #274/#276): a commit's own committer
+// timestamp only proves when it was *authored*, not when it became this PR's head, and
+// GitHub's REST API exposes no field for the latter -- verified empirically: the issue
+// timeline's "committed" events carry `created_at: null`, and `pulls/{pr}/commits` exposes
+// only author/committer date, nothing else. A commit authored before `bare` was posted but
+// pushed after it would read as "already existed" by date alone and pass a naive check even
+// though the trigger's author never saw it -- that fully adversarial single-commit case has
+// no available fix here and is a disclosed residual gap.
+//
+// What full commit history DOES let us close is the ordinary multi-push chain gap: comparing
+// `bare` only against `head` in isolation (the original single-commit check) cannot tell
+// "head is the very next commit pushed after this trigger" apart from "head is some later
+// commit that skipped over an intervening one the trigger's response never covered". Given
+// the full commit list, split it into commits at-or-before `bare` ("grounding" commits --
+// proof the trigger was posted against a PR that already had commits) and commits strictly
+// after `bare`:
+//   - no grounding commit at all -> refuse. The trigger predates every known commit, so
+//     there is nothing to safely attribute it to (the single-commit "stale trigger" case).
+//   - a grounding commit exists and nothing landed after `bare` -> safe exactly when `head`
+//     is that latest grounding commit, i.e. the PR is unchanged since the trigger was posted
+//     (the original, still-supported single-commit repair case).
+//   - a grounding commit exists and something landed after `bare` -> safe only when `head`
+//     is the EARLIEST such post-trigger commit. If some other, earlier post-trigger commit
+//     also qualifies and isn't `head`, `head` has skipped past a commit the trigger's
+//     response never covered, so refuse.
+export function isEligibleForRepair(bare, head, commits) {
+  const bareMs = new Date(bare.created_at).getTime();
+  const sorted = [...(commits ?? [])].sort(
+    (a, b) => new Date(a.commit.committer.date).getTime() - new Date(b.commit.committer.date).getTime(),
+  );
+  const grounding = sorted.filter((c) => new Date(c.commit.committer.date).getTime() <= bareMs);
+  if (grounding.length === 0) return false;
+  const after = sorted.filter((c) => new Date(c.commit.committer.date).getTime() > bareMs);
+  if (after.length === 0) return head === grounding[grounding.length - 1].sha;
+  return head === after[0].sha;
+}
+
+// Pure. Iterates bare-trigger candidates oldest-first and returns the first one eligible for
+// repair against `head`, or null if none qualify -- the Finding #4 fix composed with Finding
+// #1's eligibility check, so an old ineligible trigger never permanently blocks a later,
+// eligible one from being examined.
+export function findRepairableBareTrigger(comments, head, commits) {
+  for (const bare of findBareTriggers(comments)) {
+    if (isEligibleForRepair(bare, head, commits)) return bare;
+  }
+  return null;
 }
 
 function statusForGateBlock(gate) {
@@ -133,23 +201,49 @@ function statusForGateBlock(gate) {
 // this very PR, #275) -- a structurally different message, never this fixed prefix.
 const CLEAN_REVIEW_PATTERN = /^Codex Review: Didn't find any major issues\./;
 
+// Codex's other known fixed Stage 1 preamble (Stage 1 review finding #5 on this PR, issue
+// #274/#276), observed live on both #275 and #276: a findings-bearing review always opens
+// with this exact heading. Recognizing this second FIXED, known preamble -- not adjudicating
+// arbitrary finding content -- is what lets a generic ack/kickoff/task-link comment (which
+// matches neither this nor CLEAN_REVIEW_PATTERN) coexist with a genuine clean-pass match
+// without blocking an otherwise clean round, while an actual findings-bearing review among
+// the matches still blocks. Staying anchored to two of Codex's own known fixed reply
+// preambles keeps this inside issue #274's explicit non-goal: "semantically adjudicating
+// arbitrary Codex findings with a regex and calling that review complete" is out of scope,
+// and this never inspects finding content -- only which of two fixed, previously-observed
+// preambles (if either) a message opens with.
+const FINDINGS_PREAMBLE_PATTERN = /^### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request\./;
+
 // Pure. `stage1` is stage1-gate.mjs's own result (nested under merge-ready-gate.mjs's
 // composed `gate.stage1`). A genuine response existing (RESPONSE_RECEIVED) only proves Stage
 // 1 happened -- stage1-gate.mjs's own header comment is explicit that it "does not evaluate
 // whether a reported finding is valid" -- so this script must not treat every
-// RESPONSE_RECEIVED as clean. Requires every bound genuine match to carry the known
-// clean-pass phrasing; anything else (including a real finding-bearing review) is not
-// recognized as clean. EXEMPT is trusted as-is -- a human already declared Stage 1 doesn't
-// apply, per docs/bounded-review-cycle.md's own EXEMPT semantics.
+// RESPONSE_RECEIVED as clean. EXEMPT is trusted as-is -- a human already declared Stage 1
+// doesn't apply, per docs/bounded-review-cycle.md's own EXEMPT semantics.
 export function isCleanStage1Response(stage1) {
   if (!stage1) return false;
   if (stage1.state === "EXEMPT") return true;
   if (stage1.state !== "RESPONSE_RECEIVED") return false;
+  // Stage 1 review finding #2 on this PR (issue #274/#276): stage1-gate.mjs deliberately
+  // returns unboundGenuineMatches so a genuine finding that couldn't be reliably bound to the
+  // frozen head is never silently dropped (issue #163) -- a non-empty array here means a real
+  // reply exists on the thread that this automation cannot safely interpret, so this must
+  // report not-clean exactly like a finding-bearing bound match would, regardless of what
+  // `matches` looks like.
+  if ((stage1.unboundGenuineMatches ?? []).length > 0) return false;
   const matches = stage1.matches ?? [];
-  return matches.length > 0 && matches.every((m) => CLEAN_REVIEW_PATTERN.test(m.body_excerpt ?? ""));
+  // Stage 1 review finding #5 on this PR: requires at least one bound match to carry the
+  // known clean-pass phrasing (never zero, so an all-ack thread with no actual clean-pass
+  // reply still reports not-clean), and none of them to carry the known findings-bearing
+  // preamble -- so a lone kickoff/ack comment (matching neither fixed preamble) doesn't block
+  // an otherwise-clean round, while a genuine findings-bearing review among the matches still
+  // does.
+  const hasCleanMatch = matches.some((m) => CLEAN_REVIEW_PATTERN.test(m.body_excerpt ?? ""));
+  const hasFindingsMatch = matches.some((m) => FINDINGS_PREAMBLE_PATTERN.test(m.body_excerpt ?? ""));
+  return hasCleanMatch && !hasFindingsMatch;
 }
 
-// `ghApiImpl`/`ghPatchImpl`/`ghPrViewImpl`/`ghCommitDateImpl`/`runMergeReadyGateImpl`/
+// `ghApiImpl`/`ghPatchImpl`/`ghPrViewImpl`/`ghPrCommitsImpl`/`runMergeReadyGateImpl`/
 // `setStatusImpl` are all injected so tests can drive `run` end-to-end against fakes, never
 // the real network or `gh` CLI.
 export async function run(
@@ -158,7 +252,7 @@ export async function run(
     ghApiImpl = defaultGhApi,
     ghPatchImpl = defaultGhPatch,
     ghPrViewImpl = defaultGhPrView,
-    ghCommitDateImpl = defaultGhCommitDate,
+    ghPrCommitsImpl = defaultGhPrCommits,
     runMergeReadyGateImpl = runMergeReadyGate,
     setStatusImpl = defaultSetStatus,
   } = {},
@@ -229,25 +323,26 @@ export async function run(
   // pointless mutation.
   let repaired = false;
   if (!findExistingTrigger(comments, { head })) {
-    const bare = findBareTrigger(comments);
-    if (bare) {
-      let headCommitDate;
+    const bareCandidates = findBareTriggers(comments);
+    if (bareCandidates.length > 0) {
+      let commits;
       try {
-        headCommitDate = await ghCommitDateImpl({ repo, head });
+        commits = await ghPrCommitsImpl({ repo, pr });
       } catch (err) {
         return finalize({
           exitCode: 1,
           status: "error",
-          message: `gh commit lookup failed for ${head}: ${err.message}`,
+          message: `gh pr commits lookup failed for ${repo}#${pr}: ${err.message}`,
           repaired: false,
         });
       }
-      // Stage 1 review finding on this PR: a bare trigger posted *before* this head's own
-      // commit existed cannot be durably associated with this head -- the PR may have moved
-      // on since, and an unbound genuine response it already drew would then wrongly satisfy
-      // a head it never actually reviewed. Left unrepaired, the current head simply has no
-      // trigger yet, which merge-ready-gate.mjs correctly reports as NOT_REQUESTED.
-      if (new Date(bare.created_at).getTime() >= new Date(headCommitDate).getTime()) {
+      // Stage 1 review findings #1 and #4 on this PR (issue #274/#276): repair only the
+      // first bare trigger (oldest first) whose commit-chain position makes it safe to bind
+      // to `head` -- see isEligibleForRepair for the exact rule and its disclosed residual
+      // gap. Left unrepaired (no eligible candidate), the current head simply has no trigger
+      // yet, which merge-ready-gate.mjs correctly reports as NOT_REQUESTED.
+      const bare = findRepairableBareTrigger(comments, head, commits);
+      if (bare) {
         const newBody = `${bare.body}\n${headMarker(head)}`;
         try {
           await ghPatchImpl({ repo, commentId: bare.id, body: newBody });
@@ -347,9 +442,13 @@ function defaultGhPrView({ repo, number }) {
   return JSON.parse(raw).headRefOid ?? null;
 }
 
-function defaultGhCommitDate({ repo, head }) {
-  const raw = execFileSync("gh", ["api", `repos/${repo}/commits/${head}`], { encoding: "utf8" });
-  return JSON.parse(raw).commit.committer.date;
+// --paginate --slurp: same convention as defaultGhApi, so a PR with many commits never has a
+// later page's commit silently missed when computing repair eligibility.
+function defaultGhPrCommits({ repo, pr }) {
+  const raw = execFileSync("gh", ["api", `repos/${repo}/pulls/${pr}/commits`, "--paginate", "--slurp"], {
+    encoding: "utf8",
+  });
+  return JSON.parse(raw).flat();
 }
 
 async function main() {

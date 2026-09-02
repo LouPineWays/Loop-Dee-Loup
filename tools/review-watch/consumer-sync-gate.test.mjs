@@ -10,7 +10,15 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseArgs, findBareTrigger, isCleanStage1Response, run } from "./consumer-sync-gate.mjs";
+import {
+  parseArgs,
+  findBareTrigger,
+  findBareTriggers,
+  isEligibleForRepair,
+  findRepairableBareTrigger,
+  isCleanStage1Response,
+  run,
+} from "./consumer-sync-gate.mjs";
 import { headMarker } from "./trigger.mjs";
 import { run as runStage1GateReal } from "./stage1-gate.mjs";
 
@@ -18,10 +26,15 @@ const REPO = "LouPineWays/YouTubery";
 const PR = "98";
 const HEAD = "deadbeef00";
 
-// A commit date safely before every bare-trigger fixture's created_at below, so repair
-// proceeds by default. Tests exercising the "stale bare trigger" boundary override this.
+function commit(sha, date) {
+  return { sha, commit: { committer: { date } } };
+}
+
+// A single-commit fixture (HEAD) dated safely before every bare-trigger fixture's created_at
+// below, so repair proceeds by default. Tests exercising the "stale bare trigger" boundary
+// override this.
 const EARLY_COMMIT_DATE = "2026-08-19T00:00:00Z";
-const defaultGhCommitDateImpl = async () => EARLY_COMMIT_DATE;
+const defaultGhPrCommitsImpl = async () => [commit(HEAD, EARLY_COMMIT_DATE)];
 
 function readyGate(overrides = {}) {
   return {
@@ -77,6 +90,72 @@ test("findBareTrigger: picks the earliest match when more than one exists", () =
 
 test("findBareTrigger: null on an empty thread", () => {
   assert.equal(findBareTrigger([]), null);
+});
+
+test("findBareTriggers: returns every candidate, oldest first", () => {
+  const bares = findBareTriggers([
+    { id: 2, body: "@codex review", created_at: "2026-08-20T01:00:00Z" },
+    { id: 1, body: "@codex review", created_at: "2026-08-20T00:00:00Z" },
+  ]);
+  assert.deepEqual(bares.map((b) => b.id), [1, 2]);
+});
+
+test("findBareTriggers: empty array on an empty thread", () => {
+  assert.deepEqual(findBareTriggers([]), []);
+});
+
+// -- isEligibleForRepair (Stage 1 review finding #1 on this PR, issue #274/#276) -------------
+
+test("isEligibleForRepair: single commit before the bare trigger, head is that commit -> eligible (original single-commit case)", () => {
+  const bare = { created_at: "2026-08-20T00:00:00Z" };
+  const commits = [commit(HEAD, "2026-08-19T00:00:00Z")];
+  assert.equal(isEligibleForRepair(bare, HEAD, commits), true);
+});
+
+test("isEligibleForRepair: single commit after the bare trigger -> ineligible, no grounding commit exists", () => {
+  const bare = { created_at: "2026-08-20T00:00:00Z" };
+  const commits = [commit(HEAD, "2026-08-21T00:00:00Z")];
+  assert.equal(isEligibleForRepair(bare, HEAD, commits), false);
+});
+
+test("isEligibleForRepair: two commits, trigger between them, head is the second (later) commit -> eligible (the ordinary multi-push case, not the adversarial one)", () => {
+  const bare = { created_at: "2026-08-20T12:00:00Z" };
+  const commits = [commit("commit1", "2026-08-20T00:00:00Z"), commit(HEAD, "2026-08-21T00:00:00Z")];
+  assert.equal(isEligibleForRepair(bare, HEAD, commits), true);
+});
+
+test("isEligibleForRepair: two commits, trigger between them, head is the EARLIER commit -> ineligible (head has fallen behind a commit that already exists)", () => {
+  const bare = { created_at: "2026-08-20T12:00:00Z" };
+  const commits = [commit("commit1", "2026-08-20T00:00:00Z"), commit("commit2", "2026-08-21T00:00:00Z")];
+  assert.equal(isEligibleForRepair(bare, "commit1", commits), false);
+});
+
+test("isEligibleForRepair: an OTHER, earlier post-trigger commit qualifies and isn't head -> ineligible (head skipped past a commit the response never covered)", () => {
+  const bare = { created_at: "2026-08-20T00:00:00Z" };
+  const commits = [
+    commit("commit-grounding", "2026-08-19T00:00:00Z"),
+    commit("commit-skipped", "2026-08-20T06:00:00Z"),
+    commit(HEAD, "2026-08-21T00:00:00Z"),
+  ];
+  assert.equal(isEligibleForRepair(bare, HEAD, commits), false);
+});
+
+// -- findRepairableBareTrigger (Stage 1 review finding #4 on this PR, issue #274/#276) --------
+
+test("findRepairableBareTrigger: skips an ineligible earlier bare trigger and picks a later, eligible one", () => {
+  // The old bare trigger predates every commit on the PR (no grounding commit) so it can
+  // never be eligible; a fresh bare trigger posted after the fix commit lands IS eligible.
+  const oldBare = { id: 1, body: "@codex review", created_at: "2026-08-18T00:00:00Z" };
+  const newBare = { id: 2, body: "@codex review", created_at: "2026-08-20T12:00:00Z" };
+  const commits = [commit(HEAD, "2026-08-20T00:00:00Z")];
+  const picked = findRepairableBareTrigger([oldBare, newBare], HEAD, commits);
+  assert.equal(picked.id, 2);
+});
+
+test("findRepairableBareTrigger: null when no candidate is eligible", () => {
+  const bare = { id: 1, body: "@codex review", created_at: "2026-08-18T00:00:00Z" };
+  const commits = [commit(HEAD, "2026-08-20T00:00:00Z")];
+  assert.equal(findRepairableBareTrigger([bare], HEAD, commits), null);
 });
 
 // -- run: argument handling ----------------------------------------------------------------
@@ -147,7 +226,7 @@ test("run: repairs a bare trigger by appending the current head's marker", async
       ghPatchImpl: async (args) => {
         patchArgs = args;
       },
-      ghCommitDateImpl: defaultGhCommitDateImpl,
+      ghPrCommitsImpl: defaultGhPrCommitsImpl,
       runMergeReadyGateImpl: async () => readyGate(),
     },
   );
@@ -172,7 +251,7 @@ test("run: does NOT repair a bare trigger posted before the current head's own c
       },
       // The current head's own commit was made *after* the bare trigger was posted --
       // i.e. the PR advanced since that comment, so it cannot be trusted to be about HEAD.
-      ghCommitDateImpl: async () => "2026-08-21T00:00:00Z",
+      ghPrCommitsImpl: async () => [commit(HEAD, "2026-08-21T00:00:00Z")],
       runMergeReadyGateImpl: async () => ({
         exitCode: 2,
         state: "BLOCKED",
@@ -199,6 +278,77 @@ test("run: does not repair when a marked trigger for this head already exists", 
   );
   assert.equal(patchCalls, 0);
   assert.equal(result.repaired, false);
+});
+
+test("run: repairs a bare trigger onto the SECOND of two commits when the trigger falls between them (Stage 1 review finding #1 on this PR, issue #274/#276 -- ordinary multi-push case, not the adversarial one)", async () => {
+  const bareComment = { id: 7, body: "@codex review", created_at: "2026-08-20T12:00:00Z" };
+  let patchArgs;
+  const result = await run(
+    { repo: REPO, pr: PR, head: HEAD },
+    {
+      ghApiImpl: async () => [bareComment],
+      ghPatchImpl: async (args) => {
+        patchArgs = args;
+      },
+      ghPrCommitsImpl: async () => [
+        commit("commit1", "2026-08-20T00:00:00Z"),
+        commit(HEAD, "2026-08-21T00:00:00Z"),
+      ],
+      runMergeReadyGateImpl: async () => readyGate(),
+    },
+  );
+  assert.equal(result.repaired, true);
+  assert.equal(patchArgs.commentId, 7);
+  assert.equal(patchArgs.body, `@codex review\n${headMarker(HEAD)}`);
+});
+
+test("run: does NOT repair when head has skipped past an earlier post-trigger commit (Stage 1 review finding #1 on this PR)", async () => {
+  const bareComment = { id: 7, body: "@codex review", created_at: "2026-08-20T00:00:00Z" };
+  let patchCalls = 0;
+  const result = await run(
+    { repo: REPO, pr: PR, head: HEAD },
+    {
+      ghApiImpl: async () => [bareComment],
+      ghPatchImpl: async () => {
+        patchCalls += 1;
+      },
+      ghPrCommitsImpl: async () => [
+        commit("commit-grounding", "2026-08-19T00:00:00Z"),
+        commit("commit-skipped", "2026-08-20T06:00:00Z"),
+        commit(HEAD, "2026-08-21T00:00:00Z"),
+      ],
+      runMergeReadyGateImpl: async () => ({
+        exitCode: 2,
+        state: "BLOCKED",
+        blockedBy: [{ component: "stage1", state: "NOT_REQUESTED" }],
+      }),
+    },
+  );
+  assert.equal(patchCalls, 0);
+  assert.equal(result.repaired, false);
+});
+
+test("run: skips an ineligible old bare trigger and repairs a later, eligible one (Stage 1 review finding #4 on this PR, issue #274/#276)", async () => {
+  // The old bare trigger predates every commit on the PR (no grounding commit -- ineligible
+  // under any head). A fix commit lands, then a fresh bare trigger is posted that IS eligible
+  // for the resulting head. Without the Finding #4 fix, `run` would get stuck on the old,
+  // ineligible trigger and never examine the new one, leaving the gate NOT_REQUESTED forever.
+  const oldBare = { id: 1, body: "@codex review", created_at: "2026-08-18T00:00:00Z" };
+  const newBare = { id: 2, body: "@codex review", created_at: "2026-08-20T12:00:00Z" };
+  let patchArgs;
+  const result = await run(
+    { repo: REPO, pr: PR, head: HEAD },
+    {
+      ghApiImpl: async () => [oldBare, newBare],
+      ghPatchImpl: async (args) => {
+        patchArgs = args;
+      },
+      ghPrCommitsImpl: async () => [commit(HEAD, "2026-08-20T00:00:00Z")],
+      runMergeReadyGateImpl: async () => readyGate(),
+    },
+  );
+  assert.equal(result.repaired, true);
+  assert.equal(patchArgs.commentId, 2, "must repair the later, eligible bare trigger, not the ineligible old one");
 });
 
 // -- run: composition with merge-ready-gate.mjs (mocked) ------------------------------------
@@ -319,6 +469,80 @@ test("isCleanStage1Response: false for PENDING/NOT_REQUESTED/undefined", () => {
   assert.equal(isCleanStage1Response(undefined), false);
 });
 
+// -- isCleanStage1Response: unboundGenuineMatches (Stage 1 review finding #2 on this PR) -----
+
+test("isCleanStage1Response: false when RESPONSE_RECEIVED carries a clean bound match but a non-empty unboundGenuineMatches", () => {
+  assert.equal(
+    isCleanStage1Response({
+      state: "RESPONSE_RECEIVED",
+      matches: [{ body_excerpt: "Codex Review: Didn't find any major issues. Nice work!" }],
+      unboundGenuineMatches: [{ body_excerpt: "Some other genuine reply that couldn't be bound to this head." }],
+    }),
+    false,
+  );
+});
+
+test("isCleanStage1Response: true when unboundGenuineMatches is present but empty", () => {
+  assert.equal(
+    isCleanStage1Response({
+      state: "RESPONSE_RECEIVED",
+      matches: [{ body_excerpt: "Codex Review: Didn't find any major issues. Nice work!" }],
+      unboundGenuineMatches: [],
+    }),
+    true,
+  );
+});
+
+// -- isCleanStage1Response: ack/kickoff tolerance (Stage 1 review finding #5 on this PR) -----
+
+test("isCleanStage1Response: true for a single clean match with no ack (regression)", () => {
+  assert.equal(
+    isCleanStage1Response({
+      state: "RESPONSE_RECEIVED",
+      matches: [{ body_excerpt: "Codex Review: Didn't find any major issues. Nice work!" }],
+    }),
+    true,
+  );
+});
+
+test("isCleanStage1Response: false for a findings-bearing match alone (regression)", () => {
+  assert.equal(
+    isCleanStage1Response({
+      state: "RESPONSE_RECEIVED",
+      matches: [
+        { body_excerpt: "### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request." },
+      ],
+    }),
+    false,
+  );
+});
+
+test("isCleanStage1Response: true for a generic ack/kickoff match followed by a clean-pass match", () => {
+  assert.equal(
+    isCleanStage1Response({
+      state: "RESPONSE_RECEIVED",
+      matches: [
+        { body_excerpt: "Starting review..." },
+        { body_excerpt: "Codex Review: Didn't find any major issues. Nice work!" },
+      ],
+    }),
+    true,
+  );
+});
+
+test("isCleanStage1Response: false for a generic ack/kickoff match followed by a findings-bearing match", () => {
+  assert.equal(
+    isCleanStage1Response({
+      state: "RESPONSE_RECEIVED",
+      matches: [
+        { body_excerpt: "Starting review..." },
+        { body_excerpt: "### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request." },
+      ],
+    }),
+    false,
+  );
+});
+
 // -- run: a genuine response that isn't recognized as clean must never report ready ----------
 
 test("run: merge-ready-gate exit 0 with a finding-bearing Stage 1 response -> blocked, never ready (Stage 1 review finding on this PR, issue #274)", async () => {
@@ -331,6 +555,25 @@ test("run: merge-ready-gate exit 0 with a finding-bearing Stage 1 response -> bl
           stage1: {
             state: "RESPONSE_RECEIVED",
             matches: [{ body_excerpt: "### 💡 Codex Review\n\nHere are some automated review suggestions..." }],
+          },
+        }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.status, "blocked");
+});
+
+test("run: merge-ready-gate exit 0 with clean bound matches but a non-empty unboundGenuineMatches -> blocked, never ready (Stage 1 review finding #2 on this PR, issue #274/#276)", async () => {
+  const result = await run(
+    { repo: REPO, pr: PR, head: HEAD },
+    {
+      ghApiImpl: async () => [],
+      runMergeReadyGateImpl: async () =>
+        readyGate({
+          stage1: {
+            state: "RESPONSE_RECEIVED",
+            matches: [{ body_excerpt: "Codex Review: Didn't find any major issues. Nice work!" }],
+            unboundGenuineMatches: [{ body_excerpt: "A delayed genuine reply from another round." }],
           },
         }),
     },
@@ -466,7 +709,7 @@ test("YouTubery #98 regression: consumer-sync-gate's repair makes the same fixtu
         const c = comments.find((c) => c.id === commentId);
         c.body = body;
       },
-      ghCommitDateImpl: defaultGhCommitDateImpl,
+      ghPrCommitsImpl: defaultGhPrCommitsImpl,
       runMergeReadyGateImpl: async () => readyGate(),
     },
   );
@@ -512,7 +755,7 @@ test("run: a Codex Cloud connector-setup reply to a bare trigger stays NOT genui
       ghPatchImpl: async ({ commentId, body }) => {
         comments.find((c) => c.id === commentId).body = body;
       },
-      ghCommitDateImpl: defaultGhCommitDateImpl,
+      ghPrCommitsImpl: defaultGhPrCommitsImpl,
       runMergeReadyGateImpl: async () => ({
         exitCode: 2,
         state: "BLOCKED",
