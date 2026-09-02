@@ -201,6 +201,25 @@ This does not change how subagents should be briefed for genuinely ambiguous or 
 
 **No message bus.** A worker's return to the orchestrating session stays compact and control-oriented — complete, blocked, founder decision required, or the next authorized transition — not a narrative of implementation detail for the orchestrator to relay into a later worker's prompt. When one worker's output is needed by another, put it in durable repository/GitHub state and reference it there, rather than routing it through orchestrator chat.
 
+## Watched lifecycle breakpoints
+
+Two-plane Issue dispatch above splits control-plane and execution-plane authority for a single dispatch. The same split holds across an entire watched outcome's lifecycle, not merely across one worker's reading of it:
+
+> **The orchestrator persists across the Issue lifecycle; execution workers do not persist across lifecycle breakpoints.**
+
+> **The orchestrator watches the thin control Issue. Workers read the thick execution Issue. Lifecycle truth and execution truth remain separate.**
+
+The `parent-execution` (thin) / `work-packet` (thick) template pair established above for a single dispatch is the concrete mechanism this section operates over across time: the thin control Issue is the durable object a founder "watches" (functionally, `watch #12345`) and the orchestrating session observes for the whole lifecycle; the thick execution Issue is what each substantive worker reads to perform its stage. Legacy unsplit Issues use the same compact-projection fallback already described above under Two-plane Issue dispatch — this section adds no second fallback.
+
+Treat each of the following as a fresh-worker boundary: a new worker (session or subagent) reconstructs its stage only from durable state, never from a prior worker's conversational context.
+
+1. **Initial implementation → first PR.** The implementation worker's job ends once the PR and its required durable evidence exist (`docs/bounded-review-cycle.md`'s Entry check and Stage 1 steps 1-2). Do not preserve that worker merely because the PR may later draw review feedback. `AGENTS.md`'s Context-cost boundaries already treats the Stage 1 review request as a natural fresh-session boundary for the orchestrating session; this extends the same boundary to the worker that produced the PR.
+2. **PR review/fix.** A fresh worker handles review feedback or another actionable PR state, reconstructing only from the thick execution Issue, the PR, current review comments/findings, current repository state, and governing review authority (`docs/bounded-review-cycle.md` Stage 1) — never from the implementation worker's conversational state. One coherent response to one review round stays with one worker; do not rotate workers per individual comment (`docs/bounded-review-cycle.md` Stage 1 step 6; `AGENTS.md`'s Subagent dispatch).
+3. **Merge → Stage 2 audit.** Stage 2 already "start[s] the audit from a fresh independent context" (`docs/bounded-review-cycle.md` Stage 2 step 2). The thin control Issue records only the merged identity and the Stage 2 Audit Issue reference; it does not accumulate Stage 1 repair narrative.
+4. **Stage 2 NOT CLEAN → correction → re-audit.** A fresh correction worker performs the authorized correction (`docs/bounded-review-cycle.md`'s NOT CLEAN handling under Verdict handling). The subsequent re-audit must be performed by a *different* fresh audit worker, again starting from Stage 2 step 2's fresh-independent-context requirement — the correction worker must never become its own re-auditor. This is the same independence boundary Stage 2 already exists to enforce: a correction worker auditing its own fix would collapse execution and independent-assurance authority into one context, which is exactly what Stage 2's fresh-context requirement exists to prevent.
+
+Across all four breakpoints, the orchestrator's normal retained state stays the compact fields already named for a `parent-execution` Issue — control Issue, execution Issue, lifecycle state, route, PR, Stage 1/2 status, blocker/founder-decision flags — never copied execution requirements, diffs, test logs, review narratives, or audit reasoning; those stay in the thick execution Issue, the PR, and durable review/audit evidence, per Two-plane Issue dispatch's no-message-bus rule above.
+
 ## Decomposition boundary
 
 Decomposition and execution are separate control boundaries. An issue completable as one bounded vertical slice executes normally under Session role above.
