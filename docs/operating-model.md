@@ -193,7 +193,7 @@ A dispatched Issue can carry two distinct kinds of authority, and a session must
 
 **Immediate-dispatch gate.** This is the normal path and governs the sequence before any fallback or direct-inspection reasoning below is even considered. When the control Issue already supplies all of the following, read directly off its recorded fields:
 
-- an actionable lifecycle state (e.g. READY, not a placeholder or stale value);
+- state READY specifically — not EXECUTING, VERIFYING, REVIEW, AUDIT, CORRECTION, or any other lifecycle state; those mean the control Issue is already mid-cycle and should continue its own current step, never receive a fresh immediate dispatch;
 - one current execution pointer;
 - a settled route (executor/persona, if routing applies);
 - blocker: none;
@@ -203,7 +203,7 @@ the orchestrating session dispatches the worker immediately by reference — Iss
 
 Dispatch by reference stays by reference: do not read the execution Issue into the orchestrating session first, and do not reconstruct its requirements, acceptance criteria, or test plan into the subagent prompt — the worker reads the execution Issue and governing repository authority directly. Issue #283 (the #282 incident) is the record of this failure: a controller reconstructed most of a self-sufficient execution Issue into a bespoke subagent prompt and then also told the worker to read the same Issue, paying for one specification twice and loading implementation detail into the orchestrating session for no benefit.
 
-No script or dispatcher in this repository mechanically enforces the immediate-dispatch gate; it is a reasoning-session judgment applied to durable control-Issue fields, not a deterministic pipeline step, and the Prototype guardrail's bar against building a dispatcher before evidence justifies one applies here too. A future genuine deterministic dispatch surface should carry the smallest reliable guard, proven against a real named exception as well as the forbidden transition; until one exists, live dispatch behavior is verified by #283's fresh-session proof, not a fabricated test.
+No script or dispatcher in this repository mechanically enforces the immediate-dispatch gate; it is a reasoning-session judgment applied to durable control-Issue fields, not a deterministic pipeline step. Within the Loop-Dee-Loup source repository, `AGENTS.md`'s source-only Prototype guardrail carries the same bar against building a dispatcher before evidence justifies one; that guardrail section is Loop-Dee-Loup's own instance state and is stripped before installation, so an installed consumer repository will not have that specific text, but the caution against premature deterministic dispatch machinery still applies on its own terms wherever this document is read. A future genuine deterministic dispatch surface should carry the smallest reliable guard, proven against a real named exception as well as the forbidden transition; until one exists, live dispatch behavior is verified by #283's fresh-session proof, not a fabricated test.
 
 This does not change how subagents should be briefed for genuinely ambiguous or undocumented work — situational framing, prior findings, and specific file/line context still belong in the prompt when no durable spec covers them. It narrows only the case where a complete, self-sufficient execution Issue already exists: there, the Issue is the spec, and re-explaining it into the prompt is waste, not diligence.
 
