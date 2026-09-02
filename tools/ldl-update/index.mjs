@@ -61,13 +61,16 @@ import {
   contentMatchesHash,
   defaultResolveRevision,
   derivePendingManualIntegration,
+  deriveActivatedCapabilityReminder,
   deriveSyncPrerequisiteWarnings,
   findUnsafeDestReason,
   findUnsafeLdlDirReason,
   isValidManifest,
   parseArgs,
+  pendingIntegrationListsEqual,
   planBridges,
   sha256,
+  skipListsEqual,
   withResolvedBridgesManaged,
 } from "../ldl-init/index.mjs";
 
@@ -75,36 +78,13 @@ export { contentMatchesHash };
 
 export { parseArgs };
 
+// Re-exported for tools/mcp-server/status.mjs's existing import of these from this module —
+// both now live in tools/ldl-init/index.mjs alongside the other shared manifest-comparison
+// primitives (issue #282), so tools/ldl-activate can use them too without importing this
+// module and creating a circular dependency between the two sibling tools.
+export { skipListsEqual, pendingIntegrationListsEqual };
+
 const LDL_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-
-// Order-independent comparison of two `skipped` entry lists by dest+reason, used to decide
-// whether a newly computed skip set differs from what the existing manifest already
-// recorded — a run that finds nothing new to skip is still a true no-op. Compares each entry
-// as a [dest, reason] pair via JSON.stringify rather than joining into one delimited string,
-// so no delimiter choice can ever be ambiguous against arbitrary dest/reason text.
-// Exported so tools/mcp-server/status.mjs can replicate this exact no-op determination in a
-// read-only status check, instead of re-implementing its own skip-set comparison.
-export function skipListsEqual(a, b) {
-  const normalize = (list) =>
-    JSON.stringify(
-      list
-        .map((s) => [s.dest, s.reason])
-        .sort((x, y) => (x[0] === y[0] ? x[1].localeCompare(y[1]) : x[0].localeCompare(y[0]))),
-    );
-  return normalize(a) === normalize(b);
-}
-
-// Same order-independent comparison as skipListsEqual, applied to `pendingManualIntegration`
-// entries instead: lets a run whose set of bridge files awaiting manual merge hasn't changed
-// still count as a true no-op, without a bespoke third comparison for a third array shape.
-// Exported so tools/mcp-server/status.mjs can replicate this exact determination.
-export function pendingIntegrationListsEqual(a, b) {
-  const normalize = (list) =>
-    JSON.stringify(
-      list.map((p) => [p.dest, p.template, p.reason]).sort((x, y) => (x[0] === y[0] ? x[1].localeCompare(y[1]) : x[0].localeCompare(y[0]))),
-    );
-  return normalize(a) === normalize(b);
-}
 
 function applyInstall(ops, destRoot) {
   const installed = [];
@@ -322,6 +302,17 @@ export async function run(args, deps = {}) {
   const manualIntegrationAcknowledgements = parsedManifest.manualIntegrationAcknowledgements || [];
   const pendingManualIntegration = derivePendingManualIntegration(bridgePlans, toSkip, manualIntegrationAcknowledgements);
 
+  // Issue #282: activatedCapabilities (tools/ldl-activate's own durable record of which
+  // optional integrations this consumer has turned on) must survive an update exactly like
+  // manualIntegrationAcknowledgements above — this manifest object is a fresh literal below,
+  // not a spread of parsedManifest, so any field not explicitly carried forward here is
+  // silently wiped on every write. Missing this carry-forward would mean running
+  // tools/ldl-update against an already-activated consumer repository silently erases its
+  // activation record — a real data-loss bug, not merely a missed reminder. The no-op return
+  // branch just below never rewrites the manifest at all, so it already carries this field
+  // forward implicitly by leaving the file untouched.
+  const activatedCapabilities = parsedManifest.activatedCapabilities || [];
+
   // A skip is worth recording even when no managed file's content changed — e.g. a newer
   // MANAGED_ITEMS destination collides with a pre-existing unmanaged consumer file. Compare
   // against what the existing manifest already recorded so a run that finds nothing new
@@ -377,6 +368,7 @@ export async function run(args, deps = {}) {
     skipped: toSkip,
     pendingManualIntegration,
     manualIntegrationAcknowledgements,
+    activatedCapabilities,
   };
 
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
@@ -393,8 +385,13 @@ export async function run(args, deps = {}) {
       // see deriveSyncPrerequisiteWarnings's own comment), so an already-current repository's
       // quiet no-op above never resurfaces this unprompted, and a repository that already has
       // tools/ldl-sync/** installed from a prior run doesn't see it repeated on every unrelated
-      // update either.
-      warnings: deriveSyncPrerequisiteWarnings(installedFiles.map((f) => f.dest)),
+      // update either. deriveActivatedCapabilityReminder follows the exact same philosophy —
+      // this branch only runs when something genuinely changed, so a quiet no-op update never
+      // resurfaces this reminder unprompted either.
+      warnings: [
+        ...deriveSyncPrerequisiteWarnings(installedFiles.map((f) => f.dest)),
+        ...deriveActivatedCapabilityReminder(manifest.activatedCapabilities),
+      ],
     }),
   };
 }

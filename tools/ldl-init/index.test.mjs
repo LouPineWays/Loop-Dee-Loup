@@ -1143,6 +1143,83 @@ test("run: carries forward an existing manualIntegrationAcknowledgements array u
 });
 
 
+// Issue #282: activatedCapabilities (tools/ldl-activate's own durable record of which
+// optional integrations a consumer has turned on) must survive a reinit exactly like
+// manualIntegrationAcknowledgements does above — run() builds a fresh manifest object literal
+// rather than spreading the prior manifest, so any field not explicitly carried forward is
+// silently wiped on every re-run. This is a regression guard for exactly that data-loss bug.
+test("run: carries forward an existing activatedCapabilities array unchanged across a reinit (issue #282)", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+
+  const first = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(first.exitCode, 0);
+  const manifestPath = join(dest, ".ldl", "manifest.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  assert.deepEqual(manifest.activatedCapabilities, []);
+
+  // Hand-write an activation record, simulating a prior tools/ldl-activate run.
+  manifest.activatedCapabilities = [
+    {
+      id: "consumer-sync",
+      activatedAt: "2026-01-01T00:00:00.000Z",
+      files: [
+        { dest: ".github/workflows/ldl-sync.yml", sha256: sha256(Buffer.from("x")) },
+        { dest: ".github/workflows/ldl-sync-review.yml", sha256: sha256(Buffer.from("y")) },
+      ],
+    },
+  ];
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+
+  const second = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(second.exitCode, 0);
+  const secondManifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  assert.deepEqual(
+    secondManifest.activatedCapabilities,
+    manifest.activatedCapabilities,
+    "activatedCapabilities must survive a reinit untouched, not be silently wiped",
+  );
+});
+
+test("run: surfaces the activated-capability staleness reminder in warnings when activatedCapabilities is carried forward", async (t) => {
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  const first = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(first.exitCode, 0);
+  const manifestPath = join(dest, ".ldl", "manifest.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  manifest.activatedCapabilities = [
+    { id: "consumer-sync", activatedAt: "2026-01-01T00:00:00.000Z", files: [] },
+  ];
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+
+  const second = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(second.exitCode, 0);
+  const parsed = JSON.parse(second.message);
+  assert.ok(parsed.warnings.some((w) => w.includes("consumer-sync") && w.includes("tools/ldl-activate")));
+});
+
+test("isValidManifest: accepts a valid activatedCapabilities array and rejects a malformed entry (issue #282)", () => {
+  const base = { schemaVersion: 1, files: [] };
+  const goodEntry = {
+    id: "consumer-sync",
+    activatedAt: "2026-01-01T00:00:00.000Z",
+    files: [{ dest: ".github/workflows/ldl-sync.yml", sha256: sha256(Buffer.from("x")) }],
+  };
+  assert.equal(isValidManifest({ ...base, activatedCapabilities: [goodEntry] }), true);
+  assert.equal(isValidManifest({ ...base, activatedCapabilities: [{ id: "consumer-sync" }] }), false, "missing fields must be rejected");
+  assert.equal(
+    isValidManifest({ ...base, activatedCapabilities: [{ ...goodEntry, files: [{ dest: "x" }] }] }),
+    false,
+    "an incomplete files[] entry must be rejected",
+  );
+  assert.equal(
+    isValidManifest({ ...base, activatedCapabilities: [{ ...goodEntry, files: [{ dest: "x", sha256: "not-a-hash" }] }] }),
+    false,
+    "a non-sha256 hash must be rejected",
+  );
+});
+
 test("deriveSyncPrerequisiteWarnings: warns when a destination path falls under tools/ldl-sync/ (issue #217)", () => {
   assert.deepEqual(deriveSyncPrerequisiteWarnings(["tools/ldl-sync/verify-scope.mjs", "AGENTS.md"]), [SYNC_PR_PERMISSION_WARNING]);
 });

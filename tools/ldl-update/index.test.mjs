@@ -852,3 +852,82 @@ test("run: an already-current no-op reports no warnings — a quiet no-op stays 
   assert.equal(parsed.noop, true);
   assert.equal(parsed.warnings, undefined);
 });
+
+// Issue #282: activatedCapabilities (tools/ldl-activate's own durable record of which optional
+// integrations a consumer has turned on) must survive an update exactly like
+// manualIntegrationAcknowledgements does — run() builds a fresh manifest object literal rather
+// than spreading parsedManifest, so any field not explicitly carried forward is silently wiped
+// whenever the manifest is actually rewritten. Regression guard for exactly that data-loss bug,
+// exercised in both the no-op path (never rewrites the manifest at all, so survives trivially)
+// and a path where something else genuinely changes and the manifest does get rewritten.
+test("run: carries forward an existing activatedCapabilities array unchanged across a true no-op update (issue #282)", async (t) => {
+  const root = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, root, "rev-1");
+  const manifestPath = join(dest, ".ldl", "manifest.json");
+  const manifest = readManifest(dest);
+  manifest.activatedCapabilities = [
+    {
+      id: "consumer-sync",
+      activatedAt: "2026-01-01T00:00:00.000Z",
+      files: [
+        { dest: ".github/workflows/ldl-sync.yml", sha256: createHash("sha256").update("x").digest("hex") },
+        { dest: ".github/workflows/ldl-sync-review.yml", sha256: createHash("sha256").update("y").digest("hex") },
+      ],
+    },
+  ];
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "rev-1" });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(JSON.parse(result.message).noop, true);
+  assert.deepEqual(readManifest(dest).activatedCapabilities, manifest.activatedCapabilities);
+});
+
+test("run: carries forward an existing activatedCapabilities array unchanged across a genuine content update (issue #282)", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, rootV1, "rev-1");
+  const manifestPath = join(dest, ".ldl", "manifest.json");
+  const manifest = readManifest(dest);
+  const activatedCapabilities = [
+    {
+      id: "consumer-sync",
+      activatedAt: "2026-01-01T00:00:00.000Z",
+      files: [{ dest: ".github/workflows/ldl-sync.yml", sha256: createHash("sha256").update("x").digest("hex") }],
+    },
+  ];
+  manifest.activatedCapabilities = activatedCapabilities;
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const result = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+
+  assert.equal(result.exitCode, 0);
+  assert.notEqual(JSON.parse(result.message).noop, true, "sanity check: this run must genuinely rewrite the manifest");
+  assert.deepEqual(
+    readManifest(dest).activatedCapabilities,
+    activatedCapabilities,
+    "activatedCapabilities must survive a genuine content update untouched, not be silently wiped",
+  );
+});
+
+test("run: surfaces the activated-capability staleness reminder in warnings only when the run genuinely changes something", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, rootV1, "rev-1");
+  const manifestPath = join(dest, ".ldl", "manifest.json");
+  const manifest = readManifest(dest);
+  manifest.activatedCapabilities = [{ id: "consumer-sync", activatedAt: "2026-01-01T00:00:00.000Z", files: [] }];
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+
+  const noopResult = await run({ dest, root: rootV1 }, { resolveRevisionImpl: () => "rev-1" });
+  assert.equal(JSON.parse(noopResult.message).noop, true);
+  assert.equal(JSON.parse(noopResult.message).warnings, undefined, "a quiet no-op must never resurface this reminder unprompted");
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  const changedResult = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+  const parsed = JSON.parse(changedResult.message);
+  assert.ok(parsed.warnings.some((w) => w.includes("consumer-sync") && w.includes("tools/ldl-activate")));
+});
