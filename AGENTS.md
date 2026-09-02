@@ -68,7 +68,7 @@ After dispatch, first apply the Decomposition boundary: determine whether the ac
 
 For a single bounded vertical slice, the session must:
 
-1. load the parent snapshot and active slice;
+1. load the parent snapshot and identify the active slice — read that slice's own body directly only when implementing it inline rather than dispatching a fresh subagent worker per Subagent dispatch's two-plane rule below;
 2. complete all internal steps required by the slice without routine founder confirmation;
 3. independently verify the claimed outcome;
 4. update the parent snapshot with durable facts only;
@@ -84,6 +84,8 @@ Within a session the founder has already started, delegating work to subagents i
 The reason is chat discipline: top-level session chat should stay limited to the fixed one-line formats in "Fixed chat report formats" below, with step-by-step mechanics happening inside subagent dispatches rather than being narrated in the top-level chat.
 
 It becomes an automatic session launcher — the thing this repository defers building until evidence justifies it — only if a session uses subagent dispatch to originate work on new issues or PRs on its own initiative, without the founder having started that session in the first place. The gate that must never be bypassed is *who starts the session*, not *what the session delegates internally once running*.
+
+When a worker's task is already backed by a self-sufficient durable execution Issue, dispatch by reference — Issue number, controlling Issue, and route if already settled — and let the worker read that Issue directly. Do not load the full execution Issue into the orchestrating session first, and do not reconstruct its requirements, acceptance criteria, or test plan into the subagent prompt: that pays for the same specification twice and was the demonstrated failure in issue #282. See `docs/operating-model.md` § Two-plane Issue dispatch for the full control/execution split and its fallbacks. This narrows only the re-explanation of a spec that already exists durably — a subagent facing genuinely ambiguous or undocumented work still needs full situational framing.
 
 ## Session communication budget
 
