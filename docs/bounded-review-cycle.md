@@ -2,6 +2,18 @@
 
 The target repository's stricter review rules control. When it has no stricter rule and a slice is review-worthy, use this bounded cycle. One inline round is a bound on reviewer invocations, not permission to merge a known defect.
 
+## Wakeup cadence while waiting
+
+Waiting on a Codex review or audit response (Stage 1 or Stage 2 below) is never a case for a hand-rolled polling loop — not via `Monitor`, `Bash`, or any other ad hoc `gh api` script against a guessed endpoint and bot login. Always use `tools/review-watch/trigger.mjs` to post the trigger. For the wait itself, use `tools/review-watch/poll.mjs`: it is the required mechanism for Stage 2, which has no event delivery; for Stage 1, prefer PR event delivery when the harness supports it and use `poll.mjs` as the no-subscription fallback, per Stage 1 step 3 and the paragraph after step 9, and Stage 2 steps 4-6. `poll.mjs` already checks every endpoint Codex can respond on for the given `--kind` (`pulls/.../comments`, `pulls/.../reviews`, and `issues/.../comments` for `--kind pr`; `issues/.../comments` for `--kind issue`) and the correct bot login including its `[bot]` suffix (`chatgpt-codex-connector[bot]`), and it exits the instant a post-trigger bot response appears instead of running for a fixed window — matching by login and timestamp only, so a match still requires the same classification (genuine vs. BLOCKED vs. a blocked mutation attempt) that Stage 1 step 3 and Stage 2 step 10 already require before it counts as a review result. A hand-rolled loop re-implementing this — even one that looks equivalent — has already been observed to silently miss the response by checking the wrong endpoint or an unsuffixed login string (issue #113); do not re-derive this logic from memory.
+
+Before placing any self-check-in wakeup call (`ScheduleWakeup`, `send_later`, or a self-bound trigger) while babysitting a PR or issue between events, work through this checklist and do not place the call until every item holds:
+
+1. An event subscription already covers this PR/issue, so the check-in is a fallback, not the primary signal.
+2. Unless item 3 applies, the delay is 10–15 minutes — not a round default (30 minutes, an hour) reached for out of habit or because generic scheduling guidance elsewhere suggests it. `AGENTS.md`'s Authority order gives this repo's stricter bound priority even over a tool's own generic "check in about an hour" suggestion.
+3. A delay beyond 15 minutes is allowed only when the call's reason/name states the specific external wait it is bounded by (e.g. a stated CI duration). "Fewer interruptions" or "save tokens" are not valid reasons: a long gap does not save tokens here — a stale wake forces a full state reload of the PR/issue instead of a cheap incremental check.
+
+Defaulting to an hour, or skipping this checklist, is the exact failure this rule exists to prevent.
+
 ## Entry check
 
 Before review, verify the complete slice against its acceptance criteria and controlling authority. For code, check interacting requirements, existing invariants, generalize beyond the reported symptom, and use a fast local harness when repeated external verification would be expensive. For design or architecture, define a fixed rubric, list explicit deferrals and tensions, and self-review the entire current document rather than isolated edits.

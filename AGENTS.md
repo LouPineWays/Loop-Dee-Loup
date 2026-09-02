@@ -1,6 +1,6 @@
 # Agent operating contract
 
-Read this file before acting in this repository.
+Read this file before acting in this repository. It is a router, not a manual: it holds only the invariants needed for nearly every control decision. Stage-specific mechanics live in `docs/*.md`, operational skills, and durable GitHub state, loaded when the current lifecycle stage actually needs them — see `docs/operating-model.md` for the full startup-contract rationale.
 
 If you are reading this file inside a consumer repository rather than Loop-Dee-Loup itself, it was installed by `tools/ldl-init` — see that consumer repository's `docs/consumer-contract.md` for the installed ownership boundary and update path. Sections wrapped in `<!-- ldl:source-only:start/end -->` markers in Loop-Dee-Loup's own copy of this file are Loop-Dee-Loup's own instance state and are stripped before installation; they will not appear here.
 
@@ -24,71 +24,25 @@ Escalate unresolved contradictions. Do not silently reconcile them.
 
 ## Vertical-slice rule
 
-Every execution issue must be the kind of bounded assignment that could be dispatched to one capable subagent.
+Every execution issue must be the kind of bounded assignment one capable subagent could implement and verify end to end: one coherent capability, correction, or closure outcome, crossing whatever layers that outcome needs (including its own tests, documentation, and configuration), independently assessable and mergeable, and leaving the repository valid if no later slice follows. Do not create separate execution issues for exploration, implementation layer, tests, documentation, review response, or session continuation when they serve the same outcome — those are steps inside the slice.
 
-It must:
-
-- deliver one coherent capability, correction, or closure outcome;
-- cross every technical layer necessary for that outcome;
-- include its own tests, documentation, configuration, and verification where applicable;
-- be independently assessable and mergeable;
-- leave the product and repository valid if no later slice is executed.
-
-Do not create separate execution issues for exploration, implementation layer, tests, documentation, review response, or session continuation when they serve the same outcome. Those are steps inside the slice.
-
-A slice must also be vertical, not horizontal: it must produce a usable, observable portion of the parent outcome, not merely a layer, inventory, subsystem, or category of inputs toward it — except a legitimate enabling slice, which is authorized instead to remove a demonstrated blocker or serve as a genuine prerequisite for the very next vertical slice, provided it has its own independently verifiable outcome (see `docs/operating-model.md` § Vertical vs horizontal decomposition for the exact bar; a step with no independently verifiable outcome of its own is speculative work, not a legitimate exception). A plan whose first usable portion of the outcome would appear only after every layer or every item in a category is built is a decomposition failure, even when each resulting ticket looks individually bounded and the plan would eventually produce something usable. See `docs/operating-model.md` § Vertical vs horizontal decomposition for the full definitions, the decomposition self-check, the correction procedure, and worked examples.
+A slice must also be vertical, not horizontal: a usable, observable portion of the parent outcome, not merely a layer, inventory, subsystem, or category of inputs toward it — except a legitimate enabling slice, authorized instead to remove a demonstrated blocker or serve as a genuine prerequisite for the very next vertical slice, provided it has its own independently verifiable outcome. See `docs/operating-model.md` § Vertical vs horizontal decomposition for the full definitions, the decomposition self-check, the correction procedure, and worked examples.
 
 A founder decision, external manual action, post-merge audit, or genuinely independent correction may create a separate control boundary. Label it by its actual purpose rather than pretending it is a product slice.
 
 ## Decomposition boundary
 
-Decomposition and execution are separate control boundaries.
+Decomposition and execution are separate control boundaries. An issue completable as one bounded vertical slice under the rule above executes normally under Session execution below.
 
-If an issue is completable as one bounded vertical slice under the rule above, execute it normally under Session execution.
+An issue that genuinely requires multiple independently executable vertical slices instead triggers a decomposition session: apply the decomposition self-check (`docs/operating-model.md`), determine every currently foreseeable implementation-ready slice, create a durable execution issue for each with real GitHub dependency links, close the source issue as the decomposition record, and stop — without beginning any resulting slice, not even the first one, and not "to save a session." See `docs/operating-model.md` § Decomposition boundary for the exact six-step procedure.
 
-If it genuinely requires multiple independently executable vertical slices, the current session becomes a decomposition session. Once that determination is made, the session must not begin implementing any resulting slice — not even the first one, and not "to save a session."
-
-Before a decomposition session ends, it must:
-
-1. apply the decomposition self-check (`docs/operating-model.md` § Vertical vs horizontal decomposition): ask when, if every planned issue completed in order, the first independently usable, observable, verified portion of the parent outcome would exist — if the answer is only after several horizontal issues are all complete, the plan is horizontal and must be reframed around vertical outcomes before proceeding, even though the finished plan would eventually be usable;
-2. determine every currently foreseeable, implementation-ready vertical slice — not speculative work whose need depends on discoveries not yet made by an earlier slice;
-3. create one self-sufficient execution issue for each slice (the vertical-slice template), containing enough of the outcome, constraints, acceptance criteria, and dependencies that a fresh session can execute it without reconstructing this conversation;
-4. record genuine dependencies between those slices using GitHub's native issue relationships (Blocked by / Blocking), not free-text cross-references alone;
-5. close the source issue as a durable decomposition record — retaining its objective, settled decisions, scope and non-goals, the resulting slice list, dependencies, and any unresolved external dependency — rather than leaving it open to sequentially point from one child to the next;
-6. stop.
-
-Do not manufacture speculative future slices merely to complete a project tree: create only slices that are currently foreseeable and implementation-ready, not branches whose shape depends on an outcome not yet known.
-
-A resulting slice begins only when the founder explicitly dispatches it in a fresh session (e.g. "Work on #123"). Creating a slice — including during the same decomposition session that just created it — does not authorize beginning it. Do not infer dispatch from having just created the issue.
-
-Once dispatched, a slice runs autonomously per Session execution and the bounded review cycle until it reaches CLEAN completion or a genuine founder interrupt or unrecoverable blocker applies. CLEAN completion of one slice does not authorize beginning a sibling slice created in the same decomposition, even one that is now unblocked, obviously next, or has no remaining founder decision. The founder chooses which executable issue to dispatch next.
+A resulting slice begins only when the founder explicitly dispatches it in a fresh session; creating a slice does not authorize beginning it. Once dispatched, a slice runs autonomously through Session execution and the bounded review cycle until CLEAN completion, a genuine founder interrupt, or an unrecoverable blocker. Completing one slice never authorizes starting a sibling from the same decomposition — the founder chooses what runs next.
 
 ## Founder decision-form rule
 
-Serial founder interrogation is prohibited.
+Serial founder interrogation is prohibited. Before requesting product input, distinguish founder decisions from technical choices the session should make autonomously, collect every currently knowable founder question that blocks forming or completing vertical slices, and generate one self-contained decision form rather than asking sequentially. See `docs/decision-forms.md` for the required form structure, generation procedure, and answer-routing table.
 
-Before requesting product input:
-
-1. inspect the proposal, parent snapshot, target repository authority, and currently visible critical path;
-2. distinguish founder decisions from technical choices the session should make autonomously;
-3. collect every currently knowable founder question that blocks forming or completing vertical slices;
-4. generate one self-contained decision form rather than asking those questions sequentially.
-
-Every form question must state the blocking consequence, offer two or three mutually exclusive options where appropriate, recommend one option with tradeoffs, provide a suggested default, and include free-comment space. The form must end with a general comments field.
-
-Do not use a decision form for technical choices already governed by repository authority. Do not ask speculative downstream questions that do not affect a currently visible slice.
-
-After the founder returns the whole form:
-
-- normalize the answers into settled parent-snapshot decisions;
-- derive implementable vertical slices from the critical path;
-- convert only founder-accepted independent outcomes into backlog items. A target repository's Burn Order (e.g. Covenant's) is that repository's own prioritized backlog; Loop-Dee-Loup does not create or own it. An outcome about the Loop itself instead becomes a GitHub Issue on Loop-Dee-Loup's own repository, carrying one `priority:now`/`priority:soon`/`priority:later`/`priority:wishes` label — see `docs/priority-horizons.md`. Never merge the two;
-- record dependencies and proposed priority without duplicating the parent snapshot;
-- discard rejected options and unaccepted suggestions.
-
-A subsequent form is allowed only when the completed answers expose a new founder-level blocker that could not reasonably have been batched earlier. If two consecutive form rounds still produce no implementable vertical slice, diagnose a defective proposal, missing authority, or bad decomposition before generating the next consolidated form. Do not repeat questions already answered.
-
-If exactly one unforeseeable founder question blocks an in-progress slice, a direct concise question is allowed. Do not artificially hold it for a future batch.
+A subsequent form is allowed only when the completed answers expose a new founder-level blocker that could not reasonably have been batched earlier; two consecutive forms producing no implementable slice means diagnose before generating a third. If exactly one unforeseeable founder question blocks an in-progress slice, ask it directly instead — do not hold it for a future batch.
 
 ## Lean operating rules
 
@@ -99,6 +53,10 @@ If exactly one unforeseeable founder question blocks an in-progress slice, a dir
 - Do not recursively retrieve comments, closed issues, old PR discussions, or logs by default.
 - Do not expand scope merely because adjacent work is visible.
 - Preserve the target repository's IP boundary, branching, testing, review, merge, release, and destructive-action rules.
+
+## Auto-memory boundary
+
+A session's persistent auto-memory (where the execution environment provides one — session-level, keyed by working directory, outside this repository's git history) must not become a second project manual. It may hold founder preferences and process feedback under that memory system's own type definitions, but never backlog, issue/PR history, workflow procedure, or a duplicate of `AGENTS.md`/`docs/*.md` content — that state belongs in GitHub and this repository's docs, where every session and repository can read it, not in memory local to one environment. If a session notices memory drifting toward manual-duplication, prune it back rather than adding to it.
 
 ## Upstream-owned defects in LDL-managed content
 
@@ -117,13 +75,11 @@ For a single bounded vertical slice, the session must:
 5. create or designate at most one next vertical slice, and only when completing this slice exposes genuinely new follow-on work that was not already foreseeable at dispatch;
 6. stop at the slice boundary with a concise handoff.
 
-Do not ask whether to proceed with mechanically determined implementation, checks, verified review corrections, or handoff preparation. A new session start may be required to continue, but that is scheduling rather than approval.
-
-Once the founder has responded in an active session (e.g. answering review questions, completing a decision form, or clarifying an issue), continue mechanically through the resulting work — implementation, checks, fixes, PR — without pausing for routine confirmation. Stop only at a genuine completion, a founder interrupt condition, or a real blocker, and say which.
+Do not ask whether to proceed with mechanically determined implementation, checks, verified review corrections, or handoff preparation — a new session start may be required to continue, but that is scheduling rather than approval. Once the founder has responded in an active session, continue mechanically through the resulting work without pausing for routine confirmation. Stop only at a genuine completion, a founder interrupt condition, or a real blocker, and say which.
 
 ## Subagent dispatch
 
-Within a session the founder has already started, delegating work to subagents is the default way to keep the primary session's context lean — not merely approved for read-heavy or exploratory work (issue/PR reads, research, the Stage 2 audit trigger/wait/extract), but expected for implementation work between issues and PRs too: writing or editing files, running commands, committing, and opening PRs. It is a context-isolation technique, not a control boundary, and does not require separate founder approval.
+Within a session the founder has already started, delegating work to subagents is the default way to keep the primary session's context lean — not merely approved for read-heavy or exploratory work, but expected for implementation work between issues and PRs too: writing or editing files, running commands, committing, and opening PRs. It is a context-isolation technique, not a control boundary, and does not require separate founder approval.
 
 The reason is chat discipline: top-level session chat should stay limited to the fixed one-line formats in "Fixed chat report formats" below, with step-by-step mechanics happening inside subagent dispatches rather than being narrated in the top-level chat.
 
@@ -146,20 +102,12 @@ Use these exact one-line formats for the terminal chat message of each communica
 - Kickoff: `Starting #<issue>.`
 - Decision needed: `Decision needed: #<form-issue>.`
 - Direct question: `Question: <one clause>?` — for the single unforeseeable founder question the decision-form rule allows mid-slice; do not open a decision-form issue for it.
-- Clean completion: `CLEAN — <what merged/closed>. Next: #<slice>` (or `Next: None`). For a review-worthy PR, never emit this line — and never treat the slice as done in any other way — until `docs/bounded-review-cycle.md` Stage 1 step 8's composed `tools/review-watch/merge-ready-gate.mjs` returns exit 0 (`PRE_MERGE_READY` or `PRE_MERGE_READY_NO_WORK_ISSUE`) from durable GitHub evidence for that PR's frozen head. Completing implementation, tests, commit, push, and PR creation is not itself evidence Stage 1 happened, or that the PR carries no closing reference to its gated work issue; it is exactly the state in which the omission that produced LDL issue #32 and YouTubery issue #12 (Stage 1 alone) and LDL issue #214 (the closing-reference check alone, on YouTubery PR #49/#48) occurred, and the composed gate exists because prose reminders and two independently-invoked checks alike did not stop any of them.
-- Blocked: `BLOCKED — <one clause>. Next: <manual action>` (or `Next: None`). Use this exact line, per `docs/bounded-review-cycle.md` Stage 1, when every merge prerequisite is satisfied but the execution environment itself refuses the merge operation — that is a manual execution handoff, not a re-opened founder decision about whether to merge.
+- Clean completion: `CLEAN — <what merged/closed>. Next: #<slice>` (or `Next: None`). For a review-worthy PR, never emit this line — and never treat the slice as done in any other way — until `docs/bounded-review-cycle.md`'s composed pre-merge gate reports success from durable GitHub evidence for that PR's frozen head. Completing implementation, tests, commit, push, and PR creation is not itself evidence review happened.
+- Blocked: `BLOCKED — <one clause>. Next: <manual action>` (or `Next: None`). Use this exact line when every merge prerequisite is satisfied but the execution environment itself refuses the merge operation — a manual execution handoff, not a re-opened founder decision about whether to merge.
 
 An ad-hoc issue — one not created from a structured template (`parent-execution`, `work-packet`, `founder-decision-form`, `audit-control-issue`, `idea-intake`) — gets a single terse line for a body, not prose paragraphs. Templates keep their required fields.
 
-Waiting on a Codex review or audit response (Stage 1 or Stage 2 of the bounded review cycle) is never a case for a hand-rolled polling loop — not via `Monitor`, `Bash`, or any other ad hoc `gh api` script against a guessed endpoint and bot login. Always use `tools/review-watch/trigger.mjs` to post the trigger. For the wait itself, use `tools/review-watch/poll.mjs`: it is the required mechanism for Stage 2, which has no event delivery; for Stage 1, prefer PR event delivery when the harness supports it and use `poll.mjs` as the no-subscription fallback, per `docs/bounded-review-cycle.md` Stage 1 step 3 and the paragraph after step 9, and Stage 2 steps 4-6. `poll.mjs` already checks every endpoint Codex can respond on for the given `--kind` (`pulls/.../comments`, `pulls/.../reviews`, and `issues/.../comments` for `--kind pr`; `issues/.../comments` for `--kind issue`) and the correct bot login including its `[bot]` suffix (`chatgpt-codex-connector[bot]`), and it exits the instant a post-trigger bot response appears instead of running for a fixed window — matching by login and timestamp only, so a match still requires the same classification (genuine vs. BLOCKED vs. a blocked mutation attempt) that Stage 1 step 3 and Stage 2 step 10 already require before it counts as a review result. A hand-rolled loop re-implementing this — even one that looks equivalent — has already been observed to silently miss the response by checking the wrong endpoint or an unsuffixed login string (issue #113); do not re-derive this logic from memory.
-
-Before placing any self-check-in wakeup call (`ScheduleWakeup`, `send_later`, or a self-bound trigger) while babysitting a PR or issue between events, work through this checklist and do not place the call until every item holds:
-
-1. An event subscription already covers this PR/issue, so the check-in is a fallback, not the primary signal.
-2. Unless item 3 applies, the delay is 10–15 minutes — not a round default (30 minutes, an hour) reached for out of habit or because generic scheduling guidance elsewhere suggests it. This repo's bound is stricter and controls per the Authority order above, even over a tool's own generic "check in about an hour" suggestion.
-3. A delay beyond 15 minutes is allowed only when the call's reason/name states the specific external wait it is bounded by (e.g. a stated CI duration). "Fewer interruptions" or "save tokens" are not valid reasons: a long gap does not save tokens here — a stale wake forces a full state reload of the PR/issue instead of a cheap incremental check.
-
-Defaulting to an hour, or skipping this checklist, is the exact failure this rule exists to prevent.
+Always use `tools/review-watch/trigger.mjs` to request a Codex review and `tools/review-watch/poll.mjs` to wait for its response — never a hand-rolled polling loop against a guessed endpoint or bot login; that has already silently missed genuine responses (issue #113). See `docs/bounded-review-cycle.md` for the exact trigger/poll mechanics and the wakeup-cadence rules while waiting on a response.
 
 ## Founder interrupt conditions
 
@@ -211,7 +159,6 @@ A completed slice reports:
 
 Target at most 1,000–1,500 tokens for the complete durable handoff. The chat summary should be much shorter and link to that record.
 
-
 ## Operational skills
 
 Repository-local skills support the Loop without replacing the active issue or target-repository authority:
@@ -262,7 +209,7 @@ For review-worthy work, preserve any stricter target-repository policy and follo
 8. extract only the compact verdict needed by the controlling session;
 9. close on CLEAN, or create one consolidated correction outcome on NOT CLEAN.
 
-“One inline round” limits reviewer invocations; it never authorizes merging a known defect. The post-merge audit is a control issue and the stopping review for that cycle.
+"One inline round" limits reviewer invocations; it never authorizes merging a known defect. The post-merge audit is a control issue and the stopping review for that cycle.
 
 **Codex, triggered by `@codex review` in a comment, is the only reviewer for both stages.** Never substitute or supplement it with another review-request tool or mechanism (e.g. a native "request Copilot review" action) — if Codex is silent or slow, that is latency to wait out via event subscription and short check-ins, not a reason to reach for a different reviewer.
 

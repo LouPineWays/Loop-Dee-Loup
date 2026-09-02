@@ -6,6 +6,16 @@ The Loop-Dee-Loup execution issue is a vertical slice: the smallest coherent out
 
 It does not assume that work naturally arrives as projects, epics, sprints, departments, or formal role handoffs. Those structures are allowed only when an observed coordination problem makes them cheaper than direct execution.
 
+## Startup context budget
+
+LDL's thin-orchestrator architecture depends on a fresh Claude Code session starting with very little context. `CLAUDE.md` imports `AGENTS.md` automatically, so both load into every session before it even knows which Issue it is supervising — that automatic startup surface is a bounded routing contract, not a place for accumulating prose.
+
+Keep `AGENTS.md` limited to invariants needed for nearly every control decision: authority order, the vertical-slice/decomposition boundary determination, founder-interrupt conditions, the fixed chat report formats, and pointers to where the next layer of authority lives. Detailed implementation, review, polling, audit, and recovery mechanics belong in `docs/*.md`, an on-demand skill, or durable GitHub/repository state — loaded only once the current lifecycle stage actually needs them, not preloaded on the chance it might. Shortening prose while leaving the same material's full detail nowhere else is not a fix; the goal is a smaller globally-loaded semantic surface, not a smaller file with the same content moved into denser sentences.
+
+`tools/check-startup-budget.mjs` (wired into CI as part of the `control-plane-paths` workflow) enforces a line-count budget on `AGENTS.md` and `CLAUDE.md` as a regression guard against silent re-accumulation. It cannot judge whether an addition is a genuine universal invariant or a smuggled-back manual — that remains a review judgment — but a PR that legitimately needs more room raises the budget constant explicitly, in the same diff, rather than drifting past an unenforced target unnoticed.
+
+The same "needed almost everywhere" standard applies to any other automatically-loaded material: a session's persistent auto-memory (`AGENTS.md` § Auto-memory boundary), unscoped `.claude/rules` (none currently exist in this repository), and globally-visible skill/persona metadata, which already stays to one-line frontmatter descriptions with full instructions loaded only on invocation.
+
 ## What belongs in one slice
 
 A slice may cross UI, application logic, storage, configuration, tests, documentation, deployment, and verification. Layer count does not determine issue count. The outcome does.
@@ -179,11 +189,20 @@ One Claude Code session owns one vertical slice:
 
 Decomposition and execution are separate control boundaries. An issue completable as one bounded vertical slice executes normally under Session role above.
 
-An issue that genuinely requires multiple independently executable slices instead triggers a decomposition session: determine every currently foreseeable, implementation-ready slice, create a durable execution issue for each, record real dependencies between them, close the source issue as a decomposition record, and stop — without beginning any resulting slice. See `AGENTS.md` § Decomposition boundary for the exact contract.
+An issue that genuinely requires multiple independently executable slices triggers a decomposition session instead. Once that determination is made, the session must not begin implementing any resulting slice — not even the first one, and not "to save a session." Before it ends, it must:
+
+1. apply the decomposition self-check above: ask when, if every planned issue completed in order, the first independently usable, observable, verified portion of the parent outcome would exist — if the answer is only after several horizontal issues are all complete, the plan is horizontal and must be reframed around vertical outcomes before proceeding, even though the finished plan would eventually be usable;
+2. determine every currently foreseeable, implementation-ready vertical slice — not speculative work whose need depends on discoveries not yet made by an earlier slice;
+3. create one self-sufficient execution issue for each slice (the vertical-slice template), containing enough of the outcome, constraints, acceptance criteria, and dependencies that a fresh session can execute it without reconstructing this conversation;
+4. record genuine dependencies between those slices using GitHub's native issue relationships (Blocked by / Blocking), not free-text cross-references alone;
+5. close the source issue as a durable decomposition record — retaining its objective, settled decisions, scope and non-goals, the resulting slice list, dependencies, and any unresolved external dependency — rather than leaving it open to sequentially point from one child to the next;
+6. stop.
 
 Do not create issues to mimic implementation steps, conversational turns, or organizational roles. Do not manufacture speculative future slices whose shape depends on an outcome not yet known — "every currently foreseeable slice" is not "every slice that might eventually exist."
 
-A resulting slice begins only when the founder explicitly dispatches it in a fresh session. Completing one dispatched slice does not authorize starting a sibling from the same decomposition; the founder chooses what runs next.
+A resulting slice begins only when the founder explicitly dispatches it in a fresh session (e.g. "Work on #123"). Creating a slice — including during the same decomposition session that just created it — does not authorize beginning it. Do not infer dispatch from having just created the issue.
+
+Once dispatched, a slice runs autonomously per `AGENTS.md` § Session execution and the bounded review cycle until it reaches CLEAN completion or a genuine founder interrupt or unrecoverable blocker applies. CLEAN completion of one slice does not authorize beginning a sibling slice created in the same decomposition, even one that is now unblocked, obviously next, or has no remaining founder decision. The founder chooses which executable issue to dispatch next.
 
 ## Verification and autonomy
 
