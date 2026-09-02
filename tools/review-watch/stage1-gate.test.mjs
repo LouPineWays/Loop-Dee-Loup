@@ -105,6 +105,29 @@ test("isGenuineResponse: rejects the Codex Cloud 'create an environment' configu
   );
 });
 
+test("isGenuineResponse: rejects the Codex Cloud 'create a Codex account and connect to github' connector prompt (issue #274, LDL PR #275)", () => {
+  // Reproduced live: posting the Stage 1 trigger as github-actions[bot] (no Codex account
+  // connected to that identity) drew this exact reply instead of a review.
+  assert.equal(
+    isGenuineResponse(
+      "To use Codex here, [create a Codex account and connect to github](https://chatgpt.com/codex/cloud/settings/connectors).",
+    ),
+    false,
+  );
+});
+
+test("isGenuineResponse: accepts a genuine review that discusses the connector-prompt phrase/URL rather than being one", () => {
+  const genuineReview =
+    "**P2** The connector-setup reply text this gate matches against (`create a Codex account and connect to " +
+    "github`) is specific to the `chatgpt.com/codex/cloud/settings/connectors` page; if Codex Cloud ever renames " +
+    "that page, a real reply from it would no longer contain this phrase.";
+  assert.equal(
+    isGenuineResponse(genuineReview),
+    true,
+    "a review that merely discusses the connector-prompt phrase/URL while reviewing unrelated content must not be misclassified as the setup prompt itself",
+  );
+});
+
 test("isGenuineResponse: accepts a genuine review that discusses the setup-prompt phrase/URL rather than being one (Stage 1 review finding on PR #142)", () => {
   const genuineReview =
     "**P1** The documented `chatgpt.com/codex/cloud/settings/environments` link this gate matches against is stale; " +

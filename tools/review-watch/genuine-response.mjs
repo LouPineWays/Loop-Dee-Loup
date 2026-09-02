@@ -197,9 +197,24 @@ const ELLIPTICAL_REFUSAL_PATTERN = new RegExp(
 // reply caught (it is short — the whole thing fits in body_excerpt's 200 chars, unlike
 // every genuine response observed so far, which opens with a review/finding header) while
 // no longer rejecting a genuine review merely for mentioning the phrase or URL in passing.
+// Issue #274's empirical investigation (LDL PR #275) into whether Codex honors a
+// GITHUB_TOKEN (bot)-authored Stage 1 trigger reproduced a second, sibling setup prompt this
+// function didn't yet recognize: posting the trigger as `github-actions[bot]` (an identity
+// with no Codex account connected) drew "To use Codex here, [create a Codex account and
+// connect to github](https://chatgpt.com/codex/cloud/settings/connectors)." instead of an
+// actual review -- a distinct connector-authorization prompt from the already-known
+// environment-configuration one, but the same underlying shape: a fixed Codex Cloud setup
+// message, not a review of anything. Recognized as its own alternative second signal, same
+// anchored-to-start discipline as the environment variant, rather than loosening the anchor
+// itself -- the anchor is what already keeps a genuine review that merely mentions Codex
+// Cloud setup in passing from being misclassified (Stage 1 review finding on PR #142).
 function isCodexCloudSetupPrompt(text) {
   const normalized = (text ?? "").trim().replace(/\s+/g, " ").toLowerCase();
-  return normalized.startsWith("to use codex here") && normalized.includes("create an environment for this repo");
+  if (!normalized.startsWith("to use codex here")) return false;
+  return (
+    normalized.includes("create an environment for this repo") ||
+    normalized.includes("create a codex account and connect to github")
+  );
 }
 
 // YouTubery PR #14 (LDL issue #151): a blocked/status reply wrapped in harmless leading

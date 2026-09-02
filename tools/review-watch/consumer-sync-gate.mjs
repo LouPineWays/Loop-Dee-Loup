@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Composed automation entry point for docs/bounded-review-cycle.md's Stage 1 trigger and
-// merge-ready bookkeeping on LDL's recurring, work-issue-less consumer-sync PRs (issue #274).
+// Composed automation entry point for docs/bounded-review-cycle.md's Stage 1 trigger
+// bookkeeping and merge-ready gate on LDL's recurring, work-issue-less consumer-sync PRs
+// (issue #274).
 //
 // Problem this closes: YouTubery PR #98 reached a clean genuine Codex review, but
 // merge-ready-gate.mjs still reported NOT_REQUESTED because the founder's manually-typed
@@ -8,48 +9,66 @@
 // (`<!-- ldl-trigger-head:<sha> -->`) -- the exact provenance dedup/attribution logic
 // trigger.mjs and stage1-gate.mjs require. The founder then had to hand-edit that comment to
 // add the marker and re-run the gate by hand before it reported PRE_MERGE_READY_NO_WORK_ISSUE.
-// This script automates that whole recovery mechanically:
+//
+// This script automates that recovery, and only that recovery -- it deliberately does NOT
+// attempt to post the `@codex review` trigger itself. Issue #274 asked for the cheapest
+// GitHub-native automatic trigger path to be tried first and empirically verified before
+// falling back; that trial was run for real (LDL PR #275, comment
+// https://github.com/LouPineWays/Loop-Dee-Loup/pull/275#issuecomment-5505737648) and settled
+// the question: Codex's connector does receive a Stage 1 trigger comment authored by the
+// default GITHUB_TOKEN identity (github-actions[bot]), but that identity has no Codex account
+// connected, so it replies with a fixed Codex Cloud connector-setup prompt ("To use Codex
+// here, [create a Codex account and connect to github]...") instead of a review -- a
+// structural limitation of a bot identity, not a flaky or improvable one. Auto-posting the
+// trigger from this script would therefore only ever add a dead-end exchange to every
+// consumer-sync PR, never a real review, so it does not. See
+// docs/consumer-contract.md, "Automated Stage 1 and merge-ready bookkeeping" for the
+// documented finding and the fallback this leads to. (That reply also exposed a genuine gap
+// in tools/review-watch/genuine-response.mjs's isCodexCloudSetupPrompt, fixed alongside this
+// script so it correctly classifies that reply as non-genuine rather than a false-positive
+// RESPONSE_RECEIVED.)
+//
+// What this script actually automates:
 //
 //   1. derives the current head automatically when `--head` is omitted (`gh pr view`);
-//   2. repairs a bare, markerless `@codex review` comment already on the thread by appending
-//      the current head's marker to it -- so a genuine response a plain human-typed trigger
-//      already drew becomes attributable without anyone hand-editing anything;
-//   3. posts a fresh, correctly-marked trigger via trigger.mjs when no trigger (marked or
-//      bare) exists at all yet, attempting the fully-automatic native path this issue prefers;
-//   4. runs merge-ready-gate.mjs with the explicit no-work-issue sentinel every recurring sync
-//      PR needs (issue #190), since this script is scoped to exactly that PR shape.
+//   2. repairs a bare, markerless `@codex review` comment already on the thread -- the one
+//      remaining founder action the required fallback allows (a fixed, zero-computation
+//      comment, typed by a human so Codex actually reviews it) -- by appending the current
+//      head's marker to it, so a genuine response that comment already drew becomes
+//      attributable without anyone hand-editing anything;
+//   3. runs merge-ready-gate.mjs with the explicit no-work-issue sentinel every recurring
+//      sync PR needs (issue #190), since this script is scoped to exactly that PR shape.
 //
 // This does not reimplement trigger.mjs, stage1-gate.mjs, poll.mjs, or merge-ready-gate.mjs --
-// it composes them, plus one new primitive (bare-trigger repair) none of them provide. Every
-// one-round / cross-head / genuine-response protection those scripts already enforce (see
-// trigger.mjs's own header comment) propagates untouched through the `runTriggerImpl` call
-// below -- this script adds no override and cannot bypass them.
+// it composes them (via findExistingTrigger/headMarker and merge-ready-gate.mjs's `run`),
+// plus the one new primitive (bare-trigger repair) none of them provide.
 //
 // Usage:
 //   node tools/review-watch/consumer-sync-gate.mjs --repo OWNER/REPO --pr 50 [--head <sha>]
 //   node tools/review-watch/consumer-sync-gate.mjs --repo OWNER/REPO --pr 50 --set-status true
 //
 // Result `status` (also the composed exit code below):
-//   "ready"   (exit 0) -- merge-ready-gate.mjs returned PRE_MERGE_READY_NO_WORK_ISSUE. Safe to
-//                         surface a conspicuous "ready for manual merge" GitHub state.
-//   "pending" (exit 2) -- a Stage 1 trigger exists (bot-posted or repaired) but no genuine
-//                         response yet. Not an error -- the normal in-flight state between
-//                         trigger and response.
-//   "blocked" (exit 2) -- a founder-interrupt trigger block (cross-head or repeat-round), a
-//                         closing-reference violation, or any other non-pending BLOCKED
-//                         composed-gate state. Must never be reported as ready.
-//   "error"   (exit 1) -- an operational failure (bad args, a `gh` failure, malformed gate
-//                         output). Never treated as a pass.
+//   "ready"          (exit 0) -- merge-ready-gate.mjs returned PRE_MERGE_READY_NO_WORK_ISSUE.
+//                                Safe to surface a conspicuous "ready for manual merge" state.
+//   "not_requested"  (exit 2) -- no Stage 1 trigger (marked or bare) exists yet at all. The
+//                                founder's one remaining action: comment `@codex review` on
+//                                this PR -- nothing to compute or copy.
+//   "pending"        (exit 2) -- a trigger exists (repaired or already marked) but no genuine
+//                                response yet. Not an error -- the normal in-flight state.
+//   "blocked"        (exit 2) -- a closing-reference violation or any other non-pending
+//                                BLOCKED composed-gate state. Must never be reported as ready.
+//   "error"          (exit 1) -- an operational failure (bad args, a `gh` failure, malformed
+//                                gate output). Never treated as a pass.
 //
 // --set-status true additionally posts a GitHub commit status on `--head` under the context
-// `ldl-sync/merge-ready`, mapping ready/pending/blocked/error to success/pending/failure/error
+// `ldl-sync/merge-ready`, mapping each status above to success/pending/pending/failure/error
 // -- one deterministic, always-overwritten status per head, never an accumulating comment
 // thread. Omitted (the default) so tests exercise the pure gate logic without a side effect.
 //
 // Tests: node --test tools/review-watch/consumer-sync-gate.test.mjs
 
 import { execFileSync } from "node:child_process";
-import { run as runTrigger, findExistingTrigger, headMarker } from "./trigger.mjs";
+import { findExistingTrigger, headMarker } from "./trigger.mjs";
 import { run as runMergeReadyGate } from "./merge-ready-gate.mjs";
 
 const TRIGGER_TEXT = "@codex review";
@@ -83,23 +102,22 @@ export function findBareTrigger(comments) {
 
 function statusForGateBlock(gate) {
   const blockedBy = gate.blockedBy ?? [];
-  const pendingOnly =
-    blockedBy.length === 1 &&
-    blockedBy[0].component === "stage1" &&
-    ["NOT_REQUESTED", "PENDING"].includes(blockedBy[0].state);
-  return pendingOnly ? "pending" : "blocked";
+  if (blockedBy.length === 1 && blockedBy[0].component === "stage1") {
+    if (blockedBy[0].state === "NOT_REQUESTED") return "not_requested";
+    if (blockedBy[0].state === "PENDING") return "pending";
+  }
+  return "blocked";
 }
 
-// `ghApiImpl`/`ghPatchImpl`/`ghPrViewImpl`/`runTriggerImpl`/`runMergeReadyGateImpl`/
-// `setStatusImpl` are all injected so tests can drive `run` end-to-end against fakes,
-// never the real network or `gh` CLI.
+// `ghApiImpl`/`ghPatchImpl`/`ghPrViewImpl`/`runMergeReadyGateImpl`/`setStatusImpl` are all
+// injected so tests can drive `run` end-to-end against fakes, never the real network or
+// `gh` CLI.
 export async function run(
   args,
   {
     ghApiImpl = defaultGhApi,
     ghPatchImpl = defaultGhPatch,
     ghPrViewImpl = defaultGhPrView,
-    runTriggerImpl = runTrigger,
     runMergeReadyGateImpl = runMergeReadyGate,
     setStatusImpl = defaultSetStatus,
   } = {},
@@ -138,8 +156,9 @@ export async function run(
   }
 
   // Repair only when no marked trigger for this exact head exists yet -- a marked trigger
-  // (bot-posted or already repaired) already satisfies trigger.mjs/stage1-gate.mjs
-  // unchanged, and repairing it again would be a pointless mutation.
+  // (already repaired, or one a founder happened to post with the marker themselves) already
+  // satisfies trigger.mjs/stage1-gate.mjs unchanged, and repairing it again would be a
+  // pointless mutation.
   let repaired = false;
   if (!findExistingTrigger(comments, { head })) {
     const bare = findBareTrigger(comments);
@@ -155,29 +174,10 @@ export async function run(
         };
       }
       repaired = true;
-      // Reflect the edit locally instead of re-reading, so the trigger.mjs call below sees
-      // the repaired body immediately without racing a second live read.
+      // Reflect the edit locally instead of re-reading, so merge-ready-gate.mjs's own reads
+      // (a fresh `gh api` call inside stage1-gate.mjs) still land after this PATCH is durable.
       comments = comments.map((c) => (c.id === bare.id ? { ...c, body: newBody } : c));
     }
-  }
-
-  let trigger;
-  try {
-    trigger = await runTriggerImpl(
-      { repo, kind: "pr", number: pr, head },
-      { ghApiImpl: (path) => (path === commentsPath ? comments : ghApiImpl(path)) },
-    );
-  } catch (err) {
-    return { exitCode: 1, status: "error", message: `trigger.mjs threw: ${err.message}`, repaired };
-  }
-  if (trigger.exitCode === 1) {
-    return { exitCode: 1, status: "error", message: `trigger.mjs: ${trigger.message}`, repaired };
-  }
-  if (trigger.exitCode === 2) {
-    // A founder-interrupt block (cross-head repeat-round, or Stage 2's genuine-issue-response
-    // guard) -- never something this automation may resolve on its own. Surface it as
-    // blocked, never as pending or ready.
-    return { exitCode: 2, status: "blocked", message: trigger.message, repaired, trigger };
   }
 
   let gate;
@@ -207,9 +207,16 @@ export async function run(
   return result;
 }
 
-const STATUS_STATE = { ready: "success", pending: "pending", blocked: "failure", error: "error" };
+const STATUS_STATE = {
+  ready: "success",
+  not_requested: "pending",
+  pending: "pending",
+  blocked: "failure",
+  error: "error",
+};
 const STATUS_DESCRIPTION = {
   ready: "Clean genuine Codex review + composed gate pass -- ready for manual merge.",
+  not_requested: 'No Stage 1 trigger yet -- comment "@codex review" on this PR to request review.',
   pending: "Stage 1 trigger posted; waiting for a genuine Codex response.",
   blocked: "Blocked -- see PR comments / Actions log for the finding or violation.",
   error: "Automation failed to determine merge readiness -- see Actions log.",

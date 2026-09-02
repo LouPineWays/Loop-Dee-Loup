@@ -2,16 +2,16 @@
 // injected impl options — never touch the real network or `gh` CLI here. Run with:
 // node --test tools/review-watch/consumer-sync-gate.test.mjs
 //
-// The last section ("YouTubery #98 regression") deliberately imports the *real*, unmodified
-// trigger.mjs and stage1-gate.mjs `run` functions instead of mocking them, to prove this
-// script's repair step makes those two existing, untouched gates correctly recognize a
-// genuine response drawn by a bare, marker-less human `@codex review` comment — the exact
-// YouTubery PR #98 shape (issue #274) — without any code change to either of them.
+// The last section ("YouTubery #98 regression") deliberately verifies against the *real*,
+// unmodified stage1-gate.mjs `run` function instead of mocking it, to prove this script's
+// repair step makes that existing, untouched gate correctly recognize a genuine response
+// drawn by a bare, marker-less human `@codex review` comment — the exact YouTubery PR #98
+// shape (issue #274) — without any code change to it.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseArgs, findBareTrigger, run } from "./consumer-sync-gate.mjs";
-import { headMarker, run as runTriggerReal } from "./trigger.mjs";
+import { headMarker } from "./trigger.mjs";
 import { run as runStage1GateReal } from "./stage1-gate.mjs";
 
 const REPO = "LouPineWays/YouTubery";
@@ -84,7 +84,6 @@ test("run: derives --head via ghPrViewImpl when omitted", async () => {
         return HEAD;
       },
       ghApiImpl: async () => [],
-      runTriggerImpl: async () => ({ exitCode: 0, posted: true, timestamp: "2026-08-20T00:00:00Z" }),
       runMergeReadyGateImpl: async (args) => {
         assert.equal(args.head, HEAD);
         return readyGate();
@@ -106,26 +105,23 @@ test("run: exits 1 when head derivation fails", async () => {
   assert.match(result.message, /gh pr view failed/);
 });
 
-// -- run: composition with trigger.mjs and merge-ready-gate.mjs (mocked) -------------------
+// -- run: never attempts to post a trigger itself --------------------------------------------
 
-test("run: no bare trigger, no marked trigger -> no repair, delegates straight to trigger.mjs", async () => {
-  let triggerArgs;
+test("run: no bare trigger, no marked trigger -> no repair, and never posts a trigger of its own (issue #274's empirical finding: a bot-posted trigger only ever draws a Codex Cloud connector-setup reply, never a review)", async () => {
   const result = await run(
     { repo: REPO, pr: PR, head: HEAD },
     {
       ghApiImpl: async () => [],
-      runTriggerImpl: async (args) => {
-        triggerArgs = args;
-        return { exitCode: 0, posted: true, timestamp: "2026-08-20T00:00:00Z" };
-      },
-      runMergeReadyGateImpl: async () => readyGate(),
+      runMergeReadyGateImpl: async () => ({
+        exitCode: 2,
+        state: "BLOCKED",
+        blockedBy: [{ component: "stage1", state: "NOT_REQUESTED" }],
+      }),
     },
   );
   assert.equal(result.repaired, false);
-  assert.equal(result.status, "ready");
-  assert.equal(triggerArgs.repo, REPO);
-  assert.equal(triggerArgs.kind, "pr");
-  assert.equal(triggerArgs.head, HEAD);
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.status, "not_requested");
 });
 
 test("run: repairs a bare trigger by appending the current head's marker", async () => {
@@ -138,7 +134,6 @@ test("run: repairs a bare trigger by appending the current head's marker", async
       ghPatchImpl: async (args) => {
         patchArgs = args;
       },
-      runTriggerImpl: async () => ({ exitCode: 0, posted: false, timestamp: bareComment.created_at }),
       runMergeReadyGateImpl: async () => readyGate(),
     },
   );
@@ -157,7 +152,6 @@ test("run: does not repair when a marked trigger for this head already exists", 
       ghPatchImpl: async () => {
         patchCalls += 1;
       },
-      runTriggerImpl: async () => ({ exitCode: 0, posted: false, timestamp: "2026-08-20T00:00:00Z" }),
       runMergeReadyGateImpl: async () => readyGate(),
     },
   );
@@ -165,37 +159,13 @@ test("run: does not repair when a marked trigger for this head already exists", 
   assert.equal(result.repaired, false);
 });
 
-test("run: trigger.mjs exit 1 (operational error) propagates as error", async () => {
-  const result = await run(
-    { repo: REPO, pr: PR, head: HEAD },
-    {
-      ghApiImpl: async () => [],
-      runTriggerImpl: async () => ({ exitCode: 1, message: "gh api call failed" }),
-    },
-  );
-  assert.equal(result.exitCode, 1);
-  assert.equal(result.status, "error");
-  assert.match(result.message, /trigger\.mjs: gh api call failed/);
-});
-
-test("run: trigger.mjs exit 2 (founder-interrupt block) surfaces as blocked, never pending or ready", async () => {
-  const result = await run(
-    { repo: REPO, pr: PR, head: HEAD },
-    {
-      ghApiImpl: async () => [],
-      runTriggerImpl: async () => ({ exitCode: 2, message: "Refusing to post a second Stage 1 trigger..." }),
-    },
-  );
-  assert.equal(result.exitCode, 2);
-  assert.equal(result.status, "blocked");
-});
+// -- run: composition with merge-ready-gate.mjs (mocked) ------------------------------------
 
 test("run: merge-ready-gate PRE_MERGE_READY_NO_WORK_ISSUE -> ready", async () => {
   const result = await run(
     { repo: REPO, pr: PR, head: HEAD },
     {
       ghApiImpl: async () => [],
-      runTriggerImpl: async () => ({ exitCode: 0, posted: true, timestamp: "2026-08-20T00:00:00Z" }),
       runMergeReadyGateImpl: async (args) => {
         assert.equal(args.issue, "none");
         return readyGate();
@@ -206,12 +176,27 @@ test("run: merge-ready-gate PRE_MERGE_READY_NO_WORK_ISSUE -> ready", async () =>
   assert.equal(result.status, "ready");
 });
 
+test("run: merge-ready-gate BLOCKED on stage1 NOT_REQUESTED -> not_requested, distinct from pending", async () => {
+  const result = await run(
+    { repo: REPO, pr: PR, head: HEAD },
+    {
+      ghApiImpl: async () => [],
+      runMergeReadyGateImpl: async () => ({
+        exitCode: 2,
+        state: "BLOCKED",
+        blockedBy: [{ component: "stage1", state: "NOT_REQUESTED" }],
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.status, "not_requested");
+});
+
 test("run: merge-ready-gate BLOCKED on stage1 PENDING alone -> pending, not blocked", async () => {
   const result = await run(
     { repo: REPO, pr: PR, head: HEAD },
     {
       ghApiImpl: async () => [],
-      runTriggerImpl: async () => ({ exitCode: 0, posted: true, timestamp: "2026-08-20T00:00:00Z" }),
       runMergeReadyGateImpl: async () => ({
         exitCode: 2,
         state: "BLOCKED",
@@ -228,7 +213,6 @@ test("run: merge-ready-gate BLOCKED on a closing-reference violation -> blocked,
     { repo: REPO, pr: PR, head: HEAD },
     {
       ghApiImpl: async () => [],
-      runTriggerImpl: async () => ({ exitCode: 0, posted: true, timestamp: "2026-08-20T00:00:00Z" }),
       runMergeReadyGateImpl: async () => ({
         exitCode: 2,
         state: "BLOCKED",
@@ -245,7 +229,6 @@ test("run: merge-ready-gate operational error -> error, never ready", async () =
     { repo: REPO, pr: PR, head: HEAD },
     {
       ghApiImpl: async () => [],
-      runTriggerImpl: async () => ({ exitCode: 0, posted: true, timestamp: "2026-08-20T00:00:00Z" }),
       runMergeReadyGateImpl: async () => ({ exitCode: 1, state: "OPERATIONAL_ERROR", message: "gh failure" }),
     },
   );
@@ -261,7 +244,6 @@ test("run: --set-status true posts a commit status mapped from the composed resu
     { repo: REPO, pr: PR, head: HEAD, "set-status": "true" },
     {
       ghApiImpl: async () => [],
-      runTriggerImpl: async () => ({ exitCode: 0, posted: true, timestamp: "2026-08-20T00:00:00Z" }),
       runMergeReadyGateImpl: async () => readyGate(),
       setStatusImpl: async (args) => {
         statusCall = args;
@@ -280,7 +262,6 @@ test("run: --set-status omitted never calls setStatusImpl", async () => {
     { repo: REPO, pr: PR, head: HEAD },
     {
       ghApiImpl: async () => [],
-      runTriggerImpl: async () => ({ exitCode: 0, posted: true, timestamp: "2026-08-20T00:00:00Z" }),
       runMergeReadyGateImpl: async () => readyGate(),
       setStatusImpl: async () => {
         calls += 1;
@@ -295,7 +276,6 @@ test("run: a failure setting the commit status is reported as an error, not swal
     { repo: REPO, pr: PR, head: HEAD, "set-status": "true" },
     {
       ghApiImpl: async () => [],
-      runTriggerImpl: async () => ({ exitCode: 0, posted: true, timestamp: "2026-08-20T00:00:00Z" }),
       runMergeReadyGateImpl: async () => readyGate(),
       setStatusImpl: async () => {
         throw new Error("gh api statuses failed");
@@ -307,7 +287,7 @@ test("run: a failure setting the commit status is reported as an error, not swal
   assert.match(result.message, /gh api statuses failed/);
 });
 
-// -- YouTubery #98 regression: real trigger.mjs + real stage1-gate.mjs, no mocks -----------
+// -- YouTubery #98 regression: real stage1-gate.mjs, no mocks --------------------------------
 
 test("YouTubery #98 regression: a bare human @codex review trigger with a genuine response is NOT_REQUESTED before repair", async () => {
   const comments = [
@@ -333,7 +313,7 @@ test("YouTubery #98 regression: a bare human @codex review trigger with a genuin
   assert.equal(stage1Before.state, "NOT_REQUESTED");
 });
 
-test("YouTubery #98 regression: consumer-sync-gate's repair makes the same fixture RESPONSE_RECEIVED, via the real trigger.mjs and stage1-gate.mjs", async () => {
+test("YouTubery #98 regression: consumer-sync-gate's repair makes the same fixture RESPONSE_RECEIVED, via the real stage1-gate.mjs", async () => {
   const comments = [
     { id: 1, body: "@codex review", created_at: "2026-08-20T00:00:00Z", user: { login: "the-founder" } },
     {
@@ -353,9 +333,6 @@ test("YouTubery #98 regression: consumer-sync-gate's repair makes the same fixtu
         const c = comments.find((c) => c.id === commentId);
         c.body = body;
       },
-      // The real, unmodified trigger.mjs -- proves this script never reimplements its
-      // dedup/cross-head logic.
-      runTriggerImpl: runTriggerReal,
       runMergeReadyGateImpl: async () => readyGate(),
     },
   );
@@ -375,4 +352,48 @@ test("YouTubery #98 regression: consumer-sync-gate's repair makes the same fixtu
   );
   assert.equal(stage1After.exitCode, 0);
   assert.equal(stage1After.state, "RESPONSE_RECEIVED");
+});
+
+// -- Codex Cloud connector-setup reply (issue #274's empirical finding) never counts ---------
+
+test("run: a Codex Cloud connector-setup reply to a bare trigger stays NOT genuine, via the real stage1-gate.mjs (issue #274, LDL PR #275)", async () => {
+  // Reproduces the exact reply this script's own header comment documents: posting the
+  // trigger as a bot identity with no connected Codex account draws this fixed setup prompt,
+  // never a review. It must never be mistaken for RESPONSE_RECEIVED, before or after repair.
+  const comments = [
+    { id: 1, body: "@codex review", created_at: "2026-08-20T00:00:00Z", user: { login: "github-actions[bot]" } },
+    {
+      id: 2,
+      body: "To use Codex here, [create a Codex account and connect to github](https://chatgpt.com/codex/cloud/settings/connectors).",
+      created_at: "2026-08-20T00:00:05Z",
+      user: { login: "chatgpt-codex-connector[bot]" },
+    },
+  ];
+  const commentsPath = `repos/${REPO}/issues/${PR}/comments`;
+
+  const result = await run(
+    { repo: REPO, pr: PR, head: HEAD },
+    {
+      ghApiImpl: async (path) => (path === commentsPath ? comments : []),
+      ghPatchImpl: async ({ commentId, body }) => {
+        comments.find((c) => c.id === commentId).body = body;
+      },
+      runMergeReadyGateImpl: async () => ({
+        exitCode: 2,
+        state: "BLOCKED",
+        blockedBy: [{ component: "stage1", state: "PENDING" }],
+      }),
+    },
+  );
+  assert.equal(result.status, "pending");
+
+  const stage1 = await runStage1GateReal(
+    { repo: REPO, number: PR, head: HEAD },
+    {
+      ghPrViewImpl: async () => "",
+      ghApiImpl: async (path) => (path === commentsPath ? comments : []),
+    },
+  );
+  assert.equal(stage1.exitCode, 2);
+  assert.equal(stage1.state, "PENDING");
 });
