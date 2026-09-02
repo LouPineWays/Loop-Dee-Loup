@@ -99,21 +99,45 @@ const LEADING_VERDICT_PATTERN =
 const VERDICT_LABEL_LINE_PATTERN = /^(?:#{1,6}\s*)?\*{0,2}verdict\*{0,2}\s*(?::\s*\*{0,2}\s*(.*))?$/i;
 const VERDICT_TOKEN_PATTERN = /\b(NOT CLEAN|CLEAN)\b/i;
 
+// A heading combining "Stage 2 Audit" with the verdict token on the same line, in either order
+// relative to punctuation — issue #259's actual defect recurring a second time (this file's own
+// verdict extraction was apparently never extended for either combined-heading shape, only
+// trigger.mjs's --force guard was fixed after that incident). Two real observed examples, both
+// from Codex's own replies: "## Stage 2 Audit Verdict: **CLEAN**" (issue #259, trigger.mjs's own
+// header comment) and "## Stage 2 Audit — NOT CLEAN" (issue #278, the audit response on this very
+// correction PR's target issue). Neither matches LEADING_VERDICT_PATTERN (the token isn't the
+// very first content after heading/list/emphasis markup — "Stage 2 Audit" precedes it) or
+// VERDICT_LABEL_LINE_PATTERN (the line literally says "Stage 2 Audit", not "verdict"). Deliberately
+// narrow per this file's own Non-goals (no arbitrary Markdown parsing, no semantic adjudication):
+// the line must open with "Stage 2 Audit" (after optional heading markup, case-insensitive,
+// tolerating extra whitespace between the words), and the CLEAN/NOT CLEAN token must appear later
+// on that SAME line — never a later, unrelated line that merely mentions "Stage 2 Audit" in
+// passing prose.
+const STAGE2_HEADING_VERDICT_PATTERN = /^(?:#{1,6}\s*)?stage\s*2\s+audit\b.*$/im;
+
 function normalizeVerdictToken(token) {
   return token.toUpperCase() === "CLEAN" ? "CLEAN" : "NOT CLEAN";
 }
 
-// Pure. Extracts the response's own explicit verdict, or null. Two recognized shapes: a
-// leading status line, or a "Verdict" label followed — on the same line or the next non-blank
-// line — by the token. Only the immediate next non-blank line is checked after a label with no
-// same-line token, so an unrelated later mention of CLEAN/NOT CLEAN elsewhere in the body is
-// never mistaken for the labelled value.
+// Pure. Extracts the response's own explicit verdict, or null. Three recognized shapes: a
+// leading status line, a "Verdict" label followed — on the same line or the next non-blank
+// line — by the token, or a "Stage 2 Audit ..." heading carrying the token later on the same
+// line. Only the immediate next non-blank line is checked after a label with no same-line
+// token, so an unrelated later mention of CLEAN/NOT CLEAN elsewhere in the body is never
+// mistaken for the labelled value. The three checks are tried in order but are mutually
+// exclusive in practice (a given line matches at most one shape), so order does not matter.
 export function extractResponseVerdict(text) {
   const normalized = (text ?? "").trim();
   if (!normalized) return null;
 
   const leading = LEADING_VERDICT_PATTERN.exec(normalized);
   if (leading) return normalizeVerdictToken(leading[1]);
+
+  const stage2Heading = STAGE2_HEADING_VERDICT_PATTERN.exec(normalized);
+  if (stage2Heading) {
+    const token = VERDICT_TOKEN_PATTERN.exec(stage2Heading[0]);
+    if (token) return normalizeVerdictToken(token[1]);
+  }
 
   const lines = normalized.split("\n");
   for (let i = 0; i < lines.length; i++) {
