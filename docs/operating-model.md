@@ -176,7 +176,7 @@ Version one deliberately does not include a daemon, queue worker, webhook dispat
 
 One Claude Code session owns one vertical slice:
 
-- load the parent snapshot and active slice;
+- load the parent snapshot and identify the active slice — read that slice's own body directly only when implementing it inline rather than dispatching a fresh subagent worker per Two-plane Issue dispatch below;
 - produce its complete outcome across all necessary layers;
 - run specified checks;
 - independently verify completion claims;
