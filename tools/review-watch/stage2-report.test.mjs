@@ -75,6 +75,119 @@ test("bodyReferencesCommit: a malformed (non-hex, or under 7 chars) mergeCommit 
   assert.equal(bodyReferencesCommit(`see ${MERGE_COMMIT}`, "abc123"), false);
 });
 
+// -- isCompletedStage2AuditReport: reviewedHeadCommit target-identity signal (issue #335, audit
+// #334) — a genuine response may reference either the exact merge commit or the audit issue's
+// own trusted frozen Stage 1 reviewed head, never any other SHA. -------------------------------
+
+const REVIEWED_HEAD = "82651b3c8026ba118bb3bbf22c1dee6a09d27670";
+
+test("isCompletedStage2AuditReport: a response naming only the trusted reviewed head (not the merge commit) is accepted when reviewedHeadCommit is given", () => {
+  const body = validReport({ commit: REVIEWED_HEAD }); // response cites the reviewed head, not MERGE_COMMIT
+  const result = isCompletedStage2AuditReport(body, { mergeCommit: MERGE_COMMIT, reviewedHeadCommit: REVIEWED_HEAD });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "CLEAN");
+});
+
+test("isCompletedStage2AuditReport: without reviewedHeadCommit, a response naming only the reviewed head is still rejected (no relaxation unless the caller explicitly supplies the trusted value)", () => {
+  const body = validReport({ commit: REVIEWED_HEAD });
+  const result = isCompletedStage2AuditReport(body, { mergeCommit: MERGE_COMMIT });
+  assert.equal(result.complete, false);
+  assert.ok(result.reasons.some((r) => r.includes("merge commit")));
+});
+
+test("isCompletedStage2AuditReport: a response naming the exact merge commit still passes when reviewedHeadCommit is also given (both signals accepted, neither required over the other)", () => {
+  const result = isCompletedStage2AuditReport(validReport(), { mergeCommit: MERGE_COMMIT, reviewedHeadCommit: REVIEWED_HEAD });
+  assert.equal(result.complete, true);
+});
+
+test("isCompletedStage2AuditReport: a response naming an unrelated SHA is rejected even when reviewedHeadCommit is given (stays fail-closed)", () => {
+  const unrelated = "deadbeef00000000000000000000000000000000";
+  const result = isCompletedStage2AuditReport(validReport({ commit: unrelated }), {
+    mergeCommit: MERGE_COMMIT,
+    reviewedHeadCommit: REVIEWED_HEAD,
+  });
+  assert.equal(result.complete, false);
+  assert.ok(result.reasons.some((r) => r.includes("merge commit") && r.includes("reviewed head")));
+});
+
+test("isCompletedStage2AuditReport: a response naming a different PR's head (not this audit's own trusted reviewedHeadCommit) is rejected", () => {
+  const differentPrHead = "1234567890abcdef1234567890abcdef12345678";
+  const result = isCompletedStage2AuditReport(validReport({ commit: differentPrHead }), {
+    mergeCommit: MERGE_COMMIT,
+    reviewedHeadCommit: REVIEWED_HEAD,
+  });
+  assert.equal(result.complete, false);
+});
+
+test("isCompletedStage2AuditReport: malformed/missing trusted target metadata (reviewedHeadCommit null) falls back to the merge-commit-only check, exactly as before", () => {
+  const result = isCompletedStage2AuditReport(validReport(), { mergeCommit: MERGE_COMMIT, reviewedHeadCommit: null });
+  assert.equal(result.complete, true);
+  const rejected = isCompletedStage2AuditReport(validReport({ commit: REVIEWED_HEAD }), {
+    mergeCommit: MERGE_COMMIT,
+    reviewedHeadCommit: null,
+  });
+  assert.equal(rejected.complete, false);
+});
+
+test("isCompletedStage2AuditReport: the #330 shape (an incidental short merge-prefix inside an unrelated git-log command) still passes on the merge-commit signal alone, unaffected by reviewedHeadCommit being present or absent", () => {
+  const incidental = [
+    "Verified via `git log --format='%H%x09%s%n%b' 748f806^..0e04348 | rg -in 'fixes'`.",
+    "",
+    "### Verification checklist",
+    "",
+    "1. Confirmed A — CONFIRMED",
+    "",
+    "Verdict: CLEAN",
+  ].join("\n");
+  const result = isCompletedStage2AuditReport(incidental, {
+    mergeCommit: "0e04348fb764a364e9d910bfc8074ed9e1339df1",
+    reviewedHeadCommit: "9d775fc430faa5e236d2670de8e806fc27ca8491",
+  });
+  assert.equal(result.complete, true, "incidental prefix match must keep working once a reviewedHeadCommit is also supplied");
+});
+
+// -- isCompletedStage2AuditReport: exact #334 reproduction (issue #335) -------------------------
+// Real audit body/response fixtures, not paraphrased reconstructions. #334's requested checklist
+// has 11 items; Codex's genuine response cites only the frozen reviewed head (never the merge
+// commit) and shows a 4-item status-marker walk-through — so target identity now passes (via
+// reviewedHeadCommit) but checklist completeness still correctly fails: this is a real coverage
+// gap (checklist items 6 and 9 are never addressed anywhere in the response), not mere reporting
+// condensation, so the two independent failure reasons are demonstrated to resolve independently.
+
+const ISSUE_334_MERGE_COMMIT = "0c9358ec0f607e2c3fc26ef8049585ab5d655fbe";
+const ISSUE_334_REVIEWED_HEAD = "82651b3c8026ba118bb3bbf22c1dee6a09d27670";
+const ISSUE_334_COMMENT = readFixture("issue-334-comment.txt");
+const ISSUE_334_CHECKLIST = readFixture("issue-334-checklist.txt");
+
+test("bodyReferencesCommit: issue #334's real response never restates the merge commit itself", () => {
+  assert.equal(bodyReferencesCommit(ISSUE_334_COMMENT, ISSUE_334_MERGE_COMMIT), false);
+});
+
+test("bodyReferencesCommit: issue #334's real response does reference its trusted frozen reviewed head", () => {
+  assert.equal(bodyReferencesCommit(ISSUE_334_COMMENT, ISSUE_334_REVIEWED_HEAD), true);
+});
+
+test("isCompletedStage2AuditReport: issue #334's real response now passes target identity via reviewedHeadCommit, but still correctly fails checklist completeness (11 requested, 4 shown) — a genuine coverage gap, not safe condensation", () => {
+  const result = isCompletedStage2AuditReport(ISSUE_334_COMMENT, {
+    mergeCommit: ISSUE_334_MERGE_COMMIT,
+    reviewedHeadCommit: ISSUE_334_REVIEWED_HEAD,
+    requestedChecklist: ISSUE_334_CHECKLIST,
+  });
+  assert.equal(result.complete, false, "checklist items 6 and 9 are never addressed anywhere in the response — this is a real gap");
+  assert.equal(result.verdict, null);
+  assert.equal(result.reasons.length, 1, "only the checklist-completeness signal should fail now that target identity is satisfied");
+  assert.ok(result.reasons[0].includes("incomplete"));
+});
+
+test("isCompletedStage2AuditReport: issue #334's real response without reviewedHeadCommit fails on both target identity and checklist completeness (the exact pre-fix behavior)", () => {
+  const result = isCompletedStage2AuditReport(ISSUE_334_COMMENT, {
+    mergeCommit: ISSUE_334_MERGE_COMMIT,
+    requestedChecklist: ISSUE_334_CHECKLIST,
+  });
+  assert.equal(result.complete, false);
+  assert.equal(result.reasons.length, 2);
+});
+
 // -- extractResponseVerdict -----------------------------------------------------------------
 
 test("extractResponseVerdict: a leading 'CLEAN — ...' status line (issue #95's observed shape)", () => {
@@ -556,6 +669,26 @@ test("isCompletedStage2AuditReport: reproduces issue #330's real genuine CLEAN S
   assert.equal(result.complete, true);
   assert.equal(result.verdict, "CLEAN");
   assert.deepEqual(result.reasons, []);
+});
+
+// Issue #335: #330's target-identity pass currently relies solely on the incidental short
+// merge-prefix `0e04348` inside its response's unrelated `git log 748f806^..0e04348` command —
+// not an intentional restatement. This proves the corrected contract no longer relies on that
+// accident as the ONLY proof of target identity: #330's real response also intentionally cites
+// its own frozen reviewed head (`9d775fc430faa5e236d2670de8e806fc27ca8491`, in its
+// `gh api .../commits/9d775fc.../check-runs` verification line) while checking the required
+// control-plane-workflow item — a deliberate citation the reviewedHeadCommit signal now
+// recognizes independently, demonstrated here by supplying a deliberately WRONG mergeCommit so
+// only the reviewedHeadCommit signal can possibly account for the match.
+test("isCompletedStage2AuditReport: issue #330's real response also passes target identity via its intentional reviewedHeadCommit citation alone, independent of the incidental merge-prefix accident", () => {
+  const wrongMergeCommit = "deadbeef00000000000000000000000000000000";
+  const result = isCompletedStage2AuditReport(ISSUE_330_COMMENT, {
+    mergeCommit: wrongMergeCommit,
+    reviewedHeadCommit: "9d775fc430faa5e236d2670de8e806fc27ca8491",
+    requestedChecklist: ISSUE_330_CHECKLIST,
+  });
+  assert.equal(result.complete, true, "the real response's own citation of its frozen reviewed head must independently satisfy target identity");
+  assert.equal(result.verdict, "CLEAN");
 });
 
 test("isCompletedStage2AuditReport: a status-marker checklist truncated partway through the requested items is still rejected (issue #268 finding 2 applies equally to the marker-bullet shape)", () => {

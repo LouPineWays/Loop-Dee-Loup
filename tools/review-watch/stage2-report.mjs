@@ -21,7 +21,23 @@
 //
 //   1. references the exact target merge commit — the full SHA, or a case-insensitive prefix of
 //      it at least 7 hex characters long (Git's own minimum unambiguous abbreviation length) —
-//      appearing as a standalone hex token, not merely as a substring of an unrelated token.
+//      appearing as a standalone hex token, not merely as a substring of an unrelated token. OR
+//      (issue #335, audit #334) references the audit issue's own trusted, pre-trigger frozen
+//      Stage 1 reviewed head SHA (the caller's `reviewedHeadCommit` option, parsed by
+//      lifecycle-gate.mjs's parseReviewedHeadCommitRef from the audit issue's own "Stage 1
+//      inline review disposition" field — content the controlling session authors before ever
+//      triggering Codex, so the reviewer-only boundary in AGENTS.md's Code Review Rules means
+//      Codex can never edit it to spoof a different target). Audit #334's genuine CLEAN response
+//      never restated the merge commit itself; it cited the frozen reviewed head instead while
+//      verifying the required Control-plane-paths workflow item — a legitimate citation the
+//      audit-control-issue template's own checklist instructions explicitly ask for (a
+//      control-plane-path item must use "the PR's frozen reviewed head SHA ... not the merge
+//      commit," since workflow runs are keyed to the PR branch's head, not the commit created on
+//      `main`). Accepting either identity keeps this fail-closed: a response naming any other SHA
+//      — an unrelated commit, a stale PR head from an earlier round — still matches neither value
+//      and still fails. This is deliberately not a relaxation to "any commit mentioned in the
+//      audit issue" — only the two specific, individually-trusted values a caller explicitly
+//      supplies.
 //
 //   2. states an explicit CLEAN or NOT CLEAN verdict, in either of two shapes actually observed
 //      from Codex: a leading status line ("CLEAN — Stage 2 audit of PR #94 at `<sha>`; no
@@ -365,9 +381,16 @@ export function hasCompleteVerificationEvidence(text, requestedChecklist) {
 // #268 finding 2) — see hasCompleteVerificationEvidence. Ignored when
 // `requireVerificationEvidence` is false: legacy-compatibility mode already forgives the
 // checklist signal entirely, so there is nothing to compare completeness against.
+//
+// `reviewedHeadCommit` (default null, issue #335): the audit issue's own trusted frozen Stage 1
+// reviewed head SHA, when the caller has one (lifecycle-gate.mjs's parseReviewedHeadCommitRef).
+// Signal 1 accepts a response that references either `mergeCommit` or this value — see the
+// module header comment above for why that stays fail-closed. Applied in both strict and
+// legacy-compatibility (`requireVerificationEvidence: false`) mode: target identity is checked
+// the same way regardless of which checklist-completeness mode is active.
 export function isCompletedStage2AuditReport(
   body,
-  { mergeCommit, requireVerificationEvidence = true, requestedChecklist = null } = {},
+  { mergeCommit, requireVerificationEvidence = true, requestedChecklist = null, reviewedHeadCommit = null } = {},
 ) {
   const text = body ?? "";
   const reasons = [];
@@ -383,9 +406,16 @@ export function isCompletedStage2AuditReport(
     return { complete: false, verdict: null, reasons };
   }
 
-  const hasCommit = bodyReferencesCommit(text, mergeCommit);
+  const hasCommit =
+    bodyReferencesCommit(text, mergeCommit) || (reviewedHeadCommit ? bodyReferencesCommit(text, reviewedHeadCommit) : false);
   if (!hasCommit) {
-    reasons.push(mergeCommit ? "does not reference the exact target merge commit" : "no merge commit given to check against");
+    if (!mergeCommit && !reviewedHeadCommit) {
+      reasons.push("no merge commit given to check against");
+    } else if (reviewedHeadCommit) {
+      reasons.push("does not reference the exact target merge commit or the audit's trusted frozen reviewed head");
+    } else {
+      reasons.push("does not reference the exact target merge commit");
+    }
   }
 
   const verdict = extractResponseVerdict(text);

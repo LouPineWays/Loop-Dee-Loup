@@ -10,6 +10,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import {
   checkMergeReady,
   checkPostAudit,
@@ -20,12 +23,18 @@ import {
   parseFormField,
   parseFormFieldBlock,
   parseMergeCommitRef,
+  parseReviewedHeadCommitRef,
   parseStage2Verdict,
   parseVerificationChecklistRef,
   parseWorkIssueRef,
   recoverPrematureClosure,
 } from "./lifecycle-gate.mjs";
 import { triggerCommentBody } from "./trigger.mjs";
+
+const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
+function readFixture(name) {
+  return readFileSync(path.join(FIXTURES_DIR, name), "utf8").trimEnd();
+}
 
 const MERGE_COMMIT = "b281dbd5e7590b8ac2992753cd875f5e6472d556";
 
@@ -83,6 +92,19 @@ function auditBodyWithChecklist({ workIssue = 151, verdict = "PENDING", commit =
   return (
     `### Work issue\n\n#${workIssue}\n\n### Exact merge commit\n\n${commit}\n\n` +
     `### Verification checklist\n\n${checklist}\n\n### Verdict\n\n${verdict}\n`
+  );
+}
+
+// Like auditBodyWithChecklist, but also carries a real "Stage 1 inline review disposition" field
+// naming a frozen reviewed head — for issue #335's checkPostAudit end-to-end tests, which verify
+// parseReviewedHeadCommitRef's output actually reaches isCompletedStage2AuditReport as the
+// alternative target-identity signal.
+function auditBodyWithReviewedHead({ workIssue = 151, verdict = "PENDING", commit = MERGE_COMMIT, reviewedHead, checklist = null }) {
+  const checklistBlock = checklist ? `### Verification checklist\n\n${checklist}\n\n` : "";
+  return (
+    `### Work issue\n\n#${workIssue}\n\n### Exact merge commit\n\n${commit}\n\n` +
+    `### Stage 1 inline review disposition\n\nOne inline @codex review round at frozen head \`${reviewedHead}\`: (link). ` +
+    `No findings; no second round requested.\n\n${checklistBlock}### Verdict\n\n${verdict}\n`
   );
 }
 
@@ -249,6 +271,45 @@ test("parseMergeCommitRef: extracts the SHA out of backticks and trailing annota
     parseMergeCommitRef(`### Exact merge commit\n\n\`${MERGE_COMMIT}\` (on \`main\`)\n`),
     MERGE_COMMIT,
   );
+});
+
+// -- parseReviewedHeadCommitRef (issue #335) ---------------------------------------------
+
+const ISSUE_330_FROZEN_HEAD = "9d775fc430faa5e236d2670de8e806fc27ca8491";
+const ISSUE_334_FROZEN_HEAD = "82651b3c8026ba118bb3bbf22c1dee6a09d27670";
+
+test("parseReviewedHeadCommitRef: reads the real issue #330 'Stage 1 inline review disposition' field text", () => {
+  const body =
+    "### Stage 1 inline review disposition\n\n" +
+    `One inline \`@codex review\` round at frozen head \`${ISSUE_330_FROZEN_HEAD}\`: https://github.com/LouPineWays/Loop-Dee-Loup/pull/329#pullrequestreview-5101906774 (plus 1 inline comment). The finding was valid and fixed in commit \`3b19645\`, then merged unchanged:\n\n` +
+    "- **P2 — Recognize bold Markdown labels before anchoring**: ... fixed by stripping Markdown bold emphasis globally first.\n\n" +
+    "No second inline round was requested, per Stage 1 step 7.\n\n### Audit scope\n\n...";
+  assert.equal(parseReviewedHeadCommitRef(body), ISSUE_330_FROZEN_HEAD);
+});
+
+test("parseReviewedHeadCommitRef: reads the real issue #334 'Stage 1 inline review disposition' field text", () => {
+  const body = `### Stage 1 inline review disposition\n\n${readFixture("issue-334-review-disposition.txt")}\n\n### Audit scope\n\n...`;
+  assert.equal(parseReviewedHeadCommitRef(body), ISSUE_334_FROZEN_HEAD);
+});
+
+test("parseReviewedHeadCommitRef: returns null when the field is absent", () => {
+  assert.equal(parseReviewedHeadCommitRef("no such field here"), null);
+});
+
+test("parseReviewedHeadCommitRef: returns null when the field is present but does not contain the 'frozen ... head `<sha>`' phrase (malformed/unparseable trusted target metadata must fail closed to null, not guess)", () => {
+  const body = "### Stage 1 inline review disposition\n\nReviewed at commit `9d775fc430faa5e236d2670de8e806fc27ca8491`, no findings.";
+  assert.equal(parseReviewedHeadCommitRef(body), null);
+});
+
+test("parseReviewedHeadCommitRef: does not match an unrelated SHA-looking token elsewhere in the block when no 'frozen ... head' phrase precedes it", () => {
+  const body =
+    "### Stage 1 inline review disposition\n\nFixed in commit `3b19645abc1234567890abcdef1234567890abcd`, then merged unchanged.";
+  assert.equal(parseReviewedHeadCommitRef(body), null);
+});
+
+test("parseReviewedHeadCommitRef: tolerates extra words between 'frozen' and 'head' (e.g. 'frozen Stage 1 reviewed head')", () => {
+  const body = `### Stage 1 inline review disposition\n\nReviewed at the frozen Stage 1 reviewed head \`${ISSUE_330_FROZEN_HEAD}\`.`;
+  assert.equal(parseReviewedHeadCommitRef(body), ISSUE_330_FROZEN_HEAD);
 });
 
 test("parseWorkIssueRef: does NOT treat GitHub's own '_No response_' marker as the no-work-issue sentinel (Stage 1 review finding on PR #197)", () => {
@@ -485,6 +546,37 @@ function withKickoffOnly() {
   return async (path) => (path.includes("/issues/") ? kickoffOnlyThread() : []);
 }
 
+// A completed Stage 2 audit report (issue #230's evidence contract, otherwise identical to
+// completedAuditThread) whose response cites only the trusted frozen reviewed head — never the
+// merge commit — the exact shape issue #335/audit #334 demonstrated. For a checklist-complete
+// variant this still passes target identity via reviewedHeadCommit; for the real #334 shape
+// (checklist too short) target identity passes but completeness still correctly fails.
+function reviewedHeadOnlyThread({
+  triggerTime = "2026-08-20T00:00:00Z",
+  responseTime = "2026-08-20T00:05:00Z",
+  verdict = "CLEAN",
+  reviewedHead,
+  checklistItems = ["1. Confirmed the change against the frozen reviewed head — CONFIRMED", "2. Confirmed no regressions — CONFIRMED"],
+} = {}) {
+  const body = [
+    `${verdict} — Stage 2 audit verified against frozen reviewed head \`${reviewedHead}\`.`,
+    "",
+    "### Verification checklist",
+    "",
+    ...checklistItems,
+    "",
+    `Verdict: ${verdict}`,
+  ].join("\n");
+  return [
+    { id: 1, body: triggerCommentBody(), created_at: triggerTime },
+    { id: 2, user: { login: "chatgpt-codex-connector[bot]" }, body, created_at: responseTime },
+  ];
+}
+
+function withReviewedHeadOnlyReport(opts) {
+  return async (path) => (path.includes("/issues/") ? reviewedHeadOnlyThread(opts) : []);
+}
+
 test("checkPostAudit: exits 1 when required args are missing", async () => {
   const result = await checkPostAudit({});
   assert.equal(result.exitCode, 1);
@@ -659,6 +751,78 @@ test("checkPostAudit: a bounded follow-up report after the kickoff is still disc
   );
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "READY_TO_CLOSE");
+});
+
+// -- checkPostAudit: reviewedHeadCommit target-identity signal (issue #335, audit #334) --------
+
+test("checkPostAudit: READY_TO_CLOSE — a response citing only the audit issue's trusted frozen reviewed head (never the merge commit) is backed once its checklist is otherwise complete", async () => {
+  const reviewedHead = "82651b3c8026ba118bb3bbf22c1dee6a09d27670";
+  const checklist = "1. Confirm the change.\n2. Confirm no regressions.";
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160
+          ? { body: auditBodyWithReviewedHead({ verdict: "CLEAN", reviewedHead, checklist }), state: "OPEN" }
+          : { body: "", state: "OPEN" },
+      ghApiImpl: withReviewedHeadOnlyReport({ reviewedHead }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "READY_TO_CLOSE", "a response naming only the trusted frozen reviewed head must be recognized as evidence of the correct target");
+  assert.equal(result.verdict, "CLEAN");
+});
+
+test("checkPostAudit: without a parseable 'Stage 1 inline review disposition' field, a response citing only the reviewed head is NOT backed (no relaxation without the trusted metadata)", async () => {
+  const reviewedHead = "82651b3c8026ba118bb3bbf22c1dee6a09d27670";
+  const checklist = "1. Confirm the change.\n2. Confirm no regressions.";
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160
+          ? { body: auditBodyWithChecklist({ verdict: "CLEAN", checklist }), state: "OPEN" } // no review-disposition field at all
+          : { body: "", state: "OPEN" },
+      ghApiImpl: withReviewedHeadOnlyReport({ reviewedHead }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "no trusted reviewedHeadCommit was available to parse, so the response's own reviewed-head citation must not back CLEAN");
+  assert.equal(result.verdict, null);
+});
+
+const ISSUE_334_MERGE_COMMIT = "0c9358ec0f607e2c3fc26ef8049585ab5d655fbe";
+
+test("checkPostAudit: reproduces issue #334's exact live shape end to end — target identity is satisfied via the trusted reviewed head, but the response's real 4-item checklist still correctly fails against the real 11-item request", async () => {
+  const auditIssueBody =
+    `### Work issue\n\nnone\n\n### Exact merge commit\n\n\`${ISSUE_334_MERGE_COMMIT}\` (on \`main\`)\n\n` +
+    `### Stage 1 inline review disposition\n\n${readFixture("issue-334-review-disposition.txt")}\n\n` +
+    `### Verification checklist\n\n${readFixture("issue-334-checklist.txt")}\n\n### Verdict\n\nCLEAN\n`;
+  const thread = [
+    { id: 1, body: triggerCommentBody(), created_at: "2026-09-03T13:40:59Z" },
+    {
+      id: 2,
+      user: { login: "chatgpt-codex-connector[bot]" },
+      body: readFixture("issue-334-comment.txt"),
+      created_at: "2026-09-03T13:42:53Z",
+    },
+  ];
+  const result = await checkPostAudit(
+    { repo: "LouPineWays/Loop-Dee-Loup", "audit-issue": 334 },
+    {
+      ghIssueViewImpl: async () => ({ body: auditIssueBody, state: "OPEN" }),
+      ghApiImpl: async (path) => (path.includes("/issues/") ? thread : []),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "Work issue is 'none' and the response is not backed as CLEAN, so this stays OK rather than ACCEPTED_NO_WORK_ISSUE");
+  assert.equal(result.verdict, null, "the genuine 4-item response must not back CLEAN against an 11-item request even with target identity satisfied");
+  assert.match(
+    result.reportEvidence.reason,
+    /incomplete/,
+    "the surviving reason must be checklist incompleteness only, not a target-identity failure",
+  );
+  assert.doesNotMatch(result.reportEvidence.reason, /does not reference/, "target identity must no longer be a listed failure reason");
 });
 
 test("checkPostAudit: a completed report addressing the wrong merge commit does not back CLEAN", async () => {
