@@ -117,6 +117,36 @@ export function parseHeadingField(body, label) {
   return null;
 }
 
+// Pure. Like parseHeadingField, but returns the field's *entire* rendered block (every
+// line under the heading up to the next "### " heading or end of body, trimmed) rather
+// than only the first non-blank line. Stage 2 audit finding on this PR: "Minimum
+// authority" is a multiline textarea (see parent-execution.yml), so a genuine execution
+// pointer such as "Active execution Issue:" on one line followed by "- #77" on the next
+// was invisible to parseHeadingField's first-line-only read, silently falling through to
+// NOT_READY — exactly the false negative this gate exists to prevent. Used only for
+// "Minimum authority" below; Lifecycle/Blocker/Founder-decision stay single-line reads
+// via parseHeadingField, since those fields' whole rendered meaning is their first
+// substantive line, not a block to scan for an embedded reference.
+export function parseHeadingBlock(body, label) {
+  const lines = (body ?? "").split("\n");
+  const heading = `### ${label}`;
+  let headingIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim() === heading) {
+      headingIdx = i;
+      break;
+    }
+  }
+  if (headingIdx === -1) return null;
+  const collected = [];
+  for (let i = headingIdx + 1; i < lines.length; i++) {
+    if (lines[i].trim().startsWith("### ")) break;
+    collected.push(lines[i]);
+  }
+  const text = collected.join("\n").trim();
+  return text === "" || text === "_No response_" ? null : text;
+}
+
 // Pure. True when `value` is the explicit "none" sentinel this repository's control
 // template uses for an empty Blocker/Founder-decision field, tolerating a trailing
 // explanation after the word itself (e.g. "none — founder selected ..."). A value that is
@@ -164,7 +194,7 @@ export function parseExecutionPointer(value) {
 // which template created it.
 export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   const lifecycleRaw = parseControlBullet(body, "Lifecycle") ?? parseHeadingField(body, "State");
-  const executionRaw = parseControlBullet(body, "Execution") ?? parseHeadingField(body, "Minimum authority");
+  const executionRaw = parseControlBullet(body, "Execution") ?? parseHeadingBlock(body, "Minimum authority");
   const routeRaw = parseControlBullet(body, "Route");
   const blockerRaw = parseControlBullet(body, "Blocker") ?? parseHeadingField(body, "Current blocker");
   const founderDecisionRaw = parseControlBullet(body, "Founder decision") ?? parseHeadingField(body, "Founder interrupt");
