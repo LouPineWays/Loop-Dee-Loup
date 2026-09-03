@@ -21,23 +21,26 @@
 //
 //   1. references the exact target merge commit — the full SHA, or a case-insensitive prefix of
 //      it at least 7 hex characters long (Git's own minimum unambiguous abbreviation length) —
-//      appearing as a standalone hex token, not merely as a substring of an unrelated token. OR
-//      (issue #335, audit #334) references the audit issue's own trusted, pre-trigger frozen
-//      Stage 1 reviewed head SHA (the caller's `reviewedHeadCommit` option, parsed by
-//      lifecycle-gate.mjs's parseReviewedHeadCommitRef from the audit issue's own "Stage 1
-//      inline review disposition" field — content the controlling session authors before ever
-//      triggering Codex, so the reviewer-only boundary in AGENTS.md's Code Review Rules means
-//      Codex can never edit it to spoof a different target). Audit #334's genuine CLEAN response
-//      never restated the merge commit itself; it cited the frozen reviewed head instead while
-//      verifying the required Control-plane-paths workflow item — a legitimate citation the
-//      audit-control-issue template's own checklist instructions explicitly ask for (a
-//      control-plane-path item must use "the PR's frozen reviewed head SHA ... not the merge
-//      commit," since workflow runs are keyed to the PR branch's head, not the commit created on
-//      `main`). Accepting either identity keeps this fail-closed: a response naming any other SHA
-//      — an unrelated commit, a stale PR head from an earlier round — still matches neither value
-//      and still fails. This is deliberately not a relaxation to "any commit mentioned in the
-//      audit issue" — only the two specific, individually-trusted values a caller explicitly
-//      supplies.
+//      appearing as a standalone hex token, not merely as a substring of an unrelated token. This
+//      stays mandatory (issue #335, audit #334): #334's genuine CLEAN response never restated the
+//      merge commit — it cited the audit issue's own trusted, pre-trigger frozen Stage 1 reviewed
+//      head instead (the caller's `reviewedHeadCommit` option, parsed by lifecycle-gate.mjs's
+//      parseReviewedHeadCommitRef) while verifying the required Control-plane-paths workflow
+//      item, a legitimate citation the audit-control-issue template's own checklist instructions
+//      explicitly ask for on that one item. issue #335 investigated accepting `reviewedHeadCommit`
+//      as an alternative to `mergeCommit` for this signal, but a Stage 1 review finding on the PR
+//      that introduced it proved that relaxation unsafe: a response that misidentifies the actual
+//      merged target — naming some *incorrect* merge commit — while still (correctly) citing the
+//      reviewed head for the workflow-check item would pass target identity under an `||`, even
+//      though the response's own claimed audit target is wrong. The reviewed head only identifies
+//      the revision CI ran against pre-merge; it can even predate Stage 1 correction commits that
+//      *are* part of the actual merged result, so citing it proves nothing about whether the
+//      response covered the real merge commit. Per issue #335's own fallback ("if that cannot be
+//      made deterministic and fail-closed, retain the merge-commit requirement"), this signal
+//      still requires `mergeCommit` unconditionally — `reviewedHeadCommit`, when supplied, is used
+//      only to produce a more specific *reason* string when this signal fails (distinguishing "no
+//      commit reference at all" from "cites the reviewed head but not the required merge commit"),
+//      never to satisfy the signal itself.
 //
 //   2. states an explicit CLEAN or NOT CLEAN verdict, in either of two shapes actually observed
 //      from Codex: a leading status line ("CLEAN — Stage 2 audit of PR #94 at `<sha>`; no
@@ -384,10 +387,13 @@ export function hasCompleteVerificationEvidence(text, requestedChecklist) {
 //
 // `reviewedHeadCommit` (default null, issue #335): the audit issue's own trusted frozen Stage 1
 // reviewed head SHA, when the caller has one (lifecycle-gate.mjs's parseReviewedHeadCommitRef).
-// Signal 1 accepts a response that references either `mergeCommit` or this value — see the
-// module header comment above for why that stays fail-closed. Applied in both strict and
-// legacy-compatibility (`requireVerificationEvidence: false`) mode: target identity is checked
-// the same way regardless of which checklist-completeness mode is active.
+// Signal 1 does NOT accept this as an alternative to `mergeCommit` — a Stage 1 review finding on
+// the PR that introduced this option proved that unsafe (see the module header comment above: a
+// response naming an incorrect merge commit while still citing the correct reviewed head for the
+// workflow-check item would otherwise pass). `mergeCommit` stays unconditionally required;
+// `reviewedHeadCommit` only sharpens the failure `reason` text when signal 1 fails, so a fresh
+// session can tell "cited nothing" apart from "cited the reviewed head but not the required
+// merge commit" without that distinction ever changing the pass/fail outcome.
 export function isCompletedStage2AuditReport(
   body,
   { mergeCommit, requireVerificationEvidence = true, requestedChecklist = null, reviewedHeadCommit = null } = {},
@@ -406,13 +412,18 @@ export function isCompletedStage2AuditReport(
     return { complete: false, verdict: null, reasons };
   }
 
-  const hasCommit =
-    bodyReferencesCommit(text, mergeCommit) || (reviewedHeadCommit ? bodyReferencesCommit(text, reviewedHeadCommit) : false);
+  const hasCommit = bodyReferencesCommit(text, mergeCommit);
   if (!hasCommit) {
-    if (!mergeCommit && !reviewedHeadCommit) {
+    if (!mergeCommit) {
       reasons.push("no merge commit given to check against");
-    } else if (reviewedHeadCommit) {
-      reasons.push("does not reference the exact target merge commit or the audit's trusted frozen reviewed head");
+    } else if (reviewedHeadCommit && bodyReferencesCommit(text, reviewedHeadCommit)) {
+      // Diagnostic only (Stage 1 review finding, issue #335): the response does cite the audit's
+      // trusted frozen reviewed head, but that is never sufficient on its own — see the module
+      // header comment for why substituting it for the merge commit is unsafe.
+      reasons.push(
+        "does not reference the exact target merge commit (it cites the audit's trusted frozen reviewed head instead, " +
+          "which only proves the revision CI ran against pre-merge, not that the response covered the actual merged result)",
+      );
     } else {
       reasons.push("does not reference the exact target merge commit");
     }

@@ -97,8 +97,8 @@ function auditBodyWithChecklist({ workIssue = 151, verdict = "PENDING", commit =
 
 // Like auditBodyWithChecklist, but also carries a real "Stage 1 inline review disposition" field
 // naming a frozen reviewed head — for issue #335's checkPostAudit end-to-end tests, which verify
-// parseReviewedHeadCommitRef's output actually reaches isCompletedStage2AuditReport as the
-// alternative target-identity signal.
+// parseReviewedHeadCommitRef's output actually reaches isCompletedStage2AuditReport as
+// reviewedHeadCommit (diagnostic-only; it never satisfies target identity on its own).
 function auditBodyWithReviewedHead({ workIssue = 151, verdict = "PENDING", commit = MERGE_COMMIT, reviewedHead, checklist = null }) {
   const checklistBlock = checklist ? `### Verification checklist\n\n${checklist}\n\n` : "";
   return (
@@ -546,11 +546,12 @@ function withKickoffOnly() {
   return async (path) => (path.includes("/issues/") ? kickoffOnlyThread() : []);
 }
 
-// A completed Stage 2 audit report (issue #230's evidence contract, otherwise identical to
-// completedAuditThread) whose response cites only the trusted frozen reviewed head — never the
-// merge commit — the exact shape issue #335/audit #334 demonstrated. For a checklist-complete
-// variant this still passes target identity via reviewedHeadCommit; for the real #334 shape
-// (checklist too short) target identity passes but completeness still correctly fails.
+// A response that otherwise looks like a completed Stage 2 audit report (issue #230's evidence
+// contract) but cites only the trusted frozen reviewed head — never the merge commit — the exact
+// shape issue #335/audit #334 demonstrated. This must NOT back CLEAN even with an otherwise-
+// complete checklist: reviewedHeadCommit is diagnostic-only (a Stage 1 review finding proved
+// letting it substitute for mergeCommit is unsafe), so this thread's target-identity signal
+// always fails regardless of checklist completeness.
 function reviewedHeadOnlyThread({
   triggerTime = "2026-08-20T00:00:00Z",
   responseTime = "2026-08-20T00:05:00Z",
@@ -753,9 +754,13 @@ test("checkPostAudit: a bounded follow-up report after the kickoff is still disc
   assert.equal(result.state, "READY_TO_CLOSE");
 });
 
-// -- checkPostAudit: reviewedHeadCommit target-identity signal (issue #335, audit #334) --------
+// -- checkPostAudit: reviewedHeadCommit is diagnostic-only end to end (issue #335, audit #334) --
+// An earlier revision of this fix let a response naming only the trusted reviewed head back
+// CLEAN; a Stage 1 review finding proved that unsafe (see stage2-report.test.mjs's adversarial
+// "incorrect merge commit + correct reviewed head" unit test) and required reverting to a
+// strictly mandatory merge-commit check end to end, too.
 
-test("checkPostAudit: READY_TO_CLOSE — a response citing only the audit issue's trusted frozen reviewed head (never the merge commit) is backed once its checklist is otherwise complete", async () => {
+test("checkPostAudit: a response citing only the audit issue's trusted frozen reviewed head (never the merge commit) is still NOT backed, even with an otherwise-complete checklist", async () => {
   const reviewedHead = "82651b3c8026ba118bb3bbf22c1dee6a09d27670";
   const checklist = "1. Confirm the change.\n2. Confirm no regressions.";
   const result = await checkPostAudit(
@@ -769,31 +774,56 @@ test("checkPostAudit: READY_TO_CLOSE — a response citing only the audit issue'
     },
   );
   assert.equal(result.exitCode, 0);
-  assert.equal(result.state, "READY_TO_CLOSE", "a response naming only the trusted frozen reviewed head must be recognized as evidence of the correct target");
-  assert.equal(result.verdict, "CLEAN");
+  assert.equal(result.state, "OK", "reviewedHeadCommit must never substitute for the mandatory merge-commit citation");
+  assert.equal(result.verdict, null);
+  assert.match(result.reportEvidence.reason, /reviewed head/, "the reason should still name the reviewed-head citation for diagnostic clarity");
 });
 
-test("checkPostAudit: without a parseable 'Stage 1 inline review disposition' field, a response citing only the reviewed head is NOT backed (no relaxation without the trusted metadata)", async () => {
+// Stage 1 review finding, issue #335: the exact unsafe scenario an earlier `||`-based revision
+// would have wrongly accepted, reproduced end to end through checkPostAudit. The response names
+// an INCORRECT merge commit while also citing the audit's own correct, trusted reviewed head.
+test("checkPostAudit: a response naming an INCORRECT merge commit while also citing the correct trusted reviewed head is still NOT backed end to end", async () => {
   const reviewedHead = "82651b3c8026ba118bb3bbf22c1dee6a09d27670";
   const checklist = "1. Confirm the change.\n2. Confirm no regressions.";
+  const incorrectMergeCommit = "1234567890abcdef1234567890abcdef12345678";
+  const adversarialThread = () => {
+    const body = [
+      `Stage 2 audit of the merge commit \`${incorrectMergeCommit}\`.`, // wrong — not the audit's real commit
+      "",
+      "### Verification checklist",
+      "",
+      `1. Confirmed the control-plane workflow ran against frozen reviewed head \`${reviewedHead}\` — CONFIRMED`,
+      "2. Confirmed no regressions — CONFIRMED",
+      "",
+      "Verdict: CLEAN",
+    ].join("\n");
+    return [
+      { id: 1, body: triggerCommentBody(), created_at: "2026-08-20T00:00:00Z" },
+      { id: 2, user: { login: "chatgpt-codex-connector[bot]" }, body, created_at: "2026-08-20T00:05:00Z" },
+    ];
+  };
   const result = await checkPostAudit(
     { repo: "owner/repo", "audit-issue": 160 },
     {
       ghIssueViewImpl: async ({ number }) =>
         number === 160
-          ? { body: auditBodyWithChecklist({ verdict: "CLEAN", checklist }), state: "OPEN" } // no review-disposition field at all
+          ? { body: auditBodyWithReviewedHead({ verdict: "CLEAN", reviewedHead, checklist }), state: "OPEN" }
           : { body: "", state: "OPEN" },
-      ghApiImpl: withReviewedHeadOnlyReport({ reviewedHead }),
+      ghApiImpl: async (path) => (path.includes("/issues/") ? adversarialThread() : []),
     },
   );
   assert.equal(result.exitCode, 0);
-  assert.equal(result.state, "OK", "no trusted reviewedHeadCommit was available to parse, so the response's own reviewed-head citation must not back CLEAN");
+  assert.equal(
+    result.state,
+    "OK",
+    "an incorrect merge-commit claim must never be forgiven merely because the response also cites the correct reviewed head",
+  );
   assert.equal(result.verdict, null);
 });
 
 const ISSUE_334_MERGE_COMMIT = "0c9358ec0f607e2c3fc26ef8049585ab5d655fbe";
 
-test("checkPostAudit: reproduces issue #334's exact live shape end to end — target identity is satisfied via the trusted reviewed head, but the response's real 4-item checklist still correctly fails against the real 11-item request", async () => {
+test("checkPostAudit: reproduces issue #334's exact live shape end to end — stays correctly unbacked: target identity fails (no merge-commit citation) and checklist completeness independently fails (11 requested, 4 shown)", async () => {
   const auditIssueBody =
     `### Work issue\n\nnone\n\n### Exact merge commit\n\n\`${ISSUE_334_MERGE_COMMIT}\` (on \`main\`)\n\n` +
     `### Stage 1 inline review disposition\n\n${readFixture("issue-334-review-disposition.txt")}\n\n` +
@@ -816,13 +846,10 @@ test("checkPostAudit: reproduces issue #334's exact live shape end to end — ta
   );
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "OK", "Work issue is 'none' and the response is not backed as CLEAN, so this stays OK rather than ACCEPTED_NO_WORK_ISSUE");
-  assert.equal(result.verdict, null, "the genuine 4-item response must not back CLEAN against an 11-item request even with target identity satisfied");
-  assert.match(
-    result.reportEvidence.reason,
-    /incomplete/,
-    "the surviving reason must be checklist incompleteness only, not a target-identity failure",
-  );
-  assert.doesNotMatch(result.reportEvidence.reason, /does not reference/, "target identity must no longer be a listed failure reason");
+  assert.equal(result.verdict, null, "the genuine 4-item response citing only the reviewed head must not back CLEAN");
+  assert.match(result.reportEvidence.reason, /merge commit/);
+  assert.match(result.reportEvidence.reason, /reviewed head/);
+  assert.match(result.reportEvidence.reason, /incomplete/);
 });
 
 test("checkPostAudit: a completed report addressing the wrong merge commit does not back CLEAN", async () => {

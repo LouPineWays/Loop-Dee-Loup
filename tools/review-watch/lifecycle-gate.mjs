@@ -35,10 +35,12 @@
 //                  is never trusted on its own (e.g. set by hand before Stage 2 actually ran) —
 //                  it is treated the same as no verdict unless stage2-report.mjs's
 //                  isCompletedStage2AuditReport finds a post-trigger response that references the
-//                  exact merge commit (or, per issue #335, the audit issue's own trusted frozen
-//                  Stage 1 reviewed head — see parseReviewedHeadCommitRef below), states an
-//                  explicit CLEAN verdict of its own, and shows verification-results content; a
-//                  genuine-but-incomplete response — e.g. issue #229's "Starting #178." kickoff,
+//                  exact merge commit (still unconditionally required — issue #335 investigated
+//                  and rejected accepting the audit issue's own trusted frozen Stage 1 reviewed
+//                  head as an alternative; see parseReviewedHeadCommitRef below and
+//                  stage2-report.mjs's module comment for why), states an explicit CLEAN verdict
+//                  of its own, and shows verification-results content; a genuine-but-incomplete
+//                  response — e.g. issue #229's "Starting #178." kickoff,
 //                  which findStage2ReportEvidence below evaluates and correctly rejects — does
 //                  not count (issue #230). `--recover
 //                  true` reopens a PREMATURE_CLOSURE work issue and records why; if the
@@ -272,23 +274,30 @@ export function parseWorkIssueRef(body) {
   return match ? Number(match[1]) : null;
 }
 
-// Pure. Extracts the frozen Stage 1 reviewed head SHA a completed Stage 2 audit response may
-// cite as an alternative proof of target identity (stage2-report.mjs's `reviewedHeadCommit`
-// option), alongside the exact merge commit. Issue #335 (audit #334): a genuine CLEAN response
-// cited only this value — while verifying the checklist's own control-plane-paths item, which
-// the template instructs to use the frozen reviewed head, not the merge commit — and
-// `bodyReferencesCommit` had no way to recognize that as legitimate target-identity evidence.
+// Pure. Extracts the frozen Stage 1 reviewed head SHA from the audit issue's own "Stage 1 inline
+// review disposition" field, passed through to stage2-report.mjs's `isCompletedStage2AuditReport`
+// as `reviewedHeadCommit`. Issue #335 (audit #334): a genuine CLEAN response cited only this
+// value — while verifying the checklist's own control-plane-paths item, which the template
+// instructs to use the frozen reviewed head, not the merge commit — and `bodyReferencesCommit`
+// had no way to explain that in its failure reason.
 //
-// Scoped narrowly to keep this trustworthy: only the audit-control-issue template's own "Stage
-// 1 inline review disposition" field (pre-trigger content the controlling session authors
-// before ever triggering Codex — the reviewer-only boundary in AGENTS.md's Code Review Rules
-// means Codex can never edit an issue body to plant a spoofed value here), and only the exact
-// "frozen ... head `<sha>`" phrasing that field has used in every real audit issue observed so
-// far (e.g. "frozen head `9d775fc...`", issue #330; "frozen head `82651b3c...`", issue #334) —
-// allowing a short run of words between "frozen" and "head" (e.g. "frozen Stage 1 reviewed
-// head") without matching an unrelated later SHA-looking token elsewhere in the block. Returns
-// null when the field is absent or does not contain that phrase — callers must then fall back to
-// mergeCommit alone, the same fail-closed default as a missing "Exact merge commit" field.
+// Does NOT relax target-identity checking: a Stage 1 review finding on the PR that introduced
+// this function found that letting `reviewedHeadCommit` substitute for `mergeCommit` was unsafe
+// (a response naming an *incorrect* merge commit while still citing the correct reviewed head for
+// the workflow-check item would otherwise pass) — see stage2-report.mjs's module comment.
+// `mergeCommit` therefore remains unconditionally required; this value is used only to produce a
+// more specific failure `reason` string, distinguishing "cites the reviewed head but not the
+// required merge commit" from "cites nothing at all."
+//
+// Scoped narrowly to keep even that diagnostic use trustworthy: only the audit-control-issue
+// template's own "Stage 1 inline review disposition" field (pre-trigger content the controlling
+// session authors before ever triggering Codex — the reviewer-only boundary in AGENTS.md's Code
+// Review Rules means Codex can never edit an issue body to plant a spoofed value here), and only
+// the exact "frozen ... head `<sha>`" phrasing that field has used in every real audit issue
+// observed so far (e.g. "frozen head `9d775fc...`", issue #330; "frozen head `82651b3c...`",
+// issue #334) — allowing a short run of words between "frozen" and "head" (e.g. "frozen Stage 1
+// reviewed head") without matching an unrelated later SHA-looking token elsewhere in the block.
+// Returns null when the field is absent or does not contain that phrase.
 export function parseReviewedHeadCommitRef(body) {
   const block = parseFormFieldBlock(body, "Stage 1 inline review disposition");
   if (!block) return null;

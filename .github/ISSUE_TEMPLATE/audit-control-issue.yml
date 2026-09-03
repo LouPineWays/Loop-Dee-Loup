@@ -112,7 +112,13 @@ body:
         gate.mjs`'s post-audit check parses the response comment itself for the merge commit,
         the verdict, and the verification-checklist walk-through (issue #230) — a response
         missing any of these three cannot back a CLEAN closure, even once this issue's own
-        Verdict dropdown below is set to CLEAN by hand.
+        Verdict dropdown below is set to CLEAN by hand. Item (0)'s merge-commit restatement stays
+        mandatory even on a change where a control-plane-workflow checklist item legitimately
+        asks to be checked against the PR's frozen reviewed head instead (see the Verification
+        checklist instructions above) — citing only that reviewed head, with no separate
+        restatement of the actual merge commit, does not satisfy item (0) and will not back a
+        CLEAN closure (issue #335, audit #334: this exact omission left an otherwise-complete
+        response mechanically unbacked).
   - type: textarea
     id: findings
     attributes:
