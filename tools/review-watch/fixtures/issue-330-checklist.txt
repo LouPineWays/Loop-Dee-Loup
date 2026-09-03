@@ -1,0 +1,7 @@
+1. Confirm `normalizeLabelLine` (tools/orchestration/ready-dispatch-gate.mjs) strips Markdown bold emphasis (`**`) globally, then a leading list marker (`-`, `*`, or `•`), in that exact order — and that reversing the order (list-marker strip first) would leave a stray `*` for a `- **Label:**` input, which the anchor would then fail to match.
+2. Confirm `extractActiveExecutionRef("- **Active execution Issue:** #77")` and `extractActiveExecutionRef("**Active execution Issue:** #77")` (no leading list marker) both return `"#77"`.
+3. Confirm every previously-audited-clean/fixed case in this chain still resolves correctly: a same-line label; a single-line-continuation label; a block naming both the label and an unrelated `#N`; an empty label entry followed by unrelated later text (must stay `null`); a superseded "Previous active execution Issue:" line before the genuine one; negated prose containing the phrase (must stay `null`); and a plain (non-bold) bullet-prefixed label.
+4. Confirm `node tools/check-control-plane-paths.mjs` still exits 0 against this merge commit.
+5. Confirm no `Fixes`/`Closes`/`Resolves #321` (or case variant) appears in the PR body or any commit message that landed on `main` across the whole PR #323→#325→#327→#329 chain.
+6. Run the full local test suite (`node --test` across every `tools/**/*.test.mjs`) against this merge commit and confirm 0 failures.
+7. Confirm the `Control-plane paths` workflow completed successfully against this PR's frozen reviewed head SHA `9d775fc430faa5e236d2670de8e806fc27ca8491`.
