@@ -1,0 +1,34 @@
+{
+  "session": "615f2b4a-69eb-42f1-bef6-432a4e32f4dc",
+  "session_role": "controller",
+  "control_issue": 322,
+  "execution_issue": 321,
+  "diagnostic_mode": true,
+  "first_dispatch_ms": 33217,
+  "execution_issue_read_by_controller_before_dispatch": false,
+  "pre_dispatch_events": [],
+  "pre_dispatch_events_truncated": false,
+  "dispatch_prompt": {
+    "chars": 2554,
+    "reference_only": false,
+    "worker_references": [
+      "#321",
+      "#322"
+    ]
+  },
+  "dispatch_events": [
+    {
+      "offset_ms": 33217,
+      "subagent_type": null,
+      "prompt": {
+        "chars": 2554,
+        "reference_only": false,
+        "worker_references": [
+          "#321",
+          "#322"
+        ]
+      }
+    }
+  ],
+  "annotations": []
+}
