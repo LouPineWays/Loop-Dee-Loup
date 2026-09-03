@@ -494,10 +494,16 @@ evaluated"), never a false `false`.
   private chain-of-thought is never required or read — only the same `text`/`thinking`
   content blocks the transcript already exposes.
 
-`classifyPreDispatch(trace)` reproduces the #283-class clean/violation verdict from the
-saved artifact's own fields alone — a fresh reviewer (human or a later Claude session)
-never needs to reopen the raw transcript to reach the same conclusion the extracting
-session would have reached.
+`classifyPreDispatch(trace)` reproduces the #283-class verdict from the saved artifact's
+own fields alone — a fresh reviewer (human or a later Claude session) never needs to
+reopen the raw transcript to reach the same conclusion the extracting session would have
+reached. It returns one of three statuses, never just two: `"clean"` (a subagent was
+dispatched and neither a pre-dispatch execution-issue read nor an oversized prompt was
+found), `"violation"` (one or both were found), or `"indeterminate"` — a trace with no
+recorded subagent dispatch at all (an interrupted, truncated, or pre-dispatch-only
+transcript) is never reported `"clean"`, since the required control-read ->
+immediate-dispatch sequence never actually completed in it and a "clean" verdict is a
+positive claim that it did (Stage 2 audit finding on PR #317).
 
 ### Privacy
 
@@ -513,7 +519,9 @@ marker string that must never survive into the derived artifact.
 A trace is written to `docs/diagnostic-traces/<session>.json` (durable, git-tracked — this
 is intentionally different from `.claude/telemetry/`, which stays local/transient) plus one
 entry appended to `docs/diagnostic-traces/index.json`: `{ session, control_issue,
-execution_issue, path, created_at, pre_dispatch_status }`. That index is deliberately
+execution_issue, path, created_at, pre_dispatch_status }` — `pre_dispatch_status` is
+`classifyPreDispatch`'s three-way `"clean" | "violation" | "indeterminate"` status (see
+above). That index is deliberately
 **metadata only** (no prompt/reasoning content) so `.claude/skills/telemetry-battery/SKILL.md`'s
 Step 2 maker-discovery pass can decide whether a relevant trace exists for a concrete
 orchestration/routing claim under investigation *before* opening any individual trace file

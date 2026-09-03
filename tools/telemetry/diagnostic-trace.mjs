@@ -235,11 +235,41 @@ export function buildDiagnosticTrace(lines, options = {}) {
   };
 }
 
+// A trace has dispatch evidence when it recorded at least one completed subagent
+// dispatch — either the full `dispatch_events` array `buildDiagnosticTrace` always
+// populates, or (for a hand-built/reloaded partial trace, as a fresh reviewer might
+// construct from a saved artifact) a non-null `dispatch_prompt`. Tolerant of either
+// shape so classifyPreDispatch works the same whether it's called on a freshly built
+// trace or one round-tripped through plain JSON.
+function hasDispatchEvidence(trace) {
+  if (Array.isArray(trace?.dispatch_events) && trace.dispatch_events.length > 0) return true;
+  if (trace?.dispatch_prompt && typeof trace.dispatch_prompt === "object") return true;
+  return false;
+}
+
 // #283-class classification: distinguishes a clean immediate reference-only dispatch
 // from a regression sequence, using only the trace's own structural fields — no model
 // judgment, so any fresh reviewer (human or agent) can reproduce this verdict from the
 // artifact alone.
+//
+// A trace with no recorded dispatch at all (an interrupted, truncated, or
+// pre-dispatch-only transcript) must never read as "clean": "clean" is a positive claim
+// that the required control-read -> immediate-reference-only-dispatch sequence actually
+// completed without incident, and a transcript that never reached dispatch has not
+// demonstrated that sequence one way or the other (Stage 2 audit finding on PR #317 —
+// treating a no-dispatch trace as "clean" produced false-positive proof for exactly the
+// #283-class question this mechanism exists to answer). Such a trace is reported
+// "indeterminate" instead, distinct from both "clean" and a proven "violation".
 export function classifyPreDispatch(trace) {
+  if (!hasDispatchEvidence(trace)) {
+    return {
+      status: "indeterminate",
+      reasons: [
+        "no subagent dispatch was observed in this trace — the required control-read -> immediate-dispatch sequence never completed, so this trace proves neither a clean nor a violating sequence",
+      ],
+    };
+  }
+
   const reasons = [];
   if (trace?.execution_issue_read_by_controller_before_dispatch === true) {
     reasons.push("execution issue was read by the controller before the first subagent dispatch");
