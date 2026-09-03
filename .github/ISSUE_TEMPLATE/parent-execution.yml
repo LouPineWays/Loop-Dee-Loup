@@ -44,7 +44,13 @@ body:
     id: current
     attributes:
       label: Current state
-      description: Current verified facts only.
+      description: >-
+        Current verified facts only. When this Issue is acting as a thin control Issue in
+        the two-plane READY dispatch pattern (docs/operating-model.md § Two-plane Issue
+        dispatch), also include explicit `- **Execution:** #N` and `- **Route:** <settled
+        route>` bullet lines here — `tools/orchestration/ready-dispatch-gate.mjs` reads
+        them, alongside this template's own State/Current blocker/Founder interrupt
+        fields, to determine dispatch-readiness.
     validations:
       required: true
   - type: textarea

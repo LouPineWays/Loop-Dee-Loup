@@ -11,7 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -19,6 +19,7 @@ import {
   buildDiagnosticTrace,
   extractDiagnosticTrace,
   classifyPreDispatch,
+  deriveSessionRoleFromPath,
 } from "./diagnostic-trace.mjs";
 
 const DIAGNOSTIC_TRACE_MJS = join(process.cwd(), "tools", "telemetry", "diagnostic-trace.mjs");
@@ -38,6 +39,12 @@ function bashToolUse(id, command) {
 
 function taskToolUse(id, { prompt, subagentType = "general-purpose" }) {
   return { type: "tool_use", id, name: "Task", input: { prompt, subagent_type: subagentType } };
+}
+
+// This environment's real dispatch tool name (issue #321) — see the "Agent" entry in
+// DISPATCH_TOOL_NAMES and deriveSessionRoleFromPath's tests below.
+function agentToolUse(id, { prompt, subagentType = "general-purpose" }) {
+  return { type: "tool_use", id, name: "Agent", input: { prompt, subagent_type: subagentType } };
 }
 
 function textBlock(text) {
@@ -283,6 +290,94 @@ test("fresh-review check: classifyPreDispatch reproduces the verdict from the ar
   const reloaded = JSON.parse(JSON.stringify(trace));
   const result = classifyPreDispatch(reloaded);
   assert.equal(result.status, "violation");
+});
+
+test("buildDiagnosticTrace: dispatch is detected when the tool_use block is named \"Agent\", not just \"Task\" (issue #321 regression)", () => {
+  // The real defect behind #321's initial misclassification: this repository's own
+  // environment has never emitted a "Task"-named tool_use for a subagent dispatch, only
+  // "Agent" — so the original `=== "Task"` check silently matched zero real dispatches
+  // here, leaving dispatch_events empty and first_dispatch_ms null regardless of what
+  // actually happened.
+  const lines = [
+    JSON.parse(
+      assistantLine({
+        ts: "2026-09-03T10:00:00.000Z",
+        content: [agentToolUse("t1", { prompt: "Dispatch by reference: execution #310, control #311." })],
+      }),
+    ),
+  ];
+  const trace = buildDiagnosticTrace(lines, { controlIssue: 311, executionIssue: 310 });
+  assert.equal(trace.dispatch_events.length, 1);
+  assert.equal(trace.first_dispatch_ms, 0);
+  assert.equal(trace.dispatch_prompt.reference_only, true);
+  assert.equal(classifyPreDispatch(trace).status, "clean");
+});
+
+test("deriveSessionRoleFromPath: a bare top-level transcript is a controller; a subagents/ transcript is a worker", () => {
+  assert.equal(deriveSessionRoleFromPath(String.raw`C:\Users\x\.claude\projects\repo\4dea0981.jsonl`), "controller");
+  assert.equal(deriveSessionRoleFromPath("/home/x/.claude/projects/repo/4dea0981.jsonl"), "controller");
+  assert.equal(
+    deriveSessionRoleFromPath(String.raw`C:\Users\x\.claude\projects\repo\4dea0981\subagents\agent-af9a9.jsonl`),
+    "worker",
+  );
+  assert.equal(deriveSessionRoleFromPath("/home/x/.claude/projects/repo/4dea0981/subagents/agent-af9a9.jsonl"), "worker");
+  assert.equal(deriveSessionRoleFromPath(""), null);
+  assert.equal(deriveSessionRoleFromPath(null), null);
+});
+
+test("deriveSessionRoleFromPath: an ancestor directory merely named \"subagents\" does not, by itself, make a top-level transcript a worker (Stage 1 finding, PR #323)", () => {
+  // Only the transcript file's own immediate parent directory being literally
+  // "subagents" counts — an unrelated ancestor earlier in the path (e.g. a home or
+  // repository directory that happens to be named "subagents") must not misclassify an
+  // ordinary top-level controller transcript as a dispatched worker's.
+  assert.equal(deriveSessionRoleFromPath("/home/subagents/.claude/projects/repo/4dea0981.jsonl"), "controller");
+  assert.equal(deriveSessionRoleFromPath(String.raw`C:\subagents\Users\x\.claude\projects\repo\4dea0981.jsonl`), "controller");
+});
+
+test("classifyPreDispatch: a worker trace is never reported as a controller pre-dispatch violation (issue #321 required behavior 2)", () => {
+  // Even a trace whose raw fields would otherwise look like the #283-class violation
+  // (execution issue read before any further dispatch) must not be classified as one
+  // once session_role identifies it as a dispatched worker's own transcript — that read
+  // is the worker legitimately reading the execution issue it owns, not a controller
+  // reconnaissance violation.
+  const trace = {
+    session_role: "worker",
+    execution_issue_read_by_controller_before_dispatch: true,
+    dispatch_prompt: null,
+    dispatch_events: [],
+  };
+  const result = classifyPreDispatch(trace);
+  assert.equal(result.status, "not_applicable");
+  assert.notEqual(result.status, "violation");
+  assert.notEqual(result.status, "clean");
+});
+
+test("extractDiagnosticTrace derives session_role from the real transcript path", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-diagnostic-trace-role-"));
+  try {
+    const controllerPath = join(dir, "controller-session.jsonl");
+    writeFileSync(
+      controllerPath,
+      assistantLine({ ts: "2026-09-03T10:00:00.000Z", content: [agentToolUse("t1", { prompt: "#310" })] }) + "\n",
+      "utf8",
+    );
+    const controllerTrace = extractDiagnosticTrace(controllerPath, { controlIssue: 311, executionIssue: 310 });
+    assert.equal(controllerTrace.session_role, "controller");
+
+    const subagentsDir = join(dir, "controller-session", "subagents");
+    mkdirSync(subagentsDir, { recursive: true });
+    const workerPath = join(subagentsDir, "agent-1.jsonl");
+    writeFileSync(
+      workerPath,
+      assistantLine({ ts: "2026-09-03T10:05:00.000Z", content: [bashToolUse("t1", "gh issue view 310")] }) + "\n",
+      "utf8",
+    );
+    const workerTrace = extractDiagnosticTrace(workerPath, { controlIssue: 311, executionIssue: 310 });
+    assert.equal(workerTrace.session_role, "worker");
+    assert.equal(classifyPreDispatch(workerTrace).status, "not_applicable");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("extractDiagnosticTrace reads a real transcript file from disk", () => {

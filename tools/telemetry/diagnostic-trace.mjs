@@ -18,7 +18,7 @@
 // Claude Code transcript already contains — never from private/hidden reasoning:
 //   - pre-dispatch structural events (issue reads, git status, PR queries) in order;
 //   - whether a specific execution issue (--execution-issue) was read before the first
-//     subagent (Task tool) dispatch;
+//     subagent (Task/Agent tool) dispatch;
 //   - each subagent dispatch's time offset, subagent_type, prompt character count, a
 //     `reference_only` flag (chars <= --reference-threshold-chars), and any small
 //     issue-number references (#N) found in the prompt text;
@@ -48,6 +48,16 @@ const DEFAULT_REFERENCE_THRESHOLD_CHARS = 700;
 const MAX_PRE_DISPATCH_EVENTS = 100;
 const MAX_ANNOTATION_CHARS = 240;
 const MAX_WORKER_REFERENCES = 10;
+
+// The subagent-dispatch tool's name as it actually appears in a real Claude Code
+// transcript's tool_use blocks. Issue #321: this repository's own environment has never
+// once emitted "Task" — every one of 48 sampled local transcripts with a subagent
+// dispatch used "Agent" instead — so the original #310 implementation's `=== "Task"`
+// check silently matched zero real dispatches here, leaving `dispatch_events` empty and
+// `first_dispatch_ms: null` on every trace regardless of what actually happened. "Task"
+// is kept alongside "Agent" since a different Claude Code build/consumer environment may
+// still use it; this is additive, not a rename.
+const DISPATCH_TOOL_NAMES = new Set(["Task", "Agent"]);
 
 function parseLines(raw) {
   const out = [];
@@ -134,6 +144,31 @@ function extractIssueRefs(promptText) {
   return out;
 }
 
+// Pure. Claude Code stores a dispatched subagent's own transcript at
+// "<parent-session-dir>/subagents/agent-*.jsonl" (see tools/telemetry/README.md's
+// "Transcript-derived token usage" section) — never as a standalone top-level
+// "<uuid>.jsonl" file the way a real orchestrating session's own transcript is stored.
+// That storage shape is structural metadata about *where the file lives*, not reasoning
+// about its content, so it is deterministic, privacy-safe evidence of session role: a
+// fresh reviewer can reproduce the same verdict from the path alone, with no access to
+// the raw conversation. Issue #321 needed exactly this to resolve whether the
+// 4dea0981-616a-4cea-96e2-fdd1183b1d29 proving artifact was a controller trace or a
+// worker trace: that transcript file sits directly under the projects directory with no
+// "subagents" segment, which is what makes it a controller trace rather than the #310
+// worker's own.
+export function deriveSessionRoleFromPath(transcriptPath) {
+  if (typeof transcriptPath !== "string" || !transcriptPath) return null;
+  const segments = transcriptPath.split(/[\\/]/).filter(Boolean);
+  // Stage 1 review finding on this PR: matching "subagents" anywhere among the path's
+  // segments (e.g. a repository or home directory that itself happens to be named
+  // "subagents") would misclassify an ordinary top-level controller transcript as a
+  // worker's. The documented storage shape is specifically
+  // "<parent-session-dir>/subagents/agent-*.jsonl" — the transcript file's own immediate
+  // parent directory must be literally "subagents" — so only that exact position counts.
+  const parentDir = segments.length >= 2 ? segments[segments.length - 2] : null;
+  return parentDir === "subagents" ? "worker" : "controller";
+}
+
 function tsToMs(ts) {
   const parsed = typeof ts === "string" ? Date.parse(ts) : NaN;
   return Number.isFinite(parsed) ? parsed : null;
@@ -149,6 +184,7 @@ export function buildDiagnosticTrace(lines, options = {}) {
     executionIssue = null,
     referenceThresholdChars = DEFAULT_REFERENCE_THRESHOLD_CHARS,
     annotate = false,
+    sessionRole = null,
   } = options;
 
   const executionRef = executionIssue != null ? `#${String(executionIssue).replace(/^#/, "")}` : null;
@@ -179,7 +215,7 @@ export function buildDiagnosticTrace(lines, options = {}) {
     if (excerpt) precedingExcerpt = { ts: line.timestamp ?? null, text: excerpt };
 
     for (const block of toolUseBlocks(line)) {
-      if (block.name === "Task") {
+      if (DISPATCH_TOOL_NAMES.has(block.name)) {
         const ms = tsToMs(line.timestamp);
         const promptText = typeof block.input?.prompt === "string" ? block.input.prompt : "";
         const chars = promptText.length;
@@ -222,6 +258,7 @@ export function buildDiagnosticTrace(lines, options = {}) {
 
   return {
     session: derivedSession,
+    session_role: sessionRole,
     control_issue: controlIssue,
     execution_issue: executionIssue,
     diagnostic_mode: true,
@@ -273,6 +310,21 @@ function hasDispatchEvidence(trace) {
 // the other (Stage 2 audit finding on PR #317). Such a trace is reported
 // "indeterminate" instead, distinct from both "clean" and a proven "violation".
 export function classifyPreDispatch(trace) {
+  // Issue #321 required behavior 2: a dispatched worker's own legitimate read of the
+  // execution issue it was handed must never be labeled a controller pre-dispatch
+  // violation. `session_role` (deriveSessionRoleFromPath) is deterministic, structural
+  // evidence of which kind of transcript this is — checking it first means a worker
+  // trace can never reach the controller-only checks below, regardless of what tool
+  // calls it happened to make.
+  if (trace?.session_role === "worker") {
+    return {
+      status: "not_applicable",
+      reasons: [
+        "session_role is 'worker' — this classifier evaluates the controller's own pre-dispatch boundary, which does not apply to a dispatched worker's transcript",
+      ],
+    };
+  }
+
   const reasons = [];
   if (trace?.execution_issue_read_by_controller_before_dispatch === true) {
     reasons.push("execution issue was read by the controller before the first subagent dispatch");
@@ -299,7 +351,7 @@ export function classifyPreDispatch(trace) {
 export function extractDiagnosticTrace(transcriptPath, options = {}) {
   const raw = readFileSync(transcriptPath, "utf8");
   const lines = parseLines(raw);
-  return buildDiagnosticTrace(lines, options);
+  return buildDiagnosticTrace(lines, { ...options, sessionRole: deriveSessionRoleFromPath(transcriptPath) });
 }
 
 function parseArgs(argv) {
@@ -411,6 +463,7 @@ function main() {
     const classification = classifyPreDispatch(trace);
     appendToIndex(indexPath, {
       session: trace.session,
+      session_role: trace.session_role,
       control_issue: trace.control_issue,
       execution_issue: trace.execution_issue,
       path: outPath.split(/[\\/]/).slice(-2).join("/"),

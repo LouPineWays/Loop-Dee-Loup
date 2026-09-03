@@ -1,9 +1,10 @@
 {
   "session": "4dea0981-616a-4cea-96e2-fdd1183b1d29",
+  "session_role": "controller",
   "control_issue": 311,
   "execution_issue": 310,
   "diagnostic_mode": true,
-  "first_dispatch_ms": null,
+  "first_dispatch_ms": 60245,
   "execution_issue_read_by_controller_before_dispatch": true,
   "pre_dispatch_events": [
     {
@@ -16,17 +17,30 @@
     },
     {
       "kind": "pr_query"
-    },
-    {
-      "kind": "pr_query"
-    },
-    {
-      "kind": "issue_read",
-      "ref": "#318"
     }
   ],
   "pre_dispatch_events_truncated": false,
-  "dispatch_prompt": null,
-  "dispatch_events": [],
+  "dispatch_prompt": {
+    "chars": 3375,
+    "reference_only": false,
+    "worker_references": [
+      "#310",
+      "#311"
+    ]
+  },
+  "dispatch_events": [
+    {
+      "offset_ms": 60245,
+      "subagent_type": "general-purpose",
+      "prompt": {
+        "chars": 3375,
+        "reference_only": false,
+        "worker_references": [
+          "#310",
+          "#311"
+        ]
+      }
+    }
+  ],
   "annotations": []
 }

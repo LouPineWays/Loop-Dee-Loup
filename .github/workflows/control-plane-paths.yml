@@ -19,6 +19,7 @@ on:
       - "tools/local-worker/**"
       - "tools/review-watch/**"
       - "tools/telemetry/**"
+      - "tools/orchestration/**"
       - "tools/ldl-init/**"
       - "tools/ldl-update/**"
       - "tools/ldl-ack/**"
@@ -51,6 +52,9 @@ jobs:
 
       - name: Telemetry collector/reducer tests
         run: node --test tools/telemetry/*.test.mjs
+
+      - name: Orchestration (READY dispatch gate) tests
+        run: node --test tools/orchestration/*.test.mjs
 
       - name: LDL-init bootstrap tests
         run: node --test tools/ldl-init/index.test.mjs
