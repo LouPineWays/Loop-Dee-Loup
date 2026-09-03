@@ -542,6 +542,32 @@ test("resolveRepoIdentity: never throws even when the thrown value's own inspect
   }
 });
 
+test("resolveRepoIdentity: never throws when a genuine Error's own message is a non-string value whose coercion throws (Stage 2 audit finding, issue #350)", () => {
+  // A real `Error` (so `err instanceof Error` is true and `err.message` reads back
+  // successfully — unlike the throwing-getter case above) whose `.message` was reassigned to
+  // an object with a throwing `Symbol.toPrimitive`. Reading `err.message` itself does not
+  // throw here; only the later implicit string coercion does — exactly the gap the audit
+  // found in the previous fix, which protected reading/branching on `err` but not the final
+  // string conversion of whatever it read.
+  const nonStringMessage = {
+    [Symbol.toPrimitive]() {
+      throw new Error("detail coercion exploded");
+    },
+  };
+  const thrown = new Error("initial");
+  thrown.message = nonStringMessage;
+
+  assert.doesNotThrow(() => {
+    const result = resolveRepoIdentity({
+      gitRemoteUrlImpl: () => {
+        throw thrown;
+      },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(typeof result.reason, "string");
+  }, "resolveRepoIdentity threw while coercing a non-string Error.message to a string");
+});
+
 test("checkReadyDispatch: the normal path (no explicit repo) resolves repository identity via resolveRepoIdentityImpl, never a hand-typed value", async () => {
   let sawRepo = null;
   const result = await checkReadyDispatch(
