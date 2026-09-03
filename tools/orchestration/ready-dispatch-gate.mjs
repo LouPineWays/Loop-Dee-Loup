@@ -383,11 +383,20 @@ export function resolveRepoIdentity({ gitRemoteUrlImpl = defaultGitRemoteUrl } =
     // invoke a custom `Symbol.hasInstance`, `err.message` can be a throwing getter on an
     // Error-like object, and `String(err)` invokes `err[Symbol.toPrimitive]`/`toString`, any of
     // which can itself throw for a sufficiently adversarial thrown value. A second, inner
-    // try/catch with a fixed fallback string keeps the "never throws" contract true even then —
-    // there is no thrown-value shape this can propagate a new exception for.
+    // try/catch with a fixed fallback string keeps the "never throws" contract true even then.
+    //
+    // Stage 2 audit finding on issue #350: that inner try/catch protected reading and coercing
+    // `err`, but not a *further* coercion still waiting outside it — a genuine `Error` whose
+    // `message` property holds a non-string, coercion-throwing value (e.g. an object with a
+    // throwing `Symbol.toPrimitive`) passed the inner try/catch with `reasonDetail` still holding
+    // that live adversarial value, only to blow up when the outer template literal below
+    // implicitly coerced it to a string. The fix is to force the final string conversion
+    // (`String(...)`) itself inside the protected block, so nothing capable of throwing during
+    // string coercion survives past this catch clause — there is no remaining step downstream
+    // that still touches the original `err` or its properties.
     let reasonDetail;
     try {
-      reasonDetail = err instanceof Error ? err.message : String(err);
+      reasonDetail = String(err instanceof Error ? err.message : err);
     } catch {
       reasonDetail = "a thrown value that could not safely be inspected";
     }
