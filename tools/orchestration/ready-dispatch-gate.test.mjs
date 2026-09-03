@@ -497,6 +497,51 @@ test("resolveRepoIdentity: fails closed (ok: false) when the remote URL doesn't 
   assert.ok(result.reason.includes("not-a-remote-url"));
 });
 
+test("resolveRepoIdentity: never throws, even when gitRemoteUrlImpl throws a non-Error value (Stage 2 audit finding, issue #348)", () => {
+  for (const thrown of [null, undefined, "plain string failure", 42, { code: "ENOENT" }]) {
+    assert.doesNotThrow(() => {
+      const result = resolveRepoIdentity({
+        gitRemoteUrlImpl: () => {
+          throw thrown;
+        },
+      });
+      assert.equal(result.ok, false);
+      assert.equal(typeof result.reason, "string");
+    }, `resolveRepoIdentity threw for injected throw value: ${JSON.stringify(thrown)}`);
+  }
+});
+
+test("resolveRepoIdentity: never throws even when the thrown value's own inspection (Symbol.toPrimitive/toString/message getter) throws (Stage 1 finding, PR #349)", () => {
+  const adversarialValues = [
+    // String(err) invokes Symbol.toPrimitive, which itself throws here.
+    {
+      [Symbol.toPrimitive]() {
+        throw new Error("cannot stringify me");
+      },
+    },
+    // An Error-like object whose `message` getter throws, so even the `instanceof Error`
+    // branch's own property read is unsafe.
+    Object.create(Error.prototype, {
+      message: {
+        get() {
+          throw new Error("message getter exploded");
+        },
+      },
+    }),
+  ];
+  for (const thrown of adversarialValues) {
+    assert.doesNotThrow(() => {
+      const result = resolveRepoIdentity({
+        gitRemoteUrlImpl: () => {
+          throw thrown;
+        },
+      });
+      assert.equal(result.ok, false);
+      assert.equal(typeof result.reason, "string");
+    }, "resolveRepoIdentity threw while normalizing an adversarial thrown value");
+  }
+});
+
 test("checkReadyDispatch: the normal path (no explicit repo) resolves repository identity via resolveRepoIdentityImpl, never a hand-typed value", async () => {
   let sawRepo = null;
   const result = await checkReadyDispatch(

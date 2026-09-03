@@ -372,9 +372,28 @@ export function resolveRepoIdentity({ gitRemoteUrlImpl = defaultGitRemoteUrl } =
   try {
     url = gitRemoteUrlImpl();
   } catch (err) {
+    // Stage 2 audit finding on issue #348: JavaScript permits throwing any value, not only an
+    // `Error`. `err.message` unconditionally would itself throw (a TypeError) when a caller's
+    // injected `gitRemoteUrlImpl` throws `null`/`undefined`/a bare string/etc., letting this
+    // function violate its own documented "never throws, always returns { ok, reason }"
+    // contract at the exact moment it's supposed to be reporting a failure.
+    //
+    // Stage 1 review finding on PR #349: the normalization itself — `err instanceof Error ?
+    // err.message : String(err)` — was not itself guaranteed non-throwing. `instanceof` can
+    // invoke a custom `Symbol.hasInstance`, `err.message` can be a throwing getter on an
+    // Error-like object, and `String(err)` invokes `err[Symbol.toPrimitive]`/`toString`, any of
+    // which can itself throw for a sufficiently adversarial thrown value. A second, inner
+    // try/catch with a fixed fallback string keeps the "never throws" contract true even then —
+    // there is no thrown-value shape this can propagate a new exception for.
+    let reasonDetail;
+    try {
+      reasonDetail = err instanceof Error ? err.message : String(err);
+    } catch {
+      reasonDetail = "a thrown value that could not safely be inspected";
+    }
     return {
       ok: false,
-      reason: `could not read the current checkout's "origin" remote via "git remote get-url origin": ${err.message}`,
+      reason: `could not read the current checkout's "origin" remote via "git remote get-url origin": ${reasonDetail}`,
     };
   }
 
