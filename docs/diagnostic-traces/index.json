@@ -1,10 +1,13 @@
 [
   {
     "session": "4dea0981-616a-4cea-96e2-fdd1183b1d29",
+    "session_role": "controller",
     "control_issue": 311,
     "execution_issue": 310,
     "path": "diagnostic-traces/4dea0981-616a-4cea-96e2-fdd1183b1d29.json",
     "created_at": "2026-09-03T07:58:13.633Z",
-    "pre_dispatch_status": "violation"
+    "pre_dispatch_status": "violation",
+    "corrected_at": "2026-09-03T08:42:03.000Z",
+    "correction_note": "Issue #321: regenerated after fixing diagnostic-trace.mjs's dispatch-tool-name bug (this environment's dispatch tool is named \"Agent\", never the originally-assumed \"Task\", so dispatch_events/first_dispatch_ms were previously always empty/null here regardless of what happened) and adding deterministic session_role (path-derived: no \"subagents\" segment => controller). Verdict unchanged (violation) and now also reflects an oversized, non-reference-only dispatch prompt (3375 chars) in addition to the pre-dispatch #310 read."
   }
 ]

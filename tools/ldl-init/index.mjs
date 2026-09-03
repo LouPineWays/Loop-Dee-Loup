@@ -61,6 +61,7 @@ export const MANAGED_ITEMS = [
   { kind: "file", src: ".claude/personas/audit-verdict-extractor.md", dest: ".claude/personas/audit-verdict-extractor.md" },
   { kind: "dir", src: "tools/local-worker", dest: "tools/local-worker" },
   { kind: "dir", src: "tools/review-watch", dest: "tools/review-watch" },
+  { kind: "dir", src: "tools/orchestration", dest: "tools/orchestration" },
   { kind: "dir", src: "tools/ldl-sync", dest: "tools/ldl-sync" },
   { kind: "file", src: "docs/operating-model.md", dest: "docs/operating-model.md" },
   { kind: "file", src: "docs/bounded-review-cycle.md", dest: "docs/bounded-review-cycle.md" },

@@ -25,6 +25,9 @@ Reusable engine/runtime material distributed from this repository:
   verdict-extraction persona;
 - `tools/local-worker/` — the local-LLM delegation adapter;
 - `tools/review-watch/` — the early-exit-on-match review-polling script;
+- `tools/orchestration/` — the deterministic READY immediate-dispatch gate
+  (`ready-dispatch-gate.mjs`) `AGENTS.md` § Session execution requires as a
+  control-plane issue's first read;
 - `docs/operating-model.md`, `docs/bounded-review-cycle.md`,
   `docs/decision-forms.md`, `docs/consumer-contract.md` — the operating
   model documentation those skills and the bounded review cycle depend on;
