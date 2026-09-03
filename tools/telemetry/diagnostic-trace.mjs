@@ -235,10 +235,43 @@ export function buildDiagnosticTrace(lines, options = {}) {
   };
 }
 
+// A trace has dispatch evidence when it recorded at least one completed subagent
+// dispatch — either the full `dispatch_events` array `buildDiagnosticTrace` always
+// populates, or (for a hand-built/reloaded partial trace, as a fresh reviewer might
+// construct from a saved artifact) a non-null `dispatch_prompt`. Tolerant of either
+// shape so classifyPreDispatch works the same whether it's called on a freshly built
+// trace or one round-tripped through plain JSON.
+function hasDispatchEvidence(trace) {
+  if (Array.isArray(trace?.dispatch_events) && trace.dispatch_events.length > 0) return true;
+  if (trace?.dispatch_prompt && typeof trace.dispatch_prompt === "object") return true;
+  return false;
+}
+
 // #283-class classification: distinguishes a clean immediate reference-only dispatch
 // from a regression sequence, using only the trace's own structural fields — no model
 // judgment, so any fresh reviewer (human or agent) can reproduce this verdict from the
 // artifact alone.
+//
+// Known violation evidence is checked FIRST, independent of whether a dispatch ever
+// happened: a pre-dispatch execution-issue read is itself a proven boundary violation
+// the moment it occurs, whether or not the session went on to dispatch anything
+// afterward. Gating that check behind "did a dispatch happen" would silently discard an
+// already-proven violation for exactly the sessions most worth surfacing — an
+// interrupted or truncated run that read the thick execution issue and then never
+// completed a dispatch (Stage 1 review finding on PR #319, against the real trace this
+// mechanism's own #310/#311 proving session produced: it has
+// execution_issue_read_by_controller_before_dispatch: true and no dispatch, and an
+// earlier version of this function reported that "indeterminate", hiding the violation
+// its own index was supposed to surface).
+//
+// Only once no known violation exists does the absence of a completed dispatch matter:
+// a trace with no recorded dispatch at all (an interrupted, truncated, or
+// pre-dispatch-only transcript, and no already-proven violation either) must never read
+// as "clean" — "clean" is a positive claim that the required control-read ->
+// immediate-reference-only-dispatch sequence actually completed without incident, and a
+// transcript that never reached dispatch has not demonstrated that sequence one way or
+// the other (Stage 2 audit finding on PR #317). Such a trace is reported
+// "indeterminate" instead, distinct from both "clean" and a proven "violation".
 export function classifyPreDispatch(trace) {
   const reasons = [];
   if (trace?.execution_issue_read_by_controller_before_dispatch === true) {
@@ -247,7 +280,20 @@ export function classifyPreDispatch(trace) {
   if (trace?.dispatch_prompt && trace.dispatch_prompt.reference_only === false) {
     reasons.push("dispatch prompt exceeded the reference-only size threshold (possible requirement retransmission)");
   }
-  return { status: reasons.length === 0 ? "clean" : "violation", reasons };
+  if (reasons.length > 0) {
+    return { status: "violation", reasons };
+  }
+
+  if (!hasDispatchEvidence(trace)) {
+    return {
+      status: "indeterminate",
+      reasons: [
+        "no subagent dispatch was observed in this trace, and no violation was found in what was observed — the required control-read -> immediate-dispatch sequence never completed, so this trace proves a clean sequence did not happen either",
+      ],
+    };
+  }
+
+  return { status: "clean", reasons: [] };
 }
 
 export function extractDiagnosticTrace(transcriptPath, options = {}) {

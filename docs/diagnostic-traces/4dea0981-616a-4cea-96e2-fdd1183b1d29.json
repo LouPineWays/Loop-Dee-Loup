@@ -1,0 +1,32 @@
+{
+  "session": "4dea0981-616a-4cea-96e2-fdd1183b1d29",
+  "control_issue": 311,
+  "execution_issue": 310,
+  "diagnostic_mode": true,
+  "first_dispatch_ms": null,
+  "execution_issue_read_by_controller_before_dispatch": true,
+  "pre_dispatch_events": [
+    {
+      "kind": "issue_read",
+      "ref": "#311"
+    },
+    {
+      "kind": "issue_read",
+      "ref": "#310"
+    },
+    {
+      "kind": "pr_query"
+    },
+    {
+      "kind": "pr_query"
+    },
+    {
+      "kind": "issue_read",
+      "ref": "#318"
+    }
+  ],
+  "pre_dispatch_events_truncated": false,
+  "dispatch_prompt": null,
+  "dispatch_events": [],
+  "annotations": []
+}

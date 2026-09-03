@@ -136,6 +136,55 @@ test("buildDiagnosticTrace: no pre-dispatch reads at all is also a clean trace",
   assert.equal(classifyPreDispatch(trace).status, "clean");
 });
 
+test("classifyPreDispatch: a transcript with no subagent dispatch at all is indeterminate, never clean (Stage 2 audit finding, PR #317)", () => {
+  // An interrupted/truncated/pre-dispatch-only session: the controller read the
+  // control issue but never actually dispatched a worker. This must not be reported
+  // as a positive "clean" proof of the required control-read -> dispatch sequence,
+  // since that sequence never completed.
+  const lines = [
+    JSON.parse(assistantLine({ ts: "2026-09-03T10:00:00.000Z", content: [bashToolUse("t1", "gh issue view 311")] })),
+    JSON.parse(assistantLine({ ts: "2026-09-03T10:00:05.000Z", content: [bashToolUse("t2", "git status")] })),
+    // ...session ends here; no Task tool_use ever appears.
+  ];
+  const trace = buildDiagnosticTrace(lines, { controlIssue: 311, executionIssue: 310 });
+  assert.equal(trace.dispatch_prompt, null);
+  assert.deepEqual(trace.dispatch_events, []);
+
+  const classification = classifyPreDispatch(trace);
+  assert.equal(classification.status, "indeterminate");
+  assert.notEqual(classification.status, "clean");
+  assert.ok(classification.reasons.length > 0);
+
+  // Also true for a completely empty transcript.
+  assert.equal(classifyPreDispatch(buildDiagnosticTrace([], { controlIssue: 311 })).status, "indeterminate");
+
+  // And for a minimal reloaded/hand-built trace with no dispatch_events array at all
+  // (e.g. an older or partial saved artifact a fresh reviewer might load).
+  assert.equal(classifyPreDispatch({ execution_issue_read_by_controller_before_dispatch: false }).status, "indeterminate");
+});
+
+test("classifyPreDispatch: a known violation is reported as 'violation' even when no dispatch ever happened (Stage 1 finding, PR #319)", () => {
+  // An interrupted session that DID read the execution issue pre-dispatch, then never
+  // reached a Task dispatch at all — the real trace this mechanism's own #310/#311
+  // proving session produced. The proven violation must not be swallowed by the
+  // no-dispatch "indeterminate" path: it is known bad evidence regardless of whether a
+  // dispatch later occurred.
+  const lines = [
+    JSON.parse(assistantLine({ ts: "2026-09-03T10:00:00.000Z", content: [bashToolUse("t1", "gh issue view 311")] })),
+    JSON.parse(assistantLine({ ts: "2026-09-03T10:00:05.000Z", content: [bashToolUse("t2", "gh issue view 310 --json body")] })),
+    // ...session ends here; no Task tool_use ever appears.
+  ];
+  const trace = buildDiagnosticTrace(lines, { controlIssue: 311, executionIssue: 310 });
+  assert.equal(trace.execution_issue_read_by_controller_before_dispatch, true);
+  assert.equal(trace.dispatch_prompt, null);
+  assert.deepEqual(trace.dispatch_events, []);
+
+  const classification = classifyPreDispatch(trace);
+  assert.equal(classification.status, "violation");
+  assert.notEqual(classification.status, "indeterminate");
+  assert.ok(classification.reasons.some((r) => r.includes("read by the controller before")));
+});
+
 test("buildDiagnosticTrace: execution_issue_read flag is null (not false) when no execution issue was supplied", () => {
   const lines = [
     JSON.parse(assistantLine({ ts: "2026-09-03T10:00:00.000Z", content: [bashToolUse("t1", "gh issue view 311")] })),

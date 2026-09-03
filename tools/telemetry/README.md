@@ -494,10 +494,25 @@ evaluated"), never a false `false`.
   private chain-of-thought is never required or read — only the same `text`/`thinking`
   content blocks the transcript already exposes.
 
-`classifyPreDispatch(trace)` reproduces the #283-class clean/violation verdict from the
-saved artifact's own fields alone — a fresh reviewer (human or a later Claude session)
-never needs to reopen the raw transcript to reach the same conclusion the extracting
-session would have reached.
+`classifyPreDispatch(trace)` reproduces the #283-class verdict from the saved artifact's
+own fields alone — a fresh reviewer (human or a later Claude session) never needs to
+reopen the raw transcript to reach the same conclusion the extracting session would have
+reached. It returns one of three statuses, never just two, checked in this priority
+order:
+
+1. `"violation"` — a pre-dispatch execution-issue read or an oversized dispatch prompt
+   was found. Checked **first**, independent of whether a dispatch ever happened: a
+   pre-dispatch execution-issue read is a proven boundary violation the moment it
+   occurs, even in a transcript that never went on to complete a dispatch — an earlier
+   version gated this behind dispatch evidence and silently downgraded exactly that case
+   to `"indeterminate"` (Stage 1 review finding on PR #319, caught against this
+   repository's own committed real trace, which has that exact shape).
+2. `"indeterminate"` — no violation was found, but no subagent dispatch was recorded
+   either (an interrupted, truncated, or pre-dispatch-only transcript). Never reported as
+   `"clean"`, since `"clean"` is a positive claim that the required control-read ->
+   immediate-dispatch sequence actually completed, and a transcript that never reached
+   dispatch has not demonstrated that (Stage 2 audit finding on PR #317).
+3. `"clean"` — a subagent was dispatched and no violation was found.
 
 ### Privacy
 
@@ -513,7 +528,9 @@ marker string that must never survive into the derived artifact.
 A trace is written to `docs/diagnostic-traces/<session>.json` (durable, git-tracked — this
 is intentionally different from `.claude/telemetry/`, which stays local/transient) plus one
 entry appended to `docs/diagnostic-traces/index.json`: `{ session, control_issue,
-execution_issue, path, created_at, pre_dispatch_status }`. That index is deliberately
+execution_issue, path, created_at, pre_dispatch_status }` — `pre_dispatch_status` is
+`classifyPreDispatch`'s three-way `"clean" | "violation" | "indeterminate"` status (see
+above). That index is deliberately
 **metadata only** (no prompt/reasoning content) so `.claude/skills/telemetry-battery/SKILL.md`'s
 Step 2 maker-discovery pass can decide whether a relevant trace exists for a concrete
 orchestration/routing claim under investigation *before* opening any individual trace file
