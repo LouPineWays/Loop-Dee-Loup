@@ -32,7 +32,7 @@ A founder decision, external manual action, post-merge audit, or genuinely indep
 
 ## Decomposition boundary
 
-Decomposition and execution are separate control boundaries. An issue completable as one bounded vertical slice under the rule above executes normally under Session execution below.
+Decomposition and execution are separate control boundaries. An issue completable as one bounded vertical slice under the rule above executes normally under Session execution below. This boundary governs the execution work itself — inline slice execution, or a legacy unsplit issue whose shape has not yet been determined — not a READY thin control Issue whose linked execution pointer Session execution's immediate-dispatch gate already authorizes to dispatch by reference: that gate runs first and, when it applies, is not itself a decomposition determination.
 
 An issue that genuinely requires multiple independently executable vertical slices instead triggers a decomposition session. The session must not begin implementing any resulting slice — not even the first one, and not "to save a session." Before it ends, it must: apply the decomposition self-check (`docs/operating-model.md` § Vertical vs horizontal decomposition); determine every currently foreseeable, implementation-ready slice; create one self-sufficient execution issue per slice, with enough outcome, constraints, acceptance criteria, and dependencies that a fresh session can execute it without reconstructing this conversation; record genuine dependencies using GitHub's native issue relationships, not free-text cross-references; close the source issue as a durable decomposition record retaining its objective, settled decisions, scope/non-goals, resulting slice list, and dependencies; and stop. See `docs/operating-model.md` § Decomposition boundary for the full six-step contract and worked examples — this paragraph is self-sufficient without it.
 
@@ -64,7 +64,9 @@ If this repository has installed LDL-managed content (per `docs/consumer-contrac
 
 ## Session execution
 
-After dispatch, first apply the Decomposition boundary: determine whether the active issue is one bounded vertical slice or genuinely requires decomposition into multiple. A multi-slice determination ends the session there, per that section.
+After dispatch, first evaluate the READY immediate-dispatch gate, before the Decomposition boundary below: if the active issue is a control-plane issue recording lifecycle state READY, one current execution pointer, a settled route, blocker: none, and founder decision: none, dispatch the linked execution worker immediately by reference (issue number, controlling issue, route) and stop — without reading that execution issue's body, judging its decomposition shape, or doing implementation reconnaissance first. That linked issue's own decomposition shape is the dispatched worker's concern, not a prerequisite the controller must resolve before handing off; see Subagent dispatch below for the two-plane read this gate protects, and `docs/operating-model.md` § Two-plane Issue dispatch for the closed exceptions (malformed/conflicting control state, an unresolved escalation, or similar) that still permit direct inspection.
+
+Only when that gate does not apply — the active issue is not a READY control issue with settled routing, or it is itself the execution/legacy-unsplit work to perform — apply the Decomposition boundary: determine whether the active issue is one bounded vertical slice or genuinely requires decomposition into multiple. A multi-slice determination ends the session there, per that section.
 
 For a single bounded vertical slice, the session must:
 
