@@ -35,10 +35,14 @@
 //                  is never trusted on its own (e.g. set by hand before Stage 2 actually ran) —
 //                  it is treated the same as no verdict unless stage2-report.mjs's
 //                  isCompletedStage2AuditReport finds a post-trigger response that references the
-//                  exact merge commit, states an explicit CLEAN verdict of its own, and shows
-//                  verification-results content; a genuine-but-incomplete response — e.g. issue
-//                  #229's "Starting #178." kickoff, which findStage2ReportEvidence below
-//                  evaluates and correctly rejects — does not count (issue #230). `--recover
+//                  exact merge commit (still unconditionally required — issue #335 investigated
+//                  and rejected accepting the audit issue's own trusted frozen Stage 1 reviewed
+//                  head as an alternative; see parseReviewedHeadCommitRef below and
+//                  stage2-report.mjs's module comment for why), states an explicit CLEAN verdict
+//                  of its own, and shows verification-results content; a genuine-but-incomplete
+//                  response — e.g. issue #229's "Starting #178." kickoff,
+//                  which findStage2ReportEvidence below evaluates and correctly rejects — does
+//                  not count (issue #230). `--recover
 //                  true` reopens a PREMATURE_CLOSURE work issue and records why; if the
 //                  environment cannot reopen it, this reports the blocked state rather than
 //                  silently accepting the
@@ -270,6 +274,37 @@ export function parseWorkIssueRef(body) {
   return match ? Number(match[1]) : null;
 }
 
+// Pure. Extracts the frozen Stage 1 reviewed head SHA from the audit issue's own "Stage 1 inline
+// review disposition" field, passed through to stage2-report.mjs's `isCompletedStage2AuditReport`
+// as `reviewedHeadCommit`. Issue #335 (audit #334): a genuine CLEAN response cited only this
+// value — while verifying the checklist's own control-plane-paths item, which the template
+// instructs to use the frozen reviewed head, not the merge commit — and `bodyReferencesCommit`
+// had no way to explain that in its failure reason.
+//
+// Does NOT relax target-identity checking: a Stage 1 review finding on the PR that introduced
+// this function found that letting `reviewedHeadCommit` substitute for `mergeCommit` was unsafe
+// (a response naming an *incorrect* merge commit while still citing the correct reviewed head for
+// the workflow-check item would otherwise pass) — see stage2-report.mjs's module comment.
+// `mergeCommit` therefore remains unconditionally required; this value is used only to produce a
+// more specific failure `reason` string, distinguishing "cites the reviewed head but not the
+// required merge commit" from "cites nothing at all."
+//
+// Scoped narrowly to keep even that diagnostic use trustworthy: only the audit-control-issue
+// template's own "Stage 1 inline review disposition" field (pre-trigger content the controlling
+// session authors before ever triggering Codex — the reviewer-only boundary in AGENTS.md's Code
+// Review Rules means Codex can never edit an issue body to plant a spoofed value here), and only
+// the exact "frozen ... head `<sha>`" phrasing that field has used in every real audit issue
+// observed so far (e.g. "frozen head `9d775fc...`", issue #330; "frozen head `82651b3c...`",
+// issue #334) — allowing a short run of words between "frozen" and "head" (e.g. "frozen Stage 1
+// reviewed head") without matching an unrelated later SHA-looking token elsewhere in the block.
+// Returns null when the field is absent or does not contain that phrase.
+export function parseReviewedHeadCommitRef(body) {
+  const block = parseFormFieldBlock(body, "Stage 1 inline review disposition");
+  if (!block) return null;
+  const match = /\bfrozen\b[^`\n]{0,40}?\bhead\b\s*`([0-9a-f]{7,40})`/i.exec(block);
+  return match ? match[1] : null;
+}
+
 const SHA_TOKEN_PATTERN = /\b[0-9a-f]{7,40}\b/i;
 
 // Pure. Reads the audit-control-issue template's "Exact merge commit" field — the target
@@ -438,7 +473,7 @@ const STAGE2_LEGACY_CONTRACT_CUTOFF = "2026-08-31T09:19:22Z";
 // compatibility evaluation, which already forgives the checklist signal entirely.
 // `ghApiImpl` is injected for tests.
 async function findStage2ReportEvidence(
-  { repo, auditIssue, bot, mergeCommit, requestedChecklist = null },
+  { repo, auditIssue, bot, mergeCommit, requestedChecklist = null, reviewedHeadCommit = null },
   ghApiImpl,
   { legacyCutoff = null } = {},
 ) {
@@ -455,12 +490,17 @@ async function findStage2ReportEvidence(
   const reports = candidates.map((match) => {
     const full = findCommentById(comments, match.id);
     const body = full?.body ?? "";
-    const strict = isCompletedStage2AuditReport(body, { mergeCommit, requireVerificationEvidence: true, requestedChecklist });
+    const strict = isCompletedStage2AuditReport(body, {
+      mergeCommit,
+      requireVerificationEvidence: true,
+      requestedChecklist,
+      reviewedHeadCommit,
+    });
     const isPreCutoff = cutoffMs !== null && new Date(match.created_at).getTime() < cutoffMs;
     if (strict.complete || !isPreCutoff) {
       return { id: match.id, url: match.url, legacyCompatible: false, ...strict };
     }
-    const relaxed = isCompletedStage2AuditReport(body, { mergeCommit, requireVerificationEvidence: false });
+    const relaxed = isCompletedStage2AuditReport(body, { mergeCommit, requireVerificationEvidence: false, reviewedHeadCommit });
     return { id: match.id, url: match.url, legacyCompatible: relaxed.complete, ...relaxed };
   });
 
@@ -523,6 +563,7 @@ export async function checkPostAudit(
 
   const rawVerdict = parseStage2Verdict(auditIssueData.body ?? "");
   const mergeCommit = parseMergeCommitRef(auditIssueData.body ?? "");
+  const reviewedHeadCommit = parseReviewedHeadCommitRef(auditIssueData.body ?? "");
   const requestedChecklist = parseVerificationChecklistRef(auditIssueData.body ?? "");
 
   // Explicit no-work-issue state (issue #190): evaluated first and independently — always
@@ -534,7 +575,10 @@ export async function checkPostAudit(
     let reportEvidence = null;
     if (rawVerdict === "CLEAN") {
       try {
-        reportEvidence = await findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit, requestedChecklist }, ghApiImpl);
+        reportEvidence = await findStage2ReportEvidence(
+          { repo, auditIssue, bot, mergeCommit, requestedChecklist, reviewedHeadCommit },
+          ghApiImpl,
+        );
       } catch (err) {
         return {
           exitCode: 1,
@@ -595,9 +639,11 @@ export async function checkPostAudit(
     // complete NOT CLEAN report could be silently outranked by an older grandfathered CLEAN) —
     // the *latest* complete response, of either verdict, is always authoritative.
     try {
-      reportEvidence = await findStage2ReportEvidence({ repo, auditIssue, bot, mergeCommit, requestedChecklist }, ghApiImpl, {
-        legacyCutoff: isClosed ? STAGE2_LEGACY_CONTRACT_CUTOFF : null,
-      });
+      reportEvidence = await findStage2ReportEvidence(
+        { repo, auditIssue, bot, mergeCommit, requestedChecklist, reviewedHeadCommit },
+        ghApiImpl,
+        { legacyCutoff: isClosed ? STAGE2_LEGACY_CONTRACT_CUTOFF : null },
+      );
     } catch (err) {
       return {
         exitCode: 1,

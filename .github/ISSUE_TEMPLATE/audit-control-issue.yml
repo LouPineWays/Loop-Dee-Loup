@@ -76,7 +76,14 @@ body:
         branch's head SHA, and the merge commit created on `main` never appears as a `head_sha`
         even when CI ran and passed. A workflow whose trigger silently never matches (e.g. a
         broken `paths:` glob) will pass a content-only audit; this item exists to catch that class
-        of defect.
+        of defect. Keep this list to the number of genuinely independent checks the diff actually
+        needs — group tightly related sub-checks (e.g. several failure-mode branches of the same
+        function) under one numbered item rather than splitting them into many top-level items
+        purely for enumeration's own sake. The response's completeness is judged by comparing its
+        own walk-through count against this list's item count (issue #268 finding 2), with no
+        credit for prose elsewhere in the response that covers a topic without a matching
+        numbered/marker line — an oversized checklist can produce a mechanically-incomplete
+        response even when the substance was genuinely covered (issue #335, audit #334).
   - type: textarea
     id: verification_checklist
     attributes:
@@ -105,7 +112,13 @@ body:
         gate.mjs`'s post-audit check parses the response comment itself for the merge commit,
         the verdict, and the verification-checklist walk-through (issue #230) — a response
         missing any of these three cannot back a CLEAN closure, even once this issue's own
-        Verdict dropdown below is set to CLEAN by hand.
+        Verdict dropdown below is set to CLEAN by hand. Item (0)'s merge-commit restatement stays
+        mandatory even on a change where a control-plane-workflow checklist item legitimately
+        asks to be checked against the PR's frozen reviewed head instead (see the Verification
+        checklist instructions above) — citing only that reviewed head, with no separate
+        restatement of the actual merge commit, does not satisfy item (0) and will not back a
+        CLEAN closure (issue #335, audit #334: this exact omission left an otherwise-complete
+        response mechanically unbacked).
   - type: textarea
     id: findings
     attributes:
