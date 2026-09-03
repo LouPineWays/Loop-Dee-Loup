@@ -760,6 +760,45 @@ test("isCompletedStage2AuditReport: a numbered status-marker checklist truncated
   assert.ok(result.reasons.some((r) => r.includes("checklist walk-through is incomplete")));
 });
 
+// Stage 1 review finding on PR #354 (two P1s against the first revision of the #353 fix above).
+
+test("hasVerificationEvidence: a numbered run with a marker on only its first item is NOT evidence — every item in the selected run must carry the glyph, not merely one line anywhere (Stage 1 finding 1, PR #354)", () => {
+  // The exact adversarial input Codex reported: item 1 carries a real marker, items 2-3 are
+  // unmarked findings-shaped lines with no verification content at all. Before this finding was
+  // fixed, testing NUMBERED_MARKER_ITEM_PATTERN against the whole body let this pass evidence
+  // detection while countVerificationWalkthroughItems still counted all 3 lines as "verified".
+  const mixedRun = "1. ✅ Checked A\n2. Finding B\n3. Finding C";
+  assert.equal(hasVerificationEvidence(mixedRun), false);
+});
+
+test("hasVerificationEvidence: a lone unrelated status bullet in findings prose is NOT evidence without a 'verif...' mention — the bulleted marker shape keeps its original word-mention requirement (Stage 1 finding 2, PR #354)", () => {
+  // The exact adversarial input Codex reported: a single "- ✅ ..." bullet embedded in ordinary
+  // findings prose, no verification section, no "verif..." word anywhere. Before this finding
+  // was fixed, extending the numbered-marker shape's mention-free path to the bulleted-marker
+  // shape too let this satisfy a single-item requested checklist on its own.
+  const loneBulletInProse = "Findings: we already fixed the reported issue.\n- ✅ Fixed the finding.";
+  assert.equal(hasVerificationEvidence(loneBulletInProse), false);
+});
+
+test("hasVerificationEvidence: a numbered run where every item carries a marker is still accepted (the intended #353 fix keeps working after the Stage 1 correction)", () => {
+  const fullyMarked = "1. ✅ Checked A\n2. ✅ Checked B\n3. ✅ Checked C";
+  assert.equal(hasVerificationEvidence(fullyMarked), true);
+});
+
+test("isCompletedStage2AuditReport: the mixed-marker adversarial run from Stage 1 finding 1 does not back a CLEAN verdict even against a matching-length requested checklist", () => {
+  const mixedRun = `Merge commit \`${MERGE_COMMIT}\`.\n\n1. ✅ Checked A\n2. Finding B\n3. Finding C\n\nVerdict: CLEAN`;
+  const requestedChecklist = "1. a\n2. b\n3. c\n";
+  const result = isCompletedStage2AuditReport(mixedRun, { mergeCommit: MERGE_COMMIT, requestedChecklist });
+  assert.equal(result.complete, false);
+});
+
+test("isCompletedStage2AuditReport: the lone-bullet-in-prose adversarial input from Stage 1 finding 2 does not back a CLEAN verdict against a single-item requested checklist", () => {
+  const loneBulletInProse = `Merge commit \`${MERGE_COMMIT}\`.\n\nFindings: we already fixed the reported issue.\n- ✅ Fixed the finding.\n\nVerdict: CLEAN`;
+  const requestedChecklist = "1. a\n";
+  const result = isCompletedStage2AuditReport(loneBulletInProse, { mergeCommit: MERGE_COMMIT, requestedChecklist });
+  assert.equal(result.complete, false);
+});
+
 test("isCompletedStage2AuditReport: a status-marker checklist truncated partway through the requested items is still rejected (issue #268 finding 2 applies equally to the marker-bullet shape)", () => {
   const requested = "1. Confirm A.\n2. Confirm B.\n3. Confirm C.";
   const truncated = [
