@@ -36,14 +36,39 @@
 //   node tools/orchestration/ready-dispatch-gate.mjs --repo OWNER/REPO --control-issue 322 \
 //     | node tools/orchestration/format-dispatch-prompt.mjs
 //
-// Usage (explicit fields, e.g. for a legacy-unsplit routing worker's own compact
-// projection per docs/operating-model.md § Two-plane Issue dispatch):
+// Usage (explicit fields — only when a READY gate result's fields are already in hand
+// outside a pipe, e.g. re-rendering the same dispatch prompt from a recorded gate result,
+// or this script's own tests):
 //   node tools/orchestration/format-dispatch-prompt.mjs \
 //     --control-issue 322 --execution-issue 321 --route "implementation worker"
+//
+// Stage 1 review finding on this PR: this is NOT the right tool for a legacy-unsplit
+// routing worker (docs/operating-model.md § Two-plane Issue dispatch, "Legacy unsplit
+// Issues"). This template always says "Implementation worker dispatch" and tells the
+// worker to execute the issue and report a Slice handoff — correct only for a worker
+// that is actually authorized to execute a full vertical slice. A routing worker's job is
+// the opposite: read the full issue and return only a compact projection (outcome shape,
+// executor/persona, blocker state, authority conflicts) so the controller can decide
+// decomposition, never begin implementation. Using this formatter for that dispatch would
+// hand a routing worker an executor's mandate before the decomposition boundary is
+// resolved. This script has exactly one template for exactly one role — an implementation
+// worker dispatched on a satisfied READY immediate-dispatch gate — and that scope is
+// deliberate, not an oversight to be widened with a second mode.
 //
 // Tests: node --test tools/orchestration/format-dispatch-prompt.test.mjs
 
 import { readFileSync } from "node:fs";
+
+// Pure. True only for a finite, whole, positive number — the shape a real GitHub issue
+// number always has. Stage 1 review finding on this PR: `Number("abc")` is `NaN` and
+// `Number("-7")`/`Number("12.5")` are finite but not valid issue numbers; none of those
+// are caught by a bare `== null` check (`NaN == null` and `-7 == null` are both false), so
+// a mistyped or non-integral explicit CLI argument previously reached the template
+// unvalidated and produced references like "#NaN" that callers would use verbatim for
+// dispatch.
+function isPositiveInteger(value) {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
 
 // Pure. Renders the fixed reference-only template. Kept deliberately inert — no
 // conditionals that grow the text based on route or issue content — so its length is
@@ -54,9 +79,9 @@ import { readFileSync } from "node:fs";
 // `assertReferenceOnly` below is the guard against that, not a length cap baked into the
 // template itself.
 export function formatDispatchPrompt({ controlIssue, executionIssue, route }) {
-  if (controlIssue == null || executionIssue == null || !route) {
+  if (!isPositiveInteger(controlIssue) || !isPositiveInteger(executionIssue) || typeof route !== "string" || !route.trim()) {
     throw new Error(
-      "formatDispatchPrompt requires all three of controlIssue, executionIssue, and route",
+      "formatDispatchPrompt requires controlIssue and executionIssue to be positive integers and route to be a non-empty string",
     );
   }
   return (
@@ -132,9 +157,15 @@ function main() {
       process.exit(2);
       return;
     }
-    if (parsed.state && parsed.state !== "READY_TO_DISPATCH") {
+    // Stage 1 review finding on this PR: the original `parsed.state && parsed.state !==
+    // "READY_TO_DISPATCH"` check only rejected an explicit non-ready state — a payload
+    // that omitted `state` entirely (a malformed or schema-drifted gate result that still
+    // happened to carry controlIssue/executionIssue/route) fell through this check and
+    // was formatted into a dispatch prompt anyway. `state` must be exactly the string
+    // "READY_TO_DISPATCH"; anything else, including absent, is refused.
+    if (parsed.state !== "READY_TO_DISPATCH") {
       process.stderr.write(
-        `format-dispatch-prompt.mjs: input state is "${parsed.state}", not READY_TO_DISPATCH — refusing to format a dispatch prompt for a non-ready gate result\n`,
+        `format-dispatch-prompt.mjs: input state is ${JSON.stringify(parsed.state ?? null)}, not "READY_TO_DISPATCH" — refusing to format a dispatch prompt for a non-ready or malformed gate result\n`,
       );
       process.exit(2);
       return;
