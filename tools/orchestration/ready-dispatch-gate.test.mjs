@@ -230,6 +230,38 @@ test("extractActiveExecutionRef: isolates the labeled entry, ignoring an unrelat
   assert.equal(extractActiveExecutionRef(null), null);
 });
 
+test("extractActiveExecutionRef: an unrelated reference two lines below an empty label entry is never picked up (Stage 2 audit finding, PR #325 — the exact adversarial input Codex reported)", () => {
+  const block = "Active execution Issue:\nPending founder-selected routing details\nAlso required for context: #50";
+  assert.equal(extractActiveExecutionRef(block), null);
+});
+
+test("evaluateReadyDispatchGate: a 'Minimum authority' block with an empty Active-execution entry never dispatches to a later, unrelated authority reference (Stage 2 audit finding, PR #325)", () => {
+  const body = [
+    "### State",
+    "",
+    "READY",
+    "",
+    "### Minimum authority",
+    "",
+    "Active execution Issue:",
+    "Pending founder-selected routing details",
+    "Also required for context: #50",
+    "",
+    "### Current blocker",
+    "",
+    "none",
+    "",
+    "### Founder interrupt",
+    "",
+    "none",
+    "",
+    "- **Route:** implementation worker",
+  ].join("\n");
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "NOT_READY");
+  assert.ok(!("executionIssue" in result));
+});
+
 test("evaluateReadyDispatchGate: a 'Minimum authority' block naming both the active execution Issue and another required issue still resolves to exactly the labeled one (Stage 1 finding, PR #325 — the exact false negative Codex reported)", () => {
   const body = [
     "### State",

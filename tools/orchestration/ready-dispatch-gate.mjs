@@ -149,19 +149,26 @@ export function parseHeadingBlock(body, label) {
   return text === "" || text === "_No response_" ? null : text;
 }
 
-// Pure. Extracts only the labeled "Active execution Issue:" entry (and its immediate
-// continuation line, if the reference sits on the next line instead of the label line
-// itself) from a "Minimum authority" block — never every "#N" reference the block
-// happens to contain. Stage 1 review finding on this PR: `parent-execution.yml`'s
-// "Minimum authority" field description explicitly permits listing *multiple* required
-// issues/files ("List only the issue bodies and repository files required for the next
-// transition"), so scanning the whole block for "exactly one #N" (parseExecutionPointer's
-// contract) falsely rejected a genuinely settled control Issue the moment it named a
-// second, unrelated required issue anywhere in the same field — e.g. "Active execution
-// Issue: #77" plus a separately listed "#50" for background reading. Only the label's own
-// line, and a single following non-blank continuation line if the label line carries no
-// "#N" itself, are ever considered; scanning stops at the first blank line so an entry
-// never bleeds into unrelated following text.
+// Pure. Extracts only the labeled "Active execution Issue:" entry from a "Minimum
+// authority" block — never every "#N" reference the block happens to contain. Stage 1
+// review finding on PR #325: `parent-execution.yml`'s "Minimum authority" field
+// description explicitly permits listing *multiple* required issues/files ("List only
+// the issue bodies and repository files required for the next transition"), so scanning
+// the whole block for "exactly one #N" (parseExecutionPointer's contract) falsely
+// rejected a genuinely settled control Issue the moment it named a second, unrelated
+// required issue anywhere in the same field — e.g. "Active execution Issue: #77" plus a
+// separately listed "#50" for background reading.
+//
+// Only the label's own line, or — when that line carries no "#N" itself — exactly the
+// single line immediately following it, is ever considered. Stage 2 audit finding on
+// PR #325: an earlier revision of this function kept scanning every subsequent
+// non-blank line until a blank line, not just the one immediate continuation line, so a
+// label with no reference on its own line ("Active execution Issue:\nPending
+// founder-selected routing details\nAlso required for context: #50") returned the
+// unrelated later "#50" as if it were the active pointer — worse than the original
+// false negative, since it actively selects the wrong dispatch target. When neither the
+// label line nor its exact next line carries a reference, this returns null rather than
+// searching further.
 export function extractActiveExecutionRef(block) {
   if (typeof block !== "string") return null;
   const lines = block.split("\n");
@@ -170,13 +177,9 @@ export function extractActiveExecutionRef(block) {
     if (!labelPattern.test(lines[i])) continue;
     const sameLine = lines[i].match(/#(\d+)/);
     if (sameLine) return `#${sameLine[1]}`;
-    for (let j = i + 1; j < lines.length; j++) {
-      const trimmed = lines[j].trim();
-      if (trimmed === "") break;
-      const match = trimmed.match(/#(\d+)/);
-      if (match) return `#${match[1]}`;
-    }
-    return null;
+    const nextLine = lines[i + 1] !== undefined ? lines[i + 1].trim() : "";
+    const nextMatch = nextLine.match(/#(\d+)/);
+    return nextMatch ? `#${nextMatch[1]}` : null;
   }
   return null;
 }
