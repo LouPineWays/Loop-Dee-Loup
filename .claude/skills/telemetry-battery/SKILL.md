@@ -107,8 +107,24 @@ work happened to inspect; it is not itself evidence of a reusable pattern).
 2. Use session telemetry only for claims it can actually support (structural
    subagent/compaction patterns, token allocation where sufficient). Do not mine raw
    prompt/reasoning transcripts for semantic recurrence merely to manufacture a candidate.
-3. Identify concrete repeated friction or repeated work classes, if any, from that evidence.
-4. **Cross-window recurrence.** The discovery window is not a hard temporal boundary on when
+3. **Bounded diagnostic-trace evidence (issue #310).** When a concrete orchestration,
+   routing, or dispatch-duplication claim is under investigation, check
+   `docs/diagnostic-traces/index.json` for a relevant entry (matching control/execution
+   issue numbers, or a `pre_dispatch_status: "violation"` row worth explaining) before
+   deciding evidence is unavailable. This index is metadata-only (session, control/
+   execution issue, path, `pre_dispatch_status`) — read it freely, but open an individual
+   trace file (`tools/telemetry/diagnostic-trace.mjs`'s output; see
+   `tools/telemetry/README.md`) only when it actually bears on the claim at hand, never as
+   a routine sweep. Never scan raw Claude transcripts directly from this step. Never load
+   every diagnostic trace by default. A trace's presence supports the specific claim its
+   fields actually represent (e.g. `execution_issue_read_by_controller_before_dispatch`,
+   `dispatch_prompt.reference_only`) — it is opt-in proving/debug evidence, not a
+   representative sample: do not extrapolate it into a fleet-wide rate or percentage, and
+   the *absence* of a trace is not evidence the behavior did or did not occur. This does
+   not replace or weaken Step 1's coverage contract or any maker's own evidence bar; it is
+   one additional, bounded evidence source this step may consult.
+4. Identify concrete repeated friction or repeated work classes, if any, from that evidence.
+5. **Cross-window recurrence.** The discovery window is not a hard temporal boundary on when
    a pattern may have begun. A plausible candidate may have first appeared before the
    previous maker analysis and fallen short of the evidence bar then; new evidence can make
    that older signal materially clearer (another occurrence, a revealed common cause, an
@@ -119,18 +135,18 @@ work happened to inspect; it is not itself evidence of a reusable pattern).
    candidate merely because time passed: reconsidering one requires new material evidence
    that strengthens, changes, or completes its recurrence case, not just its age. A prior
    `NO CHANGE WARRANTED` remains correct for the evidence available at that time.
-5. Check existing scripts, skills, personas, governing rules (`AGENTS.md`, this file, other
+6. Check existing scripts, skills, personas, governing rules (`AGENTS.md`, this file, other
    skills), and open issues before treating anything as a new candidate — an existing
    mechanism (including one already fixed by a governing-rule or skill-text correction that
    the next occurrence confirms holds) makes the candidate `NO CHANGE WARRANTED`, not a
    duplicate recommendation.
-6. Apply the existing cheapest-mechanism hierarchy to whatever remains: a deterministic
+7. Apply the existing cheapest-mechanism hierarchy to whatever remains: a deterministic
    repeated operation with at least two real prior instances routes to Script Maker; a
    recurring judgment/workflow that cannot be reduced cleanly to a script routes to Skill
    Maker; a recurring expertise/context boundary routes to Persona Maker; otherwise it is
    ordinary one-off instructions or is declined. Do not weaken any maker's own evidence bar
    to manufacture a candidate.
-7. Record an explicit disposition for each maker category — `CANDIDATE` (with the recurring
+8. Record an explicit disposition for each maker category — `CANDIDATE` (with the recurring
    problem, the evidence supporting it, whether that evidence spans earlier and current
    windows, why an existing mechanism does not already solve it, and why this is the
    cheapest safe mechanism) or an evidence-backed `NO CHANGE WARRANTED`.

@@ -439,6 +439,93 @@ prompt would simply hang the proving run forever. See `docs/execution-boundary-e
 for the durable record of real proving runs against this probe and their PASS/FAIL/
 INCONCLUSIVE verdict.
 
+## Opt-in diagnostic traces for orchestration proving sessions (issue #310)
+
+Everything above is normal, always-on telemetry: it never persists prompts, responses,
+reasoning, or tool content, and that default must never change. Issue #310 adds a
+completely separate, **explicitly opt-in** mechanism for a different question — not "what
+did this session cost," but "what control-plane sequence did the controller actually
+follow before it dispatched a worker," the evidence #283-class regressions need. It reuses
+the same on-disk Claude Code transcript this directory already reads for token accounting
+— the founder-selected Option A pipeline:
+
+```
+existing local Claude transcript -> deterministic diagnostic extractor -> privacy-minimal derived artifact
+```
+
+`diagnostic-trace.mjs` is that extractor. It is a standalone script, not a hook: it is
+never wired into `.claude/settings.json`, never runs as part of a normal session, and has
+no automatic trigger of any kind. The **only** way a trace is produced is a deliberate,
+by-hand invocation with `--diagnostic-mode`:
+
+```
+node tools/telemetry/diagnostic-trace.mjs \
+  --transcript <path to the session's Claude Code transcript .jsonl> \
+  --diagnostic-mode \
+  --control-issue <n> [--execution-issue <n>] \
+  [--session <id>] [--reference-threshold-chars <n>] [--annotate] \
+  [--out <path>] [--index <path>] [--no-index]
+```
+
+Omitting `--diagnostic-mode` is a hard refusal (exit 2, nothing written) — this is the
+opt-in gate itself, not merely documentation of intent. `--execution-issue` is optional but
+is what makes the #283-class check meaningful: without it,
+`execution_issue_read_by_controller_before_dispatch` is reported as `null` ("not
+evaluated"), never a false `false`.
+
+### What it derives, deterministically, from tool_use blocks the transcript already has
+
+- `pre_dispatch_events` — an ordered list of `issue_read` / `git_status` / `pr_query` /
+  `git_log` / `repo_search` events, classified from `Bash`/`WebFetch`/`Grep`/`Glob` tool
+  calls that occurred before the first subagent (`Task` tool) dispatch;
+- `execution_issue_read_by_controller_before_dispatch` — `true` when a pre-dispatch
+  `gh issue view <execution-issue>` (or equivalent) was observed, `false` when dispatch
+  happened without one, `null` when no `--execution-issue` was supplied;
+- `first_dispatch_ms` / `dispatch_events[]` — each subagent dispatch's offset from the
+  transcript's first timestamp, `subagent_type`, and a `dispatch_prompt` of
+  `{ chars, reference_only, worker_references }` — `reference_only` is `chars <=
+  --reference-threshold-chars` (default 700), and `worker_references` is at most 10
+  distinct `#N` issue numbers found in the prompt text. The prompt text itself is never
+  persisted — only its length and any issue numbers it mentions;
+- `annotations` — empty unless `--annotate` is passed **and** a forbidden pre-dispatch
+  execution-issue read is actually detected, in which case at most one short (<=240 char,
+  truncated) excerpt of the assistant text/thinking block immediately preceding that read
+  is kept, with provenance. No excerpt is ever produced for a clean sequence, and hidden/
+  private chain-of-thought is never required or read — only the same `text`/`thinking`
+  content blocks the transcript already exposes.
+
+`classifyPreDispatch(trace)` reproduces the #283-class clean/violation verdict from the
+saved artifact's own fields alone — a fresh reviewer (human or a later Claude session)
+never needs to reopen the raw transcript to reach the same conclusion the extracting
+session would have reached.
+
+### Privacy
+
+Only coarse identifiers, counts, timestamps offsets, bounded `#N` issue-number references,
+and (opt-in, bounded, violation-triggered only) short truncated excerpts are ever written.
+Never: full tool-call commands or inputs, full prompts, full transcript content, tool
+output, file contents, `transcript_path`, or hidden reasoning beyond a capped visible
+excerpt. `diagnostic-trace.test.mjs` asserts this directly against fixtures containing a
+marker string that must never survive into the derived artifact.
+
+### Where traces live, and how the telemetry battery uses them
+
+A trace is written to `docs/diagnostic-traces/<session>.json` (durable, git-tracked — this
+is intentionally different from `.claude/telemetry/`, which stays local/transient) plus one
+entry appended to `docs/diagnostic-traces/index.json`: `{ session, control_issue,
+execution_issue, path, created_at, pre_dispatch_status }`. That index is deliberately
+**metadata only** (no prompt/reasoning content) so `.claude/skills/telemetry-battery/SKILL.md`'s
+Step 2 maker-discovery pass can decide whether a relevant trace exists for a concrete
+orchestration/routing claim under investigation *before* opening any individual trace file
+— it must never scan raw Claude transcripts itself, and must never load every diagnostic
+trace by default. Diagnostic traces are supplemental, bounded repository evidence for that
+one step; they are never added to `coverage.mjs`'s decision-critical telemetry contract,
+never required for an untraced session, and never extrapolated into a fleet-wide rate
+merely because one or more opt-in samples exist — see `.claude/skills/telemetry-battery/SKILL.md`.
+
+Not distributed to consumer repositories, same as the rest of `tools/telemetry/` (see
+`docs/consumer-contract.md`).
+
 ## Tests
 
 ```
@@ -474,4 +561,11 @@ start/stop counts, `spawnAndCapture` resolving (not crashing) on a child-process
 events.json`, a committed privacy-minimal kind+event-only snapshot of that specific proving
 run's real structural event sequence — that the corrected `subagent_stop_count: 1` in
 `docs/execution-boundary-probe-runs/245-run-3-subagent.json` is reproducible from repository
-state alone, not merely from an abstract hand-authored test case.
+state alone, not merely from an abstract hand-authored test case. `diagnostic-trace.test.mjs`
+(issue #310) covers the opt-in diagnostic-trace extractor above: a clean split-control
+sequence vs. a regression sequence with a pre-dispatch execution-issue read, prompt-
+duplication detection by character count alone, the `--annotate` excerpt being bounded and
+violation-triggered only, privacy (no marker string from a raw command/prompt survives into
+the trace with `--annotate` off), a fresh-review round-trip of `classifyPreDispatch` through
+plain JSON, and CLI end-to-end behavior including the hard refusal without
+`--diagnostic-mode` and the append-only `index.json` manifest.
