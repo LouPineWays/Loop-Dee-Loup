@@ -171,25 +171,34 @@ export function parseHeadingBlock(body, label) {
 // searching further.
 //
 // The label match is anchored to the start of each line (after stripping a leading list
-// marker like "- "), not merely present anywhere in it. Stage 2 audit finding on PR #327:
-// an unanchored `test()` matched the label substring inside unrelated prose too — a line
-// like "Previous active execution Issue: #50" (a historical/superseded entry) or "Do not
-// use #50 as the active execution Issue:" (negated prose) both contain the phrase and
-// were being read as the authoritative entry, picking up the wrong reference ahead of a
-// genuine later "Active execution Issue: #77" line. Anchoring to line-start means only a
-// line that actually *is* the label entry — not one that merely mentions the phrase —
-// can supply the pointer.
+// marker like "- " and Markdown bold emphasis), not merely present anywhere in it. Stage
+// 2 audit finding on PR #327: an unanchored `test()` matched the label substring inside
+// unrelated prose too — a line like "Previous active execution Issue: #50" (a
+// historical/superseded entry) or "Do not use #50 as the active execution Issue:"
+// (negated prose) both contain the phrase and were being read as the authoritative
+// entry, picking up the wrong reference ahead of a genuine later "Active execution
+// Issue: #77" line. Anchoring to line-start means only a line that actually *is* the
+// label entry — not one that merely mentions the phrase — can supply the pointer.
+//
+// Stage 1 review finding on PR #329: this repository's own "- **Label:**" bold-bullet
+// convention (parseControlBullet) is a natural way to author this entry too — e.g.
+// "- **Active execution Issue:** #77" — and the anchor alone rejected it, since the line
+// starts with "**" rather than "active" after only the list marker was stripped.
+// Bold emphasis ("**") is stripped globally before the list marker, not the other way
+// around: stripping the list-marker character class (which also includes "*") first
+// would consume only one asterisk of a leading "**" pair, leaving a stray "*" the anchor
+// still wouldn't match.
 const ACTIVE_EXECUTION_LABEL = /^active\s+execution\s+issue\s*:?/i;
 
-function stripListMarker(line) {
-  return line.trim().replace(/^[-*•]\s*/, "");
+function normalizeLabelLine(line) {
+  return line.replace(/\*\*/g, "").trim().replace(/^[-*•]\s*/, "").trim();
 }
 
 export function extractActiveExecutionRef(block) {
   if (typeof block !== "string") return null;
   const lines = block.split("\n");
   for (let i = 0; i < lines.length; i++) {
-    const normalized = stripListMarker(lines[i]);
+    const normalized = normalizeLabelLine(lines[i]);
     if (!ACTIVE_EXECUTION_LABEL.test(normalized)) continue;
     const sameLine = normalized.match(/#(\d+)/);
     if (sameLine) return `#${sameLine[1]}`;

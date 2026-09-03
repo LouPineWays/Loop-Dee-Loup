@@ -243,6 +243,12 @@ test("extractActiveExecutionRef: a historical/superseded or negated mention of t
   assert.equal(extractActiveExecutionRef("- Active execution Issue: #77"), "#77");
 });
 
+test("extractActiveExecutionRef: recognizes the repository's own '- **Label:**' bold-bullet convention (Stage 1 finding, PR #329)", () => {
+  assert.equal(extractActiveExecutionRef("- **Active execution Issue:** #77"), "#77");
+  assert.equal(extractActiveExecutionRef("**Active execution Issue:** #77"), "#77");
+  assert.equal(extractActiveExecutionRef("- **Active execution Issue:**\n- #77"), "#77");
+});
+
 test("evaluateReadyDispatchGate: a 'Minimum authority' block with an empty Active-execution entry never dispatches to a later, unrelated authority reference (Stage 2 audit finding, PR #325)", () => {
   const body = [
     "### State",
