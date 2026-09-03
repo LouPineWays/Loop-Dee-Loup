@@ -5,6 +5,6 @@
     "execution_issue": 310,
     "path": "diagnostic-traces/4dea0981-616a-4cea-96e2-fdd1183b1d29.json",
     "created_at": "2026-09-03T07:58:13.633Z",
-    "pre_dispatch_status": "indeterminate"
+    "pre_dispatch_status": "violation"
   }
 ]

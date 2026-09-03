@@ -497,13 +497,22 @@ evaluated"), never a false `false`.
 `classifyPreDispatch(trace)` reproduces the #283-class verdict from the saved artifact's
 own fields alone — a fresh reviewer (human or a later Claude session) never needs to
 reopen the raw transcript to reach the same conclusion the extracting session would have
-reached. It returns one of three statuses, never just two: `"clean"` (a subagent was
-dispatched and neither a pre-dispatch execution-issue read nor an oversized prompt was
-found), `"violation"` (one or both were found), or `"indeterminate"` — a trace with no
-recorded subagent dispatch at all (an interrupted, truncated, or pre-dispatch-only
-transcript) is never reported `"clean"`, since the required control-read ->
-immediate-dispatch sequence never actually completed in it and a "clean" verdict is a
-positive claim that it did (Stage 2 audit finding on PR #317).
+reached. It returns one of three statuses, never just two, checked in this priority
+order:
+
+1. `"violation"` — a pre-dispatch execution-issue read or an oversized dispatch prompt
+   was found. Checked **first**, independent of whether a dispatch ever happened: a
+   pre-dispatch execution-issue read is a proven boundary violation the moment it
+   occurs, even in a transcript that never went on to complete a dispatch — an earlier
+   version gated this behind dispatch evidence and silently downgraded exactly that case
+   to `"indeterminate"` (Stage 1 review finding on PR #319, caught against this
+   repository's own committed real trace, which has that exact shape).
+2. `"indeterminate"` — no violation was found, but no subagent dispatch was recorded
+   either (an interrupted, truncated, or pre-dispatch-only transcript). Never reported as
+   `"clean"`, since `"clean"` is a positive claim that the required control-read ->
+   immediate-dispatch sequence actually completed, and a transcript that never reached
+   dispatch has not demonstrated that (Stage 2 audit finding on PR #317).
+3. `"clean"` — a subagent was dispatched and no violation was found.
 
 ### Privacy
 
