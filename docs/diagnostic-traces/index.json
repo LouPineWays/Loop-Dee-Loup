@@ -18,5 +18,14 @@
     "path": "diagnostic-traces/615f2b4a-69eb-42f1-bef6-432a4e32f4dc.json",
     "created_at": "2026-09-03T13:23:29.095Z",
     "pre_dispatch_status": "violation"
+  },
+  {
+    "session": "55b5f43c-80db-4fe9-8fba-1df45bbb595b",
+    "session_role": "controller",
+    "control_issue": 322,
+    "execution_issue": 321,
+    "path": "diagnostic-traces/55b5f43c-80db-4fe9-8fba-1df45bbb595b.json",
+    "created_at": "2026-09-03T19:13:32.132Z",
+    "pre_dispatch_status": "clean"
   }
 ]
