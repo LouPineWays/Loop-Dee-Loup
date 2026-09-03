@@ -372,9 +372,16 @@ export function resolveRepoIdentity({ gitRemoteUrlImpl = defaultGitRemoteUrl } =
   try {
     url = gitRemoteUrlImpl();
   } catch (err) {
+    // Stage 2 audit finding on issue #348: JavaScript permits throwing any value, not only an
+    // `Error`. `err.message` unconditionally would itself throw (a TypeError) when a caller's
+    // injected `gitRemoteUrlImpl` throws `null`/`undefined`/a bare string/etc., letting this
+    // function violate its own documented "never throws, always returns { ok, reason }"
+    // contract at the exact moment it's supposed to be reporting a failure. Normalizing here
+    // keeps the contract true regardless of what the injected implementation throws.
+    const reasonDetail = err instanceof Error ? err.message : String(err);
     return {
       ok: false,
-      reason: `could not read the current checkout's "origin" remote via "git remote get-url origin": ${err.message}`,
+      reason: `could not read the current checkout's "origin" remote via "git remote get-url origin": ${reasonDetail}`,
     };
   }
 
