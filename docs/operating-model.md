@@ -219,7 +219,7 @@ A session that read execution-plane authority without recording which of the fiv
 
 ## Decomposition boundary
 
-Decomposition and execution are separate control boundaries. An issue completable as one bounded vertical slice executes normally under Session role above.
+Decomposition and execution are separate control boundaries. An issue completable as one bounded vertical slice executes normally under Session role above. For a control-plane issue, the Immediate-dispatch gate above runs first (this ordering is stated directly in `AGENTS.md` § Session execution, not only here, since that file is the automatically loaded startup contract): decomposition analysis applies only when that gate does not apply — to the execution work itself (inline slice execution or a legacy unsplit issue), never as a reassessment of a linked execution issue a satisfied gate already authorizes to dispatch by reference.
 
 An issue that genuinely requires multiple independently executable slices triggers a decomposition session instead. Once that determination is made, the session must not begin implementing any resulting slice — not even the first one, and not "to save a session." Before it ends, it must:
 
