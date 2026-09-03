@@ -24,6 +24,19 @@
 // followed immediately by acting on its verdict — never a second freeform
 // `gh issue view` on the same Issue number first.
 //
+// Repository identity — issue #344: a live `work on #322` proving session hand-typed
+// `--repo Wolfscairn-LouPine/Loop-Dee-Loup` (the wrong owner; the real remote is
+// `LouPineWays/Loop-Dee-Loup`), and GitHub correctly rejected it. The repository slug is
+// deterministic environment state, not a reasoning decision, so the normal path never
+// requires a caller to supply `--repo` at all: `resolveRepoIdentity` below derives it from
+// the current checkout's configured `origin` remote (`git remote get-url origin`, the same
+// deterministic recovery that live session used by hand), which is local, offline
+// repository-identity state — not a second GitHub read — so it does not add to the single
+// control-Issue read this script performs. `--repo` remains accepted only as an explicit
+// override for tests/exceptional invocation; the normal production path never passes it,
+// so a model can no longer author (or mistype) the owner/repo slug that governs which
+// repository the control-Issue read below targets.
+//
 // Parses the "- **Label:**" bullet convention real thin control Issues #311/#322 use in
 // practice (see docs/operating-model.md § Parent snapshots):
 //   - **Lifecycle:** READY
@@ -55,10 +68,19 @@
 //     field). exit 3. Falls through to normal Decomposition-boundary / Direct-inspection
 //     reasoning — this script has no opinion on what to do next, only on whether the
 //     immediate-dispatch shortcut applies.
-//   ERROR — the control Issue could not be read, or --control-issue was missing/invalid.
-//     exit 1.
+//   ERROR — the control Issue could not be read, --control-issue was missing/invalid, or
+//     (issue #344) the current repository identity could not be established from the
+//     checkout (no configured `origin` remote, or a remote URL that isn't a recognizable
+//     GitHub owner/repo). Distinct from NOT_READY: this means authoritative control state
+//     was never reached at all, not that it was read and found unsatisfied — it must never
+//     be treated as license to fall through to execution-Issue inspection on the theory
+//     that "the gate said something." exit 1.
 //
-// Usage:
+// Usage (normal path — repository identity is derived automatically, never hand-typed):
+//   node tools/orchestration/ready-dispatch-gate.mjs --control-issue 322
+//
+// Usage (explicit override — tests/exceptional invocation only; never required or used on
+// the normal production path):
 //   node tools/orchestration/ready-dispatch-gate.mjs --repo OWNER/REPO --control-issue 322
 //
 // Tests: node --test tools/orchestration/ready-dispatch-gate.test.mjs
@@ -312,6 +334,60 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   };
 }
 
+// Pure. Parses a `git remote get-url origin` value into an "owner/repo" slug. Accepts the
+// two shapes a GitHub (or GitHub Enterprise) remote actually takes — the scp-like SSH form
+// (`git@host:owner/repo.git`) and any URL-with-scheme form (`https://host/owner/repo.git`,
+// `ssh://git@host/owner/repo.git`) — with or without a trailing ".git" or slash. Returns
+// null for anything that doesn't resolve to exactly two path segments, rather than
+// guessing: a malformed or unexpected remote must fail closed (ERROR), never silently
+// produce a wrong owner/repo the way the hand-typed slug in issue #344 did.
+export function parseOwnerRepoFromRemoteUrl(url) {
+  if (typeof url !== "string") return null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+
+  const schemeForm = /^[A-Za-z][\w+.-]*:\/\/(?:[^@/]*@)?[^/]+\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/;
+  const scpForm = /^(?:[\w.-]+@)?[\w.-]+:([^/]+)\/([^/]+?)(?:\.git)?\/?$/;
+
+  const match = schemeForm.exec(trimmed) ?? scpForm.exec(trimmed);
+  if (!match) return null;
+  const [, owner, repo] = match;
+  if (!owner || !repo) return null;
+  return `${owner}/${repo}`;
+}
+
+function defaultGitRemoteUrl() {
+  return execFileSync("git", ["remote", "get-url", "origin"], { encoding: "utf8" }).trim();
+}
+
+// Resolves the current checkout's canonical `owner/repo` identity from authoritative local
+// repository state — never a controller-composed value. `gitRemoteUrlImpl` is injected so
+// tests can drive both the real LDL checkout shape and a consumer-repository shape without
+// touching the real `git` binary (matching this file's existing `ghIssueViewImpl`
+// injection convention). Returns { ok: true, repo } or { ok: false, reason } — a failure
+// here is a genuine ERROR (ambiguous/missing local identity), never a NOT_READY verdict
+// about control-Issue content that was never even reached.
+export function resolveRepoIdentity({ gitRemoteUrlImpl = defaultGitRemoteUrl } = {}) {
+  let url;
+  try {
+    url = gitRemoteUrlImpl();
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `could not read the current checkout's "origin" remote via "git remote get-url origin": ${err.message}`,
+    };
+  }
+
+  const repo = parseOwnerRepoFromRemoteUrl(url);
+  if (!repo) {
+    return {
+      ok: false,
+      reason: `the checkout's "origin" remote ("${url}") is not a recognizable GitHub owner/repo URL`,
+    };
+  }
+  return { ok: true, repo };
+}
+
 function defaultGhIssueView({ repo, number }) {
   const raw = execFileSync("gh", ["issue", "view", String(number), "--repo", repo, "--json", "body,state"], {
     encoding: "utf8",
@@ -323,16 +399,37 @@ function defaultGhIssueView({ repo, number }) {
 // real network or `gh` CLI. This function makes exactly one read of the control Issue —
 // no execution-Issue read, no PR query — by construction: there is no code path here that
 // could reach for anything else.
-export async function checkReadyDispatch({ repo, controlIssue }, { ghIssueViewImpl = defaultGhIssueView } = {}) {
-  if (!repo || !controlIssue) {
-    return { exitCode: 1, message: "Missing required args: --repo and --control-issue are both required." };
+export async function checkReadyDispatch(
+  { repo, controlIssue },
+  { ghIssueViewImpl = defaultGhIssueView, resolveRepoIdentityImpl = resolveRepoIdentity } = {},
+) {
+  if (!controlIssue) {
+    return { exitCode: 1, message: "Missing required arg: --control-issue is required." };
+  }
+
+  // Repository identity resolution (issue #344): an explicit `repo` is accepted verbatim
+  // only as the documented tests/exceptional-invocation override. The normal production
+  // path never supplies one, so `resolveRepoIdentityImpl` — never a controller-typed
+  // value — determines which repository the single control-Issue read below targets. This
+  // is deterministic local checkout state, not a second GitHub read, so it does not add to
+  // the one-Issue-read budget this gate is built to guarantee.
+  let resolvedRepo = repo;
+  if (!resolvedRepo) {
+    const identity = resolveRepoIdentityImpl();
+    if (!identity.ok) {
+      return {
+        exitCode: 1,
+        message: `Could not determine the current repository identity (--repo was not supplied): ${identity.reason}`,
+      };
+    }
+    resolvedRepo = identity.repo;
   }
 
   let data;
   try {
-    data = await ghIssueViewImpl({ repo, number: controlIssue });
+    data = await ghIssueViewImpl({ repo: resolvedRepo, number: controlIssue });
   } catch (err) {
-    return { exitCode: 1, message: `gh issue view failed for ${repo}#${controlIssue}: ${err.message}` };
+    return { exitCode: 1, message: `gh issue view failed for ${resolvedRepo}#${controlIssue}: ${err.message}` };
   }
 
   if (data.state !== "OPEN") {
@@ -340,19 +437,21 @@ export async function checkReadyDispatch({ repo, controlIssue }, { ghIssueViewIm
       exitCode: 3,
       state: "NOT_READY",
       controlIssue: Number(controlIssue),
-      reasons: [`control Issue ${repo}#${controlIssue} is ${data.state}, not OPEN`],
+      repo: resolvedRepo,
+      reasons: [`control Issue ${resolvedRepo}#${controlIssue} is ${data.state}, not OPEN`],
     };
   }
 
   const result = evaluateReadyDispatchGate(data.body ?? "", controlIssue);
   if (result.status === "NOT_READY") {
-    return { exitCode: 3, state: "NOT_READY", controlIssue: Number(controlIssue), reasons: result.reasons };
+    return { exitCode: 3, state: "NOT_READY", controlIssue: Number(controlIssue), repo: resolvedRepo, reasons: result.reasons };
   }
 
   return {
     exitCode: 0,
     state: "READY_TO_DISPATCH",
     controlIssue: Number(controlIssue),
+    repo: resolvedRepo,
     executionIssue: result.executionIssue,
     route: result.route,
   };

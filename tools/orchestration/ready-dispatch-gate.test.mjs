@@ -15,6 +15,8 @@ import {
   parseExecutionPointer,
   evaluateReadyDispatchGate,
   checkReadyDispatch,
+  parseOwnerRepoFromRemoteUrl,
+  resolveRepoIdentity,
 } from "./ready-dispatch-gate.mjs";
 
 // Issue #311's real body (control Issue for execution Issue #310) — a genuine
@@ -437,4 +439,143 @@ test("checkReadyDispatch: a gh failure (e.g. issue not found) fails closed with 
   );
   assert.equal(result.exitCode, 1);
   assert.ok(result.message.includes("999999"));
+});
+
+// --- Issue #344: deterministic repository-identity resolution ---------------------------
+
+test("parseOwnerRepoFromRemoteUrl: HTTPS remote, with and without a trailing .git", () => {
+  assert.equal(parseOwnerRepoFromRemoteUrl("https://github.com/LouPineWays/Loop-Dee-Loup.git"), "LouPineWays/Loop-Dee-Loup");
+  assert.equal(parseOwnerRepoFromRemoteUrl("https://github.com/LouPineWays/Loop-Dee-Loup"), "LouPineWays/Loop-Dee-Loup");
+  assert.equal(parseOwnerRepoFromRemoteUrl("https://github.com/LouPineWays/Loop-Dee-Loup/"), "LouPineWays/Loop-Dee-Loup");
+});
+
+test("parseOwnerRepoFromRemoteUrl: scp-like SSH remote, with and without a user@ prefix or .git suffix", () => {
+  assert.equal(parseOwnerRepoFromRemoteUrl("git@github.com:LouPineWays/Loop-Dee-Loup.git"), "LouPineWays/Loop-Dee-Loup");
+  assert.equal(parseOwnerRepoFromRemoteUrl("github.com:LouPineWays/Loop-Dee-Loup"), "LouPineWays/Loop-Dee-Loup");
+});
+
+test("parseOwnerRepoFromRemoteUrl: ssh:// scheme form and a GitHub Enterprise host both resolve on owner/repo shape alone", () => {
+  assert.equal(parseOwnerRepoFromRemoteUrl("ssh://git@github.com/LouPineWays/Loop-Dee-Loup.git"), "LouPineWays/Loop-Dee-Loup");
+  assert.equal(parseOwnerRepoFromRemoteUrl("https://github.mycompany.com/SomeOrg/some-repo.git"), "SomeOrg/some-repo");
+});
+
+test("parseOwnerRepoFromRemoteUrl: a consumer repository's own remote resolves to that consumer's identity, never LDL's", () => {
+  assert.equal(parseOwnerRepoFromRemoteUrl("git@github.com:SomeConsumer/YouTubery.git"), "SomeConsumer/YouTubery");
+});
+
+test("parseOwnerRepoFromRemoteUrl: malformed, empty, or non-string input fails closed to null rather than guessing", () => {
+  assert.equal(parseOwnerRepoFromRemoteUrl("not-a-remote-url"), null);
+  assert.equal(parseOwnerRepoFromRemoteUrl(""), null);
+  assert.equal(parseOwnerRepoFromRemoteUrl("   "), null);
+  assert.equal(parseOwnerRepoFromRemoteUrl(null), null);
+  assert.equal(parseOwnerRepoFromRemoteUrl(undefined), null);
+});
+
+test("resolveRepoIdentity: derives owner/repo from an injected origin remote (no real git/network access)", () => {
+  const result = resolveRepoIdentity({ gitRemoteUrlImpl: () => "https://github.com/LouPineWays/Loop-Dee-Loup.git\n" });
+  assert.deepEqual(result, { ok: true, repo: "LouPineWays/Loop-Dee-Loup" });
+});
+
+test("resolveRepoIdentity: a consumer checkout's remote resolves to the consumer's own repository", () => {
+  const result = resolveRepoIdentity({ gitRemoteUrlImpl: () => "git@github.com:SomeConsumer/YouTubery.git" });
+  assert.deepEqual(result, { ok: true, repo: "SomeConsumer/YouTubery" });
+});
+
+test("resolveRepoIdentity: fails closed (ok: false) when `git remote get-url origin` itself throws (no configured remote)", () => {
+  const result = resolveRepoIdentity({
+    gitRemoteUrlImpl: () => {
+      throw new Error("No such remote 'origin'");
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.reason.includes("origin"));
+});
+
+test("resolveRepoIdentity: fails closed (ok: false) when the remote URL doesn't resolve to an owner/repo shape", () => {
+  const result = resolveRepoIdentity({ gitRemoteUrlImpl: () => "not-a-remote-url" });
+  assert.equal(result.ok, false);
+  assert.ok(result.reason.includes("not-a-remote-url"));
+});
+
+test("checkReadyDispatch: the normal path (no explicit repo) resolves repository identity via resolveRepoIdentityImpl, never a hand-typed value", async () => {
+  let sawRepo = null;
+  const result = await checkReadyDispatch(
+    { controlIssue: 311 },
+    {
+      resolveRepoIdentityImpl: () => ({ ok: true, repo: "LouPineWays/Loop-Dee-Loup" }),
+      ghIssueViewImpl: async ({ repo, number }) => {
+        sawRepo = repo;
+        assert.equal(number, 311);
+        return { body: ISSUE_311_BODY, state: "OPEN" };
+      },
+    },
+  );
+  assert.equal(sawRepo, "LouPineWays/Loop-Dee-Loup");
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "READY_TO_DISPATCH");
+  assert.equal(result.repo, "LouPineWays/Loop-Dee-Loup");
+});
+
+test("checkReadyDispatch: a consumer repository's derived identity is used as-is, never coerced to the LDL source repository", async () => {
+  let sawRepo = null;
+  const result = await checkReadyDispatch(
+    { controlIssue: 311 },
+    {
+      resolveRepoIdentityImpl: () => ({ ok: true, repo: "SomeConsumer/YouTubery" }),
+      ghIssueViewImpl: async ({ repo }) => {
+        sawRepo = repo;
+        return { body: ISSUE_311_BODY, state: "OPEN" };
+      },
+    },
+  );
+  assert.equal(sawRepo, "SomeConsumer/YouTubery");
+  assert.equal(result.repo, "SomeConsumer/YouTubery");
+});
+
+test("checkReadyDispatch: an explicit --repo override is used verbatim and never triggers repository-identity resolution", async () => {
+  let resolveCalls = 0;
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 311 },
+    {
+      resolveRepoIdentityImpl: () => {
+        resolveCalls++;
+        return { ok: true, repo: "should-never-be-used/should-never-be-used" };
+      },
+      ghIssueViewImpl: async () => ({ body: ISSUE_311_BODY, state: "OPEN" }),
+    },
+  );
+  assert.equal(resolveCalls, 0);
+  assert.equal(result.repo, "LouPineWays/Loop-Dee-Loup");
+});
+
+test("checkReadyDispatch: a repository-identity resolution failure is a distinct ERROR (exit 1), never NOT_READY (exit 3), and never reads the control Issue", async () => {
+  let issueReadCalls = 0;
+  const result = await checkReadyDispatch(
+    { controlIssue: 311 },
+    {
+      resolveRepoIdentityImpl: () => ({
+        ok: false,
+        reason: 'the checkout\'s "origin" remote ("not-a-remote-url") is not a recognizable GitHub owner/repo URL',
+      }),
+      ghIssueViewImpl: async () => {
+        issueReadCalls++;
+        return { body: ISSUE_311_BODY, state: "OPEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.notEqual(result.exitCode, 3);
+  assert.equal(result.state, undefined);
+  assert.ok(result.message.includes("repository identity"));
+  assert.equal(issueReadCalls, 0);
+});
+
+test("checkReadyDispatch: missing --control-issue fails closed with exit 1 even without attempting repository-identity resolution", async () => {
+  let resolveCalls = 0;
+  const result = await checkReadyDispatch(
+    { controlIssue: null },
+    { resolveRepoIdentityImpl: () => { resolveCalls++; return { ok: true, repo: "x/y" }; } },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(resolveCalls, 0);
 });

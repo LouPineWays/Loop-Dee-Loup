@@ -32,8 +32,9 @@
 // reads the execution Issue directly, so nothing else belongs in the dispatch prompt
 // itself.
 //
-// Usage (piped from the gate, the normal path):
-//   node tools/orchestration/ready-dispatch-gate.mjs --repo OWNER/REPO --control-issue 322 \
+// Usage (piped from the gate, the normal path — the gate derives repository identity
+// deterministically from the checkout's own "origin" remote; issue #344):
+//   node tools/orchestration/ready-dispatch-gate.mjs --control-issue 322 \
 //     | node tools/orchestration/format-dispatch-prompt.mjs
 //
 // Usage (explicit fields — only when a READY gate result's fields are already in hand
