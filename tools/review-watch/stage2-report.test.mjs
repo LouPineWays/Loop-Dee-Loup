@@ -571,3 +571,91 @@ test("isCompletedStage2AuditReport: a status-marker checklist truncated partway 
   assert.equal(result.complete, false);
   assert.ok(result.reasons.some((r) => r.includes("incomplete")), `expected an incompleteness reason, got: ${result.reasons}`);
 });
+
+// -- PR #331 Stage 1 review findings on the status-marker walk-through support above ----------
+
+const THREE_ITEM_CHECKLIST = "1. Confirm A.\n2. Confirm B.\n3. Confirm C.";
+
+test("countVerificationWalkthroughItems (Stage 1 finding 1): a short numbered findings list must not outrank a complete, later marker-bullet checklist", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. First finding — root cause X, now fixed.",
+    "",
+    "### Verification",
+    "",
+    "- ✅ Confirmed A.",
+    "- ✅ Confirmed B.",
+    "- ✅ Confirmed C.",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 3, "the trailing marker checklist (3 items) must win over the earlier 1-item numbered findings list");
+  assert.equal(hasCompleteVerificationEvidence(body, THREE_ITEM_CHECKLIST), true);
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 1): a numbered findings list must not pad out an incomplete, later marker-bullet checklist", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. First finding.",
+    "2. Second finding.",
+    "3. Third finding.",
+    "",
+    "### Verification",
+    "",
+    "- ✅ Confirmed A.",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 1, "the trailing marker checklist (1 real item) must win, not the 3 earlier numbered findings");
+  assert.equal(hasCompleteVerificationEvidence(body, THREE_ITEM_CHECKLIST), false, "1 real checklist item must not satisfy a 3-item request merely because 3 numbered findings appear earlier");
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 2): an indented sub-bullet nested under one checklist item is not counted as its own additional top-level item", () => {
+  const body = [
+    "### Verification",
+    "",
+    "- ✅ Confirmed the parent check.",
+    "  - ✅ Sub-check one.",
+    "  - ✅ Sub-check two.",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 1, "2 nested sub-bullets under 1 top-level item must not inflate the count to 3");
+  assert.equal(
+    hasCompleteVerificationEvidence(body, THREE_ITEM_CHECKLIST),
+    false,
+    "1 real top-level item must not satisfy a 3-item request merely because it has nested sub-bullets",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 3): an indented continuation line under a checklist item does not break the walk-through run", () => {
+  const body = [
+    "### Verification",
+    "",
+    "- ✅ Confirmed A.",
+    "  Additional detail explaining how A was confirmed.",
+    "- ✅ Confirmed B.",
+    "- ✅ Confirmed C.",
+    "  More explanation here too.",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 3, "indented continuation lines must not fragment a complete 3-item walk-through into isolated single-item runs");
+  assert.equal(hasCompleteVerificationEvidence(body, THREE_ITEM_CHECKLIST), true);
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 4): a trailing 'Founder judgment required' warning bullet does not shrink or replace a complete marker checklist", () => {
+  const body = [
+    "### Verification",
+    "",
+    "- ✅ Confirmed A.",
+    "- ✅ Confirmed B.",
+    "- ✅ Confirmed C.",
+    "- ⚠️ Founder judgment required.",
+    "",
+    "Verdict: CLEAN",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 3, "the founder-judgment warning bullet is not a checklist item and must not be counted or break the run");
+  assert.equal(hasCompleteVerificationEvidence(body, THREE_ITEM_CHECKLIST), true);
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 4): a lone 'Founder judgment required' warning bullet is never accepted as evidence that verification was performed", () => {
+  const body = ["Verification was not performed for this commit.", "", "- ⚠️ Founder judgment required.", "", "Verdict: CLEAN"].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 0);
+  assert.equal(hasVerificationEvidence(body), false, "a warning-only bullet with no real checklist must not read as verification evidence");
+  assert.equal(hasCompleteVerificationEvidence(body, "1. Confirm X."), false);
+});
