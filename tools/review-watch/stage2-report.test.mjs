@@ -713,6 +713,92 @@ test("isCompletedStage2AuditReport: issue #330's real response, given a delibera
   assert.equal(result.verdict, null);
 });
 
+// Issue #353: a genuine, substantively complete Stage 2 response numbered every checklist item
+// with its own pass/fail glyph ("1. ✅ ...", "2. ✅ ...", ..., "5. ✅ ...") but never used the
+// literal word "verify"/"verification"/etc. anywhere in the body — `hasVerificationEvidence`'s
+// unconditional `VERIFICATION_MENTION_PATTERN` gate rejected it outright despite an unambiguous
+// five-item walk-through matching its 5-item requested checklist exactly. Fixtures are the exact
+// real response body and the exact real requested checklist text (issue #353's own
+// "Verification checklist" field), not paraphrased reconstructions.
+
+const ISSUE_353_COMMIT = "cd87a9c9ffe72338b1ff1d8a240ced9d9eb49750";
+const ISSUE_353_COMMENT = readFixture("issue-353-comment.txt");
+const ISSUE_353_CHECKLIST = readFixture("issue-353-checklist.txt");
+
+test("hasVerificationEvidence: true for a numbered status-marker checklist ('1. ✅ ...') that never uses the word 'verif...'", () => {
+  assert.equal(hasVerificationEvidence("1. ✅ Confirmed the fix works.\n2. ✅ Tests pass."), true);
+});
+
+test("hasVerificationEvidence: a bare numbered list with no status-marker glyph still requires a 'verif...' mention (unchanged behavior)", () => {
+  assert.equal(hasVerificationEvidence("1. The fix looks correct.\n2. Tests pass."), false);
+});
+
+test("countVerificationWalkthroughItems: reproduces issue #353's real response — 5 numbered status-marker items, matching its 5-item requested checklist", () => {
+  assert.equal(countVerificationWalkthroughItems(ISSUE_353_COMMENT), 5);
+  assert.equal(countNumberedItems(ISSUE_353_CHECKLIST), 5);
+});
+
+test("hasCompleteVerificationEvidence: issue #353's real response satisfies its real 5-item requested checklist via the numbered status-marker shape, despite never using the word 'verif...'", () => {
+  assert.equal(hasCompleteVerificationEvidence(ISSUE_353_COMMENT, ISSUE_353_CHECKLIST), true);
+});
+
+test("isCompletedStage2AuditReport: reproduces issue #353's real genuine CLEAN Stage 2 response as complete — content-complete but previously misclassified as showing no verification-results content at all", () => {
+  const result = isCompletedStage2AuditReport(ISSUE_353_COMMENT, {
+    mergeCommit: ISSUE_353_COMMIT,
+    requestedChecklist: ISSUE_353_CHECKLIST,
+  });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "CLEAN");
+  assert.deepEqual(result.reasons, []);
+});
+
+test("isCompletedStage2AuditReport: a numbered status-marker checklist truncated partway through the requested items is still rejected (issue #268 finding 2 applies equally to the numbered-marker shape)", () => {
+  const truncated = `Merge commit \`${MERGE_COMMIT}\`.\n\n1. ✅ First check.\n2. ✅ Second check.\n\nVerdict: CLEAN`;
+  const requestedChecklist = "1. a\n2. b\n3. c\n4. d\n5. e\n";
+  const result = isCompletedStage2AuditReport(truncated, { mergeCommit: MERGE_COMMIT, requestedChecklist });
+  assert.equal(result.complete, false);
+  assert.ok(result.reasons.some((r) => r.includes("checklist walk-through is incomplete")));
+});
+
+// Stage 1 review finding on PR #354 (two P1s against the first revision of the #353 fix above).
+
+test("hasVerificationEvidence: a numbered run with a marker on only its first item is NOT evidence — every item in the selected run must carry the glyph, not merely one line anywhere (Stage 1 finding 1, PR #354)", () => {
+  // The exact adversarial input Codex reported: item 1 carries a real marker, items 2-3 are
+  // unmarked findings-shaped lines with no verification content at all. Before this finding was
+  // fixed, testing NUMBERED_MARKER_ITEM_PATTERN against the whole body let this pass evidence
+  // detection while countVerificationWalkthroughItems still counted all 3 lines as "verified".
+  const mixedRun = "1. ✅ Checked A\n2. Finding B\n3. Finding C";
+  assert.equal(hasVerificationEvidence(mixedRun), false);
+});
+
+test("hasVerificationEvidence: a lone unrelated status bullet in findings prose is NOT evidence without a 'verif...' mention — the bulleted marker shape keeps its original word-mention requirement (Stage 1 finding 2, PR #354)", () => {
+  // The exact adversarial input Codex reported: a single "- ✅ ..." bullet embedded in ordinary
+  // findings prose, no verification section, no "verif..." word anywhere. Before this finding
+  // was fixed, extending the numbered-marker shape's mention-free path to the bulleted-marker
+  // shape too let this satisfy a single-item requested checklist on its own.
+  const loneBulletInProse = "Findings: we already fixed the reported issue.\n- ✅ Fixed the finding.";
+  assert.equal(hasVerificationEvidence(loneBulletInProse), false);
+});
+
+test("hasVerificationEvidence: a numbered run where every item carries a marker is still accepted (the intended #353 fix keeps working after the Stage 1 correction)", () => {
+  const fullyMarked = "1. ✅ Checked A\n2. ✅ Checked B\n3. ✅ Checked C";
+  assert.equal(hasVerificationEvidence(fullyMarked), true);
+});
+
+test("isCompletedStage2AuditReport: the mixed-marker adversarial run from Stage 1 finding 1 does not back a CLEAN verdict even against a matching-length requested checklist", () => {
+  const mixedRun = `Merge commit \`${MERGE_COMMIT}\`.\n\n1. ✅ Checked A\n2. Finding B\n3. Finding C\n\nVerdict: CLEAN`;
+  const requestedChecklist = "1. a\n2. b\n3. c\n";
+  const result = isCompletedStage2AuditReport(mixedRun, { mergeCommit: MERGE_COMMIT, requestedChecklist });
+  assert.equal(result.complete, false);
+});
+
+test("isCompletedStage2AuditReport: the lone-bullet-in-prose adversarial input from Stage 1 finding 2 does not back a CLEAN verdict against a single-item requested checklist", () => {
+  const loneBulletInProse = `Merge commit \`${MERGE_COMMIT}\`.\n\nFindings: we already fixed the reported issue.\n- ✅ Fixed the finding.\n\nVerdict: CLEAN`;
+  const requestedChecklist = "1. a\n";
+  const result = isCompletedStage2AuditReport(loneBulletInProse, { mergeCommit: MERGE_COMMIT, requestedChecklist });
+  assert.equal(result.complete, false);
+});
+
 test("isCompletedStage2AuditReport: a status-marker checklist truncated partway through the requested items is still rejected (issue #268 finding 2 applies equally to the marker-bullet shape)", () => {
   const requested = "1. Confirm A.\n2. Confirm B.\n3. Confirm C.";
   const truncated = [

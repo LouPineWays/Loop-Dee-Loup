@@ -217,6 +217,17 @@ const CHECKLIST_MARKER_ITEM_PATTERN_SOURCE = `^[-*+]\\s*${CHECKLIST_STATUS_MARKE
 const CHECKLIST_MARKER_ITEM_PATTERN = new RegExp(CHECKLIST_MARKER_ITEM_PATTERN_SOURCE, "m");
 const CHECKLIST_MARKER_ITEM_LINE_PATTERN = new RegExp(CHECKLIST_MARKER_ITEM_PATTERN_SOURCE);
 
+// The same per-item status-marker shape as CHECKLIST_MARKER_ITEM_PATTERN above, but prefixed by
+// a numbered-list marker ("1. ✅ ...") instead of a bullet ("- ✅ ...") — issue #353's genuine
+// Stage 2 audit response used exactly this shape for every item in its checklist walk-through
+// ("1. ✅ ...", "2. ✅ ...", ...). A numbered run with a pass/fail glyph on every item is at
+// least as unambiguous a walk-through signal as the bulleted-marker case already is (both carry
+// an explicit per-item verdict glyph, not merely a numbered list that might be something else
+// entirely, like a findings list) — see hasVerificationEvidence below for why this pattern alone
+// is trusted without also requiring VERIFICATION_MENTION_PATTERN.
+const NUMBERED_MARKER_ITEM_PATTERN_SOURCE = `^\\s*\\d{1,3}[.)]\\s*${CHECKLIST_STATUS_MARKER}\\s+\\S`;
+const NUMBERED_MARKER_ITEM_PATTERN = new RegExp(NUMBERED_MARKER_ITEM_PATTERN_SOURCE, "m");
+
 // A line that can genuinely separate two top-level marker items: non-blank, and itself starting
 // at column 0 (no leading whitespace) — i.e. other top-level content (a heading, a new
 // paragraph, an unrelated top-level bullet), never a checklist item's own indented continuation
@@ -228,16 +239,6 @@ const CHECKLIST_MARKER_ITEM_LINE_PATTERN = new RegExp(CHECKLIST_MARKER_ITEM_PATT
 // continuation content is, by construction, never column-0.
 function isTopLevelBoundaryLine(line) {
   return line.trim() !== "" && /^\S/.test(line);
-}
-
-// Pure. Whether `text` shows actual verification-results content: a checklist walk-through —
-// either a numbered list ("1. ...") or a per-item status-marker bullet list ("- ✅ ...") —
-// together with some mention of verification itself, rather than a bare verdict with nothing
-// behind it.
-export function hasVerificationEvidence(text) {
-  const normalized = text ?? "";
-  if (!VERIFICATION_MENTION_PATTERN.test(normalized)) return false;
-  return NUMBERED_ITEM_PATTERN.test(normalized) || CHECKLIST_MARKER_ITEM_PATTERN.test(normalized);
 }
 
 // Pure. Counts top-level numbered list lines ("1. ...", "2) ...") in `text`. Used against the
@@ -264,13 +265,16 @@ export function countNumberedItems(text) {
 // step — deliberately a numbering-sequence heuristic, not heading-text matching (which response
 // authors are not required to phrase identically), consistent with this module's Non-goals (no
 // arbitrary Markdown parsing, no semantic adjudication of finding content). Returns `null` when
-// no such run exists, and otherwise `{ count, endLineIndex }` — `endLineIndex` (the 0-based line
-// index of the run's last item) is what lets `countVerificationWalkthroughItems` below choose
-// between this and a same-body marker-bullet run by document position, per issue #330's Stage 1
-// review finding 1: preferring numbered runs unconditionally let an early numbered *findings*
-// entry outrank the response's real (marker-bullet) checklist, in both directions — a short
-// numbered findings list could pad out an incomplete marker checklist's count, and a genuinely
-// complete marker checklist could be discarded in favor of a single unrelated numbered finding.
+// no such run exists, and otherwise `{ count, endLineIndex, itemLineIndexes }` —
+// `endLineIndex` (the 0-based line index of the run's last item) is what lets
+// `countVerificationWalkthroughItems` below choose between this and a same-body marker-bullet
+// run by document position, per issue #330's Stage 1 review finding 1: preferring numbered runs
+// unconditionally let an early numbered *findings* entry outrank the response's real
+// (marker-bullet) checklist, in both directions — a short numbered findings list could pad out
+// an incomplete marker checklist's count, and a genuinely complete marker checklist could be
+// discarded in favor of a single unrelated numbered finding. `itemLineIndexes` (every line index
+// in the selected run, not just the last) is what lets numberedWalkthroughIsFullyMarked below
+// check every item in the exact same run for a per-item marker, not just its own line count.
 function findNumberedWalkthroughRun(lines) {
   const numbered = [];
   lines.forEach((line, index) => {
@@ -288,7 +292,56 @@ function findNumberedWalkthroughRun(lines) {
   }
   if (numbered[runStart].number !== 1) return null;
   const runItems = numbered.slice(runStart);
-  return { count: runItems.length, endLineIndex: runItems[runItems.length - 1].index };
+  return { count: runItems.length, endLineIndex: runItems[runItems.length - 1].index, itemLineIndexes: runItems.map((r) => r.index) };
+}
+
+// Pure. True only when the *selected walk-through numbered run itself* — the exact same
+// trailing 1,2,3,... run findNumberedWalkthroughRun (and therefore
+// countVerificationWalkthroughItems) would count — carries a pass/fail glyph on every one of
+// its items, not merely somewhere in the document. Stage 1 review finding on this PR: testing
+// NUMBERED_MARKER_ITEM_PATTERN against the whole body only proves *one* line anywhere has a
+// marker; a mixed run like "1. ✅ Checked A" / "2. Finding B" / "3. Finding C" still let an
+// earlier revision of this fix accept the body as verification evidence while items 2-3 (no
+// marker, no verification content) were silently counted as if verified, against a 3-item
+// requested checklist. Requiring every item in the exact counted run to carry the glyph keeps
+// the "evidence present" gate (hasVerificationEvidence below) and the "how many items" count in
+// sync with each other.
+function numberedWalkthroughIsFullyMarked(lines) {
+  const run = findNumberedWalkthroughRun(lines);
+  if (!run) return false;
+  return run.itemLineIndexes.every((index) => NUMBERED_MARKER_ITEM_PATTERN.test(lines[index]));
+}
+
+// Pure. Whether `text` shows actual verification-results content: a numbered per-item
+// status-marker walk-through ("1. ✅ ...", every item marked), a bulleted per-item
+// status-marker walk-through ("- ✅ ...") together with some mention of verification itself, or
+// a bare numbered list ("1. ...") together with the same mention — rather than a bare verdict
+// with nothing behind it.
+//
+// Stage 2 audit finding on issue #353: a genuine, substantively complete response numbered
+// every checklist item with its own pass/fail glyph ("1. ✅ ...", "2. ✅ ...", ...) but never
+// used the literal word "verify"/"verification"/etc. anywhere in the body, so the original
+// `VERIFICATION_MENTION_PATTERN` gate — applied unconditionally before either list shape was
+// even checked — rejected it outright as showing no verification-results content at all, despite
+// an unambiguous five-item walk-through sitting right there.
+//
+// Stage 1 review finding on this PR (two P1s against an earlier revision of this fix): the
+// mention-free path stays narrowly scoped to the numbered-marker shape, and only when the
+// *entire* selected walk-through run is marker-bearing (numberedWalkthroughIsFullyMarked) —
+// not merely one marked line anywhere in the body (which would let a mixed run of marked and
+// unmarked numbered lines pass evidence-detection while still counting the unmarked lines as if
+// verified). The bulleted marker case ("- ✅ ...") deliberately keeps requiring the word
+// mention, unchanged from before this fix: a lone unrelated status bullet — e.g. "- ✅ Fixed the
+// finding" inside ordinary findings prose, as an existing adversarial test already demonstrates
+// for this shape — must not, on its own, satisfy a single-item requested checklist with no real
+// verification section or wording at all. A bare numbered list without glyphs also keeps
+// requiring the mention, since that shape alone could still plausibly be something else (e.g. a
+// numbered findings list).
+export function hasVerificationEvidence(text) {
+  const normalized = text ?? "";
+  if (numberedWalkthroughIsFullyMarked(normalized.split("\n"))) return true;
+  if (!VERIFICATION_MENTION_PATTERN.test(normalized)) return false;
+  return NUMBERED_ITEM_PATTERN.test(normalized) || CHECKLIST_MARKER_ITEM_PATTERN.test(normalized);
 }
 
 // Pure. Finds `text`'s *verification-checklist walk-through* when it is shaped as a per-item
