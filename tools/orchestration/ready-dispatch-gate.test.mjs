@@ -8,6 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   parseControlBullet,
+  parseHeadingField,
   isNoneSentinel,
   parseExecutionPointer,
   evaluateReadyDispatchGate,
@@ -136,6 +137,108 @@ test("evaluateReadyDispatchGate: an unsettled Route (missing or 'none') is NOT_R
 
   const noneRoute = "- **Lifecycle:** READY\n- **Execution:** #5\n- **Route:** none\n- **Blocker:** none\n- **Founder decision:** none\n";
   assert.equal(evaluateReadyDispatchGate(noneRoute).status, "NOT_READY");
+});
+
+test("parseHeadingField: reads a GitHub issue-form '### Heading' field, distinct from the bullet convention (Stage 1 finding, PR #323)", () => {
+  const body = "### State\n\nREADY\n\n### Current blocker\n\nnone\n\n### Founder interrupt\n\n_No response_\n";
+  assert.equal(parseHeadingField(body, "State"), "READY");
+  assert.equal(parseHeadingField(body, "Current blocker"), "none");
+  // GitHub's own "no answer" marker for an unanswered optional field reads as absent,
+  // not as literal text.
+  assert.equal(parseHeadingField(body, "Founder interrupt"), null);
+  assert.equal(parseHeadingField(body, "Nonexistent"), null);
+});
+
+test("evaluateReadyDispatchGate: a control Issue shaped like the real shipped parent-execution.yml template (### headings, no bullets) is still readable (Stage 1 P1 finding, PR #323)", () => {
+  // Mirrors what GitHub actually renders from .github/ISSUE_TEMPLATE/parent-execution.yml
+  // — no "- **Lifecycle:**"/"Execution"/"Route" bullets exist in that template at all.
+  const templateShapedBody = [
+    "### Source item",
+    "",
+    "#123",
+    "",
+    "### State",
+    "",
+    "READY",
+    "",
+    "### Accepted outcome",
+    "",
+    "Some outcome.",
+    "",
+    "### Current state",
+    "",
+    "- **Execution:** #310",
+    "- **Route:** implementation worker",
+    "",
+    "### Minimum authority",
+    "",
+    "See #310.",
+    "",
+    "### Current blocker",
+    "",
+    "none",
+    "",
+    "### Founder interrupt",
+    "",
+    "none",
+    "",
+  ].join("\n");
+  const result = evaluateReadyDispatchGate(templateShapedBody);
+  assert.equal(result.status, "READY_TO_DISPATCH");
+  assert.equal(result.executionIssue, 310);
+  assert.equal(result.route, "implementation worker");
+});
+
+test("evaluateReadyDispatchGate: Lifecycle/Blocker/Founder-decision fall back to template headings even with no Execution/Route bullets present anywhere but Minimum authority", () => {
+  const body = [
+    "### State",
+    "",
+    "READY",
+    "",
+    "### Minimum authority",
+    "",
+    "Active execution Issue: #77. See docs/operating-model.md.",
+    "",
+    "### Current blocker",
+    "",
+    "none",
+    "",
+    "### Founder interrupt",
+    "",
+    "none",
+    "",
+    "- **Route:** implementation worker",
+  ].join("\n");
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "READY_TO_DISPATCH");
+  assert.equal(result.executionIssue, 77);
+});
+
+test("evaluateReadyDispatchGate: a self-referential Execution pointer (control Issue naming itself) is NOT_READY (Stage 1 finding, PR #323)", () => {
+  const body = "- **Lifecycle:** READY\n- **Execution:** #42\n- **Route:** implementation worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = evaluateReadyDispatchGate(body, 42);
+  assert.equal(result.status, "NOT_READY");
+  assert.ok(result.reasons.some((r) => r.includes("#42") && r.includes("itself")));
+
+  // A genuinely different execution pointer on the same control Issue number is fine.
+  const okResult = evaluateReadyDispatchGate(body.replace("#42", "#41"), 42);
+  assert.equal(okResult.status, "READY_TO_DISPATCH");
+  assert.equal(okResult.executionIssue, 41);
+
+  // Omitting controlIssueNumber (the pure function's default) skips this check —
+  // callers that don't have their own control Issue number handy still get the rest of
+  // the gate's protection.
+  assert.equal(evaluateReadyDispatchGate(body).status, "READY_TO_DISPATCH");
+});
+
+test("checkReadyDispatch: rejects a self-referential Execution pointer end to end", async () => {
+  const body = "- **Lifecycle:** READY\n- **Execution:** #322\n- **Route:** implementation worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 322 },
+    { ghIssueViewImpl: async () => ({ body, state: "OPEN" }) },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "NOT_READY");
 });
 
 test("checkReadyDispatch: never calls gh more than once, and never for anything but the control Issue itself", async () => {

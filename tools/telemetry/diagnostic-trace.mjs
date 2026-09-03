@@ -158,8 +158,15 @@ function extractIssueRefs(promptText) {
 // worker's own.
 export function deriveSessionRoleFromPath(transcriptPath) {
   if (typeof transcriptPath !== "string" || !transcriptPath) return null;
-  const segments = transcriptPath.split(/[\\/]/);
-  return segments.includes("subagents") ? "worker" : "controller";
+  const segments = transcriptPath.split(/[\\/]/).filter(Boolean);
+  // Stage 1 review finding on this PR: matching "subagents" anywhere among the path's
+  // segments (e.g. a repository or home directory that itself happens to be named
+  // "subagents") would misclassify an ordinary top-level controller transcript as a
+  // worker's. The documented storage shape is specifically
+  // "<parent-session-dir>/subagents/agent-*.jsonl" — the transcript file's own immediate
+  // parent directory must be literally "subagents" — so only that exact position counts.
+  const parentDir = segments.length >= 2 ? segments[segments.length - 2] : null;
+  return parentDir === "subagents" ? "worker" : "controller";
 }
 
 function tsToMs(ts) {

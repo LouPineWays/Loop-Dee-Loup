@@ -325,6 +325,15 @@ test("deriveSessionRoleFromPath: a bare top-level transcript is a controller; a 
   assert.equal(deriveSessionRoleFromPath(null), null);
 });
 
+test("deriveSessionRoleFromPath: an ancestor directory merely named \"subagents\" does not, by itself, make a top-level transcript a worker (Stage 1 finding, PR #323)", () => {
+  // Only the transcript file's own immediate parent directory being literally
+  // "subagents" counts — an unrelated ancestor earlier in the path (e.g. a home or
+  // repository directory that happens to be named "subagents") must not misclassify an
+  // ordinary top-level controller transcript as a dispatched worker's.
+  assert.equal(deriveSessionRoleFromPath("/home/subagents/.claude/projects/repo/4dea0981.jsonl"), "controller");
+  assert.equal(deriveSessionRoleFromPath(String.raw`C:\subagents\Users\x\.claude\projects\repo\4dea0981.jsonl`), "controller");
+});
+
 test("classifyPreDispatch: a worker trace is never reported as a controller pre-dispatch violation (issue #321 required behavior 2)", () => {
   // Even a trace whose raw fields would otherwise look like the #283-class violation
   // (execution issue read before any further dispatch) must not be classified as one

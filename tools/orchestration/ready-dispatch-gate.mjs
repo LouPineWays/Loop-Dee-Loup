@@ -24,13 +24,24 @@
 // followed immediately by acting on its verdict — never a second freeform
 // `gh issue view` on the same Issue number first.
 //
-// Parses the "Current state" bullet block LDL's parent-execution control template uses
-// (see docs/operating-model.md § Parent snapshots and control Issues #311/#322):
+// Parses the "- **Label:**" bullet convention real thin control Issues #311/#322 use in
+// practice (see docs/operating-model.md § Parent snapshots):
 //   - **Lifecycle:** READY
 //   - **Execution:** #123
 //   - **Route:** implementation worker
 //   - **Blocker:** none
 //   - **Founder decision:** none — <optional trailing explanation>
+//
+// Stage 1 review finding on this PR: `.github/ISSUE_TEMPLATE/parent-execution.yml` — a
+// coarser, whole-feature controller template, not specific to this two-plane thin
+// control/execution pattern — never actually renders these bullets; it renders "###
+// State" (dropdown), "### Current blocker", and "### Founder interrupt" instead, with no
+// dedicated Execution or Route field at all. Lifecycle/Blocker/Founder-decision fall back
+// to those "### Heading" fields when the bullet is absent (parseHeadingField); Execution
+// additionally falls back to scanning the template's "### Minimum authority" field for a
+// single "#N" reference. Route has no template counterpart, so a control Issue relying on
+// this gate must include an explicit "- **Route:**" bullet regardless of which template
+// created it.
 //
 // Verdicts:
 //   READY_TO_DISPATCH — every gate field satisfied. exit 0. Result carries
@@ -75,6 +86,37 @@ export function parseControlBullet(body, label) {
   return match ? match[1].trim() : null;
 }
 
+// Pure. Reads one GitHub issue-form field's rendered value by its "### Label" heading —
+// the shape `.github/ISSUE_TEMPLATE/parent-execution.yml`'s "State" dropdown and
+// "Current blocker"/"Founder interrupt" textareas actually render as, distinct from the
+// separate ad hoc "- **Label:**" bullet convention (parseControlBullet) that real control
+// Issues #311/#322 use in practice. Stage 1 review finding on this PR: without this, a
+// control Issue created from the repository's own shipped template — which has never
+// emitted `- **Lifecycle:**`-style bullets — always read as NOT_READY, leaving the gate
+// this script exists to provide unusable for template-created issues. Kept as a small,
+// independent copy of tools/review-watch/lifecycle-gate.mjs's parseFormField rather than
+// a cross-directory import, since tools/orchestration and tools/review-watch are
+// separate consumer-distributed units that should not depend on each other's internals.
+export function parseHeadingField(body, label) {
+  const lines = (body ?? "").split("\n");
+  const heading = `### ${label}`;
+  let headingIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim() === heading) {
+      headingIdx = i;
+      break;
+    }
+  }
+  if (headingIdx === -1) return null;
+  for (let i = headingIdx + 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line.startsWith("### ")) break;
+    if (line === "") continue;
+    return line === "_No response_" ? null : line;
+  }
+  return null;
+}
+
 // Pure. True when `value` is the explicit "none" sentinel this repository's control
 // template uses for an empty Blocker/Founder-decision field, tolerating a trailing
 // explanation after the word itself (e.g. "none — founder selected ..."). A value that is
@@ -102,20 +144,35 @@ export function parseExecutionPointer(value) {
 }
 
 // Pure core: evaluates AGENTS.md's immediate-dispatch gate against an already-fetched
-// control Issue body. Exported separately from the `gh` call so tests exercise it without
+// control Issue body. `controlIssueNumber`, when given, rejects a self-referential
+// Execution pointer (Stage 1 review finding on this PR: a malformed control Issue #42
+// whose own "Execution" field names "#42" must never read as dispatch-ready — that would
+// hand a worker the thin control record itself instead of a separate, self-sufficient
+// execution Issue). Exported separately from the `gh` call so tests exercise it without
 // touching the network, matching this repository's existing gate-script convention
 // (lifecycle-gate.mjs, stage1-gate.mjs).
-export function evaluateReadyDispatchGate(body) {
-  const lifecycleRaw = parseControlBullet(body, "Lifecycle");
-  const executionRaw = parseControlBullet(body, "Execution");
+//
+// Each field is read from the ad hoc "- **Label:**" bullet convention first (the shape
+// real control Issues #311/#322 use), falling back to the shipped
+// `parent-execution.yml` template's own "### Heading" fields where one exists: "State"
+// for Lifecycle, "Current blocker" for Blocker, "Founder interrupt" for Founder
+// decision. The template has no dedicated Execution or Route field; Execution also
+// falls back to scanning "Minimum authority" (the template's field for pointing at the
+// active execution Issue) for a single "#N" reference. Route has no template
+// counterpart at all — a control Issue relying on the two-plane READY dispatch pattern
+// must include an explicit "- **Route:**" bullet somewhere in its body regardless of
+// which template created it.
+export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
+  const lifecycleRaw = parseControlBullet(body, "Lifecycle") ?? parseHeadingField(body, "State");
+  const executionRaw = parseControlBullet(body, "Execution") ?? parseHeadingField(body, "Minimum authority");
   const routeRaw = parseControlBullet(body, "Route");
-  const blockerRaw = parseControlBullet(body, "Blocker");
-  const founderDecisionRaw = parseControlBullet(body, "Founder decision");
+  const blockerRaw = parseControlBullet(body, "Blocker") ?? parseHeadingField(body, "Current blocker");
+  const founderDecisionRaw = parseControlBullet(body, "Founder decision") ?? parseHeadingField(body, "Founder interrupt");
 
   const reasons = [];
 
   if (lifecycleRaw === null) {
-    reasons.push('no "- **Lifecycle:**" bullet found in the control Issue body');
+    reasons.push('no "- **Lifecycle:**" bullet or "### State" heading found in the control Issue body');
   } else if (lifecycleRaw.toUpperCase() !== "READY") {
     reasons.push(
       `lifecycle is "${lifecycleRaw}", not READY` +
@@ -126,20 +183,26 @@ export function evaluateReadyDispatchGate(body) {
   }
 
   const execution = parseExecutionPointer(executionRaw);
-  if (!execution.ok) reasons.push(execution.reason);
+  if (!execution.ok) {
+    reasons.push(execution.reason);
+  } else if (controlIssueNumber != null && execution.issue === Number(controlIssueNumber)) {
+    reasons.push(
+      `Execution field points back at the control Issue itself (#${execution.issue}) — a control Issue is never its own execution Issue`,
+    );
+  }
 
   if (routeRaw === null || routeRaw === "" || isNoneSentinel(routeRaw)) {
     reasons.push(`Route is not settled (found: ${JSON.stringify(routeRaw)})`);
   }
 
   if (blockerRaw === null) {
-    reasons.push('no "- **Blocker:**" bullet found in the control Issue body');
+    reasons.push('no "- **Blocker:**" bullet or "### Current blocker" heading found in the control Issue body');
   } else if (!isNoneSentinel(blockerRaw)) {
     reasons.push(`Blocker is not "none" (found: "${blockerRaw}")`);
   }
 
   if (founderDecisionRaw === null) {
-    reasons.push('no "- **Founder decision:**" bullet found in the control Issue body');
+    reasons.push('no "- **Founder decision:**" bullet or "### Founder interrupt" heading found in the control Issue body');
   } else if (!isNoneSentinel(founderDecisionRaw)) {
     reasons.push(`Founder decision is not "none" (found: "${founderDecisionRaw}")`);
   }
@@ -187,7 +250,7 @@ export async function checkReadyDispatch({ repo, controlIssue }, { ghIssueViewIm
     };
   }
 
-  const result = evaluateReadyDispatchGate(data.body ?? "");
+  const result = evaluateReadyDispatchGate(data.body ?? "", controlIssue);
   if (result.status === "NOT_READY") {
     return { exitCode: 3, state: "NOT_READY", controlIssue: Number(controlIssue), reasons: result.reasons };
   }
