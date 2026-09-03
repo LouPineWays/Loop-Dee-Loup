@@ -217,6 +217,17 @@ const CHECKLIST_MARKER_ITEM_PATTERN_SOURCE = `^[-*+]\\s*${CHECKLIST_STATUS_MARKE
 const CHECKLIST_MARKER_ITEM_PATTERN = new RegExp(CHECKLIST_MARKER_ITEM_PATTERN_SOURCE, "m");
 const CHECKLIST_MARKER_ITEM_LINE_PATTERN = new RegExp(CHECKLIST_MARKER_ITEM_PATTERN_SOURCE);
 
+// The same per-item status-marker shape as CHECKLIST_MARKER_ITEM_PATTERN above, but prefixed by
+// a numbered-list marker ("1. ✅ ...") instead of a bullet ("- ✅ ...") — issue #353's genuine
+// Stage 2 audit response used exactly this shape for every item in its checklist walk-through
+// ("1. ✅ ...", "2. ✅ ...", ...). A numbered run with a pass/fail glyph on every item is at
+// least as unambiguous a walk-through signal as the bulleted-marker case already is (both carry
+// an explicit per-item verdict glyph, not merely a numbered list that might be something else
+// entirely, like a findings list) — see hasVerificationEvidence below for why this pattern alone
+// is trusted without also requiring VERIFICATION_MENTION_PATTERN.
+const NUMBERED_MARKER_ITEM_PATTERN_SOURCE = `^\\s*\\d{1,3}[.)]\\s*${CHECKLIST_STATUS_MARKER}\\s+\\S`;
+const NUMBERED_MARKER_ITEM_PATTERN = new RegExp(NUMBERED_MARKER_ITEM_PATTERN_SOURCE, "m");
+
 // A line that can genuinely separate two top-level marker items: non-blank, and itself starting
 // at column 0 (no leading whitespace) — i.e. other top-level content (a heading, a new
 // paragraph, an unrelated top-level bullet), never a checklist item's own indented continuation
@@ -230,14 +241,26 @@ function isTopLevelBoundaryLine(line) {
   return line.trim() !== "" && /^\S/.test(line);
 }
 
-// Pure. Whether `text` shows actual verification-results content: a checklist walk-through —
-// either a numbered list ("1. ...") or a per-item status-marker bullet list ("- ✅ ...") —
-// together with some mention of verification itself, rather than a bare verdict with nothing
-// behind it.
+// Pure. Whether `text` shows actual verification-results content: a checklist walk-through,
+// shaped as either a bulleted or numbered per-item status-marker list ("- ✅ ..." / "1. ✅ ..."),
+// or a bare numbered list ("1. ...") together with some mention of verification itself, rather
+// than a bare verdict with nothing behind it.
+//
+// Stage 2 audit finding on issue #353: a genuine, substantively complete response numbered
+// every checklist item with its own pass/fail glyph ("1. ✅ ...", "2. ✅ ...", ...) but never
+// used the literal word "verify"/"verification"/etc. anywhere in the body, so the original
+// `VERIFICATION_MENTION_PATTERN` gate — applied unconditionally before either list shape was
+// even checked — rejected it outright as showing no verification-results content at all, despite
+// an unambiguous five-item walk-through sitting right there. An explicit pass/fail glyph on every
+// item (`CHECKLIST_MARKER_ITEM_PATTERN` or `NUMBERED_MARKER_ITEM_PATTERN`) is exactly the same
+// unambiguous signal the bulleted-marker case already relies on — a plain numbered list without
+// glyphs could still plausibly be something else (e.g. a numbered findings list), which is why
+// that bare-numbered branch keeps requiring the word mention as its own corroborating signal.
 export function hasVerificationEvidence(text) {
   const normalized = text ?? "";
+  if (CHECKLIST_MARKER_ITEM_PATTERN.test(normalized) || NUMBERED_MARKER_ITEM_PATTERN.test(normalized)) return true;
   if (!VERIFICATION_MENTION_PATTERN.test(normalized)) return false;
-  return NUMBERED_ITEM_PATTERN.test(normalized) || CHECKLIST_MARKER_ITEM_PATTERN.test(normalized);
+  return NUMBERED_ITEM_PATTERN.test(normalized);
 }
 
 // Pure. Counts top-level numbered list lines ("1. ...", "2) ...") in `text`. Used against the
