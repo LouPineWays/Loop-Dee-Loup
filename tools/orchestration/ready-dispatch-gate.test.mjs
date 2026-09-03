@@ -235,6 +235,14 @@ test("extractActiveExecutionRef: an unrelated reference two lines below an empty
   assert.equal(extractActiveExecutionRef(block), null);
 });
 
+test("extractActiveExecutionRef: a historical/superseded or negated mention of the label phrase is never treated as the authoritative entry (Stage 2 audit finding, PR #327 — the exact adversarial input Codex reported)", () => {
+  assert.equal(extractActiveExecutionRef("Previous active execution Issue: #50\nActive execution Issue: #77"), "#77");
+  assert.equal(extractActiveExecutionRef("Do not use #50 as the active execution Issue: it is closed."), null);
+  // A genuine bullet-prefixed label line still counts — anchoring strips a leading list
+  // marker before checking, it does not require the label to start at column 0.
+  assert.equal(extractActiveExecutionRef("- Active execution Issue: #77"), "#77");
+});
+
 test("evaluateReadyDispatchGate: a 'Minimum authority' block with an empty Active-execution entry never dispatches to a later, unrelated authority reference (Stage 2 audit finding, PR #325)", () => {
   const body = [
     "### State",
@@ -260,6 +268,32 @@ test("evaluateReadyDispatchGate: a 'Minimum authority' block with an empty Activ
   const result = evaluateReadyDispatchGate(body);
   assert.equal(result.status, "NOT_READY");
   assert.ok(!("executionIssue" in result));
+});
+
+test("evaluateReadyDispatchGate: a superseded 'Previous active execution Issue' line never outranks the genuine label entry (Stage 2 audit finding, PR #327)", () => {
+  const body = [
+    "### State",
+    "",
+    "READY",
+    "",
+    "### Minimum authority",
+    "",
+    "Previous active execution Issue: #50",
+    "Active execution Issue: #77",
+    "",
+    "### Current blocker",
+    "",
+    "none",
+    "",
+    "### Founder interrupt",
+    "",
+    "none",
+    "",
+    "- **Route:** implementation worker",
+  ].join("\n");
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "READY_TO_DISPATCH");
+  assert.equal(result.executionIssue, 77);
 });
 
 test("evaluateReadyDispatchGate: a 'Minimum authority' block naming both the active execution Issue and another required issue still resolves to exactly the labeled one (Stage 1 finding, PR #325 — the exact false negative Codex reported)", () => {

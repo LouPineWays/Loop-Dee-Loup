@@ -169,13 +169,29 @@ export function parseHeadingBlock(body, label) {
 // false negative, since it actively selects the wrong dispatch target. When neither the
 // label line nor its exact next line carries a reference, this returns null rather than
 // searching further.
+//
+// The label match is anchored to the start of each line (after stripping a leading list
+// marker like "- "), not merely present anywhere in it. Stage 2 audit finding on PR #327:
+// an unanchored `test()` matched the label substring inside unrelated prose too — a line
+// like "Previous active execution Issue: #50" (a historical/superseded entry) or "Do not
+// use #50 as the active execution Issue:" (negated prose) both contain the phrase and
+// were being read as the authoritative entry, picking up the wrong reference ahead of a
+// genuine later "Active execution Issue: #77" line. Anchoring to line-start means only a
+// line that actually *is* the label entry — not one that merely mentions the phrase —
+// can supply the pointer.
+const ACTIVE_EXECUTION_LABEL = /^active\s+execution\s+issue\s*:?/i;
+
+function stripListMarker(line) {
+  return line.trim().replace(/^[-*•]\s*/, "");
+}
+
 export function extractActiveExecutionRef(block) {
   if (typeof block !== "string") return null;
   const lines = block.split("\n");
-  const labelPattern = /active\s+execution\s+issue\s*:?/i;
   for (let i = 0; i < lines.length; i++) {
-    if (!labelPattern.test(lines[i])) continue;
-    const sameLine = lines[i].match(/#(\d+)/);
+    const normalized = stripListMarker(lines[i]);
+    if (!ACTIVE_EXECUTION_LABEL.test(normalized)) continue;
+    const sameLine = normalized.match(/#(\d+)/);
     if (sameLine) return `#${sameLine[1]}`;
     const nextLine = lines[i + 1] !== undefined ? lines[i + 1].trim() : "";
     const nextMatch = nextLine.match(/#(\d+)/);
