@@ -9,6 +9,8 @@ import assert from "node:assert/strict";
 import {
   parseControlBullet,
   parseHeadingField,
+  parseHeadingBlock,
+  extractActiveExecutionRef,
   isNoneSentinel,
   parseExecutionPointer,
   evaluateReadyDispatchGate,
@@ -198,6 +200,72 @@ test("evaluateReadyDispatchGate: Lifecycle/Blocker/Founder-decision fall back to
     "### Minimum authority",
     "",
     "Active execution Issue: #77. See docs/operating-model.md.",
+    "",
+    "### Current blocker",
+    "",
+    "none",
+    "",
+    "### Founder interrupt",
+    "",
+    "none",
+    "",
+    "- **Route:** implementation worker",
+  ].join("\n");
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "READY_TO_DISPATCH");
+  assert.equal(result.executionIssue, 77);
+});
+
+test("parseHeadingBlock: reads the entire multiline field, not just its first line (Stage 2 audit finding, PR #323)", () => {
+  const body = "### Minimum authority\n\nActive execution Issue:\n- #77\n\n### Current blocker\n\nnone\n";
+  assert.equal(parseHeadingBlock(body, "Minimum authority"), "Active execution Issue:\n- #77");
+  assert.equal(parseHeadingBlock(body, "Nonexistent"), null);
+  assert.equal(parseHeadingBlock("### Minimum authority\n\n_No response_\n", "Minimum authority"), null);
+});
+
+test("extractActiveExecutionRef: isolates the labeled entry, ignoring an unrelated '#N' reference elsewhere in the same block (Stage 1 finding, PR #325)", () => {
+  assert.equal(extractActiveExecutionRef("Active execution Issue: #77\nAlso see #50 for background."), "#77");
+  assert.equal(extractActiveExecutionRef("Active execution Issue:\n- #77\n\nAlso required: #50"), "#77");
+  assert.equal(extractActiveExecutionRef("Also required: #50\nNo active-execution label here."), null);
+  assert.equal(extractActiveExecutionRef(null), null);
+});
+
+test("evaluateReadyDispatchGate: a 'Minimum authority' block naming both the active execution Issue and another required issue still resolves to exactly the labeled one (Stage 1 finding, PR #325 — the exact false negative Codex reported)", () => {
+  const body = [
+    "### State",
+    "",
+    "READY",
+    "",
+    "### Minimum authority",
+    "",
+    "Active execution Issue: #77",
+    "Also required for context: #50",
+    "",
+    "### Current blocker",
+    "",
+    "none",
+    "",
+    "### Founder interrupt",
+    "",
+    "none",
+    "",
+    "- **Route:** implementation worker",
+  ].join("\n");
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "READY_TO_DISPATCH");
+  assert.equal(result.executionIssue, 77);
+});
+
+test("evaluateReadyDispatchGate: an Execution pointer on a later line of a multiline 'Minimum authority' block is still found (Stage 2 audit finding, PR #323 — the exact false negative Codex reported)", () => {
+  const body = [
+    "### State",
+    "",
+    "READY",
+    "",
+    "### Minimum authority",
+    "",
+    "Active execution Issue:",
+    "- #77",
     "",
     "### Current blocker",
     "",

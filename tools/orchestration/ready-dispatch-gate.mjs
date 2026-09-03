@@ -38,8 +38,10 @@
 // State" (dropdown), "### Current blocker", and "### Founder interrupt" instead, with no
 // dedicated Execution or Route field at all. Lifecycle/Blocker/Founder-decision fall back
 // to those "### Heading" fields when the bullet is absent (parseHeadingField); Execution
-// additionally falls back to scanning the template's "### Minimum authority" field for a
-// single "#N" reference. Route has no template counterpart, so a control Issue relying on
+// additionally falls back to the template's "### Minimum authority" field, extracting
+// only its labeled "Active execution Issue:" entry — never every "#N" reference that
+// field happens to contain, since it may legitimately list other required issues too.
+// Route has no template counterpart, so a control Issue relying on
 // this gate must include an explicit "- **Route:**" bullet regardless of which template
 // created it.
 //
@@ -117,6 +119,68 @@ export function parseHeadingField(body, label) {
   return null;
 }
 
+// Pure. Like parseHeadingField, but returns the field's *entire* rendered block (every
+// line under the heading up to the next "### " heading or end of body, trimmed) rather
+// than only the first non-blank line. Stage 2 audit finding on this PR: "Minimum
+// authority" is a multiline textarea (see parent-execution.yml), so a genuine execution
+// pointer such as "Active execution Issue:" on one line followed by "- #77" on the next
+// was invisible to parseHeadingField's first-line-only read, silently falling through to
+// NOT_READY — exactly the false negative this gate exists to prevent. Used only for
+// "Minimum authority" below; Lifecycle/Blocker/Founder-decision stay single-line reads
+// via parseHeadingField, since those fields' whole rendered meaning is their first
+// substantive line, not a block to scan for an embedded reference.
+export function parseHeadingBlock(body, label) {
+  const lines = (body ?? "").split("\n");
+  const heading = `### ${label}`;
+  let headingIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim() === heading) {
+      headingIdx = i;
+      break;
+    }
+  }
+  if (headingIdx === -1) return null;
+  const collected = [];
+  for (let i = headingIdx + 1; i < lines.length; i++) {
+    if (lines[i].trim().startsWith("### ")) break;
+    collected.push(lines[i]);
+  }
+  const text = collected.join("\n").trim();
+  return text === "" || text === "_No response_" ? null : text;
+}
+
+// Pure. Extracts only the labeled "Active execution Issue:" entry (and its immediate
+// continuation line, if the reference sits on the next line instead of the label line
+// itself) from a "Minimum authority" block — never every "#N" reference the block
+// happens to contain. Stage 1 review finding on this PR: `parent-execution.yml`'s
+// "Minimum authority" field description explicitly permits listing *multiple* required
+// issues/files ("List only the issue bodies and repository files required for the next
+// transition"), so scanning the whole block for "exactly one #N" (parseExecutionPointer's
+// contract) falsely rejected a genuinely settled control Issue the moment it named a
+// second, unrelated required issue anywhere in the same field — e.g. "Active execution
+// Issue: #77" plus a separately listed "#50" for background reading. Only the label's own
+// line, and a single following non-blank continuation line if the label line carries no
+// "#N" itself, are ever considered; scanning stops at the first blank line so an entry
+// never bleeds into unrelated following text.
+export function extractActiveExecutionRef(block) {
+  if (typeof block !== "string") return null;
+  const lines = block.split("\n");
+  const labelPattern = /active\s+execution\s+issue\s*:?/i;
+  for (let i = 0; i < lines.length; i++) {
+    if (!labelPattern.test(lines[i])) continue;
+    const sameLine = lines[i].match(/#(\d+)/);
+    if (sameLine) return `#${sameLine[1]}`;
+    for (let j = i + 1; j < lines.length; j++) {
+      const trimmed = lines[j].trim();
+      if (trimmed === "") break;
+      const match = trimmed.match(/#(\d+)/);
+      if (match) return `#${match[1]}`;
+    }
+    return null;
+  }
+  return null;
+}
+
 // Pure. True when `value` is the explicit "none" sentinel this repository's control
 // template uses for an empty Blocker/Founder-decision field, tolerating a trailing
 // explanation after the word itself (e.g. "none — founder selected ..."). A value that is
@@ -157,14 +221,16 @@ export function parseExecutionPointer(value) {
 // `parent-execution.yml` template's own "### Heading" fields where one exists: "State"
 // for Lifecycle, "Current blocker" for Blocker, "Founder interrupt" for Founder
 // decision. The template has no dedicated Execution or Route field; Execution also
-// falls back to scanning "Minimum authority" (the template's field for pointing at the
-// active execution Issue) for a single "#N" reference. Route has no template
+// falls back to "Minimum authority" (the template's field for pointing at the active
+// execution Issue), reading only its labeled "Active execution Issue:" entry
+// (extractActiveExecutionRef) — that field may legitimately list other required issues
+// too, so every "#N" it contains is never treated as a candidate pointer. Route has no template
 // counterpart at all — a control Issue relying on the two-plane READY dispatch pattern
 // must include an explicit "- **Route:**" bullet somewhere in its body regardless of
 // which template created it.
 export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   const lifecycleRaw = parseControlBullet(body, "Lifecycle") ?? parseHeadingField(body, "State");
-  const executionRaw = parseControlBullet(body, "Execution") ?? parseHeadingField(body, "Minimum authority");
+  const executionRaw = parseControlBullet(body, "Execution") ?? extractActiveExecutionRef(parseHeadingBlock(body, "Minimum authority"));
   const routeRaw = parseControlBullet(body, "Route");
   const blockerRaw = parseControlBullet(body, "Blocker") ?? parseHeadingField(body, "Current blocker");
   const founderDecisionRaw = parseControlBullet(body, "Founder decision") ?? parseHeadingField(body, "Founder interrupt");
