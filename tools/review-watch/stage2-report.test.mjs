@@ -8,6 +8,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import {
   bodyReferencesCommit,
   countNumberedItems,
@@ -17,6 +20,11 @@ import {
   hasVerificationEvidence,
   isCompletedStage2AuditReport,
 } from "./stage2-report.mjs";
+
+const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
+function readFixture(name) {
+  return readFileSync(path.join(FIXTURES_DIR, name), "utf8").trimEnd();
+}
 
 const MERGE_COMMIT = "b281dbd5e7590b8ac2992753cd875f5e6472d556";
 
@@ -473,4 +481,181 @@ test("isCompletedStage2AuditReport: requireVerificationEvidence: false ignores r
     requestedChecklist: REQUESTED_CHECKLIST,
   });
   assert.equal(result.complete, true, "legacy-compatibility mode must still accept a terse response regardless of requestedChecklist");
+});
+
+// -- status-marker bullet checklist walk-through (issue #330's genuine Stage 2 audit response,
+// comment 5525865299): "- ✅ `command` — result" per item, no numbering at all. Fixtures are the
+// exact real response body and the exact real requested checklist text (issue #330's own
+// "Verification checklist" field), not paraphrased reconstructions.
+
+const ISSUE_330_COMMIT = "0e04348fb764a364e9d910bfc8074ed9e1339df1";
+const ISSUE_330_COMMENT = readFixture("issue-330-comment.txt");
+const ISSUE_330_CHECKLIST = readFixture("issue-330-checklist.txt");
+
+test("hasVerificationEvidence: true for a status-marker bullet checklist ('- ✅ ...') with no numbering", () => {
+  assert.equal(hasVerificationEvidence("### Verification\n\n- ✅ Confirmed the fix works."), true);
+});
+
+test("countVerificationWalkthroughItems: counts the trailing contiguous run of status-marker bullet lines when there is no numbered walk-through", () => {
+  const body = [
+    "### Findings",
+    "",
+    "No actionable findings.",
+    "",
+    "### Verification",
+    "",
+    "- ✅ Confirmed A.",
+    "- ✅ Confirmed B.",
+    "- ❌ Confirmed C failed.",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 3);
+});
+
+test("countVerificationWalkthroughItems: an earlier unrelated bulleted line breaks the trailing marker run, isolating it from the checklist section (mirrors the numbered-run isolation test above)", () => {
+  const body = [
+    "### Findings",
+    "",
+    "- Some finding, not a checklist item.",
+    "",
+    "### Verification",
+    "",
+    "- ✅ Confirmed A.",
+    "- ✅ Confirmed B.",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 2, "must not count the unrelated Findings bullet as part of the checklist run");
+});
+
+test("countVerificationWalkthroughItems: prefers a numbered walk-through over an unrelated marker-bullet list elsewhere in the body", () => {
+  const body = [
+    "### Findings",
+    "",
+    "- ✅ Not a checklist, just a status-marker bullet in prose.",
+    "",
+    "### Verification checklist",
+    "",
+    "1. Confirmed A.",
+    "2. Confirmed B.",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 2);
+});
+
+test("countVerificationWalkthroughItems: reproduces issue #330's real response — 7 status-marker bullet items, matching its 7-item requested checklist", () => {
+  assert.equal(countVerificationWalkthroughItems(ISSUE_330_COMMENT), 7);
+  assert.equal(countNumberedItems(ISSUE_330_CHECKLIST), 7);
+});
+
+test("hasCompleteVerificationEvidence: issue #330's real response satisfies its real 7-item requested checklist via the status-marker bullet shape", () => {
+  assert.equal(hasCompleteVerificationEvidence(ISSUE_330_COMMENT, ISSUE_330_CHECKLIST), true);
+});
+
+test("isCompletedStage2AuditReport: reproduces issue #330's real genuine CLEAN Stage 2 response as complete — content-complete but previously misclassified as incomplete for lacking a numbered checklist walk-through", () => {
+  const result = isCompletedStage2AuditReport(ISSUE_330_COMMENT, {
+    mergeCommit: ISSUE_330_COMMIT,
+    requestedChecklist: ISSUE_330_CHECKLIST,
+  });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "CLEAN");
+  assert.deepEqual(result.reasons, []);
+});
+
+test("isCompletedStage2AuditReport: a status-marker checklist truncated partway through the requested items is still rejected (issue #268 finding 2 applies equally to the marker-bullet shape)", () => {
+  const requested = "1. Confirm A.\n2. Confirm B.\n3. Confirm C.";
+  const truncated = [
+    `CLEAN — Stage 2 audit of the merge commit \`${MERGE_COMMIT}\`.`,
+    "",
+    "### Verification",
+    "",
+    "- ✅ Confirmed A.",
+  ].join("\n");
+  const result = isCompletedStage2AuditReport(truncated, { mergeCommit: MERGE_COMMIT, requestedChecklist: requested });
+  assert.equal(result.complete, false);
+  assert.ok(result.reasons.some((r) => r.includes("incomplete")), `expected an incompleteness reason, got: ${result.reasons}`);
+});
+
+// -- PR #331 Stage 1 review findings on the status-marker walk-through support above ----------
+
+const THREE_ITEM_CHECKLIST = "1. Confirm A.\n2. Confirm B.\n3. Confirm C.";
+
+test("countVerificationWalkthroughItems (Stage 1 finding 1): a short numbered findings list must not outrank a complete, later marker-bullet checklist", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. First finding — root cause X, now fixed.",
+    "",
+    "### Verification",
+    "",
+    "- ✅ Confirmed A.",
+    "- ✅ Confirmed B.",
+    "- ✅ Confirmed C.",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 3, "the trailing marker checklist (3 items) must win over the earlier 1-item numbered findings list");
+  assert.equal(hasCompleteVerificationEvidence(body, THREE_ITEM_CHECKLIST), true);
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 1): a numbered findings list must not pad out an incomplete, later marker-bullet checklist", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. First finding.",
+    "2. Second finding.",
+    "3. Third finding.",
+    "",
+    "### Verification",
+    "",
+    "- ✅ Confirmed A.",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 1, "the trailing marker checklist (1 real item) must win, not the 3 earlier numbered findings");
+  assert.equal(hasCompleteVerificationEvidence(body, THREE_ITEM_CHECKLIST), false, "1 real checklist item must not satisfy a 3-item request merely because 3 numbered findings appear earlier");
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 2): an indented sub-bullet nested under one checklist item is not counted as its own additional top-level item", () => {
+  const body = [
+    "### Verification",
+    "",
+    "- ✅ Confirmed the parent check.",
+    "  - ✅ Sub-check one.",
+    "  - ✅ Sub-check two.",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 1, "2 nested sub-bullets under 1 top-level item must not inflate the count to 3");
+  assert.equal(
+    hasCompleteVerificationEvidence(body, THREE_ITEM_CHECKLIST),
+    false,
+    "1 real top-level item must not satisfy a 3-item request merely because it has nested sub-bullets",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 3): an indented continuation line under a checklist item does not break the walk-through run", () => {
+  const body = [
+    "### Verification",
+    "",
+    "- ✅ Confirmed A.",
+    "  Additional detail explaining how A was confirmed.",
+    "- ✅ Confirmed B.",
+    "- ✅ Confirmed C.",
+    "  More explanation here too.",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 3, "indented continuation lines must not fragment a complete 3-item walk-through into isolated single-item runs");
+  assert.equal(hasCompleteVerificationEvidence(body, THREE_ITEM_CHECKLIST), true);
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 4): a trailing 'Founder judgment required' warning bullet does not shrink or replace a complete marker checklist", () => {
+  const body = [
+    "### Verification",
+    "",
+    "- ✅ Confirmed A.",
+    "- ✅ Confirmed B.",
+    "- ✅ Confirmed C.",
+    "- ⚠️ Founder judgment required.",
+    "",
+    "Verdict: CLEAN",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 3, "the founder-judgment warning bullet is not a checklist item and must not be counted or break the run");
+  assert.equal(hasCompleteVerificationEvidence(body, THREE_ITEM_CHECKLIST), true);
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 4): a lone 'Founder judgment required' warning bullet is never accepted as evidence that verification was performed", () => {
+  const body = ["Verification was not performed for this commit.", "", "- ⚠️ Founder judgment required.", "", "Verdict: CLEAN"].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 0);
+  assert.equal(hasVerificationEvidence(body), false, "a warning-only bullet with no real checklist must not read as verification evidence");
+  assert.equal(hasCompleteVerificationEvidence(body, "1. Confirm X."), false);
 });

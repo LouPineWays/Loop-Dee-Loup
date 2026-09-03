@@ -30,19 +30,22 @@
 //      (the shape the audit-control-issue template's own Verdict field describes, and the shape
 //      parseFormField in lifecycle-gate.mjs already reads from the audit issue body itself).
 //
-//   3. shows verification-results content, not merely a bare verdict: at least one numbered
-//      item together with some mention of verification. This is what a kickoff/acknowledgement
-//      can never accidentally satisfy, and it is what the audit-control-issue template already
-//      documents as required — "Required findings structure" already asks every response to
-//      include "a verification-performed checklist that works through every item in the
-//      Verification checklist field ... and states its result," and states a "no findings"
-//      audit must still report "in this structure," not a bare one-liner. This module makes
-//      that existing prose requirement mechanically enforced rather than only aspirational.
+//   3. shows verification-results content, not merely a bare verdict: at least one checklist
+//      item — either a numbered item ("1. ...") or a per-item status-marker bullet ("- ✅ ...",
+//      issue #330's genuine Stage 2 audit response, comment 5525865299) — together with some
+//      mention of verification. This is what a kickoff/acknowledgement can never accidentally
+//      satisfy, and it is what the audit-control-issue template already documents as required —
+//      "Required findings structure" already asks every response to include "a
+//      verification-performed checklist that works through every item in the Verification
+//      checklist field ... and states its result," and states a "no findings" audit must still
+//      report "in this structure," not a bare one-liner. The template does not mandate numbering
+//      specifically, so a status-marker bullet list satisfies it exactly as well. This module
+//      makes that existing prose requirement mechanically enforced rather than only aspirational.
 //      When the caller supplies the audit issue's own requested checklist text (`isCompleted
 //      Stage2AuditReport`'s `requestedChecklist` option), this signal additionally requires the
-//      response's numbered-item count to meet the requested count (issue #268 finding 2) — a
-//      response truncated partway through a multi-item checklist no longer passes on the
-//      strength of its first item alone.
+//      response's own walk-through item count (numbered or marker-bullet) to meet the requested
+//      count (issue #268 finding 2) — a response truncated partway through a multi-item checklist
+//      no longer passes on the strength of its first item alone.
 //
 // A historical response that predates this contract (e.g. issue #95's terse "CLEAN — ... no
 // actionable findings. Next: None.", which has no numbered checklist walk-through) would report
@@ -169,14 +172,53 @@ export function extractResponseVerdict(text) {
 const VERIFICATION_MENTION_PATTERN = /\bverif(?:y|ies|ied|ication|ying)\b/i;
 const NUMBERED_ITEM_PATTERN = /^\s*\d{1,3}[.)]\s+\S/m;
 const NUMBERED_ITEM_PATTERN_GLOBAL = /^\s*\d{1,3}[.)]\s+\S/gm;
-const NUMBERED_ITEM_NUMBER_PATTERN = /^\s*(\d{1,3})[.)]\s+\S/gm;
 
-// Pure. Whether `text` shows actual verification-results content: a numbered checklist
-// walk-through together with some mention of verification itself, rather than a bare verdict
-// with nothing behind it.
+// A top-level bullet item carrying its own per-item status marker — the shape observed on
+// issue #330's genuine Stage 2 audit response (comment 5525865299): "- ✅ `command` — result"
+// for each checklist item, with no numbering at all. Deliberately restricted to a small,
+// unambiguous set of pass/fail glyphs (checkmark and cross families only) rather than "any
+// emoji after a bullet" — a findings list that happens to bullet unrelated emoji must not be
+// misread as a checklist walk-through. Stage 1 review finding on this PR: an earlier version
+// also accepted a warning glyph (⚠️/⚠), which the audit-control-issue template's own required
+// response structure separately uses for its "whether founder judgment is required" field —
+// with that glyph included, a trailing "- ⚠️ Founder judgment required" note (not itself a
+// checklist item) could either get miscounted as an extra checklist item or, worse, stand in
+// entirely for a real checklist walk-through that was never actually performed. Checkmark/cross
+// glyphs carry no such ambiguity with any other required-structure field, so dropping the
+// warning glyph removes the confusion at its source rather than trying to distinguish the two
+// meanings positionally.
+//
+// Requires zero leading whitespace (not `^\s*[-*+]`, deliberately) — a *top-level* list item, as
+// every real checklist item observed so far is. Stage 1 review finding on this PR: allowing
+// arbitrary leading whitespace let an indented sub-bullet nested under one checklist item (e.g.
+// "  - ✅ subcheck") be miscounted as its own additional top-level item, inflating the walk-
+// through count above what was actually addressed.
+const CHECKLIST_STATUS_MARKER = "(?:✅|✔️|✔|☑️|☑|❌|✗|✘)";
+const CHECKLIST_MARKER_ITEM_PATTERN_SOURCE = `^[-*+]\\s*${CHECKLIST_STATUS_MARKER}\\s+\\S`;
+const CHECKLIST_MARKER_ITEM_PATTERN = new RegExp(CHECKLIST_MARKER_ITEM_PATTERN_SOURCE, "m");
+const CHECKLIST_MARKER_ITEM_LINE_PATTERN = new RegExp(CHECKLIST_MARKER_ITEM_PATTERN_SOURCE);
+
+// A line that can genuinely separate two top-level marker items: non-blank, and itself starting
+// at column 0 (no leading whitespace) — i.e. other top-level content (a heading, a new
+// paragraph, an unrelated top-level bullet), never a checklist item's own indented continuation
+// line. Stage 1 review finding on this PR: treating *any* non-blank line as a separator broke a
+// checklist item that wrapped onto an indented continuation line (evidence/explanation directly
+// under a "- ✅ ..." item) into a false run boundary, undercounting a complete walk-through. An
+// indented, non-matching line is silently skipped instead — neither counted nor treated as a
+// break — consistent with the zero-indentation top-level requirement above: real nested/
+// continuation content is, by construction, never column-0.
+function isTopLevelBoundaryLine(line) {
+  return line.trim() !== "" && /^\S/.test(line);
+}
+
+// Pure. Whether `text` shows actual verification-results content: a checklist walk-through —
+// either a numbered list ("1. ...") or a per-item status-marker bullet list ("- ✅ ...") —
+// together with some mention of verification itself, rather than a bare verdict with nothing
+// behind it.
 export function hasVerificationEvidence(text) {
   const normalized = text ?? "";
-  return VERIFICATION_MENTION_PATTERN.test(normalized) && NUMBERED_ITEM_PATTERN.test(normalized);
+  if (!VERIFICATION_MENTION_PATTERN.test(normalized)) return false;
+  return NUMBERED_ITEM_PATTERN.test(normalized) || CHECKLIST_MARKER_ITEM_PATTERN.test(normalized);
 }
 
 // Pure. Counts top-level numbered list lines ("1. ...", "2) ...") in `text`. Used against the
@@ -190,37 +232,97 @@ export function countNumberedItems(text) {
   return matches ? matches.length : 0;
 }
 
-// Pure. Counts the numbered items in `text`'s *verification-checklist walk-through* specifically
-// — not every numbered line in the response body. Stage 1 review finding on this PR: the
-// required response structure's item (2), one numbered entry per finding, precedes item (3), the
-// checklist walk-through — so a response with two numbered findings plus only item 1 of a
-// three-item requested checklist has three numbered lines total, and a plain count would call it
-// complete against a 3-item request while checklist items 2-3 were never actually addressed.
+// Pure. Finds `text`'s *verification-checklist walk-through* when it is shaped as a numbered
+// list, specifically — not every numbered line in the response body. Stage 1 review finding on
+// an earlier revision of this module: the required response structure's item (2), one numbered
+// entry per finding, precedes item (3), the checklist walk-through — so a response with two
+// numbered findings plus only item 1 of a three-item requested checklist has three numbered
+// lines total, and a plain count would call it complete against a 3-item request while checklist
+// items 2-3 were never actually addressed.
 //
-// A genuine checklist walk-through is its own freshly-numbered list, restarting at 1, and per the
-// required structure's ordering it is the *last* numbered list before the verdict. This returns
-// the length of the last contiguous run of numbered items that begins at 1 and increases by
-// exactly 1 each step — deliberately a numbering-sequence heuristic, not heading-text matching
-// (which response authors are not required to phrase identically), consistent with this module's
-// Non-goals (no arbitrary Markdown parsing, no semantic adjudication of finding content).
-export function countVerificationWalkthroughItems(text) {
-  const normalized = text ?? "";
-  const numbers = [];
-  NUMBERED_ITEM_NUMBER_PATTERN.lastIndex = 0;
-  let match;
-  while ((match = NUMBERED_ITEM_NUMBER_PATTERN.exec(normalized)) !== null) {
-    numbers.push(Number(match[1]));
-  }
-  if (numbers.length === 0) return 0;
-  let runStart = numbers.length - 1;
-  for (let i = numbers.length - 1; i > 0; i--) {
-    if (numbers[i] === numbers[i - 1] + 1) {
+// A genuine checklist walk-through is its own freshly-numbered list, restarting at 1. This finds
+// the last contiguous run of numbered items that begins at 1 and increases by exactly 1 each
+// step — deliberately a numbering-sequence heuristic, not heading-text matching (which response
+// authors are not required to phrase identically), consistent with this module's Non-goals (no
+// arbitrary Markdown parsing, no semantic adjudication of finding content). Returns `null` when
+// no such run exists, and otherwise `{ count, endLineIndex }` — `endLineIndex` (the 0-based line
+// index of the run's last item) is what lets `countVerificationWalkthroughItems` below choose
+// between this and a same-body marker-bullet run by document position, per issue #330's Stage 1
+// review finding 1: preferring numbered runs unconditionally let an early numbered *findings*
+// entry outrank the response's real (marker-bullet) checklist, in both directions — a short
+// numbered findings list could pad out an incomplete marker checklist's count, and a genuinely
+// complete marker checklist could be discarded in favor of a single unrelated numbered finding.
+function findNumberedWalkthroughRun(lines) {
+  const numbered = [];
+  lines.forEach((line, index) => {
+    const match = /^\s*(\d{1,3})[.)]\s+\S/.exec(line);
+    if (match) numbered.push({ index, number: Number(match[1]) });
+  });
+  if (numbered.length === 0) return null;
+  let runStart = numbered.length - 1;
+  for (let i = numbered.length - 1; i > 0; i--) {
+    if (numbered[i].number === numbered[i - 1].number + 1) {
       runStart = i - 1;
     } else {
       break;
     }
   }
-  return numbers[runStart] === 1 ? numbers.length - runStart : 0;
+  if (numbered[runStart].number !== 1) return null;
+  const runItems = numbered.slice(runStart);
+  return { count: runItems.length, endLineIndex: runItems[runItems.length - 1].index };
+}
+
+// Pure. Finds `text`'s *verification-checklist walk-through* when it is shaped as a per-item
+// status-marker bullet list ("- ✅ ...") rather than a numbered list — issue #330's genuine
+// Stage 2 audit response (comment 5525865299) used exactly this shape and has no numbering at
+// all, so findNumberedWalkthroughRun alone finds nothing for a content-complete response.
+//
+// There is no numeric sequence to anchor on here (unlike the numbered case), so this instead
+// finds the *last contiguous run of matching lines* — walking backward through every line that
+// matched the marker pattern and stopping as soon as a genuine top-level boundary line
+// (isTopLevelBoundaryLine — non-blank and non-indented) separates two matches. Blank lines and
+// indented continuation lines between two matches do not break the run. That isolates a trailing
+// checklist section from an unrelated earlier bulleted list (e.g. a findings section that
+// happens to use the same bullet character) the same way the numbered version isolates the last
+// numbered run from earlier numbered findings. Returns `null` when no marker item is found, and
+// otherwise `{ count, endLineIndex }` — see findNumberedWalkthroughRun's own comment for why the
+// end position matters.
+function findMarkerWalkthroughRun(lines) {
+  const matchedLineIndexes = [];
+  lines.forEach((line, index) => {
+    if (CHECKLIST_MARKER_ITEM_LINE_PATTERN.test(line)) matchedLineIndexes.push(index);
+  });
+  if (matchedLineIndexes.length === 0) return null;
+
+  let count = 1;
+  for (let k = matchedLineIndexes.length - 1; k > 0; k--) {
+    let brokenByBoundary = false;
+    for (let lineIndex = matchedLineIndexes[k - 1] + 1; lineIndex < matchedLineIndexes[k]; lineIndex++) {
+      if (isTopLevelBoundaryLine(lines[lineIndex])) {
+        brokenByBoundary = true;
+        break;
+      }
+    }
+    if (brokenByBoundary) break;
+    count++;
+  }
+  return { count, endLineIndex: matchedLineIndexes[matchedLineIndexes.length - 1] };
+}
+
+// Pure. Counts the items in `text`'s verification-checklist walk-through, whichever of the two
+// observed shapes it uses: a numbered list, or a per-item status-marker bullet list (issue
+// #330). When both a numbered run and a marker-bullet run exist in the same body, picks whichever
+// one ends later in the document — the genuine checklist walk-through is whichever list actually
+// sits last (closest to the verdict), per the required response structure's ordering, not
+// whichever shape happens to be numbered (issue #330's Stage 1 review finding 1).
+export function countVerificationWalkthroughItems(text) {
+  const lines = (text ?? "").split("\n");
+  const numberedRun = findNumberedWalkthroughRun(lines);
+  const markerRun = findMarkerWalkthroughRun(lines);
+  if (!numberedRun && !markerRun) return 0;
+  if (!markerRun) return numberedRun.count;
+  if (!numberedRun) return markerRun.count;
+  return numberedRun.endLineIndex > markerRun.endLineIndex ? numberedRun.count : markerRun.count;
 }
 
 // Pure. Whether `text`'s verification-results content is *complete* against `requestedChecklist`
