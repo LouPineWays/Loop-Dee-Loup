@@ -1,0 +1,48 @@
+{
+  "issue": 310,
+  "issue_title": "[Telemetry] Add opt-in diagnostic traces for orchestration proving sessions",
+  "ground_truth_pr": 317,
+  "ground_truth_files": [
+    ".claude/skills/telemetry-battery/SKILL.md",
+    "tools/telemetry/README.md",
+    "tools/telemetry/diagnostic-trace.mjs",
+    "tools/telemetry/diagnostic-trace.test.mjs"
+  ],
+  "runs": {
+    "arm_a_unbounded": {
+      "tool_uses": 3,
+      "subagent_tokens": 72036,
+      "duration_ms": 25704,
+      "recalled_files": [
+        "tools/telemetry/diagnostic-trace.mjs",
+        "tools/telemetry/diagnostic-trace.test.mjs",
+        "tools/telemetry/README.md",
+        ".claude/skills/telemetry-battery/SKILL.md",
+        "docs/diagnostic-traces/index.json",
+        "docs/diagnostic-traces/4dea0981-616a-4cea-96e2-fdd1183b1d29.json"
+      ],
+      "false_positive_surfaces": [],
+      "founder_blocker_reported": false,
+      "founder_blocker_correct": true,
+      "verdict_correct": true,
+      "notes": "Exact match to all 4 ground-truth files plus the correct real committed proving-session artifact filename -- the strongest single result in the sample. Also correctly reconstructed the two-round review chain (PR #317 -> Stage 2 NOT CLEAN #318 -> PR #319 -> Stage 2 CLEAN #320)."
+    },
+    "arm_b_bounded_4calls": {
+      "tool_uses": 3,
+      "subagent_tokens": 70985,
+      "duration_ms": 21590,
+      "recalled_files": [
+        "tools/telemetry/diagnostic-trace.mjs",
+        "tools/telemetry/diagnostic-trace.test.mjs",
+        "tools/telemetry/README.md",
+        ".claude/skills/telemetry-battery/SKILL.md",
+        "docs/diagnostic-traces/4dea0981-616a-4cea-96e2-fdd1183b1d29.json"
+      ],
+      "false_positive_surfaces": [],
+      "founder_blocker_reported": false,
+      "founder_blocker_correct": true,
+      "verdict_correct": true,
+      "notes": "Matches arm A almost exactly, same tool-call count even under a nominal budget (the cap was never binding), same file recall quality."
+    }
+  }
+}

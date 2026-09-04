@@ -1,0 +1,40 @@
+{
+  "issue": 269,
+  "issue_title": "Define default consumer disposition for defects found in upstream LDL-managed content",
+  "ground_truth_pr": 272,
+  "ground_truth_files": [
+    "AGENTS.md",
+    "docs/bounded-review-cycle.md",
+    "docs/consumer-contract.md"
+  ],
+  "runs": {
+    "arm_a_unbounded": {
+      "tool_uses": 2,
+      "subagent_tokens": 66174,
+      "duration_ms": 18113,
+      "recalled_files": [
+        "docs/consumer-contract.md",
+        "AGENTS.md"
+      ],
+      "false_positive_surfaces": [],
+      "founder_blocker_reported": false,
+      "founder_blocker_correct": true,
+      "verdict_correct": true,
+      "notes": "2/3 ground-truth files (missed docs/bounded-review-cycle.md, a 1-line change); high precision -- cited exact section headings and line numbers in docs/consumer-contract.md."
+    },
+    "arm_b_bounded_4calls": {
+      "tool_uses": 1,
+      "subagent_tokens": 65874,
+      "duration_ms": 16598,
+      "recalled_files": [
+        "docs/consumer-contract.md",
+        "AGENTS.md"
+      ],
+      "false_positive_surfaces": [],
+      "founder_blocker_reported": false,
+      "founder_blocker_correct": true,
+      "verdict_correct": true,
+      "notes": "Matches arm A's file recall and verdict with one fewer tool call."
+    }
+  }
+}

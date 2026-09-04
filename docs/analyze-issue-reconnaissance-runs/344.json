@@ -1,0 +1,41 @@
+{
+  "issue": 344,
+  "issue_title": "[Bug] Resolve READY-gate repository identity deterministically",
+  "ground_truth_pr": 347,
+  "ground_truth_files": [
+    "AGENTS.md",
+    "tools/orchestration/format-dispatch-prompt.mjs",
+    "tools/orchestration/ready-dispatch-gate.mjs",
+    "tools/orchestration/ready-dispatch-gate.test.mjs"
+  ],
+  "runs": {
+    "arm_a_unbounded": {
+      "tool_uses": 4,
+      "subagent_tokens": 71553,
+      "duration_ms": 30145,
+      "recalled_files": [
+        "tools/orchestration/ready-dispatch-gate.mjs",
+        "tools/orchestration/ready-dispatch-gate.test.mjs",
+        "tools/orchestration/format-dispatch-prompt.mjs",
+        "AGENTS.md",
+        "tools/review-watch/stage2-report.mjs"
+      ],
+      "false_positive_surfaces": ["tools/review-watch/stage2-report.mjs (correctly attributed to a distinct follow-on PR #354, not a false positive)"],
+      "founder_blocker_reported": false,
+      "founder_blocker_correct": true,
+      "verdict_correct": true,
+      "notes": "Correctly identified issue as closed via PR #347 + correction PR #349 + unrelated follow-on PR #354. Named the exact core files touched by ground-truth PR #347."
+    },
+    "arm_b_bounded_4calls": {
+      "tool_uses": 2,
+      "subagent_tokens": 68159,
+      "duration_ms": 19961,
+      "recalled_files": [],
+      "false_positive_surfaces": [],
+      "founder_blocker_reported": false,
+      "founder_blocker_correct": true,
+      "verdict_correct": true,
+      "notes": "Correctly identified issue as closed, correctly summarized outcome/authority/dependencies, but reported 'Likely implementation surfaces / files: N/A' instead of naming the ground-truth files -- the one case in this sample where the bounded arm's file recall was materially weaker than the unbounded arm's, despite reaching the same correct top-level verdict."
+    }
+  }
+}

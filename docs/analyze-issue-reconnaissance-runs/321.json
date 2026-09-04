@@ -1,0 +1,61 @@
+{
+  "issue": 321,
+  "issue_title": "[Bug] Resolve the post-#314 READY-dispatch proof violation",
+  "ground_truth_pr": 323,
+  "ground_truth_note": "Primary implementation PR; full outcome spans a correction chain through PR #325/#327/#329/#333/#346.",
+  "ground_truth_files": [
+    ".github/ISSUE_TEMPLATE/parent-execution.yml",
+    ".github/workflows/control-plane-paths.yml",
+    "AGENTS.md",
+    "docs/bounded-review-cycle.md",
+    "docs/consumer-contract.md",
+    "docs/diagnostic-traces/*.json",
+    "docs/diagnostic-traces/index.json",
+    "docs/operating-model.md",
+    "tools/check-control-plane-paths.mjs",
+    "tools/ldl-init/index.mjs",
+    "tools/orchestration/ready-dispatch-gate.mjs",
+    "tools/orchestration/ready-dispatch-gate.test.mjs",
+    "tools/telemetry/diagnostic-trace.mjs",
+    "tools/telemetry/diagnostic-trace.test.mjs"
+  ],
+  "runs": {
+    "arm_a_unbounded": {
+      "tool_uses": 1,
+      "subagent_tokens": 70124,
+      "duration_ms": 19276,
+      "recalled_files": [
+        "tools/orchestration/ready-dispatch-gate.mjs",
+        "tools/orchestration/format-dispatch-prompt.mjs",
+        "tools/telemetry/diagnostic-trace.mjs",
+        "docs/diagnostic-traces/*.json",
+        "AGENTS.md",
+        "docs/operating-model.md"
+      ],
+      "false_positive_surfaces": [],
+      "founder_blocker_reported": false,
+      "founder_blocker_correct": true,
+      "verdict_correct": true,
+      "notes": "Single tool call sufficed (unbounded budget, chose not to explore). Also correctly reconstructed the multi-PR dependency chain #313/#315/#316/#319/#320/#323-331/#346 from the issue body/comments alone."
+    },
+    "arm_b_bounded_4calls": {
+      "tool_uses": 1,
+      "subagent_tokens": 70106,
+      "duration_ms": 18614,
+      "recalled_files": [
+        "tools/orchestration/ready-dispatch-gate.mjs",
+        "tools/orchestration/format-dispatch-prompt.mjs",
+        "tools/telemetry/diagnostic-trace.mjs",
+        "docs/diagnostic-traces/*.json",
+        "docs/diagnostic-traces/index.json",
+        "AGENTS.md",
+        "docs/operating-model.md"
+      ],
+      "false_positive_surfaces": [],
+      "founder_blocker_reported": false,
+      "founder_blocker_correct": true,
+      "verdict_correct": true,
+      "notes": "Effectively identical to arm A -- same single tool call, same files, same dependency chain, same verdict."
+    }
+  }
+}

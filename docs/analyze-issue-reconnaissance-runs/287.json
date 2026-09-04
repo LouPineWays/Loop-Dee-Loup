@@ -1,0 +1,48 @@
+{
+  "issue": 287,
+  "issue_title": "[Bug] Make orchestrator startup context a thin routing contract",
+  "ground_truth_pr": 288,
+  "ground_truth_files": [
+    ".github/workflows/control-plane-paths.yml",
+    "AGENTS.md",
+    "docs/bounded-review-cycle.md",
+    "docs/operating-model.md",
+    "tools/check-startup-budget.mjs"
+  ],
+  "runs": {
+    "arm_a_unbounded": {
+      "tool_uses": 2,
+      "subagent_tokens": 69150,
+      "duration_ms": 18696,
+      "recalled_files": [
+        "AGENTS.md",
+        "docs/operating-model.md",
+        "docs/decision-forms.md",
+        "docs/bounded-review-cycle.md",
+        "tools/check-startup-budget.mjs"
+      ],
+      "false_positive_surfaces": [],
+      "founder_blocker_reported": false,
+      "founder_blocker_correct": true,
+      "verdict_correct": true,
+      "notes": "4/5 ground-truth files named (missed the CI workflow yml, a minor supporting file); also correctly flagged the still-open, non-blocking follow-on issue #123 (startup-tax telemetry) without conflating it with #287's own closed scope."
+    },
+    "arm_b_bounded_4calls": {
+      "tool_uses": 2,
+      "subagent_tokens": 68993,
+      "duration_ms": 22366,
+      "recalled_files": [
+        "AGENTS.md",
+        "docs/operating-model.md",
+        "docs/decision-forms.md",
+        "docs/bounded-review-cycle.md",
+        "tools/check-startup-budget.mjs"
+      ],
+      "false_positive_surfaces": [],
+      "founder_blocker_reported": false,
+      "founder_blocker_correct": true,
+      "verdict_correct": true,
+      "notes": "Identical file recall and verdict to arm A."
+    }
+  }
+}

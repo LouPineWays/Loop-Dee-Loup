@@ -1,0 +1,52 @@
+{
+  "issue": 335,
+  "issue_title": "[Bug] Calibrate Stage 2 completed-report evidence without weakening fail-closed audit semantics",
+  "ground_truth_pr": 337,
+  "ground_truth_files": [
+    ".github/ISSUE_TEMPLATE/audit-control-issue.yml",
+    "docs/bounded-review-cycle.md",
+    "tools/review-watch/fixtures/issue-334-checklist.txt",
+    "tools/review-watch/fixtures/issue-334-comment.txt",
+    "tools/review-watch/fixtures/issue-334-review-disposition.txt",
+    "tools/review-watch/lifecycle-gate.mjs",
+    "tools/review-watch/lifecycle-gate.test.mjs",
+    "tools/review-watch/stage2-report.mjs",
+    "tools/review-watch/stage2-report.test.mjs"
+  ],
+  "runs": {
+    "arm_a_unbounded": {
+      "tool_uses": 1,
+      "subagent_tokens": 68804,
+      "duration_ms": 18571,
+      "recalled_files": [
+        "tools/review-watch/stage2-report.mjs",
+        "tools/review-watch/stage2-report.test.mjs",
+        "tools/review-watch/lifecycle-gate.mjs",
+        "docs/bounded-review-cycle.md",
+        ".github/ISSUE_TEMPLATE/audit-control-issue.yml"
+      ],
+      "false_positive_surfaces": [],
+      "founder_blocker_reported": false,
+      "founder_blocker_correct": true,
+      "verdict_correct": true,
+      "notes": "Stopped after a single gh issue view call (unbounded budget, chose not to explore further) -- issue's own closing comment was self-documenting. Named 5/9 ground-truth files, missed only the fixtures/ directory."
+    },
+    "arm_b_bounded_4calls": {
+      "tool_uses": 1,
+      "subagent_tokens": 68776,
+      "duration_ms": 18543,
+      "recalled_files": [
+        "tools/review-watch/stage2-report.mjs",
+        "tools/review-watch/stage2-report.test.mjs",
+        "tools/review-watch/lifecycle-gate.mjs",
+        "docs/bounded-review-cycle.md",
+        ".github/ISSUE_TEMPLATE/audit-control-issue.yml"
+      ],
+      "false_positive_surfaces": [],
+      "founder_blocker_reported": false,
+      "founder_blocker_correct": true,
+      "verdict_correct": true,
+      "notes": "Effectively identical output to arm A -- same single tool call, same files named, same verdict. Arms converged completely for this issue."
+    }
+  }
+}
