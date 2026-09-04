@@ -63,18 +63,34 @@
 //     { controlIssue, executionIssue, route } — the exact reference-only triple to hand
 //     the dispatched worker; nothing else belongs in that prompt (AGENTS.md § Subagent
 //     dispatch).
-//   NOT_READY — the control Issue does not currently satisfy the gate (wrong lifecycle
-//     state, a blocker, a pending founder decision, a missing/malformed/multi-valued
-//     field). exit 3. Falls through to normal Decomposition-boundary / Direct-inspection
+//   BLOCKED — issue #368: the control Issue was read successfully and its own recorded
+//     fields *explicitly* say the current invocation must not advance — `Lifecycle:
+//     BLOCKED`, a non-"none" Blocker, or an unresolved Founder decision. exit 4. This is a
+//     positive, authoritative "do not advance" verdict, not merely "the immediate-dispatch
+//     shortcut doesn't apply" — distinct from NOT_READY by construction so a controller
+//     cannot collapse the two into the same "fall through and reason normally" handling.
+//     Control #301's live reproduction (issue #368) is the incident this exists to close:
+//     `Lifecycle: BLOCKED` plus an active Blocker both landed in the old broad NOT_READY
+//     bucket, and the controller then treated that NOT_READY result as permission to fall
+//     through into execution-Issue inspection and repository reconnaissance instead of
+//     stopping. Result carries { reasons } — only the specific blocking field(s), not the
+//     full unrelated NOT_READY diagnostic set — enough for a concise blocked/founder-
+//     interrupt chat handoff without a second read.
+//   NOT_READY — the immediate-dispatch shortcut genuinely does not apply, and no field
+//     explicitly says to stop: wrong non-BLOCKED mid-cycle lifecycle state (EXECUTING,
+//     VERIFYING, REVIEW, AUDIT, CORRECTION), a missing/malformed/multi-valued field, or a
+//     control Issue shape the gate cannot classify at all (e.g. a legacy unsplit Issue).
+//     exit 3. Falls through to normal Decomposition-boundary / Direct-inspection
 //     reasoning — this script has no opinion on what to do next, only on whether the
-//     immediate-dispatch shortcut applies.
+//     immediate-dispatch shortcut applies. See BLOCKED above for the narrower case where
+//     control state instead says to stop outright.
 //   ERROR — the control Issue could not be read, --control-issue was missing/invalid, or
 //     (issue #344) the current repository identity could not be established from the
 //     checkout (no configured `origin` remote, or a remote URL that isn't a recognizable
-//     GitHub owner/repo). Distinct from NOT_READY: this means authoritative control state
-//     was never reached at all, not that it was read and found unsatisfied — it must never
-//     be treated as license to fall through to execution-Issue inspection on the theory
-//     that "the gate said something." exit 1.
+//     GitHub owner/repo). Distinct from NOT_READY and BLOCKED: this means authoritative
+//     control state was never reached at all, not that it was read and found unsatisfied
+//     or blocking — it must never be treated as license to fall through to execution-Issue
+//     inspection on the theory that "the gate said something." exit 1.
 //
 // Usage (normal path — repository identity is derived automatically, never hand-typed):
 //   node tools/orchestration/ready-dispatch-gate.mjs --control-issue 322
@@ -266,6 +282,19 @@ export function parseExecutionPointer(value) {
 // touching the network, matching this repository's existing gate-script convention
 // (lifecycle-gate.mjs, stage1-gate.mjs).
 //
+// Issue #368: unsatisfied gate fields are classified into two disjoint buckets rather
+// than one broad NOT_READY. A "blocking" field is one whose own parsed value positively
+// asserts that the invocation must not advance — `Lifecycle: BLOCKED` specifically (not
+// any other non-READY lifecycle state), a Blocker field that was found and is not the
+// "none" sentinel, or a Founder-decision field that was found and is not the "none"
+// sentinel. Every other unsatisfied condition (a missing field, an unrecognized lifecycle
+// value, a mid-cycle lifecycle state other than BLOCKED, an unsettled Route, a malformed
+// or self-referential Execution pointer) stays ordinary NOT_READY: the shortcut doesn't
+// apply, but nothing read here asserts that work must stop. A control Issue that trips
+// any blocking condition returns status "BLOCKED" with only the blocking reason(s) —
+// never the full NOT_READY diagnostic set — since the point is a concise, authoritative
+// stop signal, not a complete field-by-field report.
+//
 // Each field is read from the ad hoc "- **Label:**" bullet convention first (the shape
 // real control Issues #311/#322 use), falling back to the shipped
 // `parent-execution.yml` template's own "### Heading" fields where one exists: "State"
@@ -286,9 +315,17 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   const founderDecisionRaw = parseControlBullet(body, "Founder decision") ?? parseHeadingField(body, "Founder interrupt");
 
   const reasons = [];
+  // Issue #368: reasons that positively assert "stop" rather than merely "shortcut
+  // doesn't apply". Populated as a subset of `reasons`, never a separate parse.
+  const blockingReasons = [];
 
   if (lifecycleRaw === null) {
     reasons.push('no "- **Lifecycle:**" bullet or "### State" heading found in the control Issue body');
+  } else if (lifecycleRaw.toUpperCase() === "BLOCKED") {
+    const msg =
+      'lifecycle is "BLOCKED" — this control Issue has an explicit blocking lifecycle state and must not receive a fresh immediate dispatch';
+    reasons.push(msg);
+    blockingReasons.push(msg);
   } else if (lifecycleRaw.toUpperCase() !== "READY") {
     reasons.push(
       `lifecycle is "${lifecycleRaw}", not READY` +
@@ -314,13 +351,21 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   if (blockerRaw === null) {
     reasons.push('no "- **Blocker:**" bullet or "### Current blocker" heading found in the control Issue body');
   } else if (!isNoneSentinel(blockerRaw)) {
-    reasons.push(`Blocker is not "none" (found: "${blockerRaw}")`);
+    const msg = `Blocker is not "none" (found: "${blockerRaw}") — an active blocker must not be reinterpreted as authorization to advance`;
+    reasons.push(msg);
+    blockingReasons.push(msg);
   }
 
   if (founderDecisionRaw === null) {
     reasons.push('no "- **Founder decision:**" bullet or "### Founder interrupt" heading found in the control Issue body');
   } else if (!isNoneSentinel(founderDecisionRaw)) {
-    reasons.push(`Founder decision is not "none" (found: "${founderDecisionRaw}")`);
+    const msg = `Founder decision is not "none" (found: "${founderDecisionRaw}") — an unresolved founder decision must stop the invocation, not authorize execution reasoning`;
+    reasons.push(msg);
+    blockingReasons.push(msg);
+  }
+
+  if (blockingReasons.length > 0) {
+    return { status: "BLOCKED", reasons: blockingReasons };
   }
 
   if (reasons.length > 0) {
@@ -471,6 +516,9 @@ export async function checkReadyDispatch(
   }
 
   const result = evaluateReadyDispatchGate(data.body ?? "", controlIssue);
+  if (result.status === "BLOCKED") {
+    return { exitCode: 4, state: "BLOCKED", controlIssue: Number(controlIssue), repo: resolvedRepo, reasons: result.reasons };
+  }
   if (result.status === "NOT_READY") {
     return { exitCode: 3, state: "NOT_READY", controlIssue: Number(controlIssue), repo: resolvedRepo, reasons: result.reasons };
   }
