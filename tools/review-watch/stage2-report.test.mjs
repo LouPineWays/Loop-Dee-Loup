@@ -1005,3 +1005,57 @@ test("isCompletedStage2AuditReport (issue #381): reproduces the real #380 CLEAN 
   assert.equal(result.verdict, "CLEAN");
   assert.deepEqual(result.reasons, []);
 });
+
+// -- Stage 1 review findings on this PR: masking a "### Checks" section must not itself turn an
+// unrelated earlier numbered *findings* list, or a nested subheading inside "### Checks", into
+// counted walk-through evidence.
+
+test("countVerificationWalkthroughItems (Stage 1 finding P1 on this PR): numbered findings with no separate walk-through are not counted merely because a trailing 'Checks' log is masked out", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. First finding — root cause X.",
+    "2. Second finding — root cause Y.",
+    "3. Third finding — root cause Z.",
+    "",
+    "### Checks",
+    "",
+    "- ✅ `npm test`",
+    "",
+    "Verdict: CLEAN",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 0, "no genuine checklist walk-through exists; the findings list must not be promoted into one");
+  assert.equal(
+    hasCompleteVerificationEvidence(body, THREE_ITEM_CHECKLIST),
+    false,
+    "three findings plus one command check must not satisfy a three-item requested checklist",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding P1 on this PR): a genuine walk-through with no 'Findings' heading is still counted normally when a 'Checks' log follows it (must not regress)", () => {
+  const body = ["### Verification results", "", "1. **PASS** — first item.", "2. **PASS** — second item.", "", "### Checks", "", "- ✅ `npm test`"].join(
+    "\n",
+  );
+  assert.equal(countVerificationWalkthroughItems(body), 2, "a walk-through not labeled as findings must still win over the masked Checks section");
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding P2 on this PR): a nested subheading inside a 'Checks' section does not end the masked section early", () => {
+  const body = [
+    "1. **PASS** — first item.",
+    "2. **PASS** — second item.",
+    "",
+    "### Checks",
+    "",
+    "#### Unit tests",
+    "",
+    "- ✅ `cmd a`",
+    "- ✅ `cmd b`",
+    "- ✅ `cmd c`",
+    "- ✅ `cmd d`",
+  ].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    2,
+    "the nested '#### Unit tests' subheading must not re-expose the Checks section's command bullets to candidacy",
+  );
+});

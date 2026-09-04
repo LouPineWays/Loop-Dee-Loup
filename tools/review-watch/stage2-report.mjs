@@ -242,8 +242,9 @@ function isTopLevelBoundaryLine(line) {
 }
 
 // A Markdown heading line at any level ("#" through "######"), used only to find section
-// boundaries — not itself a candidate checklist/finding line.
-const HEADING_LINE_PATTERN = /^#{1,6}\s+\S/;
+// boundaries — not itself a candidate checklist/finding line. Captures the "#" run so callers
+// can compare heading levels (computeHeadingSectionMask, below).
+const HEADING_LEVEL_PATTERN = /^(#{1,6})\s+\S/;
 
 // A heading whose own text names a *literal command log* rather than a checklist walk-through —
 // observed real shape: "### Checks" (issue #381, comment 5541924356), each of whose lines is
@@ -255,27 +256,61 @@ const HEADING_LINE_PATTERN = /^#{1,6}\s+\S/;
 // text alone, not exact punctuation/emphasis around it.
 const CHECKS_SECTION_HEADING_PATTERN = /^#{1,6}\s*\*{0,2}\s*checks?\b/i;
 
-// Pure. For each line index in `lines`, whether that line falls inside a literal-command-log
-// section — from a heading matching CHECKS_SECTION_HEADING_PATTERN down to (but not including)
-// the next heading of any level, or the end of the document. Lines before the first heading are
-// never inside such a section. Issue #381: findNumberedWalkthroughRun and findMarkerWalkthroughRun
-// both use this to exclude a trailing "### Checks" section's own bullets from ever being mistaken
-// for the genuine requested-checklist walk-through, even though the two use the identical
-// per-item status-marker glyphs — a real Stage 2 response reproduced in comment 5541924356 has a
-// complete, earlier, fully-sequential 6-item numbered "Verification results" walk-through
-// followed by a 5-line "### Checks" section of literal commands, and the marker-bullet run that
-// section produced was previously winning countVerificationWalkthroughItems's "whichever run ends
-// later" tie-break over the correct, earlier, complete numbered run.
-function computeLiteralCommandLogMask(lines) {
+// A heading whose own text names the response's *findings* section (the required response
+// structure's item (2), one numbered entry per finding — docs/bounded-review-cycle.md) rather
+// than its checklist walk-through (item (3)). Stage 1 review finding on this PR (P1): masking a
+// trailing "### Checks" section can leave a numbered findings list as the *only* remaining
+// numbered-run candidate when the response never actually wrote a separate walk-through section
+// — e.g. three numbered findings followed only by a masked "### Checks" log — and
+// findNumberedWalkthroughRun's "last run starting at 1" heuristic has no way to tell that
+// findings list apart from a genuine walk-through once nothing later in the document
+// disambiguates it. Excluding findings-labeled content from candidacy the same way
+// CHECKS_SECTION_HEADING_PATTERN excludes command logs closes that gap: a findings list can
+// then only ever be miscounted as the walk-through when it is not labeled as findings at all,
+// the same pre-existing, accepted ambiguity every marker/numbered heuristic in this module
+// already lives with (documented in findNumberedWalkthroughRun's own comment).
+const FINDINGS_SECTION_HEADING_PATTERN = /^#{1,6}\s*\*{0,2}\s*findings?\b/i;
+
+// Pure. For each line index in `lines`, whether that line falls inside a section opened by a
+// heading matching `startPattern` — from that heading down to (but not including) the next
+// heading at the *same or shallower* level, or the end of the document. A heading nested
+// *deeper* than the section's own opening heading (e.g. a "#### Unit tests" subheading under a
+// "### Checks" section) does not end the section — Stage 1 review finding on this PR (P2): the
+// original version compared every heading against `startPattern` unconditionally, so a nested
+// subheading that didn't itself say "checks" incorrectly closed the section early, exposing its
+// remaining bullets to being counted as checklist items again. Lines before the first matching
+// heading are never inside a section.
+function computeHeadingSectionMask(lines, startPattern) {
   const mask = new Array(lines.length).fill(false);
-  let inChecksSection = false;
+  let sectionLevel = null;
   for (let i = 0; i < lines.length; i++) {
-    if (HEADING_LINE_PATTERN.test(lines[i])) {
-      inChecksSection = CHECKS_SECTION_HEADING_PATTERN.test(lines[i]);
+    const headingMatch = HEADING_LEVEL_PATTERN.exec(lines[i]);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      if (sectionLevel !== null && level <= sectionLevel) {
+        sectionLevel = null;
+      }
+      if (sectionLevel === null && startPattern.test(lines[i])) {
+        sectionLevel = level;
+      }
     }
-    mask[i] = inChecksSection;
+    mask[i] = sectionLevel !== null;
   }
   return mask;
+}
+
+// Pure. For each line index in `lines`, whether that line falls inside a literal-command-log
+// section (CHECKS_SECTION_HEADING_PATTERN) or a findings section (FINDINGS_SECTION_HEADING_
+// PATTERN) — see each pattern's own comment for why both are excluded from checklist-walk-
+// through candidacy. Issue #381: findNumberedWalkthroughRun and findMarkerWalkthroughRun both
+// use this to exclude those sections' own bullets/numbering from ever being mistaken for the
+// genuine requested-checklist walk-through, even though a command log reuses the identical
+// per-item status-marker glyphs a real checklist item uses, and a findings list reuses the
+// identical numbered-list shape a real walk-through uses.
+function computeExcludedSectionMask(lines) {
+  const checksMask = computeHeadingSectionMask(lines, CHECKS_SECTION_HEADING_PATTERN);
+  const findingsMask = computeHeadingSectionMask(lines, FINDINGS_SECTION_HEADING_PATTERN);
+  return lines.map((_, i) => checksMask[i] || findingsMask[i]);
 }
 
 // Pure. Counts top-level numbered list lines ("1. ...", "2) ...") in `text`. Used against the
@@ -313,10 +348,10 @@ export function countNumberedItems(text) {
 // in the selected run, not just the last) is what lets numberedWalkthroughIsFullyMarked below
 // check every item in the exact same run for a per-item marker, not just its own line count.
 function findNumberedWalkthroughRun(lines) {
-  const literalCommandLogMask = computeLiteralCommandLogMask(lines);
+  const excludedSectionMask = computeExcludedSectionMask(lines);
   const numbered = [];
   lines.forEach((line, index) => {
-    if (literalCommandLogMask[index]) return;
+    if (excludedSectionMask[index]) return;
     const match = /^\s*(\d{1,3})[.)]\s+\S/.exec(line);
     if (match) numbered.push({ index, number: Number(match[1]) });
   });
@@ -399,10 +434,10 @@ export function hasVerificationEvidence(text) {
 // otherwise `{ count, endLineIndex }` — see findNumberedWalkthroughRun's own comment for why the
 // end position matters.
 function findMarkerWalkthroughRun(lines) {
-  const literalCommandLogMask = computeLiteralCommandLogMask(lines);
+  const excludedSectionMask = computeExcludedSectionMask(lines);
   const matchedLineIndexes = [];
   lines.forEach((line, index) => {
-    if (literalCommandLogMask[index]) return;
+    if (excludedSectionMask[index]) return;
     if (CHECKLIST_MARKER_ITEM_LINE_PATTERN.test(line)) matchedLineIndexes.push(index);
   });
   if (matchedLineIndexes.length === 0) return null;
@@ -428,10 +463,12 @@ function findMarkerWalkthroughRun(lines) {
 // one ends later in the document — the genuine checklist walk-through is whichever list actually
 // sits last (closest to the verdict), per the required response structure's ordering, not
 // whichever shape happens to be numbered (issue #330's Stage 1 review finding 1). Both candidate
-// runs are found with a trailing "### Checks" (or equivalent) literal-command-log section already
-// masked out (computeLiteralCommandLogMask, issue #381), so that section's own command bullets —
-// which reuse the identical status-marker glyphs a genuine checklist item uses — can never win
-// this tie-break merely for sitting physically later in the document than the real walk-through.
+// runs are found with a trailing "### Checks" (or equivalent) literal-command-log section, and
+// any findings section, already masked out (computeExcludedSectionMask, issue #381), so a
+// command log's bullets — which reuse the identical status-marker glyphs a genuine checklist
+// item uses — can never win this tie-break merely for sitting physically later in the document
+// than the real walk-through, and a findings list can never be counted as the walk-through
+// merely for being the only numbered run left once a command log is excluded.
 export function countVerificationWalkthroughItems(text) {
   const lines = (text ?? "").split("\n");
   const numberedRun = findNumberedWalkthroughRun(lines);
