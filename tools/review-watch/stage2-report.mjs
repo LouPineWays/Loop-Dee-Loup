@@ -241,6 +241,43 @@ function isTopLevelBoundaryLine(line) {
   return line.trim() !== "" && /^\S/.test(line);
 }
 
+// A Markdown heading line at any level ("#" through "######"), used only to find section
+// boundaries — not itself a candidate checklist/finding line.
+const HEADING_LINE_PATTERN = /^#{1,6}\s+\S/;
+
+// A heading whose own text names a *literal command log* rather than a checklist walk-through —
+// observed real shape: "### Checks" (issue #381, comment 5541924356), each of whose lines is
+// "- ✅ `<command run>`" — the exact same top-level marker-bullet shape CHECKLIST_MARKER_ITEM_
+// PATTERN matches for a genuine per-item checklist walk-through. The two are structurally
+// indistinguishable by bullet shape alone; the heading is the only signal that separates "this
+// bullet asserts a checklist item was verified" from "this bullet records that a command was
+// run." Matches "Checks", "Checks:", "Checks performed", "### **Checks**", etc. — the heading
+// text alone, not exact punctuation/emphasis around it.
+const CHECKS_SECTION_HEADING_PATTERN = /^#{1,6}\s*\*{0,2}\s*checks?\b/i;
+
+// Pure. For each line index in `lines`, whether that line falls inside a literal-command-log
+// section — from a heading matching CHECKS_SECTION_HEADING_PATTERN down to (but not including)
+// the next heading of any level, or the end of the document. Lines before the first heading are
+// never inside such a section. Issue #381: findNumberedWalkthroughRun and findMarkerWalkthroughRun
+// both use this to exclude a trailing "### Checks" section's own bullets from ever being mistaken
+// for the genuine requested-checklist walk-through, even though the two use the identical
+// per-item status-marker glyphs — a real Stage 2 response reproduced in comment 5541924356 has a
+// complete, earlier, fully-sequential 6-item numbered "Verification results" walk-through
+// followed by a 5-line "### Checks" section of literal commands, and the marker-bullet run that
+// section produced was previously winning countVerificationWalkthroughItems's "whichever run ends
+// later" tie-break over the correct, earlier, complete numbered run.
+function computeLiteralCommandLogMask(lines) {
+  const mask = new Array(lines.length).fill(false);
+  let inChecksSection = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (HEADING_LINE_PATTERN.test(lines[i])) {
+      inChecksSection = CHECKS_SECTION_HEADING_PATTERN.test(lines[i]);
+    }
+    mask[i] = inChecksSection;
+  }
+  return mask;
+}
+
 // Pure. Counts top-level numbered list lines ("1. ...", "2) ...") in `text`. Used against the
 // audit-control issue's own Verification checklist field, which contains nothing but the
 // requested list, so a plain count of every numbered line in it is accurate. Do not reuse this
@@ -276,8 +313,10 @@ export function countNumberedItems(text) {
 // in the selected run, not just the last) is what lets numberedWalkthroughIsFullyMarked below
 // check every item in the exact same run for a per-item marker, not just its own line count.
 function findNumberedWalkthroughRun(lines) {
+  const literalCommandLogMask = computeLiteralCommandLogMask(lines);
   const numbered = [];
   lines.forEach((line, index) => {
+    if (literalCommandLogMask[index]) return;
     const match = /^\s*(\d{1,3})[.)]\s+\S/.exec(line);
     if (match) numbered.push({ index, number: Number(match[1]) });
   });
@@ -360,8 +399,10 @@ export function hasVerificationEvidence(text) {
 // otherwise `{ count, endLineIndex }` — see findNumberedWalkthroughRun's own comment for why the
 // end position matters.
 function findMarkerWalkthroughRun(lines) {
+  const literalCommandLogMask = computeLiteralCommandLogMask(lines);
   const matchedLineIndexes = [];
   lines.forEach((line, index) => {
+    if (literalCommandLogMask[index]) return;
     if (CHECKLIST_MARKER_ITEM_LINE_PATTERN.test(line)) matchedLineIndexes.push(index);
   });
   if (matchedLineIndexes.length === 0) return null;
@@ -386,7 +427,11 @@ function findMarkerWalkthroughRun(lines) {
 // #330). When both a numbered run and a marker-bullet run exist in the same body, picks whichever
 // one ends later in the document — the genuine checklist walk-through is whichever list actually
 // sits last (closest to the verdict), per the required response structure's ordering, not
-// whichever shape happens to be numbered (issue #330's Stage 1 review finding 1).
+// whichever shape happens to be numbered (issue #330's Stage 1 review finding 1). Both candidate
+// runs are found with a trailing "### Checks" (or equivalent) literal-command-log section already
+// masked out (computeLiteralCommandLogMask, issue #381), so that section's own command bullets —
+// which reuse the identical status-marker glyphs a genuine checklist item uses — can never win
+// this tie-break merely for sitting physically later in the document than the real walk-through.
 export function countVerificationWalkthroughItems(text) {
   const lines = (text ?? "").split("\n");
   const numberedRun = findNumberedWalkthroughRun(lines);

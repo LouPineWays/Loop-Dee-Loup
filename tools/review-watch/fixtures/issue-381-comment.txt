@@ -1,0 +1,46 @@
+## Stage 2 audit report
+
+**Exact merge commit audited:** `3947b0e03be816a483d8cc7117241f86f13b081c`
+
+### Severity summary
+
+| Severity | Count |
+|---|---:|
+| Critical | 0 |
+| High | 0 |
+| Medium | 0 |
+| Low | 0 |
+
+### Findings
+
+No actionable findings.
+
+### Verification results
+
+1. **PASS — bounded mechanical continuation.** `AGENTS.md` limits uninterrupted mechanical work to one bounded transition, requires the controller to stop at the resulting lifecycle breakpoint, and distinguishes persistent durable lifecycle/control state from disposable reasoning context.
+
+2. **PASS — five-breakpoint terminology.** The Context-cost guidance now says "five-breakpoint fresh-context model," consistent with the operating model's "Across all five breakpoints" summary.
+
+3. **PASS — authorized-stage scope.** The bounded-review-cycle guidance permits mechanical continuation only within one authorized stage and explicitly ends the current controller when reaching PR/Stage 1, routing a Stage 1 finding, triggering Stage 2, or routing a NOT CLEAN verdict.
+
+4. **PASS — five lifecycle breakpoints.** The operating model enumerates exactly five breakpoints: initial implementation to first PR, PR review/fix, merge to Stage 2, NOT CLEAN correction/re-audit, and CLEAN or terminal interruption. It explicitly applies these boundaries to both controller and worker reasoning contexts.
+
+5. **PASS — diff confinement.** The merge commit changes only `AGENTS.md` and `docs/operating-model.md`, with no code, tooling, templates, or other documentation modified.
+
+6. **PASS — control-plane workflow.** GitHub Actions run `33882019271`, named `Control-plane paths`, completed successfully for frozen reviewed head `fd1baa68eefd9dabec69784fa1c5390e9fa31ae5`.
+
+### Checks
+
+- ✅ `git diff --name-status 3947b0e03be816a483d8cc7117241f86f13b081c^ 3947b0e03be816a483d8cc7117241f86f13b081c`
+- ✅ `git diff --check 3947b0e03be816a483d8cc7117241f86f13b081c^ 3947b0e03be816a483d8cc7117241f86f13b081c`
+- ✅ `git show --format=fuller --no-ext-diff --unified=80 3947b0e03be816a483d8cc7117241f86f13b081c -- AGENTS.md docs/operating-model.md`
+- ✅ `gh api 'repos/LouPineWays/Loop-Dee-Loup/actions/runs?head_sha=fd1baa68eefd9dabec69784fa1c5390e9fa31ae5' --jq '.workflow_runs[] | {id,name,status,conclusion,head_sha,event}'`
+- ✅ `git status --short` — no repository modifications; no commit or pull request was created, preserving the read-only reviewer boundary.
+
+### Founder judgment required
+
+No.
+
+### Verdict
+
+**CLEAN**

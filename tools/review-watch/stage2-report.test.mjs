@@ -625,6 +625,15 @@ const ISSUE_330_COMMIT = "0e04348fb764a364e9d910bfc8074ed9e1339df1";
 const ISSUE_330_COMMENT = readFixture("issue-330-comment.txt");
 const ISSUE_330_CHECKLIST = readFixture("issue-330-checklist.txt");
 
+// Issue #381: a genuine, complete 6-item numbered "Verification results" walk-through (matching
+// this issue's 6-item requested checklist), followed by an unrelated "### Checks" section of 5
+// literal-command bullets shaped identically to a marker-bullet checklist item ("- ✅ `cmd`").
+// Exact real response body (comment 5541924356 on issue #380) and its exact real requested
+// checklist (issue #380's own "Verification checklist" field), not paraphrased reconstructions.
+const ISSUE_381_COMMIT = "3947b0e03be816a483d8cc7117241f86f13b081c";
+const ISSUE_381_COMMENT = readFixture("issue-381-comment.txt");
+const ISSUE_381_CHECKLIST = readFixture("issue-381-checklist.txt");
+
 test("hasVerificationEvidence: true for a status-marker bullet checklist ('- ✅ ...') with no numbering", () => {
   assert.equal(hasVerificationEvidence("### Verification\n\n- ✅ Confirmed the fix works."), true);
 });
@@ -899,4 +908,100 @@ test("countVerificationWalkthroughItems (Stage 1 finding 4): a lone 'Founder jud
   assert.equal(countVerificationWalkthroughItems(body), 0);
   assert.equal(hasVerificationEvidence(body), false, "a warning-only bullet with no real checklist must not read as verification evidence");
   assert.equal(hasCompleteVerificationEvidence(body, "1. Confirm X."), false);
+});
+
+// -- issue #381: a later "### Checks" literal-command-log section must never outrank a complete,
+// earlier numbered checklist walk-through merely for using the same status-marker glyphs and
+// sitting later in the document.
+
+test("countVerificationWalkthroughItems (issue #381): a complete numbered walk-through is not undercounted by a later, unrelated 'Checks' section of fewer status-marker command bullets", () => {
+  const body = [
+    "### Verification results",
+    "",
+    "1. **PASS** — first item.",
+    "2. **PASS** — second item.",
+    "3. **PASS** — third item.",
+    "4. **PASS** — fourth item.",
+    "5. **PASS** — fifth item.",
+    "6. **PASS** — sixth item.",
+    "",
+    "### Checks",
+    "",
+    "- ✅ `command one`",
+    "- ✅ `command two`",
+    "- ✅ `command three`",
+    "- ✅ `command four`",
+    "- ✅ `command five`",
+    "",
+    "Verdict: CLEAN",
+  ].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    6,
+    "the correct, earlier, complete 6-item numbered walk-through must win over the later 5-item Checks section",
+  );
+});
+
+test("hasCompleteVerificationEvidence (issue #381): the synthetic reproduction satisfies its matching 6-item requested checklist", () => {
+  const body = [
+    "### Verification results",
+    "",
+    "1. **PASS** — first item.",
+    "2. **PASS** — second item.",
+    "3. **PASS** — third item.",
+    "4. **PASS** — fourth item.",
+    "5. **PASS** — fifth item.",
+    "6. **PASS** — sixth item.",
+    "",
+    "### Checks",
+    "",
+    "- ✅ `command one`",
+    "- ✅ `command two`",
+    "- ✅ `command three`",
+    "- ✅ `command four`",
+    "- ✅ `command five`",
+    "",
+    "Verdict: CLEAN",
+  ].join("\n");
+  const requestedChecklist = "1. A.\n2. B.\n3. C.\n4. D.\n5. E.\n6. F.";
+  assert.equal(hasCompleteVerificationEvidence(body, requestedChecklist), true);
+});
+
+test("countVerificationWalkthroughItems (issue #381): a 'Checks' heading at any level, with optional emphasis/colon, is still recognized as a literal-command-log section", () => {
+  const body = ["1. one", "2. two", "", "#### **Checks:**", "", "- ✅ `cmd a`", "- ✅ `cmd b`", "- ✅ `cmd c`"].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 2, "the 2-item numbered run must win, not the 3-item 'Checks:' section");
+});
+
+test("countVerificationWalkthroughItems (issue #381): a genuine marker-bullet checklist NOT under a 'Checks' heading still wins the later-run tie-break unaffected (issue #330's Stage 1 finding 1 must not regress)", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. First finding — root cause X, now fixed.",
+    "",
+    "### Verification",
+    "",
+    "- ✅ Confirmed A.",
+    "- ✅ Confirmed B.",
+    "- ✅ Confirmed C.",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 3, "an unrelated section not literally named 'Checks' must not be masked out");
+});
+
+test("countVerificationWalkthroughItems (issue #381): reproduces the real #380/#381 response — the correct 6-item numbered walk-through, not the 5-item 'Checks' section", () => {
+  assert.equal(countVerificationWalkthroughItems(ISSUE_381_COMMENT), 6);
+  assert.equal(countNumberedItems(ISSUE_381_CHECKLIST), 6);
+});
+
+test("hasCompleteVerificationEvidence (issue #381): the real response satisfies its real 6-item requested checklist", () => {
+  assert.equal(hasCompleteVerificationEvidence(ISSUE_381_COMMENT, ISSUE_381_CHECKLIST), true);
+});
+
+test("isCompletedStage2AuditReport (issue #381): reproduces the real #380 CLEAN Stage 2 response as complete — previously misclassified as incomplete (5 of 6) due to the later 'Checks' section", () => {
+  const result = isCompletedStage2AuditReport(ISSUE_381_COMMENT, {
+    mergeCommit: ISSUE_381_COMMIT,
+    requestedChecklist: ISSUE_381_CHECKLIST,
+  });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "CLEAN");
+  assert.deepEqual(result.reasons, []);
 });
