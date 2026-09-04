@@ -191,6 +191,18 @@ test("checkReadyDispatch: a template-shaped control Issue with State: BLOCKED_FA
   assert.ok(!("executionIssue" in result));
 });
 
+test("checkReadyDispatch: a template-shaped control Issue with State: BLOCKED_EXTERNAL reports exit 4, state BLOCKED (issue #370)", async () => {
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 301 },
+    { ghIssueViewImpl: async () => ({ body: templateShapedBlockedBody("BLOCKED_EXTERNAL"), state: "OPEN" }) },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "BLOCKED");
+  assert.ok(result.reasons.length > 0);
+  assert.ok(result.reasons.some((r) => r.includes("BLOCKED_EXTERNAL")));
+  assert.ok(!("executionIssue" in result));
+});
+
 test("evaluateReadyDispatchGate: a non-'none' Blocker alone (otherwise READY-shaped) is BLOCKED, not a fallthrough NOT_READY (issue #368)", () => {
   const body =
     "- **Lifecycle:** READY\n- **Execution:** #5\n- **Route:** implementation worker\n- **Blocker:** waiting on an external dependency\n- **Founder decision:** none\n";
