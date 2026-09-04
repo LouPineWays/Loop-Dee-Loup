@@ -140,6 +140,57 @@ test("evaluateReadyDispatchGate: the exact control #301 reproduction shape is BL
   assert.ok(result.reasons.some((r) => r.includes("Blocker")));
 });
 
+// Issue #370 (Stage 1 finding on #368's PR): `.github/ISSUE_TEMPLATE/parent-execution.yml`'s
+// own "State" dropdown never offers the bare word "BLOCKED" — its actual blocking options
+// are "BLOCKED_FAILURE" and "BLOCKED_EXTERNAL". A template-shaped control Issue using either
+// value must read as BLOCKED, not fall through to ordinary NOT_READY the way the old
+// literal-"BLOCKED"-only check let it.
+function templateShapedBlockedBody(stateValue) {
+  return [
+    "### State",
+    "",
+    stateValue,
+    "",
+    "### Current state",
+    "",
+    "- **Execution:** #5",
+    "- **Route:** implementation worker",
+    "",
+    "### Current blocker",
+    "",
+    "none",
+    "",
+    "### Founder interrupt",
+    "",
+    "none",
+    "",
+  ].join("\n");
+}
+
+test("evaluateReadyDispatchGate: a template-shaped body with State: BLOCKED_FAILURE is BLOCKED, not NOT_READY (issue #370)", () => {
+  const result = evaluateReadyDispatchGate(templateShapedBlockedBody("BLOCKED_FAILURE"));
+  assert.equal(result.status, "BLOCKED");
+  assert.ok(result.reasons.some((r) => r.includes("BLOCKED_FAILURE")));
+});
+
+test("evaluateReadyDispatchGate: a template-shaped body with State: BLOCKED_EXTERNAL is BLOCKED, not NOT_READY (issue #370)", () => {
+  const result = evaluateReadyDispatchGate(templateShapedBlockedBody("BLOCKED_EXTERNAL"));
+  assert.equal(result.status, "BLOCKED");
+  assert.ok(result.reasons.some((r) => r.includes("BLOCKED_EXTERNAL")));
+});
+
+test("checkReadyDispatch: a template-shaped control Issue with State: BLOCKED_FAILURE reports exit 4, state BLOCKED (issue #370)", async () => {
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 301 },
+    { ghIssueViewImpl: async () => ({ body: templateShapedBlockedBody("BLOCKED_FAILURE"), state: "OPEN" }) },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "BLOCKED");
+  assert.ok(result.reasons.length > 0);
+  assert.ok(result.reasons.some((r) => r.includes("BLOCKED_FAILURE")));
+  assert.ok(!("executionIssue" in result));
+});
+
 test("evaluateReadyDispatchGate: a non-'none' Blocker alone (otherwise READY-shaped) is BLOCKED, not a fallthrough NOT_READY (issue #368)", () => {
   const body =
     "- **Lifecycle:** READY\n- **Execution:** #5\n- **Route:** implementation worker\n- **Blocker:** waiting on an external dependency\n- **Founder decision:** none\n";

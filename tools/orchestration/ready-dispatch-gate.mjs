@@ -64,11 +64,13 @@
 //     the dispatched worker; nothing else belongs in that prompt (AGENTS.md § Subagent
 //     dispatch).
 //   BLOCKED — issue #368: the control Issue was read successfully and its own recorded
-//     fields *explicitly* say the current invocation must not advance — `Lifecycle:
-//     BLOCKED`, a non-"none" Blocker, or an unresolved Founder decision. exit 4. This is a
-//     positive, authoritative "do not advance" verdict, not merely "the immediate-dispatch
-//     shortcut doesn't apply" — distinct from NOT_READY by construction so a controller
-//     cannot collapse the two into the same "fall through and reason normally" handling.
+//     fields *explicitly* say the current invocation must not advance — a blocking
+//     lifecycle value (the ad hoc bullet convention's `Lifecycle: BLOCKED`, or the shipped
+//     template's `State: BLOCKED_FAILURE` / `State: BLOCKED_EXTERNAL` — issue #370), a
+//     non-"none" Blocker, or an unresolved Founder decision. exit 4. This is a positive,
+//     authoritative "do not advance" verdict, not merely "the immediate-dispatch shortcut
+//     doesn't apply" — distinct from NOT_READY by construction so a controller cannot
+//     collapse the two into the same "fall through and reason normally" handling.
 //     Control #301's live reproduction (issue #368) is the incident this exists to close:
 //     `Lifecycle: BLOCKED` plus an active Blocker both landed in the old broad NOT_READY
 //     bucket, and the controller then treated that NOT_READY result as permission to fall
@@ -103,7 +105,18 @@
 
 import { execFileSync } from "node:child_process";
 
-const KNOWN_LIFECYCLE_STATES = ["READY", "EXECUTING", "VERIFYING", "REVIEW", "AUDIT", "CORRECTION", "BLOCKED"];
+const KNOWN_LIFECYCLE_STATES = ["READY", "EXECUTING", "VERIFYING", "REVIEW", "AUDIT", "CORRECTION", "BLOCKED", "BLOCKED_FAILURE", "BLOCKED_EXTERNAL"];
+
+// Issue #370 (Stage 1 finding on #368's PR): the ad hoc "- **Lifecycle:**" bullet
+// convention uses the bare word "BLOCKED", but `.github/ISSUE_TEMPLATE/parent-execution.yml`'s
+// own "State" dropdown never offers that bare value at all — its actual blocking options
+// are "BLOCKED_FAILURE" and "BLOCKED_EXTERNAL". Matching only the literal string "BLOCKED"
+// let a template-created control Issue with `State: BLOCKED_FAILURE` (or
+// `BLOCKED_EXTERNAL`) fall through to ordinary NOT_READY — reproducing the exact
+// NOT_READY/BLOCKED collapse issue #368 was written to close, just reachable via the
+// template's own field values instead of the ad hoc bullet. All three values are treated
+// identically as positive "do not advance" signals.
+const BLOCKING_LIFECYCLE_VALUES = new Set(["BLOCKED", "BLOCKED_FAILURE", "BLOCKED_EXTERNAL"]);
 
 // Pure. Reads one "- **Label:** value" bullet line from a control Issue's body — the
 // "Current state" block's own rendering convention (not a GitHub issue-form field, so
@@ -284,16 +297,18 @@ export function parseExecutionPointer(value) {
 //
 // Issue #368: unsatisfied gate fields are classified into two disjoint buckets rather
 // than one broad NOT_READY. A "blocking" field is one whose own parsed value positively
-// asserts that the invocation must not advance — `Lifecycle: BLOCKED` specifically (not
-// any other non-READY lifecycle state), a Blocker field that was found and is not the
-// "none" sentinel, or a Founder-decision field that was found and is not the "none"
-// sentinel. Every other unsatisfied condition (a missing field, an unrecognized lifecycle
-// value, a mid-cycle lifecycle state other than BLOCKED, an unsettled Route, a malformed
-// or self-referential Execution pointer) stays ordinary NOT_READY: the shortcut doesn't
-// apply, but nothing read here asserts that work must stop. A control Issue that trips
-// any blocking condition returns status "BLOCKED" with only the blocking reason(s) —
-// never the full NOT_READY diagnostic set — since the point is a concise, authoritative
-// stop signal, not a complete field-by-field report.
+// asserts that the invocation must not advance — a blocking lifecycle value specifically
+// (issue #370: `BLOCKED`, `BLOCKED_FAILURE`, or `BLOCKED_EXTERNAL` — see
+// BLOCKING_LIFECYCLE_VALUES; not any other non-READY lifecycle state), a Blocker field
+// that was found and is not the "none" sentinel, or a Founder-decision field that was
+// found and is not the "none" sentinel. Every other unsatisfied condition (a missing
+// field, an unrecognized lifecycle value, a mid-cycle lifecycle state other than a
+// blocking one, an unsettled Route, a malformed or self-referential Execution pointer)
+// stays ordinary NOT_READY: the shortcut doesn't apply, but nothing read here asserts
+// that work must stop. A control Issue that trips any blocking condition returns status
+// "BLOCKED" with only the blocking reason(s) — never the full NOT_READY diagnostic set —
+// since the point is a concise, authoritative stop signal, not a complete field-by-field
+// report.
 //
 // Each field is read from the ad hoc "- **Label:**" bullet convention first (the shape
 // real control Issues #311/#322 use), falling back to the shipped
@@ -321,9 +336,9 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
 
   if (lifecycleRaw === null) {
     reasons.push('no "- **Lifecycle:**" bullet or "### State" heading found in the control Issue body');
-  } else if (lifecycleRaw.toUpperCase() === "BLOCKED") {
+  } else if (BLOCKING_LIFECYCLE_VALUES.has(lifecycleRaw.toUpperCase())) {
     const msg =
-      'lifecycle is "BLOCKED" — this control Issue has an explicit blocking lifecycle state and must not receive a fresh immediate dispatch';
+      `lifecycle is "${lifecycleRaw}" — this control Issue has an explicit blocking lifecycle state and must not receive a fresh immediate dispatch`;
     reasons.push(msg);
     blockingReasons.push(msg);
   } else if (lifecycleRaw.toUpperCase() !== "READY") {
