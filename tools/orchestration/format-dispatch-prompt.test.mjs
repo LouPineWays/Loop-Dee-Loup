@@ -32,6 +32,18 @@ test("formatDispatchPrompt includes the PR-open stop clause", () => {
   assert.match(prompt, /Watched lifecycle breakpoints/);
 });
 
+// Stage 2 audit #363 finding on merged PR #362: the three assertions above also match the
+// *pre-fix* template text from before commit dd643668b363aa6e2127efdea351943ac39dee8a (which
+// added the Stage 1 exemption branch below) — a revert of that commit would still pass them
+// unchanged, because none of them pin the exemption-specific wording. This test asserts the
+// exemption branch itself, so reverting dd643668b363aa6e2127efdea351943ac39dee8a back to only
+// "Stage 1 review has been requested, stop" fails this test.
+test("formatDispatchPrompt's stop clause covers the recorded Stage 1 exemption branch, not just a review-requested PR", () => {
+  const prompt = formatDispatchPrompt({ controlIssue: 322, executionIssue: 321, route: "implementation worker" });
+  assert.match(prompt, /Stage 1 review requested, or/);
+  assert.match(prompt, /a recorded Stage 1 exemption for non-review-worthy work/);
+});
+
 test("formatDispatchPrompt never contains restated AGENTS.md contract prose", () => {
   const prompt = formatDispatchPrompt({ controlIssue: 322, executionIssue: 321, route: "implementation worker" });
   // The regression this script exists to prevent: a dispatch prompt that restates whole
