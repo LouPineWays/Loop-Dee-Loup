@@ -76,9 +76,13 @@ test("real fixture: control Issue #311's body is READY_TO_DISPATCH with executio
   assert.equal(result.route, "implementation worker");
 });
 
-test("real fixture: control Issue #322's body is NOT_READY because Lifecycle is BLOCKED, not READY", () => {
+test("real fixture: control Issue #322's body is BLOCKED (issue #368) because Lifecycle is BLOCKED and Blocker is non-none", () => {
+  // Issue #368: this fixture used to read as ordinary NOT_READY, which the old AGENTS.md
+  // fallback treated as license to fall through into execution reasoning. Both fields
+  // here positively assert "stop", so the gate must now return the distinct BLOCKED
+  // verdict instead.
   const result = evaluateReadyDispatchGate(ISSUE_322_BODY);
-  assert.equal(result.status, "NOT_READY");
+  assert.equal(result.status, "BLOCKED");
   assert.ok(result.reasons.some((r) => r.includes("BLOCKED")));
   // The Blocker field is also non-"none" here — both must not be silently inferred from
   // each other (operating-model.md: "blocker and founder-decision state are separate,
@@ -117,6 +121,106 @@ test("parseExecutionPointer: exactly one #N is ok; zero or multiple fail closed"
   assert.equal(multi.ok, false);
   assert.ok(multi.reason.includes("#310"));
   assert.ok(multi.reason.includes("#318"));
+});
+
+// Issue #368: the exact control #301 reproduction shape from the incident report.
+const CONTROL_301_BODY = `## Current state
+
+- **Lifecycle:** BLOCKED
+- **Execution:** #297
+- **Route:** implementation worker
+- **Blocker:** obtain independently verifiable durable primary evidence for any scored run and/or enough exercisable participant availability to support an authorized terminal conclusion without unverifiable derived data
+- **Founder decision:** none
+`;
+
+test("evaluateReadyDispatchGate: the exact control #301 reproduction shape is BLOCKED, not ordinary NOT_READY (issue #368)", () => {
+  const result = evaluateReadyDispatchGate(CONTROL_301_BODY);
+  assert.equal(result.status, "BLOCKED");
+  assert.ok(result.reasons.some((r) => r.includes("BLOCKED")));
+  assert.ok(result.reasons.some((r) => r.includes("Blocker")));
+});
+
+// Issue #370 (Stage 1 finding on #368's PR): `.github/ISSUE_TEMPLATE/parent-execution.yml`'s
+// own "State" dropdown never offers the bare word "BLOCKED" — its actual blocking options
+// are "BLOCKED_FAILURE" and "BLOCKED_EXTERNAL". A template-shaped control Issue using either
+// value must read as BLOCKED, not fall through to ordinary NOT_READY the way the old
+// literal-"BLOCKED"-only check let it.
+function templateShapedBlockedBody(stateValue) {
+  return [
+    "### State",
+    "",
+    stateValue,
+    "",
+    "### Current state",
+    "",
+    "- **Execution:** #5",
+    "- **Route:** implementation worker",
+    "",
+    "### Current blocker",
+    "",
+    "none",
+    "",
+    "### Founder interrupt",
+    "",
+    "none",
+    "",
+  ].join("\n");
+}
+
+test("evaluateReadyDispatchGate: a template-shaped body with State: BLOCKED_FAILURE is BLOCKED, not NOT_READY (issue #370)", () => {
+  const result = evaluateReadyDispatchGate(templateShapedBlockedBody("BLOCKED_FAILURE"));
+  assert.equal(result.status, "BLOCKED");
+  assert.ok(result.reasons.some((r) => r.includes("BLOCKED_FAILURE")));
+});
+
+test("evaluateReadyDispatchGate: a template-shaped body with State: BLOCKED_EXTERNAL is BLOCKED, not NOT_READY (issue #370)", () => {
+  const result = evaluateReadyDispatchGate(templateShapedBlockedBody("BLOCKED_EXTERNAL"));
+  assert.equal(result.status, "BLOCKED");
+  assert.ok(result.reasons.some((r) => r.includes("BLOCKED_EXTERNAL")));
+});
+
+test("checkReadyDispatch: a template-shaped control Issue with State: BLOCKED_FAILURE reports exit 4, state BLOCKED (issue #370)", async () => {
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 301 },
+    { ghIssueViewImpl: async () => ({ body: templateShapedBlockedBody("BLOCKED_FAILURE"), state: "OPEN" }) },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "BLOCKED");
+  assert.ok(result.reasons.length > 0);
+  assert.ok(result.reasons.some((r) => r.includes("BLOCKED_FAILURE")));
+  assert.ok(!("executionIssue" in result));
+});
+
+test("evaluateReadyDispatchGate: a non-'none' Blocker alone (otherwise READY-shaped) is BLOCKED, not a fallthrough NOT_READY (issue #368)", () => {
+  const body =
+    "- **Lifecycle:** READY\n- **Execution:** #5\n- **Route:** implementation worker\n- **Blocker:** waiting on an external dependency\n- **Founder decision:** none\n";
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "BLOCKED");
+  assert.equal(result.reasons.length, 1);
+  assert.ok(result.reasons[0].includes("Blocker"));
+});
+
+test("evaluateReadyDispatchGate: an unresolved Founder decision alone (otherwise READY-shaped) is BLOCKED, not a fallthrough NOT_READY (issue #368)", () => {
+  const body =
+    "- **Lifecycle:** READY\n- **Execution:** #5\n- **Route:** implementation worker\n- **Blocker:** none\n- **Founder decision:** choose between option A and option B\n";
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "BLOCKED");
+  assert.equal(result.reasons.length, 1);
+  assert.ok(result.reasons[0].includes("Founder decision"));
+});
+
+test("evaluateReadyDispatchGate: EXECUTING/VERIFYING/REVIEW/AUDIT/CORRECTION with Blocker/Founder decision both none stay NOT_READY, never BLOCKED (issue #368 AC: authorized mid-lifecycle continuation is not converted into a founder blocker)", () => {
+  for (const state of ["EXECUTING", "VERIFYING", "REVIEW", "AUDIT", "CORRECTION"]) {
+    const body = `- **Lifecycle:** ${state}\n- **Execution:** #5\n- **Route:** implementation worker\n- **Blocker:** none\n- **Founder decision:** none\n`;
+    const result = evaluateReadyDispatchGate(body);
+    assert.equal(result.status, "NOT_READY", `expected NOT_READY (not BLOCKED) for lifecycle ${state}`);
+  }
+});
+
+test("evaluateReadyDispatchGate: a legacy unsplit Issue with no control-state shape at all stays ordinary NOT_READY fallback, never BLOCKED (issue #368)", () => {
+  const body = "This is a plain legacy issue body with no Current-state bullet block at all.";
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "NOT_READY");
 });
 
 test("evaluateReadyDispatchGate: missing Blocker/Founder-decision fields fail closed, never assumed 'none'", () => {
@@ -412,15 +516,44 @@ test("checkReadyDispatch: a closed control Issue is NOT_READY regardless of body
   assert.equal(result.state, "NOT_READY");
 });
 
-test("checkReadyDispatch: a NOT_READY control Issue (real #322 fixture) reports exit 3 with reasons, never dispatches", async () => {
+test("checkReadyDispatch: a BLOCKED control Issue (control #301 reproduction shape) reports exit 4 with reasons, from a single read, never dispatches (issue #368)", async () => {
+  let calls = 0;
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 301 },
+    {
+      ghIssueViewImpl: async () => {
+        calls++;
+        return { body: CONTROL_301_BODY, state: "OPEN" };
+      },
+    },
+  );
+  assert.equal(calls, 1);
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "BLOCKED");
+  assert.notEqual(result.exitCode, 3);
+  assert.ok(result.reasons.length > 0);
+  assert.ok(!("executionIssue" in result));
+});
+
+test("checkReadyDispatch: a BLOCKED control Issue (real #322 fixture) reports exit 4 with reasons, never dispatches (issue #368)", async () => {
   const result = await checkReadyDispatch(
     { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 322 },
     { ghIssueViewImpl: async () => ({ body: ISSUE_322_BODY, state: "OPEN" }) },
   );
-  assert.equal(result.exitCode, 3);
-  assert.equal(result.state, "NOT_READY");
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "BLOCKED");
   assert.ok(result.reasons.length > 0);
   assert.ok(!("executionIssue" in result));
+});
+
+test("checkReadyDispatch: an ordinary NOT_READY control Issue (mid-cycle lifecycle, no active blocker) still reports exit 3, distinct from BLOCKED's exit 4", async () => {
+  const body = "- **Lifecycle:** EXECUTING\n- **Execution:** #5\n- **Route:** implementation worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 400 },
+    { ghIssueViewImpl: async () => ({ body, state: "OPEN" }) },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "NOT_READY");
 });
 
 test("checkReadyDispatch: missing required args fails closed with exit 1", async () => {
