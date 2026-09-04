@@ -91,7 +91,10 @@ export function formatDispatchPrompt({ controlIssue, executionIssue, route }) {
     `Read #${executionIssue} directly from GitHub for its full outcome, constraints, and ` +
     `acceptance criteria — it was not restated here on purpose. Execute it per AGENTS.md ` +
     `and, for review-worthy work, docs/bounded-review-cycle.md. Report back using ` +
-    `AGENTS.md's Slice handoff format.`
+    `AGENTS.md's Slice handoff format. Once the PR exists — Stage 1 review requested, or ` +
+    `a recorded Stage 1 exemption for non-review-worthy work — stop: do not wait, poll, ` +
+    `merge, or begin Stage 2; those are fresh-worker or deterministic steps per ` +
+    `docs/operating-model.md § Watched lifecycle breakpoints.`
   );
 }
 

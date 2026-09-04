@@ -77,7 +77,7 @@ For a single bounded vertical slice, the session must:
 5. create or designate at most one next vertical slice, and only when completing this slice exposes genuinely new follow-on work that was not already foreseeable at dispatch;
 6. stop at the slice boundary with a concise handoff.
 
-Do not ask whether to proceed with mechanically determined implementation, checks, verified review corrections, or handoff preparation — a new session start may be required to continue, but that is scheduling rather than approval. Once the founder has responded in an active session, continue mechanically through the resulting work without pausing for routine confirmation. Stop only at a genuine completion, a founder interrupt condition, or a real blocker, and say which.
+Do not ask whether to proceed with mechanically determined implementation, checks, verified review corrections, or handoff preparation — a new session start may be required to continue, but that is scheduling rather than approval. Once the founder has responded in an active session, continue mechanically through the resulting work without pausing for routine confirmation. Stop only at a genuine completion, a founder interrupt condition, or a real blocker, and say which. This "continue mechanically ... until CLEAN completion" instruction governs the top-level founder-invoked session; a dispatched implementation worker under the watched-lifecycle model stops instead at the PR-open breakpoint per `docs/operating-model.md` § Watched lifecycle breakpoints.
 
 ## Subagent dispatch
 
@@ -193,7 +193,7 @@ When a workflow failure is systemic, make the smallest governing correction at t
 
 Open or update the self-sufficient PR or issue record before clearing, compacting, ending, or handing off a session. The durable record must state the outcome, scope, evidence, blockers, review stage, exact refs, and next authorized action so a successor with zero conversation memory can continue safely.
 
-Treat the Stage 1 review request and a CLEAN Stage 2 close as natural fresh-session boundaries. Run `spend` before a destructive context clear when the completed session is worth measuring. Do not retain an implementation-heavy session merely to wait for CI, review, or an issue audit.
+Treat the Stage 1 review request and a CLEAN Stage 2 close as natural fresh-session boundaries — see `docs/operating-model.md` § Watched lifecycle breakpoints for the full four-breakpoint fresh-worker model across a watched outcome's lifecycle. Run `spend` before a destructive context clear when the completed session is worth measuring. Do not retain an implementation-heavy session merely to wait for CI, review, or an issue audit.
 
 Use event delivery for PR activity when the available harness supports it. Do not add long timer-driven fallback waits that keep a large context alive when an event subscription already covers the state change. Issue-based audit responses are different: if no event delivery exists, delegate the trigger, bounded wait, and result extraction to one disposable worker or successor context. It must return only CLEAN/NOT CLEAN, severity counts, and the finding text required for action, never the complete audit transcript or command log.
 
