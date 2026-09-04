@@ -20,6 +20,18 @@ test("formatDispatchPrompt stays well under the reference-only threshold for a r
   assert.ok(prompt.length < 700, `expected < 700 chars, got ${prompt.length}`);
 });
 
+// Issue #286: an implementation worker dispatched by this formatter must stop at the
+// PR-open/Stage-1-triggered breakpoint rather than riding AGENTS.md's general "continue
+// mechanically ... until CLEAN completion" instruction through Stage 1 wait, merge, and
+// Stage 2 (the #311/#310/#317/#318 reproduction recorded on #286). The stop clause must be
+// part of the fixed template itself, not left to the orchestrating session to add by hand.
+test("formatDispatchPrompt includes the PR-open stop clause", () => {
+  const prompt = formatDispatchPrompt({ controlIssue: 322, executionIssue: 321, route: "implementation worker" });
+  assert.match(prompt, /stop/i);
+  assert.match(prompt, /do not wait, poll, merge, or begin Stage 2/);
+  assert.match(prompt, /Watched lifecycle breakpoints/);
+});
+
 test("formatDispatchPrompt never contains restated AGENTS.md contract prose", () => {
   const prompt = formatDispatchPrompt({ controlIssue: 322, executionIssue: 321, route: "implementation worker" });
   // The regression this script exists to prevent: a dispatch prompt that restates whole
