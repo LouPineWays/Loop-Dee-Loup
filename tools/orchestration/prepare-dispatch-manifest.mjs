@@ -6,24 +6,33 @@
 // reimplemented) and, for every unit in the plan, resolves a route using a small, fixed,
 // deterministic table rather than any per-unit judgment:
 //
-//   1. If the unit's own "Files/surfaces expected to change" field already names an
-//      existing non-test script file (checked against the real filesystem), immediately
-//      followed by the fixed annotation "(invoked, not modified)", AND that same script is
-//      NOT also named inside this same unit's own "Required bounded outcome" field -- i.e.
-//      an existing mechanism this unit merely invokes, not the thing this unit itself is
-//      building or changing -- the route is that script itself: running it, not dispatching
-//      a reasoning worker, satisfies the unit. The annotation is required, not merely
-//      existence-on-disk plus absence from "Required bounded outcome": that weaker pair of
-//      signals is not by itself proof of non-modification -- a valid contract whose outcome
-//      describes the same file without literally repeating its exact backtick path (a
+//   1. If the unit's own "Files/surfaces expected to change" field, once trimmed, consists of
+//      EXACTLY one backtick-quoted path to an existing, non-test script file (checked against
+//      the real filesystem) immediately followed by the fixed annotation
+//      "(invoked, not modified)" and nothing else (`extractSoleInvokedNotModifiedPath`), AND
+//      that same script is NOT also named inside this same unit's own "Required bounded
+//      outcome" field -- i.e. an existing mechanism this unit merely invokes, not the thing
+//      this unit itself is building or changing, and the unit's ENTIRE Files/surfaces field
+//      is that one invocation, nothing more -- the route is that script itself: running it,
+//      not dispatching a reasoning worker, satisfies the unit. The annotation is required,
+//      not merely existence-on-disk plus absence from "Required bounded outcome": that weaker
+//      pair of signals is not by itself proof of non-modification -- a valid contract whose
+//      outcome describes the same file without literally repeating its exact backtick path (a
 //      paraphrase, no filename quoted) would otherwise be silently short-circuited to "just
 //      run the pre-change file" when its real job is to modify it (Stage 1 review finding on
 //      PR #401, issue #400's correction). "Files/surfaces expected to change" is, by its own
 //      field name, a list of files that DO change; a script can only correctly land in this
 //      route when the unit's own contract explicitly, truthfully asserts the opposite for
-//      that one entry. A script the unit's own "Required bounded outcome" names as its
-//      deliverable is still never routed this way even when annotated, as defense in depth;
-//      see `isUnitsOwnDeliverable` below.
+//      that one entry. The whole-field anchor is independently necessary, not merely the
+//      annotation: an annotated script sitting alongside a genuinely separate deliverable
+//      would otherwise still wrongly satisfy the whole unit by invoking only the safe entry,
+//      silently leaving the other named surface's real work undone (Stage 2 audit #402), and
+//      that same defect resurfaces if the second surface is unquoted plain text rather than a
+//      second backtick span (Stage 1 review finding on PR #403) -- see
+//      `extractSoleInvokedNotModifiedPath`'s own comment for the full defect/fix history. A
+//      script the unit's own "Required bounded outcome" names as its deliverable is still
+//      never routed this way even when the field otherwise matches, as defense in depth; see
+//      `isUnitsOwnDeliverable` below.
 //   2. Else, if the unit's "Applicable role/capability" field names a skill or persona that
 //      actually exists under `.claude/skills/` or `.claude/personas/`, the route is that
 //      skill/persona.
@@ -119,22 +128,47 @@ export function findExistingScriptPath(filesSurfacesField, { fileExists }) {
   return null;
 }
 
-// The one fixed phrase a "Files/surfaces expected to change" entry must carry, immediately
-// after its own backtick-quoted path, for that entry to be eligible for the
-// deterministic-script route -- see the module comment above for why mere existence-on-disk
-// is not sufficient. Exact phrase, case-sensitive; not a fuzzy/nearby-text check.
-const INVOKED_NOT_MODIFIED_ANNOTATION = "(invoked, not modified)";
+// Anchors the ENTIRE "Files/surfaces expected to change" field (once trimmed) to be exactly
+// one backtick-quoted path followed by the fixed "(invoked, not modified)" phrase and nothing
+// else (an optional trailing period is the only thing allowed after it). See
+// `extractSoleInvokedNotModifiedPath` below for why the whole field must be anchored rather
+// than merely checking the phrase appears somewhere near the path.
+const SOLE_INVOKED_NOT_MODIFIED_FIELD = /^`([^`]+)`\s*\(invoked, not modified\)\.?$/;
 
-// Pure. True when `scriptPath`'s own backtick-quoted span inside `filesSurfacesField` is
-// immediately followed (optionally after whitespace) by the fixed
-// INVOKED_NOT_MODIFIED_ANNOTATION phrase -- the only truthful way a contract can assert this
-// file is a pre-existing mechanism the unit merely invokes, not one it is itself changing.
-export function hasInvokedNotModifiedAnnotation(filesSurfacesField, scriptPath) {
-  const text = filesSurfacesField ?? "";
-  const escapedPath = scriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const escapedAnnotation = INVOKED_NOT_MODIFIED_ANNOTATION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp("`" + escapedPath + "`\\s*" + escapedAnnotation);
-  return re.test(text);
+// Pure. Returns the quoted path when `filesSurfacesField` (once trimmed) consists of EXACTLY
+// one backtick-quoted path immediately followed by the fixed "(invoked, not modified)"
+// phrase and nothing else -- null for anything else at all: a second surface (quoted or
+// plain text), the script mentioned twice, surrounding prose, an unrelated inline code span,
+// or the annotation missing/misplaced. This single whole-field anchor replaces two earlier,
+// narrower checks (an annotation-adjacency regex, and a separate code-span count) that each
+// had their own real gap found on independent review:
+//   - Checking only that the annotation sits next to ITS OWN script (the original PR #401
+//     fix) said nothing about whether the field ALSO named a second, genuine surface
+//     elsewhere -- a unit whose Files/surfaces listed an annotated pre-existing script
+//     alongside a separate real deliverable (e.g. "`gate.mjs` (invoked, not modified),
+//     `new-feature.mjs` (new)") was still wrongly routed to "just run the gate script",
+//     silently leaving the deliverable unimplemented (Stage 2 audit #402).
+//   - Counting backtick code spans (`isOnlySurfaceNamed`, this correction's own first
+//     attempt) undercounted a second surface named in PLAIN, unquoted text (Codex's own
+//     `docs/new-guide.md` example) -- the parser does not require backtick-quoting for this
+//     field, so an unquoted second surface was invisible to a spans.length check entirely --
+//     and separately OVERcounted a genuinely single-surface field that happened to mention
+//     the same path twice, or an unrelated inline code span (e.g. a CLI flag name) in its own
+//     explanatory prose, needlessly declining a safe deterministic route (Stage 1 review
+//     finding on PR #403).
+// Anchoring the WHOLE field to this one minimal, exact shape closes both gaps at once and
+// admits no further per-token heuristic to get wrong: anything beyond the bare minimal
+// assertion -- correct or not, quoted or not, duplicate or not -- simply does not match, and
+// the unit falls through to a reasoning-worker route instead of being guessed at. This is a
+// deliberate precision trade-off, not an oversight: a unit whose contract explains itself in
+// extra prose around the annotation, or explains it twice, no longer gets the deterministic
+// route even when a human reader would consider it obviously safe -- accepted because the
+// cost of a needless reasoning-worker dispatch is far smaller than the cost of another
+// per-token exception this file's own history shows is easy to get wrong again.
+export function extractSoleInvokedNotModifiedPath(filesSurfacesField) {
+  const text = (filesSurfacesField ?? "").trim();
+  const m = SOLE_INVOKED_NOT_MODIFIED_FIELD.exec(text);
+  return m ? m[1] : null;
 }
 
 // Pure. True when `scriptPath` also appears as a code span inside `requiredBoundedOutcomeField`
@@ -213,7 +247,7 @@ export function resolveUnitRoute(unit, { fileExists, skillNames = [], personaNam
   const scriptPath = findExistingScriptPath(unit?.filesSurfacesExpectedToChange, { fileExists });
   if (
     scriptPath &&
-    hasInvokedNotModifiedAnnotation(unit?.filesSurfacesExpectedToChange, scriptPath) &&
+    extractSoleInvokedNotModifiedPath(unit?.filesSurfacesExpectedToChange) === scriptPath &&
     !isUnitsOwnDeliverable(scriptPath, unit?.requiredBoundedOutcome)
   ) {
     return { route: `deterministic script: ${scriptPath}`, isReplanRequired: false, reason: null };

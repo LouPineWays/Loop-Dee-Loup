@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import {
   extractCodeSpans,
   findExistingScriptPath,
-  hasInvokedNotModifiedAnnotation,
+  extractSoleInvokedNotModifiedPath,
   isUnitsOwnDeliverable,
   findSkillOrPersonaMatch,
   extractCapabilityClassLabel,
@@ -200,49 +200,102 @@ test("extractCapabilityClassLabel does not treat an abbreviation's period as a s
   );
 });
 
-// --- hasInvokedNotModifiedAnnotation -------------------------------------------------
+// --- extractSoleInvokedNotModifiedPath -----------------------------------------------
 
-test("hasInvokedNotModifiedAnnotation is true when the exact annotation immediately follows the script's own backtick span", () => {
+test("extractSoleInvokedNotModifiedPath returns the path when the field is exactly that one annotated entry", () => {
   assert.equal(
-    hasInvokedNotModifiedAnnotation(
-      "`tools/orchestration/ready-dispatch-gate.mjs` (invoked, not modified).",
-      "tools/orchestration/ready-dispatch-gate.mjs",
-    ),
-    true,
+    extractSoleInvokedNotModifiedPath("`tools/orchestration/ready-dispatch-gate.mjs` (invoked, not modified)."),
+    "tools/orchestration/ready-dispatch-gate.mjs",
+  );
+  // Trailing period is optional.
+  assert.equal(
+    extractSoleInvokedNotModifiedPath("`tools/orchestration/ready-dispatch-gate.mjs` (invoked, not modified)"),
+    "tools/orchestration/ready-dispatch-gate.mjs",
   );
 });
 
-test("hasInvokedNotModifiedAnnotation is false when the script is named without the annotation", () => {
+test("extractSoleInvokedNotModifiedPath returns null when the script is named without the annotation", () => {
+  assert.equal(extractSoleInvokedNotModifiedPath("`tools/orchestration/ready-dispatch-gate.mjs`."), null);
+});
+
+// Stage 1 review finding on PR #403 (audit #402's own correction, round 1): the parser does
+// not require backtick-quoting for "Files/surfaces expected to change", so a second surface
+// named in plain, unquoted text was invisible to a backtick-code-span count -- a unit with
+// an annotated script plus a plain-text second deliverable (e.g. "docs/new-guide.md (new)")
+// was still wrongly routed to the script alone. The whole-field anchor rejects this outright:
+// nothing may follow the annotation but an optional trailing period.
+test("extractSoleInvokedNotModifiedPath returns null when a second surface is named in plain, unquoted text", () => {
   assert.equal(
-    hasInvokedNotModifiedAnnotation(
-      "`tools/orchestration/ready-dispatch-gate.mjs`, `tools/orchestration/some-other.mjs`.",
-      "tools/orchestration/ready-dispatch-gate.mjs",
-    ),
-    false,
+    extractSoleInvokedNotModifiedPath("`tools/orchestration/ready-dispatch-gate.mjs` (invoked, not modified), docs/new-guide.md (new)."),
+    null,
   );
 });
 
-test("hasInvokedNotModifiedAnnotation is false when the annotation is present but attached to a different span", () => {
+test("extractSoleInvokedNotModifiedPath returns null when a second surface is named as a second backtick span", () => {
   assert.equal(
-    hasInvokedNotModifiedAnnotation(
-      "`tools/orchestration/other.mjs` (invoked, not modified), `tools/orchestration/ready-dispatch-gate.mjs`.",
-      "tools/orchestration/ready-dispatch-gate.mjs",
+    extractSoleInvokedNotModifiedPath(
+      "`tools/orchestration/ready-dispatch-gate.mjs` (invoked, not modified), `tools/orchestration/new-feature.mjs` (new).",
     ),
-    false,
+    null,
+  );
+});
+
+// Stage 1 review finding on PR #403 (round 2): a genuinely single-surface field that mentions
+// the same path twice, or an unrelated inline code span (e.g. a CLI flag) in its own
+// explanatory prose, is deliberately NOT recognized either -- the whole-field anchor accepts
+// only the bare minimal assertion, trading a needless reasoning-worker dispatch in this case
+// for never having to get a per-token dedup/exception heuristic right again (see this
+// function's own module comment for the full rationale).
+test("extractSoleInvokedNotModifiedPath returns null for a genuinely single-surface field wrapped in extra prose", () => {
+  assert.equal(
+    extractSoleInvokedNotModifiedPath(
+      "See `tools/orchestration/ready-dispatch-gate.mjs` (invoked, not modified) -- also referenced via `--control-issue`.",
+    ),
+    null,
   );
 });
 
 // --- resolveUnitRoute ---------------------------------------------------------------
 
-test("resolveUnitRoute routes to a deterministic script when Files/surfaces names one that exists AND carries the invoked-not-modified annotation", () => {
+test("resolveUnitRoute routes to a deterministic script when Files/surfaces is exactly one annotated existing script", () => {
   const fileExists = fileExistsFrom(["tools/orchestration/parse-execution-plan.mjs"]);
   const u = unit({
     requiredBoundedOutcome: "Consume the existing parser to produce a dispatch manifest.",
-    filesSurfacesExpectedToChange:
-      "`tools/orchestration/parse-execution-plan.mjs` (invoked, not modified), `tools/orchestration/parse-execution-plan.test.mjs`.",
+    filesSurfacesExpectedToChange: "`tools/orchestration/parse-execution-plan.mjs` (invoked, not modified).",
   });
   const result = resolveUnitRoute(u, { fileExists, skillNames: [], personaNames: [] });
   assert.equal(result.route, "deterministic script: tools/orchestration/parse-execution-plan.mjs");
+  assert.equal(result.isReplanRequired, false);
+});
+
+// Stage 2 audit #402 finding: an annotated, non-deliverable script sitting alongside a
+// genuinely separate deliverable in the same field only proves that ONE entry is a safe
+// invocation -- it says nothing about whether the rest of the unit's real outcome is
+// satisfied by running that script.
+test("resolveUnitRoute does NOT route to the deterministic-script route when a separate deliverable is named alongside the annotated script (backtick-quoted)", () => {
+  const fileExists = fileExistsFrom(["tools/orchestration/ready-dispatch-gate.mjs"]);
+  const u = unit({
+    requiredBoundedOutcome: "Create a new feature module.",
+    filesSurfacesExpectedToChange:
+      "`tools/orchestration/ready-dispatch-gate.mjs` (invoked, not modified), `tools/orchestration/new-feature.mjs` (new).",
+    applicableRoleCapability: "bounded coding worker (see Shared Contract).",
+  });
+  const result = resolveUnitRoute(u, { fileExists, skillNames: [], personaNames: [] });
+  assert.equal(result.route, "bounded implementation worker");
+  assert.equal(result.isReplanRequired, false);
+});
+
+// Stage 1 review finding on PR #403: the same defect resurfaces when the second surface is
+// plain, unquoted text rather than a second backtick span.
+test("resolveUnitRoute does NOT route to the deterministic-script route when a separate deliverable is named in plain, unquoted text", () => {
+  const fileExists = fileExistsFrom(["tools/orchestration/ready-dispatch-gate.mjs"]);
+  const u = unit({
+    requiredBoundedOutcome: "Create a new guide document.",
+    filesSurfacesExpectedToChange: "`tools/orchestration/ready-dispatch-gate.mjs` (invoked, not modified), docs/new-guide.md (new).",
+    applicableRoleCapability: "bounded coding worker (see Shared Contract).",
+  });
+  const result = resolveUnitRoute(u, { fileExists, skillNames: [], personaNames: [] });
+  assert.equal(result.route, "bounded implementation worker");
   assert.equal(result.isReplanRequired, false);
 });
 
@@ -277,13 +330,12 @@ test("resolveUnitRoute does NOT route to the deterministic-script route when the
 // DONE by then. A unit whose job is to build/modify a script must not be marked
 // deterministically satisfied by running that script's pre-change contents, even if (as
 // defense in depth) its own Files/surfaces entry were also carrying the annotation.
-test("resolveUnitRoute does NOT route to the deterministic-script route when the script is this unit's own deliverable, even when annotated", () => {
+test("resolveUnitRoute does NOT route to the deterministic-script route when the script is this unit's own deliverable, even when annotated and the only surface named", () => {
   const fileExists = fileExistsFrom(["tools/orchestration/prepare-dispatch-manifest.mjs"]);
   const u = unit({
     requiredBoundedOutcome:
       "`tools/orchestration/prepare-dispatch-manifest.mjs` (+ test) that consumes 294-B's shipped parser output.",
-    filesSurfacesExpectedToChange:
-      "`tools/orchestration/prepare-dispatch-manifest.mjs` (invoked, not modified), `tools/orchestration/prepare-dispatch-manifest.test.mjs`.",
+    filesSurfacesExpectedToChange: "`tools/orchestration/prepare-dispatch-manifest.mjs` (invoked, not modified).",
     applicableRoleCapability: "bounded coding worker (see Shared Contract).",
   });
   const result = resolveUnitRoute(u, { fileExists, skillNames: [], personaNames: [] });
@@ -603,9 +655,9 @@ test("runPrepareDispatchManifest produces a plausible manifest for a 5-unit plan
         applicableRoleCapability: "bounded coding worker (see Shared Contract).",
         // Modeled here as a genuine pre-existing-mechanism invocation (distinct from
         // 294-B's real full contract, which names this same script as its own deliverable)
-        // purely to exercise the deterministic-script route end-to-end.
-        filesSurfacesExpectedToChange:
-          "`tools/orchestration/parse-execution-plan.mjs` (invoked, not modified), `tools/orchestration/parse-execution-plan.test.mjs`.",
+        // purely to exercise the deterministic-script route end-to-end. Only the one
+        // annotated script is named, per extractSoleInvokedNotModifiedPath's requirement.
+        filesSurfacesExpectedToChange: "`tools/orchestration/parse-execution-plan.mjs` (invoked, not modified).",
         prerequisitesDependencies: "none. Parallel with 294-A.",
       }),
       "294-C": unit({
