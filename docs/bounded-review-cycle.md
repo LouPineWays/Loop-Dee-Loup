@@ -24,6 +24,23 @@ Within Loop-Dee-Loup's own repository, a PR that touches a control-plane path �
 
 `node tools/check-control-plane-paths.mjs` (wired into CI as the `control-plane-paths` workflow) deterministically verifies every path already listed above still resolves against the repository, guarding against the exact silent drift found by three consecutive Stage 2 audits (issues #37, #39, #41). It cannot decide whether a brand-new top-level location belongs on this list — that remains a judgment call for whoever adds it.
 
+## Integration/PR worker
+
+The step immediately before this cycle starts is its own bounded role, not part of it. Once an execution Issue's planned implementation units are complete (`docs/operating-model.md`, "Execution-stage session boundaries"), a fresh integration worker — none of the implementation workers, and not the Codex reviewer this cycle triggers — determines whether the implementation actually produced the coherent outcome that was planned, and opens the PR.
+
+It reads only the durable surfaces that job needs: the parent execution contract and its acceptance/verification authority, the durable execution plan and shared contracts, the completed implementation state, and governing repository authority. It then:
+
+1. compares the durable plan against the actual repository result;
+2. identifies missing units, violated shared contracts, unintegrated seams, and inconsistencies between units;
+3. synthesizes or fixes those seams itself when the correction is within the already-authorized execution scope — escalating rather than expanding scope when it is not;
+4. verifies the integrated vertical outcome against the Entry check above;
+5. opens the PR with the durable evidence Stage 1 needs;
+6. persists the PR/control reference and ends.
+
+Refreshing the Plan Index comment from current unit states is part of step 1's comparison, and this worker is one of only two writers allowed to do it (`docs/operating-model.md`, "Durable plan artifacts").
+
+**This worker is not the independent reviewer, and its verification never substitutes for Stage 1 or Stage 2.** It participates in producing the outcome — it writes code, resolves seams, and authors the PR — so it cannot also be the independent assurance boundary over that same work, for the same reason Stage 2 must be performed by a fresh context that did not perform the correction it audits (Stage 2 step 2; `docs/operating-model.md`, "Watched lifecycle breakpoints", breakpoint 4). Its completion is what makes a PR *eligible* for Stage 1, never evidence that Stage 1 happened: `stage1-gate.mjs` remains the only thing that establishes that, per Stage 1 step 9. This role also ends at breakpoint 1 — it does not stay alive to watch the review it just made possible.
+
 ## Stage 1: one inline PR review round
 
 1. Complete the slice and required local checks.

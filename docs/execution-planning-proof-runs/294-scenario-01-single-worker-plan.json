@@ -1,0 +1,18 @@
+{
+  "scenario": "1. Single-worker plan",
+  "issue_294_text": "planner determines that one capable worker is cheaper/safer than decomposition; implementation completes without artificial units",
+  "status": "demonstrated (indirect: mechanism correctly does not impose multi-unit structure on a genuinely single-worker issue)",
+  "representative_real_work": "issue #368 (\"[Bug] Stop blocked control invocations at the READY gate instead of falling through to execution reasoning\", CLOSED) -- a real, already-completed LDL execution issue that was implemented and merged as one bounded vertical slice by one worker, with no Plan Index/Shared Contract/Worker Unit comments ever created for it.",
+  "exact_command": "node tools/orchestration/parse-execution-plan.mjs --execution-issue 368",
+  "observed_output": {
+    "ok": false,
+    "repo": "LouPineWays/Loop-Dee-Loup",
+    "executionIssue": 368,
+    "errors": [
+      "no comment with heading \"## Execution Plan Index (v1)\" was found on issue #368"
+    ]
+  },
+  "exit_code": 2,
+  "interpretation": "issue #368 is a real, closed, single-bounded-vertical-slice execution issue that never went through 294-A/B/C's multi-unit planning machinery -- it was implemented directly by one worker under AGENTS.md's normal Session execution path, with no Plan Index comment ever authored. Running the real parse-execution-plan.mjs against it produces a clean, explicit 'no plan found' result (exit 2, a specific error, not a crash and not a fabricated single-unit plan). This demonstrates the mechanism's own side of scenario 1's requirement: it does not force multi-unit Plan Index / Worker Unit Contract machinery onto an issue that is correctly handled as one worker, and does not silently invent structure where none exists.",
+  "honest_caveat": "The scenario's other half -- a planner explicitly reasoning 'one capable worker is cheaper than decomposition' and recording that reasoning -- is a planning-stage judgment call made (or, for a simple issue like #368, implicitly never needed at all) outside 294-B/294-C's deterministic parse/route scripts, which only operate on already-authored Plan Index comments. No separate durable 'the planner considered decomposition and rejected it' artifact exists for #368 (nor is one required by AGENTS.md for a plainly single-slice issue) to point to as direct evidence of that reasoning step. This proof-run therefore demonstrates the mechanism's behavior on a genuine single-worker case, not a captured planner deliberation transcript."
+}
