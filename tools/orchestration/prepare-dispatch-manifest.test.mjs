@@ -15,10 +15,12 @@ import assert from "node:assert/strict";
 import {
   extractCodeSpans,
   findExistingScriptPath,
+  isUnitsOwnDeliverable,
   findSkillOrPersonaMatch,
   extractCapabilityClassLabel,
   resolveUnitRoute,
   extractDependencyUnitIds,
+  hasUnrecognizedDependencyWording,
   isDoneState,
   computeDispatchReady,
   buildNote,
@@ -78,6 +80,33 @@ test("findExistingScriptPath ignores non-path, non-script code spans (e.g. bare 
   assert.equal(findExistingScriptPath(field, { fileExists }), null);
 });
 
+// --- isUnitsOwnDeliverable -----------------------------------------------------------
+
+test("isUnitsOwnDeliverable is true when the script also appears in Required bounded outcome", () => {
+  assert.equal(
+    isUnitsOwnDeliverable(
+      "tools/orchestration/prepare-dispatch-manifest.mjs",
+      "`tools/orchestration/prepare-dispatch-manifest.mjs` (+ test) that consumes 294-B's parser.",
+    ),
+    true,
+  );
+});
+
+test("isUnitsOwnDeliverable is false when the script is not mentioned in Required bounded outcome", () => {
+  assert.equal(
+    isUnitsOwnDeliverable(
+      "tools/orchestration/parse-execution-plan.mjs",
+      "`tools/orchestration/prepare-dispatch-manifest.mjs` (+ test) that consumes 294-B's parser.",
+    ),
+    false,
+  );
+});
+
+test("isUnitsOwnDeliverable is false for an empty/absent Required bounded outcome field", () => {
+  assert.equal(isUnitsOwnDeliverable("tools/orchestration/example.mjs", ""), false);
+  assert.equal(isUnitsOwnDeliverable("tools/orchestration/example.mjs", null), false);
+});
+
 // --- findSkillOrPersonaMatch --------------------------------------------------------
 
 test("findSkillOrPersonaMatch finds a named skill", () => {
@@ -133,6 +162,43 @@ test("resolveUnitRoute routes to a deterministic script when Files/surfaces alre
   const fileExists = fileExistsFrom(["tools/orchestration/parse-execution-plan.mjs"]);
   const u = unit({
     filesSurfacesExpectedToChange: "`tools/orchestration/parse-execution-plan.mjs`, `tools/orchestration/parse-execution-plan.test.mjs`.",
+  });
+  const result = resolveUnitRoute(u, { fileExists, skillNames: [], personaNames: [] });
+  assert.equal(result.route, "deterministic script: tools/orchestration/parse-execution-plan.mjs");
+  assert.equal(result.isReplanRequired, false);
+});
+
+// Real-world regression: worker unit 294-C's own contract names its own deliverable
+// (prepare-dispatch-manifest.mjs) in "Files/surfaces expected to change" AND in "Required
+// bounded outcome". After 294-C shipped, a live Dispatch Manifest run wrongly routed 294-C
+// to "deterministic script: tools/orchestration/prepare-dispatch-manifest.mjs" -- i.e. "just
+// run the existing file" -- which only happened to be harmless because 294-C was already
+// DONE by then. A unit whose job is to build/modify a script must not be marked
+// deterministically satisfied by running that script's pre-change contents.
+test("resolveUnitRoute does NOT route to the deterministic-script route when the script is this unit's own deliverable", () => {
+  const fileExists = fileExistsFrom(["tools/orchestration/prepare-dispatch-manifest.mjs"]);
+  const u = unit({
+    requiredBoundedOutcome:
+      "`tools/orchestration/prepare-dispatch-manifest.mjs` (+ test) that consumes 294-B's shipped parser output.",
+    filesSurfacesExpectedToChange:
+      "`tools/orchestration/prepare-dispatch-manifest.mjs`, `tools/orchestration/prepare-dispatch-manifest.test.mjs`.",
+    applicableRoleCapability: "bounded coding worker (see Shared Contract).",
+  });
+  const result = resolveUnitRoute(u, { fileExists, skillNames: [], personaNames: [] });
+  // Falls through to the capability-class table instead of the script route.
+  assert.equal(result.route, "bounded implementation worker");
+  assert.equal(result.isReplanRequired, false);
+});
+
+// No-regression companion: a genuine pre-existing mechanism the unit merely invokes (not
+// named in its own Required bounded outcome) must still resolve to the deterministic-script
+// route exactly as before.
+test("resolveUnitRoute still routes to the deterministic script when it is NOT this unit's own deliverable", () => {
+  const fileExists = fileExistsFrom(["tools/orchestration/parse-execution-plan.mjs"]);
+  const u = unit({
+    requiredBoundedOutcome: "Consume the existing parser to produce a dispatch manifest.",
+    filesSurfacesExpectedToChange:
+      "`tools/orchestration/parse-execution-plan.mjs`, `tools/orchestration/parse-execution-plan.test.mjs`.",
   });
   const result = resolveUnitRoute(u, { fileExists, skillNames: [], personaNames: [] });
   assert.equal(result.route, "deterministic script: tools/orchestration/parse-execution-plan.mjs");
@@ -227,6 +293,56 @@ test("extractDependencyUnitIds extracts every unit ID in a multi-unit 'depends o
   );
 });
 
+// --- hasUnrecognizedDependencyWording -------------------------------------------------
+
+test("hasUnrecognizedDependencyWording flags a unit-ID mention this parser's grammar does not capture", () => {
+  assert.equal(hasUnrecognizedDependencyWording("Blocked by 294-A"), true);
+  assert.equal(hasUnrecognizedDependencyWording("Requires 294-A"), true);
+});
+
+test("hasUnrecognizedDependencyWording does not flag a recognized 'depends on ... Independent of ...' field", () => {
+  assert.equal(hasUnrecognizedDependencyWording("depends on 294-B (imports its parser). Independent of 294-A."), false);
+});
+
+test("hasUnrecognizedDependencyWording does not flag genuinely dependency-free text", () => {
+  assert.equal(hasUnrecognizedDependencyWording("none. Parallel with 294-B."), false);
+  assert.equal(hasUnrecognizedDependencyWording("none."), false);
+  assert.equal(hasUnrecognizedDependencyWording(null), false);
+});
+
+// --- computeDispatchReady + unrecognized wording (fails closed) ------------------------
+
+test("computeDispatchReady fails closed (not ready) for 'Blocked by 294-A' prerequisites wording", () => {
+  const u = unit({ prerequisitesDependencies: "Blocked by 294-A." });
+  const result = computeDispatchReady(u, { "294-X": u, "294-A": unit({ unitId: "294-A", state: "DONE" }) });
+  assert.equal(result.ready, false);
+  assert.equal(result.unrecognized, true);
+});
+
+test("computeDispatchReady fails closed (not ready) for 'Requires 294-A' prerequisites wording", () => {
+  const u = unit({ prerequisitesDependencies: "Requires 294-A." });
+  const result = computeDispatchReady(u, { "294-X": u, "294-A": unit({ unitId: "294-A", state: "DONE" }) });
+  assert.equal(result.ready, false);
+  assert.equal(result.unrecognized, true);
+});
+
+test("computeDispatchReady: 'depends on 294-B ... Independent of 294-A.' still extracts only 294-B and is not flagged as unrecognized", () => {
+  const depB = unit({ unitId: "294-B", state: "DONE" });
+  const u = unit({ prerequisitesDependencies: "depends on 294-B (imports its parser). Independent of 294-A." });
+  const result = computeDispatchReady(u, { "294-X": u, "294-B": depB, "294-A": unit({ unitId: "294-A", state: "PLANNED" }) });
+  assert.equal(result.ready, true);
+  assert.deepEqual(result.dependencies, ["294-B"]);
+  assert.equal(result.unrecognized, undefined);
+});
+
+test("computeDispatchReady: 'none. Parallel with 294-B.' still resolves ready with zero dependencies", () => {
+  const u = unit({ prerequisitesDependencies: "none. Parallel with 294-B." });
+  const result = computeDispatchReady(u, { "294-X": u, "294-B": unit({ unitId: "294-B", state: "PLANNED" }) });
+  assert.equal(result.ready, true);
+  assert.deepEqual(result.dependencies, []);
+  assert.equal(result.unrecognized, undefined);
+});
+
 // --- isDoneState -----------------------------------------------------------------------
 
 // Real Worker Unit Contract "State" fields carry a trailing one-line completion note and
@@ -298,6 +414,17 @@ test("buildNote reports DONE for a completed unit", () => {
     buildNote({ unit: unit({ state: "DONE" }), routeResult, readiness: { ready: true, dependencies: [], notDone: [] } }),
     "DONE",
   );
+});
+
+test("buildNote reports a distinct note for unrecognized prerequisites wording", () => {
+  const routeResult = { isReplanRequired: false };
+  const note = buildNote({
+    unit: unit({ prerequisitesDependencies: "Blocked by 294-A." }),
+    routeResult,
+    readiness: { ready: false, dependencies: [], notDone: [], unrecognized: true },
+  });
+  assert.match(note, /unrecognized prerequisites wording/);
+  assert.match(note, /Blocked by 294-A\./);
 });
 
 test("buildNote reports blocked dependencies when not ready", () => {

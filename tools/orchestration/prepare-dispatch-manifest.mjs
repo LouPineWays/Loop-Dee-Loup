@@ -7,9 +7,14 @@
 // deterministic table rather than any per-unit judgment:
 //
 //   1. If the unit's own "Files/surfaces expected to change" field already names an
-//      existing non-test script file (checked against the real filesystem), the route is
-//      that script itself — running it, not dispatching a reasoning worker, satisfies the
-//      unit.
+//      existing non-test script file (checked against the real filesystem) that is NOT
+//      also named inside this same unit's own "Required bounded outcome" field -- i.e. an
+//      existing mechanism this unit merely invokes, not the thing this unit itself is
+//      building or changing -- the route is that script itself: running it, not dispatching
+//      a reasoning worker, satisfies the unit. A script the unit's own "Required bounded
+//      outcome" names as its deliverable is never routed this way, even when a pre-change
+//      (or not-yet-existing) copy already happens to exist on disk; see
+//      `isUnitsOwnDeliverable` below.
 //   2. Else, if the unit's "Applicable role/capability" field names a skill or persona that
 //      actually exists under `.claude/skills/` or `.claude/personas/`, the route is that
 //      skill/persona.
@@ -25,11 +30,15 @@
 //
 // Priority order (1) before (3) is deliberate and takes precedence over the looser
 // "routes per its own recorded capability class" phrasing elsewhere in this plan: a unit
-// whose own deliverable script already exists on disk is better satisfied by naming that
-// script than by re-deriving a generic worker label from its capability class, and the
-// "Required bounded outcome" field's own ordered parenthetical (script, then skill/
-// persona, then capability-class fallback) is this unit's authoritative spec for the
-// table's shape.
+// whose "Files/surfaces expected to change" names an existing, on-disk script that is a
+// pre-existing mechanism this unit merely invokes (not its own deliverable) is better
+// satisfied by naming that script than by re-deriving a generic worker label from its
+// capability class, and the "Required bounded outcome" field's own ordered parenthetical
+// (script, then skill/persona, then capability-class fallback) is this unit's authoritative
+// spec for the table's shape. A script the unit's own "Required bounded outcome" names as
+// what this unit itself must produce/change is excluded from step (1) precisely because
+// running its pre-change contents cannot satisfy a unit whose job is to change it -- see
+// `isUnitsOwnDeliverable`.
 //
 // Independently, dispatch_ready is computed from the unit's own "Prerequisites/
 // dependencies" field: a DONE unit is always dispatch_ready (moot); an unresolved-route
@@ -101,6 +110,14 @@ export function findExistingScriptPath(filesSurfacesField, { fileExists }) {
   return null;
 }
 
+// Pure. True when `scriptPath` also appears as a code span inside `requiredBoundedOutcomeField`
+// -- i.e. this unit's own "Required bounded outcome" names that same file as part of what this
+// unit itself must produce/change, not merely invoke. A unit that is building or modifying a
+// script is not satisfied by running that script's pre-change (or not-yet-existing) contents.
+export function isUnitsOwnDeliverable(scriptPath, requiredBoundedOutcomeField) {
+  return extractCodeSpans(requiredBoundedOutcomeField).includes(scriptPath);
+}
+
 // Pure. True when `haystack` (already lower-cased) contains `name` as a whole lowercase
 // token/substring match — a simple, deterministic containment check, not fuzzy matching.
 function containsName(haystackLower, name) {
@@ -143,7 +160,7 @@ export function extractCapabilityClassLabel(capabilityField) {
 // REPLAN_REQUIRED case (why routing could not resolve deterministically).
 export function resolveUnitRoute(unit, { fileExists, skillNames = [], personaNames = [] } = {}) {
   const scriptPath = findExistingScriptPath(unit?.filesSurfacesExpectedToChange, { fileExists });
-  if (scriptPath) {
+  if (scriptPath && !isUnitsOwnDeliverable(scriptPath, unit?.requiredBoundedOutcome)) {
     return { route: `deterministic script: ${scriptPath}`, isReplanRequired: false, reason: null };
   }
 
@@ -169,6 +186,13 @@ export function resolveUnitRoute(unit, { fileExists, skillNames = [], personaNam
 
 const DEPENDS_ON_CLAUSE = /depends on\s+(.*?)(?:\.\s|\.$|\bindependent\b|$)/is;
 const UNIT_ID_TOKEN = /\d+-[A-Za-z]+/g;
+const UNIT_ID_TOKEN_EXISTS = /\d+-[A-Za-z]+/;
+// A unit-ID mention inside one of these clauses is an explicit non-dependency mention this
+// plan's own established prose vocabulary already uses (every real "no dependency" Worker
+// Unit Contract field in this plan reads "none. Parallel with <ID>." and a genuine
+// dependency field excludes a sibling with "Independent of <ID>.") -- neither is
+// "unrecognized" wording.
+const EXCLUDED_MENTION_CLAUSE = /\b(?:independent of|parallel with)\s+[^.]*\.?/gi;
 
 // Pure. A unit's own "State" field is DONE when it *starts with* the literal word "DONE"
 // -- real Worker Unit Contract comments append a one-line completion note and commit range
@@ -195,17 +219,43 @@ export function extractDependencyUnitIds(prerequisitesField) {
   return [...match[1].matchAll(UNIT_ID_TOKEN)].map((m) => m[0]);
 }
 
+// Pure. True when `prerequisitesField` names a unit-ID-shaped token that this file's own
+// "depends on ..." grammar does not capture and that is not explicitly excluded by an
+// "independent of ..." clause -- i.e. prose this parser cannot deterministically resolve
+// into a dependency list. Recognized-but-empty fields (e.g. "none.", "Parallel with 294-B.")
+// return false here; only a field naming a unit ID this parser fails to recognize as a
+// dependency clause is unrecognized.
+export function hasUnrecognizedDependencyWording(prerequisitesField) {
+  const text = prerequisitesField ?? "";
+  if (!text.trim()) return false;
+
+  let remaining = text;
+  const dependsMatch = DEPENDS_ON_CLAUSE.exec(text);
+  if (dependsMatch) {
+    remaining = remaining.slice(0, dependsMatch.index) + remaining.slice(dependsMatch.index + dependsMatch[0].length);
+  }
+  remaining = remaining.replace(EXCLUDED_MENTION_CLAUSE, "");
+
+  return UNIT_ID_TOKEN_EXISTS.test(remaining);
+}
+
 // Pure. Computes whether `unit` is currently dispatch-ready: always true (trivially) once
 // the unit's own State is DONE; otherwise true only when every unit ID its own
 // "Prerequisites/dependencies" field names after "depends on" is itself in state DONE in
 // `unitsById`. A referenced dependency unit ID that is not present in `unitsById` at all is
-// treated as not-ready (an unresolved reference is not evidence of readiness).
+// treated as not-ready (an unresolved reference is not evidence of readiness). A field with
+// no recognized "depends on" clause but that still names an unrecognized unit-ID-shaped
+// token (e.g. "Blocked by 294-A", "Requires 294-A") fails closed -- it is never silently
+// treated as "no dependencies" -- and is reported with `unrecognized: true`.
 export function computeDispatchReady(unit, unitsById) {
   if (isDoneState(unit.state)) {
     return { ready: true, dependencies: [], notDone: [] };
   }
   const dependencies = extractDependencyUnitIds(unit.prerequisitesDependencies);
   if (dependencies.length === 0) {
+    if (hasUnrecognizedDependencyWording(unit.prerequisitesDependencies)) {
+      return { ready: false, dependencies: [], notDone: [], unrecognized: true };
+    }
     return { ready: true, dependencies, notDone: [] };
   }
   const notDone = dependencies.filter((depId) => !isDoneState(unitsById[depId]?.state));
@@ -217,6 +267,9 @@ export function computeDispatchReady(unit, unitsById) {
 export function buildNote({ unit, routeResult, readiness }) {
   if (routeResult.isReplanRequired) return routeResult.reason;
   if (isDoneState(unit.state)) return "DONE";
+  if (readiness.unrecognized) {
+    return `unrecognized prerequisites wording: ${JSON.stringify(unit.prerequisitesDependencies ?? "")} -- needs a recognized "depends on" clause or replan`;
+  }
   if (readiness.ready) {
     return readiness.dependencies.length === 0
       ? "no prerequisites"

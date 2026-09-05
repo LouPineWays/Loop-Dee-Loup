@@ -249,7 +249,7 @@ export function parseExecutionPlan(comments, { executionIssue } = {}) {
           `the comment referenced as the Shared Contract (${sharedContractUrl}) does not have the required "## Shared Contract (v1)" heading`,
         );
       } else {
-        sharedContract = { commentId: sharedContractComment.id, url: sharedContractUrl };
+        sharedContract = { commentId: sharedContractComment.id, url: sharedContractComment.html_url ?? sharedContractUrl };
       }
     }
   }
@@ -292,13 +292,22 @@ export function parseExecutionPlan(comments, { executionIssue } = {}) {
     }
 
     const fields = {};
+    const missingLabels = [];
     for (const [label, key] of WORKER_UNIT_FIELDS) {
-      fields[key] = parseBulletBlock(unitComment.body, label);
+      const value = parseBulletBlock(unitComment.body, label);
+      fields[key] = value;
+      if (value === null) missingLabels.push(label);
+    }
+    if (missingLabels.length > 0) {
+      errors.push(
+        `the Worker Unit Contract comment for ${unitId} (${url}) is missing required bullet(s): ${missingLabels.join(", ")}`,
+      );
+      continue;
     }
 
     units[unitId] = {
       commentId: unitComment.id,
-      url,
+      url: unitComment.html_url ?? url,
       indexState,
       indexOutcome,
       ...fields,

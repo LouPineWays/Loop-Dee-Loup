@@ -273,6 +273,140 @@ test("parseExecutionPlan: a unit referenced by the Plan Index whose comment does
 });
 
 // ---------------------------------------------------------------------------------------
+// Fixture 6: a Worker Unit Contract comment missing one or several required bullets — this
+// must fail explicitly (ok: false) rather than silently producing a unit with null fields
+// that later code (e.g. prepare-dispatch-manifest.mjs) could treat as "ready".
+// ---------------------------------------------------------------------------------------
+
+function workerUnitBodyMissingLabels(unitId, labelsToOmit, { state = "PLANNED" } = {}) {
+  const full = workerUnitBody(unitId, { state });
+  return full
+    .split("\n")
+    .filter((line) => !labelsToOmit.some((label) => line.startsWith(`- **${label}:**`)))
+    .join("\n");
+}
+
+test("parseExecutionPlan: a Worker Unit Contract comment missing one required bullet fails explicitly, naming the unit and field", () => {
+  const sharedContractId = 600;
+  const unitGId = 601;
+  const planIndexId = 602;
+
+  const planIndex = {
+    id: planIndexId,
+    html_url: commentUrl(planIndexId),
+    body: planIndexBody({
+      sharedContractLine: commentUrl(sharedContractId),
+      unitsLines: [`294-G: PLANNED — an outcome (${commentUrl(unitGId)})`],
+    }),
+  };
+  const sharedContract = { id: sharedContractId, html_url: commentUrl(sharedContractId), body: sharedContractBody() };
+  const unitG = {
+    id: unitGId,
+    html_url: commentUrl(unitGId),
+    body: workerUnitBodyMissingLabels("294-G", ["Verification required"]),
+  };
+
+  const result = parseExecutionPlan([planIndex, sharedContract, unitG], { executionIssue: EXECUTION_ISSUE });
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => e.includes("294-G") && e.includes("Verification required")));
+});
+
+test("parseExecutionPlan: a Worker Unit Contract comment missing several required bullets names all of them in one error", () => {
+  const sharedContractId = 610;
+  const unitHId = 611;
+  const planIndexId = 612;
+
+  const planIndex = {
+    id: planIndexId,
+    html_url: commentUrl(planIndexId),
+    body: planIndexBody({
+      sharedContractLine: commentUrl(sharedContractId),
+      unitsLines: [`294-H: PLANNED — an outcome (${commentUrl(unitHId)})`],
+    }),
+  };
+  const sharedContract = { id: sharedContractId, html_url: commentUrl(sharedContractId), body: sharedContractBody() };
+  const unitH = {
+    id: unitHId,
+    html_url: commentUrl(unitHId),
+    body: workerUnitBodyMissingLabels("294-H", ["Observable completion condition", "Verification required", "Prerequisites/dependencies"]),
+  };
+
+  const result = parseExecutionPlan([planIndex, sharedContract, unitH], { executionIssue: EXECUTION_ISSUE });
+  assert.equal(result.ok, false);
+  const missingFieldsError = result.errors.find((e) => e.includes("294-H"));
+  assert.ok(missingFieldsError);
+  assert.match(missingFieldsError, /Observable completion condition/);
+  assert.match(missingFieldsError, /Verification required/);
+  assert.match(missingFieldsError, /Prerequisites\/dependencies/);
+});
+
+test("parseExecutionPlan: existing fully-populated fixtures still pass unchanged (no regression)", () => {
+  const result = parseExecutionPlan(normalCompletePlanComments(), { executionIssue: EXECUTION_ISSUE });
+  assert.equal(result.ok, true);
+  assert.equal(Object.keys(result.plan.units).length, 2);
+});
+
+// ---------------------------------------------------------------------------------------
+// Fixture 7 (Finding 4): a "Shared contract:"/Units-list URL field whose text has the
+// correct #issuecomment-<id> suffix but a mistyped owner/repo/issue path. The comment still
+// resolves correctly by ID, but the stored `.url` must be that comment's own canonical
+// `html_url`, never the mistyped field text.
+// ---------------------------------------------------------------------------------------
+
+test("parseExecutionPlan: sharedContract.url uses the resolved comment's own html_url, not a mistyped Shared-contract field URL", () => {
+  const sharedContractId = 700;
+  const unitIId = 701;
+  const planIndexId = 702;
+  const mistypedSharedContractUrl = `https://github.com/WRONG-OWNER/wrong-repo/issues/9999#issuecomment-${sharedContractId}`;
+
+  const planIndex = {
+    id: planIndexId,
+    html_url: commentUrl(planIndexId),
+    body: planIndexBody({
+      sharedContractLine: mistypedSharedContractUrl,
+      unitsLines: [`294-I: PLANNED — an outcome (${commentUrl(unitIId)})`],
+    }),
+  };
+  const sharedContract = { id: sharedContractId, html_url: commentUrl(sharedContractId), body: sharedContractBody() };
+  const unitI = { id: unitIId, html_url: commentUrl(unitIId), body: workerUnitBody("294-I") };
+
+  const result = parseExecutionPlan([planIndex, sharedContract, unitI], { executionIssue: EXECUTION_ISSUE });
+  assert.equal(result.ok, true);
+  assert.equal(result.plan.sharedContract.url, commentUrl(sharedContractId));
+  assert.notEqual(result.plan.sharedContract.url, mistypedSharedContractUrl);
+});
+
+test("parseExecutionPlan: units[id].url uses the resolved unit comment's own html_url, not a mistyped Units-list entry URL", () => {
+  const sharedContractId = 710;
+  const unitJId = 711;
+  const planIndexId = 712;
+  const mistypedUnitUrl = `https://github.com/WRONG-OWNER/wrong-repo/issues/9999#issuecomment-${unitJId}`;
+
+  const planIndex = {
+    id: planIndexId,
+    html_url: commentUrl(planIndexId),
+    body: planIndexBody({
+      sharedContractLine: commentUrl(sharedContractId),
+      unitsLines: [`294-J: PLANNED — an outcome (${mistypedUnitUrl})`],
+    }),
+  };
+  const sharedContract = { id: sharedContractId, html_url: commentUrl(sharedContractId), body: sharedContractBody() };
+  const unitJ = { id: unitJId, html_url: commentUrl(unitJId), body: workerUnitBody("294-J") };
+
+  const result = parseExecutionPlan([planIndex, sharedContract, unitJ], { executionIssue: EXECUTION_ISSUE });
+  assert.equal(result.ok, true);
+  assert.equal(result.plan.units["294-J"].url, commentUrl(unitJId));
+  assert.notEqual(result.plan.units["294-J"].url, mistypedUnitUrl);
+});
+
+test("parseExecutionPlan: when a resolved comment's html_url matches the field text exactly, behavior is unchanged", () => {
+  const result = parseExecutionPlan(normalCompletePlanComments(), { executionIssue: EXECUTION_ISSUE });
+  assert.equal(result.ok, true);
+  assert.equal(result.plan.sharedContract.url, commentUrl(100));
+  assert.equal(result.plan.units["294-A"].url, commentUrl(101));
+});
+
+// ---------------------------------------------------------------------------------------
 // Additional coverage: no Plan Index comment at all, and end-to-end error-path plumbing.
 // ---------------------------------------------------------------------------------------
 
