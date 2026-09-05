@@ -1,0 +1,12 @@
+{
+  "scenario": "10. Economic evidence",
+  "issue_294_text": "where telemetry exists, compare repeated context retrieval, model calls, rework, integration cost, and founder intervention against a one-strong-worker control. Do not declare success from lower per-call price alone.",
+  "status": "not exercised -- no telemetry/control data exists yet to compare",
+  "reason": [
+    "This is the first real, live use of #294's own newly-shipped planning/routing mechanism (294-A/B/C only just reached DONE in this same plan). No prior comparable multi-unit plan under this exact mechanism exists anywhere in this repository's history to draw economic telemetry from.",
+    "This unit (294-D) has no access to the actual per-session token/model-call/context-retrieval telemetry for the separate sessions that executed 294-A, 294-B, and 294-C -- those were dispatched and completed in prior, now-closed sessions this unit cannot inspect (per AGENTS.md's own conversation-history-is-not-durable-state principle, and because no execution-boundary-style telemetry capture, per docs/execution-boundary-experiment.md, was wired into those dispatches).",
+    "No comparable 'one-strong-worker control' run of the same #294 scope exists to compare against -- #294 was decomposed into five units from the start; there is no parallel one-worker attempt at the identical scope to measure against it.",
+    "Repository-level telemetry infrastructure exists (tools/telemetry/, docs/telemetry-battery-log.md) but is oriented at LDL's own session-level cost/usage tracking generally, not at a per-plan planner-vs-single-worker economic comparison specific to #294's mechanism; wiring that comparison up is out of this unit's own bounded scope (docs/execution-planning-proof-runs.md and one artifact per scenario -- not new telemetry instrumentation)."
+  ],
+  "honest_caveat": "Scenario 10 is explicitly marked not-exercised rather than silently omitted, per this unit's contract. A future dispatch of #294-shaped plans, if telemetry capture is wired into worker-unit dispatch sessions (e.g. via the execution-boundary-probe.mjs precedent in docs/execution-boundary-experiment.md), would be the natural way to gather the comparison this scenario asks for. Declaring this scenario 'passed' without such data would be exactly the 'success from lower per-call price alone' the scenario text itself warns against."
+}

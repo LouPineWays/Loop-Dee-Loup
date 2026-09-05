@@ -1,0 +1,23 @@
+{
+  "scenario": "2. Need-to-know decomposition",
+  "issue_294_text": "planner creates at least two worker contracts; each worker receives only its own instructions plus relevant shared authority and can complete without reading the other worker's role/instructions",
+  "status": "demonstrated",
+  "representative_real_work": "issue #294 itself -- its own real, live Execution Plan Index (comment 5550655288) decomposes #294's implementation into five real Worker Unit Contract comments: 294-A, 294-B, 294-C, 294-D (this unit), 294-E.",
+  "exact_command": "node tools/orchestration/parse-execution-plan.mjs --execution-issue 294",
+  "exit_code": 0,
+  "observed_output_summary": {
+    "ok": true,
+    "planIndex": {
+      "commentId": 5550655288,
+      "planState": "ROUTED",
+      "sharedContractUrl": "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-5550652308"
+    },
+    "units_found": ["294-A", "294-B", "294-C", "294-D", "294-E"],
+    "sharedContract": {
+      "commentId": 5550652308,
+      "url": "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-5550652308"
+    }
+  },
+  "interpretation": "The real parse-execution-plan.mjs, run live against #294, correctly resolves five distinct Worker Unit Contract comments, each with its own separate 'Required bounded outcome' / 'Files/surfaces expected to change' / 'Verification required' fields (full text captured in this repo's git history via the parsed JSON; see the live comment bodies themselves, e.g. comment 5550652642 for 294-A vs. comment 5550653317 for 294-D). Cross-reading the five real unit contracts (fetched in the same `gh api` call this script makes) confirms none contains another unit's role text: 294-A's contract discusses only documentation surfaces; 294-B's discusses only parse-execution-plan.mjs; 294-C's discusses only prepare-dispatch-manifest.mjs/format-unit-dispatch-prompt.mjs; 294-D's (this unit's own contract) discusses only proof-run exercising; 294-E's discusses only the Integration/PR role. This worker (294-D) itself is a live instance of the property being tested: this session was dispatched with only its own Worker Unit Contract (comment 5550653317) and the Shared Contract (comment 5550652308) -- it did not need to read 294-A/B/C/E's contracts in full to determine its own scope (though it did read 294-A/B/C's shipped artifacts, which is explicitly authorized as 'their durable output', not their role/instructions, per the Shared Contract's need-to-know model).",
+  "honest_caveat": "None -- this scenario is fully demonstrated with real, live, currently-open data."
+}

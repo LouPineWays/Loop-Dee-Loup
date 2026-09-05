@@ -1,0 +1,29 @@
+{
+  "scenario": "9. Backlog integrity",
+  "issue_294_text": "GitHub still represents the work as one coherent thick execution Issue plus its thin control Issue, not a tree of model-sized backlog tickets",
+  "status": "demonstrated",
+  "representative_real_work": "issue #294 (thick execution Issue) and issue #306 (its thin control companion), and this repository's real, complete GitHub Issue list.",
+  "exact_commands": [
+    "gh issue list --repo LouPineWays/Loop-Dee-Loup --state all --search \"294-A OR 294-B OR 294-C OR 294-D OR 294-E in:title\" --json number,title",
+    "gh issue list --repo LouPineWays/Loop-Dee-Loup --state all --limit 500 --json number"
+  ],
+  "observed_output": {
+    "title_search_matches": "16 issues matched the keyword search, but zero of them are titled '294-A', '294-B', '294-C', '294-D', or '294-E' -- every match is an unrelated issue whose title happens to mention '294' as a cross-reference (e.g. '#295 completed research', '#306 [Control] Add economical issue-local execution units', '#227 planner-routed thin-switchboard execution economics').",
+    "total_repository_issue_count": 260,
+    "confirmed": "no GitHub Issue exists anywhere in this repository for units 294-A, 294-B, 294-C, 294-D, or 294-E -- they exist only as five comments on issue #294 itself (comment ids 5550652642, 5550652746, 5550653170, 5550653317, 5550653422)."
+  },
+  "issue_294_state": {
+    "number": 294,
+    "title": "[Orchestration] Add issue-local planning and need-to-know execution units",
+    "state": "OPEN",
+    "role": "thick execution Issue -- carries the Plan Index, Shared Contract, and all five Worker Unit Contract comments"
+  },
+  "issue_306_state": {
+    "number": 306,
+    "title": "[Control] Add economical issue-local execution units",
+    "state": "OPEN",
+    "role": "thin control companion, per #294's own closing line: 'Thin control companion: #306. For orchestrated execution use `work on #306`; this Issue remains the authoritative thick execution contract.'"
+  },
+  "interpretation": "Real, live, current GitHub state confirms #294 remains one coherent thick execution Issue and #306 its one thin control companion -- exactly two Issues for this entire plan, not five (or more) model-sized backlog tickets. The five-unit decomposition (294-A through 294-E) lives entirely as comments on #294, satisfying scenario 9 and #294's own non-goal 'creating a GitHub Issue for every execution unit.'",
+  "honest_caveat": "None -- this scenario is fully demonstrated with real, live, currently-verifiable GitHub repository state."
+}

@@ -1,0 +1,33 @@
+{
+  "scenario": "3. Shared-contract case",
+  "issue_294_text": "two workers require the same schema/name/interface; planner persists it once and both use the same durable value without orchestrator relay",
+  "status": "demonstrated",
+  "representative_real_work": "issue #294's own real Shared Contract comment (5550652308) and the real shipped code of worker units 294-B and 294-C, both of which independently consume it.",
+  "evidence": [
+    {
+      "shared_value": "Worker Unit Contract comment heading format: '## Worker Unit: <UnitID> (v1)', with the exact bold-label bullet list (Unit ID ... State) in the Shared Contract's 'Durable artifact conventions' section.",
+      "consumer_1": "tools/orchestration/parse-execution-plan.mjs (294-B) defines WORKER_UNIT_HEADING = /^## Worker Unit: (\\S+) \\(v1\\)$/ and the WORKER_UNIT_FIELDS array, both matching the Shared Contract's bullet list character-for-character (verified by direct comparison of the module source against the live Shared Contract comment body).",
+      "consumer_2": "tools/orchestration/prepare-dispatch-manifest.mjs (294-C) reads 294-B's already-parsed fields (applicableRoleCapability, filesSurfacesExpectedToChange, prerequisitesDependencies, state) via runParseExecutionPlan -- it never re-parses or re-derives the Shared Contract's field spec itself; it consumes the single durable parse that 294-B already produced from the one shared source."
+    },
+    {
+      "shared_value": "Dispatch Manifest comment format: heading '## Dispatch Manifest (v1)', '- **Plan index:**' bullet, one '- <UnitID>: route=... dispatch_ready=... note=...' line per unit.",
+      "consumer_1": "The Shared Contract's own 'Durable artifact conventions' section states this format once.",
+      "consumer_2": "tools/orchestration/prepare-dispatch-manifest.mjs's formatDispatchManifestBody() renders exactly this shape -- confirmed by the real live run below, whose output matches the format spec verbatim."
+    },
+    {
+      "shared_value": "Route-relevant capability classes: 'doc-authority worker', 'bounded coding worker', 'integration worker' mapping to the two generic labels 'bounded implementation worker' / 'stronger/general worker'.",
+      "consumer_1": "The Shared Contract's 'Route-relevant capability classes' section defines these three named classes once.",
+      "consumer_2": "tools/orchestration/prepare-dispatch-manifest.mjs's CAPABILITY_CLASS_ROUTE_TABLE constant reproduces exactly these three classes (plus the two generic labels mapped to themselves) -- confirmed by reading the module source directly; no other file re-derives or duplicates this table."
+    }
+  ],
+  "exact_command_for_live_confirmation": "node tools/orchestration/parse-execution-plan.mjs --execution-issue 294",
+  "observed_output_summary": {
+    "sharedContract": {
+      "commentId": 5550652308,
+      "url": "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-5550652308"
+    },
+    "note": "every one of the five real Worker Unit Contract comments' own 'Relevant shared-contract pointer' field names this same comment 5550652308 -- confirmed directly in each unit's parsed fields from this one run."
+  },
+  "interpretation": "Real, live evidence: one Shared Contract comment (5550652308) is the single durable source for (a) the artifact heading/field formats consumed by 294-B's parser and 294-C's manifest formatter, and (b) the capability-class route table consumed by 294-C's router. Neither worker's own instructions restate the other's; both point at the same one comment, and 294-C's router imports 294-B's parser output directly rather than re-deriving it -- exactly the 'planner establishes shared X durably -> worker A reads X -> worker B reads X' shape #294 requires, with no orchestrator relay involved at any point.",
+  "honest_caveat": "None -- this scenario is fully demonstrated with real, live, currently-open data and real shipped source code, cross-checked directly."
+}
