@@ -183,6 +183,22 @@ test("extractCapabilityClassLabel still truncates at the dash when the field has
   );
 });
 
+// Stage 1 review finding on this correction's own first attempt (issue #396's correction
+// PR): an unconditional sentence-boundary truncation -- applied to every field, regardless
+// of whether the "(see Shared Contract)" marker is present -- cut a label short at an
+// abbreviation's internal period ("e.g.") that happens to precede the field's real dash
+// separator, producing "stronger/general worker (e.g" instead of "stronger/general worker".
+// Gating sentence-truncation on the marker's presence (only that marker's own recovered
+// period is a reliable class-label boundary) fixes this: a marker-less field falls through
+// to the pre-existing dash-only truncation unchanged, so the dash after the abbreviation is
+// still found and used, exactly as it was before the 294-C fix was introduced.
+test("extractCapabilityClassLabel does not treat an abbreviation's period as a sentence boundary in a marker-less field", () => {
+  assert.equal(
+    extractCapabilityClassLabel("stronger/general worker (e.g. architecture review) — judgment-heavy."),
+    "stronger/general worker (e.g. architecture review)",
+  );
+});
+
 // --- resolveUnitRoute ---------------------------------------------------------------
 
 test("resolveUnitRoute routes to a deterministic script when Files/surfaces already names one that exists", () => {

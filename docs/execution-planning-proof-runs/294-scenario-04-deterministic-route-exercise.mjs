@@ -27,10 +27,9 @@
 // to a genuine pre-existing mechanism when that is what the unit's own fields actually
 // describe -- the case scenario 4 is meant to cover.
 //
-// Run with:
+// Run with (from the repository root; no network/`gh` access required -- this exercise
+// checks real on-disk file existence only, no live issue fetch):
 //   node docs/execution-planning-proof-runs/294-scenario-04-deterministic-route-exercise.mjs
-// from this file's own directory (no network/`gh` access required -- this exercise checks
-// real on-disk file existence only, no live issue fetch).
 
 import path, { dirname } from "node:path";
 import { existsSync } from "node:fs";
@@ -50,25 +49,30 @@ function realFileExists(relPath) {
 
 // A synthetic unit that merely INVOKES a real, pre-existing script
 // (tools/orchestration/ready-dispatch-gate.mjs) -- named in "Files/surfaces expected to
-// change" -- while its own "Required bounded outcome" names a completely different,
-// unrelated deliverable file. The pre-existing script is not this unit's own deliverable.
-// Deliberately, "Required bounded outcome" below names ONLY the synthetic unit's own
-// deliverable file -- never the invoked gate script's path in backticks -- because
-// isUnitsOwnDeliverable() checks for the script's path appearing as a code span in this
-// exact field. Mentioning the invoked script's path there (even just to describe invoking
-// it) would wrongly self-trigger the "own deliverable" exclusion this exercise is meant to
-// stay clear of; the field describes invoking a prerequisite gate check only in prose.
+// change" -- and whose entire "Required bounded outcome" is satisfied by running that one
+// script and acting on its verdict; there is no separate deliverable this synthetic unit
+// still owes once the gate check runs (a Stage 1 review finding on this correction's own
+// first attempt used a synthetic outcome requiring a second, unrelated documentation
+// deliverable the gate script cannot produce -- a false-positive route that left the unit's
+// real outcome unfinished, not the scenario's promised case of a unit completely solvable by
+// an existing mechanism). Deliberately, "Required bounded outcome" below describes running
+// "the gate check named in Files/surfaces below" in prose rather than repeating the script's
+// path in backticks, because isUnitsOwnDeliverable() checks for the script's path appearing
+// as a code span in this exact field -- naming it there (even just to describe invoking it)
+// would wrongly self-trigger the "own deliverable" exclusion this exercise is meant to stay
+// clear of.
 const syntheticUnit = {
   unitId: "294-SYNTH-ROUTE",
   state: "PLANNED",
   requiredBoundedOutcome:
-    "`docs/some-other-synthetic-deliverable.md` (new) -- a short documentation note " +
-    "unrelated to any existing script, produced after invoking a real, pre-existing " +
-    "orchestration gate check as a prerequisite step.",
+    "Invoking the pre-existing orchestration gate check named in this unit's own " +
+    "Files/surfaces field, against this synthetic unit's own (hypothetical) control issue, " +
+    "and acting on its verdict is this unit's entire required outcome -- no separate " +
+    "deliverable exists once that gate check has run.",
   applicableRoleCapability: "bounded coding worker (see Shared Contract).",
   filesSurfacesExpectedToChange:
     "`tools/orchestration/ready-dispatch-gate.mjs` (invoked as a pre-existing gate check, " +
-    "not modified), `docs/some-other-synthetic-deliverable.md` (new).",
+    "not modified -- running it fully satisfies this unit's own required outcome above).",
   prerequisitesDependencies: "none.",
 };
 

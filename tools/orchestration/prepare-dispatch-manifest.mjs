@@ -142,26 +142,36 @@ export function findSkillOrPersonaMatch(capabilityField, { skillNames = [], pers
 // field, e.g. "bounded coding worker (see Shared Contract)." -> "bounded coding worker", or
 // "stronger/general worker — judgment-heavy (...)." -> "stronger/general worker". Strips a
 // trailing "(see Shared Contract)" parenthetical -- WITHOUT also consuming a following
-// period, so that period (when present) survives as a genuine sentence-boundary marker --
-// then truncates at the field's first sentence boundary (a period followed by whitespace).
-// The sentence-boundary truncation must happen BEFORE the dash-truncation step, because a
-// real capability field's own explanatory prose after the class-label sentence can carry
-// its own unrelated em/en-dash (e.g. 294-C's real field: "bounded coding worker (see Shared
-// Contract). Kept as one unit deliberately — a parallel-negative-control decision: ..."),
-// and that prose dash must never be mistaken for the label/trailing-detail separator the
-// dash-match step is meant to catch. Consuming the parenthetical's own trailing period
-// together with the parenthetical (as an earlier version of this function did) destroys the
-// very sentence-boundary marker this step depends on for exactly that field shape -- collapsing
-// "worker (see Shared Contract). Kept as..." to "worker  Kept as..." with no period left to
-// find, silently falling through to the wrong dash again. Finally truncates at the first
-// " — " / " - " em/en-dash-style separator, then trims a trailing period. Returns null for
-// an empty/absent field.
+// period, so that period (when present) survives as a genuine sentence-boundary marker.
+//
+// Sentence-boundary truncation (a period followed by whitespace) is applied BEFORE the
+// dash-truncation step, but ONLY when the "(see Shared Contract)" marker was actually
+// present in the field -- that marker's own recovered trailing period is the one genuine,
+// reliably-positioned class-label boundary this step exists to restore (e.g. 294-C's real
+// field: "bounded coding worker (see Shared Contract). Kept as one unit deliberately — a
+// parallel-negative-control decision: ...", whose own explanatory prose carries an unrelated
+// dash that must never be mistaken for the label/trailing-detail separator the dash-match
+// step is meant to catch). Gating on the marker's presence -- rather than truncating at the
+// first "X. " found anywhere, unconditionally -- matters because a marker-less field's first
+// period+space is not reliably a class-label boundary at all: a Stage 1 review finding on
+// this correction (issue #396's own correction PR) showed a field like "stronger/general
+// worker (e.g. architecture review) — judgment-heavy." has its first ". " inside an "e.g."
+// abbreviation that precedes the field's real dash separator, so an unconditional
+// sentence-truncation step would cut the label short before ever reaching that dash. Fields
+// without the marker fall through to the pre-existing dash-only truncation unchanged, exactly
+// as before this fix.
+//
+// Finally truncates at the first " — " / " - " em/en-dash-style separator, then trims a
+// trailing period. Returns null for an empty/absent field.
 export function extractCapabilityClassLabel(capabilityField) {
   const text = (capabilityField ?? "").trim();
   if (!text) return null;
+  const hasSharedContractMarker = /\(see Shared Contract\)/i.test(text);
   let stripped = text.replace(/\(see Shared Contract\)/i, "").trim();
-  const sentenceMatch = stripped.match(/\.\s/);
-  if (sentenceMatch) stripped = stripped.slice(0, sentenceMatch.index).trim();
+  if (hasSharedContractMarker) {
+    const sentenceMatch = stripped.match(/\.\s/);
+    if (sentenceMatch) stripped = stripped.slice(0, sentenceMatch.index).trim();
+  }
   const dashMatch = stripped.match(/\s[—-]\s/);
   if (dashMatch) stripped = stripped.slice(0, dashMatch.index).trim();
   stripped = stripped.replace(/\.$/, "").trim();
