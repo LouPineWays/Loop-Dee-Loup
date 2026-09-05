@@ -156,6 +156,33 @@ test("extractCapabilityClassLabel returns null for an empty field", () => {
   assert.equal(extractCapabilityClassLabel(null), null);
 });
 
+// Real-world regression: worker unit 294-C's own real "Applicable role/capability" field
+// (Stage 2 audit #396). Its explanatory prose after the class-label sentence carries its own
+// unrelated em-dash ("Kept as one unit deliberately — a parallel-negative-control
+// decision: ..."), which the pre-fix dash-only truncation wrongly treated as the label/
+// trailing-detail separator, returning "bounded coding worker  Kept as one unit
+// deliberately" instead of "bounded coding worker" -- a value that doesn't resolve in
+// CAPABILITY_CLASS_ROUTE_TABLE and wrongly fell through to REPLAN_REQUIRED. Verbatim field
+// text (whitespace/newlines collapsed to single spaces, matching parseBulletBlock's own
+// collapsing), from https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-5550653170.
+const UNIT_294C_REAL_CAPABILITY_FIELD =
+  "bounded coding worker (see Shared Contract). Kept as one unit deliberately — a " +
+  "parallel-negative-control decision: these two scripts are individually small, share the " +
+  "same immediate consumer (a future Route/Prepare-stage controller session) and the same " +
+  "input (294-B's parser output), and splitting them into two separate dispatches was judged " +
+  "not to earn its coordination cost over one worker producing both together.";
+
+test("extractCapabilityClassLabel truncates at the first sentence boundary before checking for a dash (294-C real field, #396)", () => {
+  assert.equal(extractCapabilityClassLabel(UNIT_294C_REAL_CAPABILITY_FIELD), "bounded coding worker");
+});
+
+test("extractCapabilityClassLabel still truncates at the dash when the field has no earlier sentence boundary (no regression)", () => {
+  assert.equal(
+    extractCapabilityClassLabel("stronger/general worker — judgment-heavy (widest authority/input sweep, cross-file synthesis, no fixed template)."),
+    "stronger/general worker",
+  );
+});
+
 // --- resolveUnitRoute ---------------------------------------------------------------
 
 test("resolveUnitRoute routes to a deterministic script when Files/surfaces already names one that exists", () => {
@@ -216,6 +243,20 @@ test("resolveUnitRoute routes to a matching skill before falling back to the cap
 test("resolveUnitRoute falls back to 'bounded implementation worker' for a bounded coding worker", () => {
   const fileExists = fileExistsFrom([]);
   const u = unit({ applicableRoleCapability: "bounded coding worker (see Shared Contract)." });
+  const result = resolveUnitRoute(u, { fileExists, skillNames: [], personaNames: [] });
+  assert.equal(result.route, "bounded implementation worker");
+  assert.equal(result.isReplanRequired, false);
+});
+
+// Real-world regression: 294-C's own real capability field (#396), with no matching
+// script/skill/persona, must resolve via the capability-class table to "bounded
+// implementation worker" -- not fall through to REPLAN_REQUIRED.
+test("resolveUnitRoute resolves 294-C's real capability field to 'bounded implementation worker', not REPLAN_REQUIRED (#396)", () => {
+  const fileExists = fileExistsFrom([]);
+  const u = unit({
+    filesSurfacesExpectedToChange: "`tools/orchestration/some-other-unit-deliverable.mjs`.",
+    applicableRoleCapability: UNIT_294C_REAL_CAPABILITY_FIELD,
+  });
   const result = resolveUnitRoute(u, { fileExists, skillNames: [], personaNames: [] });
   assert.equal(result.route, "bounded implementation worker");
   assert.equal(result.isReplanRequired, false);

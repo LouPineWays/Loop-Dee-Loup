@@ -1,20 +1,40 @@
 {
   "scenario": "4. Deterministic route",
   "issue_294_text": "planner identifies a unit completely solvable/verifiable by an existing/new deterministic mechanism and does not spend an unnecessary reasoning-worker call on that unit",
-  "status": "demonstrated",
-  "representative_real_work": "issue #294 itself -- units 294-B and 294-C, whose own 'Files/surfaces expected to change' fields name the very scripts that satisfy them.",
-  "exact_command": "node tools/orchestration/prepare-dispatch-manifest.mjs --execution-issue 294",
-  "exit_code": 0,
-  "observed_output": [
-    "## Dispatch Manifest (v1)",
-    "",
-    "- **Plan index:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-5550655288",
-    "- 294-A: route=stronger/general worker dispatch_ready=true note=DONE",
-    "- 294-B: route=deterministic script: tools/orchestration/parse-execution-plan.mjs dispatch_ready=true note=DONE",
-    "- 294-C: route=deterministic script: tools/orchestration/prepare-dispatch-manifest.mjs dispatch_ready=true note=DONE",
-    "- 294-D: route=stronger/general worker dispatch_ready=true note=prerequisites satisfied: 294-A, 294-B, 294-C",
-    "- 294-E: route=stronger/general worker dispatch_ready=false note=blocked on: 294-D (not yet DONE)"
+  "status": "original real-world demonstration invalidated by a Stage 1 correctness fix; supplementary constructed exercise of the real fixed mechanism recorded instead",
+  "why_the_original_demonstration_no_longer_applies": [
+    "The original version of this proof-run pointed at real #294 units 294-B and 294-C, whose own 'Files/surfaces expected to change' fields name the very scripts each unit was itself building (parse-execution-plan.mjs and prepare-dispatch-manifest.mjs respectively).",
+    "Stage 2 post-merge audit #396 correctly found that this was never actually the right example for this scenario: 'deterministic route' in #294's own Verification section describes routing a unit to a genuine PRE-EXISTING mechanism it merely invokes, not a script the unit is itself producing.",
+    "PR #393's Stage 1 fix added `isUnitsOwnDeliverable` to tools/orchestration/prepare-dispatch-manifest.mjs's `resolveUnitRoute`, correctly excluding a script named in a unit's own 'Required bounded outcome' field from the deterministic-script route even when it is also named in 'Files/surfaces expected to change'. Post-fix, 294-B and 294-C no longer route to their own deliverable scripts -- see the refreshed live re-run below -- so they no longer demonstrate this scenario at all.",
+    "No real unit in #294's own history has a 'Files/surfaces expected to change' field naming a pre-existing script that is genuinely NOT that unit's own deliverable -- every real unit in this plan built the scripts it named -- so no real live #294 occurrence exists to substitute."
   ],
-  "interpretation": "Re-running the real, unmodified prepare-dispatch-manifest.mjs against the real live #294 plan reproduces the same routing 294-C's own worker recorded when it first ran this script: 294-B routes to 'deterministic script: tools/orchestration/parse-execution-plan.mjs' and 294-C routes to 'deterministic script: tools/orchestration/prepare-dispatch-manifest.mjs' -- both resolved via resolveUnitRoute()'s step 1 (an existing, non-test script already named in the unit's own 'Files/surfaces expected to change' field), with no reasoning-worker capability-class fallback needed for either. This is real evidence that the mechanism identifies a unit as completely solvable by an existing deterministic script and routes it there directly, rather than spending a 'bounded implementation worker' or 'stronger/general worker' reasoning-worker call on it.",
-  "honest_caveat": "None -- this is a direct, reproducible live run against real, currently-open plan state, matching the same result 294-C's worker already recorded independently when this mechanism first ran."
+  "refreshed_live_rerun": {
+    "description": "Re-running the real, now-fixed prepare-dispatch-manifest.mjs against the real live #294 plan, after both this correction round's fixes (the isUnitsOwnDeliverable Stage 1 fix from PR #393, and the extractCapabilityClassLabel sentence-boundary fix from this same correction round, #396).",
+    "exact_command": "node tools/orchestration/prepare-dispatch-manifest.mjs --repo LouPineWays/Loop-Dee-Loup --execution-issue 294",
+    "exit_code": 0,
+    "observed_output": [
+      "## Dispatch Manifest (v1)",
+      "",
+      "- **Plan index:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-5550655288",
+      "- 294-A: route=stronger/general worker dispatch_ready=true note=DONE",
+      "- 294-B: route=bounded implementation worker dispatch_ready=true note=DONE",
+      "- 294-C: route=bounded implementation worker dispatch_ready=true note=DONE",
+      "- 294-D: route=stronger/general worker dispatch_ready=true note=DONE",
+      "- 294-E: route=stronger/general worker dispatch_ready=true note=DONE"
+    ],
+    "interpretation": "294-B and 294-C now correctly fall through to the capability-class table ('bounded implementation worker') instead of the deterministic-script route, because their own 'Files/surfaces expected to change' scripts are also named as their own deliverables in 'Required bounded outcome'. This confirms the Stage 1 fix works on the real live plan, but it also confirms this real plan no longer contains any example of the scenario this row is meant to demonstrate -- hence the constructed exercise below."
+  },
+  "constructed_exercise": {
+    "description": "Per the same constructed-exercise precedent scenario 5 already established (fabricating a passing result for a scenario that did not really happen is prohibited, but a clearly-labeled synthetic input that genuinely exercises the real, unmodified shipped mechanism is not the same thing), the real `resolveUnitRoute` function was imported directly (never reimplemented) from the real, fixed tools/orchestration/prepare-dispatch-manifest.mjs, and run against one synthetic unit constructed in-memory only -- never posted to GitHub. The synthetic unit's 'Files/surfaces expected to change' field names a real, already-existing repository script (tools/orchestration/ready-dispatch-gate.mjs, a pre-fix-era script this synthetic unit merely invokes as a prerequisite gate check) while its own 'Required bounded outcome' field names a completely different synthetic deliverable file and never mentions the invoked script's path.",
+    "committed_script": "docs/execution-planning-proof-runs/294-scenario-04-deterministic-route-exercise.mjs",
+    "exact_command": "node docs/execution-planning-proof-runs/294-scenario-04-deterministic-route-exercise.mjs",
+    "exit_code": 0,
+    "observed_output": {
+      "route": "deterministic script: tools/orchestration/ready-dispatch-gate.mjs",
+      "isReplanRequired": false,
+      "reason": null
+    },
+    "interpretation": "The synthetic unit is correctly routed to 'deterministic script: tools/orchestration/ready-dispatch-gate.mjs' -- the real, pre-existing, on-disk mechanism it merely invokes -- rather than falling through to a generic 'bounded implementation worker'/'stronger/general worker' reasoning-worker label, and rather than being wrongly excluded by isUnitsOwnDeliverable (which correctly finds no match, since the invoked script's path never appears in the synthetic unit's own 'Required bounded outcome' field). This is genuine evidence that the Stage 1-fixed mechanism still correctly identifies and routes to a pre-existing deterministic mechanism when that is what a unit's own fields actually describe -- the case this scenario is meant to cover -- even though #294's own real unit history no longer supplies a naturally-occurring example of it."
+  },
+  "honest_caveat": "This scenario is NOT demonstrated by a real, naturally-occurring #294 unit routing to a pre-existing script it merely invokes -- no such unit exists in this plan's real history; every real unit built the script it named. The refreshed live re-run above shows the real mechanism, now correctly fixed, no longer misroutes 294-B/294-C to their own deliverables, but that re-run does not itself demonstrate the deterministic-route scenario (it demonstrates the fix's absence-of-false-positive behavior on this plan, which is a different, related claim). The constructed exercise above shows the real mechanism correctly performs the deterministic-route behavior when genuinely presented with a unit whose fields describe invoking a pre-existing script, via one clearly-labeled synthetic unit -- not a substitute for a real occurrence. Scenario 4 should be treated as demonstrated only by supplementary constructed-mechanism evidence, not by a real historical #294 occurrence, and this status was downgraded from the prior 'demonstrated' (with no caveat) specifically because the original real-world example was found, in Stage 2 audit #396, to have been the wrong example all along."
 }
