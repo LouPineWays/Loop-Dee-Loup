@@ -1,43 +1,39 @@
-// Scenario 4 (Deterministic route) constructed exercise -- Stage 2 audit #400 correction,
-// round 3 (this repository's own live evidence of a three-round correction sequence: audit
-// #396 found the original real-world example was the wrong example; PR #399's Stage 1 review
-// found the first synthetic substitute's outcome was unsatisfiable by its selected route;
-// Stage 2 audit #400 found the second synthetic substitute's own contract was internally
-// contradictory AND that the underlying resolveUnitRoute mechanism itself had a live,
-// unguarded truthfulness gap -- see below).
+// Scenario 4 (Deterministic route) constructed exercise. This scenario's own evidence has
+// gone through five correction rounds -- see 294-scenario-04-deterministic-route.json's
+// `history` field for the complete record; summary: audit #396 found the original real-world
+// example (real units 294-B/294-C routing to their own deliverables) was the wrong example
+// entirely, fixed by PR #393's `isUnitsOwnDeliverable`; two subsequent synthetic substitutes
+// were found invalid (PR #399's Stage 1 review, Stage 2 audit #400); PR #401's Stage 1 review
+// then found the underlying `resolveUnitRoute` mechanism itself had a live truthfulness gap
+// (existence-on-disk plus textual absence from "Required bounded outcome" is not proof of
+// non-modification), fixed with an explicit "(invoked, not modified)" annotation requirement;
+// Stage 2 audit #402 found that fix incomplete (it protected only the annotated entry, not
+// the unit's whole outcome, so a second real deliverable named alongside it was silently
+// skipped); PR #403's own Stage 1 review then found THAT fix incomplete too, twice over: a
+// second surface named in plain unquoted text bypassed a backtick-code-span count entirely,
+// and (in tension with that first finding) a genuinely single-surface field wrapped in its
+// own explanatory prose or duplicate mention was needlessly declined.
 //
-// The ORIGINAL scenario-4 proof-run pointed at real #294 units 294-B/294-C, whose own
-// "Files/surfaces expected to change" field happened to name the very script each unit was
-// itself building. That was never the right example: the "deterministic route" case in
-// #294's own "Verification" section is about a planner routing a unit to a genuine
-// PRE-EXISTING mechanism it merely invokes, not a script the unit is itself producing.
-// PR #393's Stage 1 fix (`isUnitsOwnDeliverable`) closed that specific gap for the real
-// units, but Stage 2 audit #400's own Stage 1 review round (on PR #401) found the deeper
-// underlying problem: `resolveUnitRoute` inferred "genuine pre-existing mechanism" merely
-// from a script's existence-on-disk plus absence from "Required bounded outcome" -- which is
-// unsound whenever a valid unit's outcome describes the same file without literally
-// repeating its exact backtick path (a paraphrase). Such a unit would be silently
-// short-circuited to "just run the pre-change file" when its real job is to modify it.
-//
-// The fix: `resolveUnitRoute` now requires an EXPLICIT, fixed annotation --
-// "(invoked, not modified)" -- immediately after a script's own backtick-quoted path in
-// "Files/surfaces expected to change" before that entry is eligible for the
-// deterministic-script route at all (`hasInvokedNotModifiedAnnotation`). Mere existence and
-// textual absence from "Required bounded outcome" are no longer sufficient by themselves.
+// The current fix (`extractSoleInvokedNotModifiedPath` in prepare-dispatch-manifest.mjs)
+// resolves this by anchoring the ENTIRE "Files/surfaces expected to change" field to be
+// exactly one backtick-quoted path immediately followed by the fixed
+// "(invoked, not modified)" phrase and nothing else (an optional trailing period aside) --
+// see that function's own module comment for the full defect/fix history and the deliberate
+// precision trade-off this whole-field anchor makes (a genuinely safe field wrapped in extra
+// prose is declined too, rather than risk another per-token exception).
 //
 // This exercise demonstrates THREE cases against the real, unmodified, shipped
 // `resolveUnitRoute` (imported directly, never reimplemented):
-//   1. A synthetic unit whose Files/surfaces entry carries the annotation, and names nothing
-//      else, correctly routes deterministically -- the case this scenario is meant to cover.
-//   2. The adversarial shape Stage 1 review found on PR #401 -- a valid contract whose
-//      outcome paraphrases the same file without quoting its exact path, and whose
-//      Files/surfaces entry carries NO annotation -- correctly falls through to a
-//      reasoning-worker route instead of being wrongly treated as a deterministic mechanism.
-//   3. The adversarial shape Stage 2 audit #402 found -- a unit whose Files/surfaces names
-//      BOTH an annotated, genuinely pre-existing script AND a separate, real deliverable --
-//      correctly falls through to a reasoning-worker route too, rather than being routed
-//      solely to the annotated script and silently leaving the separate deliverable
-//      unimplemented.
+//   1. A synthetic unit whose Files/surfaces field is EXACTLY the one annotated path and
+//      nothing else correctly routes deterministically -- the case this scenario covers.
+//   2. A valid contract whose outcome paraphrases the same file without quoting its exact
+//      path, and whose Files/surfaces entry carries NO annotation, correctly falls through to
+//      a reasoning-worker route instead of being wrongly treated as a deterministic
+//      mechanism.
+//   3. A unit whose Files/surfaces names BOTH an annotated, genuinely pre-existing script AND
+//      a separate, real deliverable correctly falls through to a reasoning-worker route too,
+//      rather than being routed solely to the annotated script and silently leaving the
+//      separate deliverable unimplemented.
 //
 // Run with (from the repository root; no network/`gh` access required -- this exercise
 // checks real on-disk file existence only, no live issue fetch):
@@ -59,6 +55,26 @@ function realFileExists(relPath) {
   return existsSync(path.join(REPO_ROOT, relPath));
 }
 
+// Boilerplate common to all three synthetic units below, so each is a genuinely complete
+// 13-field Worker Unit Contract -- a shape parse-execution-plan.mjs's own required-field
+// validation (PR #393's Stage 1 fix) would accept if ever posted as a real comment, not an
+// internally injected object missing fields that check never sees (Stage 1 review finding on
+// PR #403: the prior version of this exercise populated only 6 of 13 fields per unit, which
+// only proved resolveUnitRoute handles a malformed object, not that a valid planned unit can
+// reach each case).
+function commonFields(caseLabel) {
+  return {
+    parentExecutionIssue: "#294",
+    authorityInputPointers: "this exercise's own module comment above.",
+    relevantSharedContractPointer:
+      "this Issue's \"## Shared Contract (v1)\" comment -- \"Route-relevant capability classes\" section.",
+    observableCompletionCondition: `resolveUnitRoute() resolves this synthetic unit's '${caseLabel}' case to the route recorded in this exercise's own committed JSON output.`,
+    verificationRequired: "manual review of this exercise script's own recorded output against its JSON artifact.",
+    durableOutputStateExpected: "none -- this synthetic unit is never posted to GitHub; it exists only in this exercise's own in-memory run.",
+    interruptEscalationConditions: "not applicable -- this is a constructed exercise input, not a real dispatched unit.",
+  };
+}
+
 // Case 1: a synthetic unit that merely INVOKES a real, pre-existing script
 // (tools/orchestration/ready-dispatch-gate.mjs), correctly annotated, and whose entire
 // "Required bounded outcome" is satisfied by running that one script and acting on its
@@ -70,17 +86,21 @@ function realFileExists(relPath) {
 // exact field -- naming it there would wrongly self-trigger the "own deliverable" exclusion.
 const validInvocationUnit = {
   unitId: "294-SYNTH-ROUTE-VALID",
-  state: "PLANNED",
+  ...commonFields("valid_invocation"),
   requiredBoundedOutcome:
     "Invoking the pre-existing orchestration gate check named in this unit's own " +
     "Files/surfaces field, against this synthetic unit's own (hypothetical) control issue, " +
     "and acting on its verdict is this unit's entire required outcome -- no separate " +
     "deliverable exists once that gate check has run.",
   applicableRoleCapability: "bounded coding worker (see Shared Contract).",
-  filesSurfacesExpectedToChange:
-    "`tools/orchestration/ready-dispatch-gate.mjs` (invoked, not modified) -- running it " +
-    "fully satisfies this unit's own required outcome above.",
+  // Must be EXACTLY the one annotated path with nothing else, per
+  // extractSoleInvokedNotModifiedPath's whole-field anchor -- any trailing explanation here
+  // (even truthful) would fail the match and wrongly fall through to a reasoning-worker
+  // route, exactly the over-strictness Stage 1 review's second finding on PR #403 warned
+  // against introducing accidentally.
+  filesSurfacesExpectedToChange: "`tools/orchestration/ready-dispatch-gate.mjs` (invoked, not modified).",
   prerequisitesDependencies: "none.",
+  state: "PLANNED",
 };
 
 // Case 2: the exact adversarial shape Stage 1 review found on PR #401 -- a VALID contract
@@ -93,7 +113,7 @@ const validInvocationUnit = {
 // whole job is to change that file.
 const paraphrasedModificationUnit = {
   unitId: "294-SYNTH-ROUTE-INVALID",
-  state: "PLANNED",
+  ...commonFields("paraphrased_modification"),
   requiredBoundedOutcome:
     "Update the plan-parsing table used by the routing tool so it recognizes one new " +
     "Worker Unit Contract field, and add a regression test for the new field.",
@@ -101,6 +121,7 @@ const paraphrasedModificationUnit = {
   filesSurfacesExpectedToChange:
     "`tools/orchestration/parse-execution-plan.mjs`, `tools/orchestration/parse-execution-plan.test.mjs`.",
   prerequisitesDependencies: "none.",
+  state: "PLANNED",
 };
 
 // Case 3: the exact adversarial shape Stage 2 audit #402 found -- a valid contract that
@@ -110,13 +131,14 @@ const paraphrasedModificationUnit = {
 // the annotated entry itself is perfectly truthful in isolation.
 const mixedSurfaceUnit = {
   unitId: "294-SYNTH-ROUTE-MIXED",
-  state: "PLANNED",
+  ...commonFields("mixed_surface"),
   requiredBoundedOutcome: "Create a new feature module.",
   applicableRoleCapability: "bounded coding worker (see Shared Contract).",
   filesSurfacesExpectedToChange:
     "`tools/orchestration/ready-dispatch-gate.mjs` (invoked, not modified), " +
     "`tools/orchestration/new-feature.mjs` (new).",
   prerequisitesDependencies: "none.",
+  state: "PLANNED",
 };
 
 const results = {
