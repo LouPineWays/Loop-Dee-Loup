@@ -1,5 +1,5 @@
 // Scenario 4 (Deterministic route) constructed exercise. This scenario's own evidence has
-// gone through seven correction rounds -- see 294-scenario-04-deterministic-route.json's
+// gone through eight correction rounds -- see 294-scenario-04-deterministic-route.json's
 // `history` field for the complete record; summary: audit #396 found the original real-world
 // example (real units 294-B/294-C routing to their own deliverables) was the wrong example
 // entirely, fixed by PR #393's `isUnitsOwnDeliverable`; two subsequent synthetic substitutes
@@ -97,20 +97,27 @@ function commonFields(caseLabel) {
 // earlier version of this outcome text said "...and acting on its verdict", which
 // resolveUnitRoute's own structural check cannot actually verify is complete -- see this
 // mechanism's own explicit trust-boundary comment in prepare-dispatch-manifest.mjs for why
-// that gap is documented rather than chased with a fifth structural fix; this outcome text
-// was corrected to make the case genuinely match what the route verifies, not overclaim it).
-// A Stage 1 review finding on this exercise's first attempt separately found an outcome
-// requiring a second, unrelated deliverable the gate script cannot produce; this version
-// fixes that too. Deliberately, "Required bounded outcome" below never repeats the invoked
-// script's own path in backticks, because isUnitsOwnDeliverable() checks for the script's
-// path appearing as a code span in this exact field -- naming it there would wrongly
-// self-trigger the "own deliverable" exclusion.
+// that gap is documented rather than chased with a fifth structural fix to resolveUnitRoute
+// itself; this outcome text was corrected to make the case genuinely match what the route
+// verifies, not overclaim it). Fixing that outcome text dropped the only concrete argument
+// the gate script actually needs (`--control-issue <N>`, per ready-dispatch-gate.mjs's own
+// required-arg check), leaving a unit that would exit with a missing-arg error if its
+// described invocation were literally run -- a Stage 1 review finding on THIS correction's
+// own first attempt (a unit's outcome must remain concretely executable, not merely
+// structurally valid). Fixed by naming a real, valid control issue (#306, this scenario's
+// own control issue) as the argument. A Stage 1 review finding on this exercise's very first
+// attempt separately found an outcome requiring a second, unrelated deliverable the gate
+// script cannot produce; this version fixes that too. Deliberately, "Required bounded
+// outcome" below never repeats the invoked script's own path in backticks, because
+// isUnitsOwnDeliverable() checks for the script's path appearing as a code span in this
+// exact field -- naming it there would wrongly self-trigger the "own deliverable" exclusion.
 const validInvocationUnit = {
   unitId: "294-SYNTH-ROUTE-VALID",
   ...commonFields("valid_invocation"),
   requiredBoundedOutcome:
     "Invoking the pre-existing orchestration gate check named in this unit's own " +
-    "Files/surfaces field is this unit's entire required outcome, complete the moment that " +
+    "Files/surfaces field, as `node tools/orchestration/ready-dispatch-gate.mjs " +
+    "--control-issue 306`, is this unit's entire required outcome, complete the moment that " +
     "gate check has run -- no follow-up action and no separate deliverable exists.",
   applicableRoleCapability: "bounded coding worker (see Shared Contract).",
   // Must be EXACTLY the one annotated path with nothing else, per

@@ -210,10 +210,26 @@ found two real bugs in `prepare-dispatch-manifest.mjs`, both since fixed in corr
    comment — this route verifies field structure only, and a contract whose outcome isn't
    actually complete once its annotated script runs is a contract-authoring error this tool
    is not designed to catch, the same trust already extended to a unit's "State" or
-   "Verification required" fields not lying — rather than attempting an eighth structural fix.
+   "Verification required" fields not lying — rather than attempting a fifth structural fix
+   to `resolveUnitRoute` itself (the route has had four to date: `isUnitsOwnDeliverable`, the
+   annotation check, the code-span check, and the whole-field anchor).
    The exercise's outcome text was corrected to genuinely match what the route verifies.
+11. **Three small consistency issues in bug 10's own fix, found on PR #405's own Stage 1
+   review, fixed in the same PR without a second Codex invocation**: (a) correcting the
+   exercise's outcome text to remove the "acting on its verdict" overclaim also removed the
+   only concrete `--control-issue <N>` argument the invoked gate script actually requires,
+   leaving a unit whose described invocation would exit with a missing-arg error if literally
+   run — fixed by naming a real argument (`--control-issue 306`) and independently confirming
+   that exact command runs to completion (exit code 3, `NOT_READY` — a legitimate verdict,
+   not a crash); (b) calling the (declined) further fix an "eighth structural fix" miscounted
+   this repository's own history — `resolveUnitRoute` has had four structural fixes to date,
+   corrected to "fifth" everywhere it appeared; (c) step 1's own primary route description
+   still stated unconditionally that selecting this route means running the script "satisfies
+   the unit," contradicting bug 10's own newly added trust-boundary caveat — reconciled by
+   amending step 1's text to say the route assumes the contract author has ensured invocation
+   alone satisfies the outcome, rather than asserting it as a guarantee.
 
-See issues #396, #400, #402, and #404 for the full evidence trail on all ten findings.
+See issues #396, #400, #402, and #404 for the full evidence trail on all eleven findings.
 `format-unit-dispatch-prompt.mjs` is not implicated in any of them.
 
 ## Verdict
@@ -231,7 +247,7 @@ structural-eligibility scope described below) on every scenario that could actua
 observed with real, live repository state, supplemented by clearly-labeled constructed
 exercises for scenarios 4 and 5 (both now valid, non-contradictory synthetic substitutes),
 and records the remaining two (7 and 10) honestly rather than fabricating evidence for them.
-Scenario 4's own history across seven rounds is itself part of this record's evidence: not
+Scenario 4's own history across eight rounds is itself part of this record's evidence: not
 just a documentation fix each time, but successively deeper findings culminating in three
 real, previously-live safety gaps in the shipped routing mechanism (bugs 6, 8, and 9 above) —
 gaps none of the 5 real #294 units happened to trigger, but that a future unit plausibly could
@@ -243,7 +259,10 @@ first six: not a fixable structural gap, but an inherent limit of what field-str
 checking can ever verify about outcome completeness without semantic judgment — resolved by a
 founder-reviewed decision to document that limit explicitly rather than keep iterating in
 code, since closing it for real would itself require the "second planning pass" deterministic
-routing is designed never to become. This proof-run record's own original "Bugs found: None"
+routing is designed never to become; the eighth round (bug 11) then found three smaller
+consistency gaps in that very documentation fix — a reminder that even a documentation-only
+correction is not exempt from the same scrutiny. This proof-run record's own original "Bugs
+found: None"
 claim was itself found wrong by the process it was meant to support, repeatedly — a reminder
 that this document, like the mechanism it documents, is not self-verifying and depends on the
 same independent review discipline (`docs/bounded-review-cycle.md`) applied to any other

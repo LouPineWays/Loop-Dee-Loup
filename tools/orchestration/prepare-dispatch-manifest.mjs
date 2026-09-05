@@ -13,8 +13,11 @@
 //      that same script is NOT also named inside this same unit's own "Required bounded
 //      outcome" field -- i.e. an existing mechanism this unit merely invokes, not the thing
 //      this unit itself is building or changing, and the unit's ENTIRE Files/surfaces field
-//      is that one invocation, nothing more -- the route is that script itself: running it,
-//      not dispatching a reasoning worker, satisfies the unit. The annotation is required,
+//      is that one invocation, nothing more -- the route is that script itself, on the
+//      assumption that the contract author has ensured invoking it alone satisfies the whole
+//      outcome (see the EXPLICIT TRUST BOUNDARY note below for what this route does and does
+//      not verify): running it, not dispatching a reasoning worker, is treated as satisfying
+//      the unit. The annotation is required,
 //      not merely existence-on-disk plus absence from "Required bounded outcome": that weaker
 //      pair of signals is not by itself proof of non-modification -- a valid contract whose
 //      outcome describes the same file without literally repeating its exact backtick path (a
