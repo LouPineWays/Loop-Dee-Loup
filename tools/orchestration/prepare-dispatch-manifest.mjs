@@ -13,8 +13,11 @@
 //      that same script is NOT also named inside this same unit's own "Required bounded
 //      outcome" field -- i.e. an existing mechanism this unit merely invokes, not the thing
 //      this unit itself is building or changing, and the unit's ENTIRE Files/surfaces field
-//      is that one invocation, nothing more -- the route is that script itself: running it,
-//      not dispatching a reasoning worker, satisfies the unit. The annotation is required,
+//      is that one invocation, nothing more -- the route is that script itself, on the
+//      assumption that the contract author has ensured invoking it alone satisfies the whole
+//      outcome (see the EXPLICIT TRUST BOUNDARY note below for what this route does and does
+//      not verify): running it, not dispatching a reasoning worker, is treated as satisfying
+//      the unit. The annotation is required,
 //      not merely existence-on-disk plus absence from "Required bounded outcome": that weaker
 //      pair of signals is not by itself proof of non-modification -- a valid contract whose
 //      outcome describes the same file without literally repeating its exact backtick path (a
@@ -45,6 +48,27 @@
 //      the capability-class label isn't in the fixed table — routing would require real
 //      per-unit judgment, which this unit's own contract's escalation condition forbids
 //      guessing at. The unit is marked route="REPLAN_REQUIRED" instead.
+//
+// EXPLICIT TRUST BOUNDARY on step (1) (Stage 2 audit #404, the fourth correction round on
+// this same route, resolved by documenting a limit rather than attempting a fifth structural
+// fix): everything above verifies FIELD STRUCTURE ONLY -- that "Files/surfaces expected to
+// change" names exactly one existing, non-test, non-own-deliverable script, explicitly
+// annotated as invoked-not-modified. It does NOT and cannot verify that the unit's full
+// "Required bounded outcome" is completely satisfied by running that script alone. A unit
+// whose outcome genuinely requires follow-up action beyond invoking the script -- e.g. "run
+// this checker and close the linked issue based on its verdict" -- still takes this route as
+// long as its Files/surfaces field is structurally valid, even though "close the issue" is
+// real work no script call performs. Closing that gap would require semantically parsing
+// whether a unit's own outcome prose describes anything beyond script invocation -- exactly
+// the per-unit judgment #294's own founder clarification says deterministic routing must
+// never become ("routing itself turns into a second planning pass"). Writing a contract
+// whose outcome is not actually complete once its sole annotated script has run is therefore
+// a contract-authoring error this tool is not designed to catch, the same trust this
+// mechanism already extends to a unit's "State" field not lying about being DONE, or its
+// "Verification required" field not lying about having been run. A future genuine fix would
+// need a durable, machine-readable assertion that the outcome is EXACTLY "invoke this script,
+// no follow-up judgment or mutation" -- out of scope here; this route remains a structural
+// triage step, not an outcome-completeness verifier, by design.
 //
 // Priority order (1) before (3) is deliberate and takes precedence over the looser
 // "routes per its own recorded capability class" phrasing elsewhere in this plan: a unit
