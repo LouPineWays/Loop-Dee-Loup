@@ -16,6 +16,7 @@ import {
   extractCodeSpans,
   findExistingScriptPath,
   hasInvokedNotModifiedAnnotation,
+  isOnlySurfaceNamed,
   isUnitsOwnDeliverable,
   findSkillOrPersonaMatch,
   extractCapabilityClassLabel,
@@ -234,16 +235,60 @@ test("hasInvokedNotModifiedAnnotation is false when the annotation is present bu
 
 // --- resolveUnitRoute ---------------------------------------------------------------
 
-test("resolveUnitRoute routes to a deterministic script when Files/surfaces names one that exists AND carries the invoked-not-modified annotation", () => {
+test("resolveUnitRoute routes to a deterministic script when Files/surfaces names one that exists, carries the invoked-not-modified annotation, and is the only surface named", () => {
   const fileExists = fileExistsFrom(["tools/orchestration/parse-execution-plan.mjs"]);
   const u = unit({
     requiredBoundedOutcome: "Consume the existing parser to produce a dispatch manifest.",
-    filesSurfacesExpectedToChange:
-      "`tools/orchestration/parse-execution-plan.mjs` (invoked, not modified), `tools/orchestration/parse-execution-plan.test.mjs`.",
+    filesSurfacesExpectedToChange: "`tools/orchestration/parse-execution-plan.mjs` (invoked, not modified).",
   });
   const result = resolveUnitRoute(u, { fileExists, skillNames: [], personaNames: [] });
   assert.equal(result.route, "deterministic script: tools/orchestration/parse-execution-plan.mjs");
   assert.equal(result.isReplanRequired, false);
+});
+
+// Stage 2 audit #402 finding on PR #401's own correction: an annotated, non-deliverable
+// script sitting alongside a genuinely separate deliverable in the same field only proves
+// that ONE entry is a safe invocation -- it says nothing about whether the rest of the
+// unit's real outcome is satisfied by running that script. Without isOnlySurfaceNamed, this
+// unit would be wrongly routed to "just run the gate script", silently leaving the actual
+// feature module unimplemented.
+test("resolveUnitRoute does NOT route to the deterministic-script route when a separate deliverable is named alongside the annotated script", () => {
+  const fileExists = fileExistsFrom(["tools/orchestration/ready-dispatch-gate.mjs"]);
+  const u = unit({
+    requiredBoundedOutcome: "Create a new feature module.",
+    filesSurfacesExpectedToChange:
+      "`tools/orchestration/ready-dispatch-gate.mjs` (invoked, not modified), `tools/orchestration/new-feature.mjs` (new).",
+    applicableRoleCapability: "bounded coding worker (see Shared Contract).",
+  });
+  const result = resolveUnitRoute(u, { fileExists, skillNames: [], personaNames: [] });
+  assert.equal(result.route, "bounded implementation worker");
+  assert.equal(result.isReplanRequired, false);
+});
+
+// --- isOnlySurfaceNamed --------------------------------------------------------------
+
+test("isOnlySurfaceNamed is true when the field names exactly the one given script and nothing else", () => {
+  assert.equal(
+    isOnlySurfaceNamed("`tools/orchestration/ready-dispatch-gate.mjs` (invoked, not modified).", "tools/orchestration/ready-dispatch-gate.mjs"),
+    true,
+  );
+});
+
+test("isOnlySurfaceNamed is false when a second code span is present, even a plausible test companion", () => {
+  assert.equal(
+    isOnlySurfaceNamed(
+      "`tools/orchestration/ready-dispatch-gate.mjs` (invoked, not modified), `tools/orchestration/ready-dispatch-gate.test.mjs`.",
+      "tools/orchestration/ready-dispatch-gate.mjs",
+    ),
+    false,
+  );
+});
+
+test("isOnlySurfaceNamed is false when the field's only span is a different path than the one given", () => {
+  assert.equal(
+    isOnlySurfaceNamed("`tools/orchestration/other.mjs` (invoked, not modified).", "tools/orchestration/ready-dispatch-gate.mjs"),
+    false,
+  );
 });
 
 // Stage 1 review finding on PR #401 (issue #400's own correction): mere existence-on-disk
@@ -277,13 +322,12 @@ test("resolveUnitRoute does NOT route to the deterministic-script route when the
 // DONE by then. A unit whose job is to build/modify a script must not be marked
 // deterministically satisfied by running that script's pre-change contents, even if (as
 // defense in depth) its own Files/surfaces entry were also carrying the annotation.
-test("resolveUnitRoute does NOT route to the deterministic-script route when the script is this unit's own deliverable, even when annotated", () => {
+test("resolveUnitRoute does NOT route to the deterministic-script route when the script is this unit's own deliverable, even when annotated and the only surface named", () => {
   const fileExists = fileExistsFrom(["tools/orchestration/prepare-dispatch-manifest.mjs"]);
   const u = unit({
     requiredBoundedOutcome:
       "`tools/orchestration/prepare-dispatch-manifest.mjs` (+ test) that consumes 294-B's shipped parser output.",
-    filesSurfacesExpectedToChange:
-      "`tools/orchestration/prepare-dispatch-manifest.mjs` (invoked, not modified), `tools/orchestration/prepare-dispatch-manifest.test.mjs`.",
+    filesSurfacesExpectedToChange: "`tools/orchestration/prepare-dispatch-manifest.mjs` (invoked, not modified).",
     applicableRoleCapability: "bounded coding worker (see Shared Contract).",
   });
   const result = resolveUnitRoute(u, { fileExists, skillNames: [], personaNames: [] });
@@ -603,9 +647,9 @@ test("runPrepareDispatchManifest produces a plausible manifest for a 5-unit plan
         applicableRoleCapability: "bounded coding worker (see Shared Contract).",
         // Modeled here as a genuine pre-existing-mechanism invocation (distinct from
         // 294-B's real full contract, which names this same script as its own deliverable)
-        // purely to exercise the deterministic-script route end-to-end.
-        filesSurfacesExpectedToChange:
-          "`tools/orchestration/parse-execution-plan.mjs` (invoked, not modified), `tools/orchestration/parse-execution-plan.test.mjs`.",
+        // purely to exercise the deterministic-script route end-to-end. Only the one
+        // annotated script is named, per isOnlySurfaceNamed's requirement.
+        filesSurfacesExpectedToChange: "`tools/orchestration/parse-execution-plan.mjs` (invoked, not modified).",
         prerequisitesDependencies: "none. Parallel with 294-A.",
       }),
       "294-C": unit({

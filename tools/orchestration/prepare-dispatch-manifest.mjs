@@ -8,22 +8,28 @@
 //
 //   1. If the unit's own "Files/surfaces expected to change" field already names an
 //      existing non-test script file (checked against the real filesystem), immediately
-//      followed by the fixed annotation "(invoked, not modified)", AND that same script is
-//      NOT also named inside this same unit's own "Required bounded outcome" field -- i.e.
+//      followed by the fixed annotation "(invoked, not modified)", AND that annotated script
+//      is the ONLY code span named in the field (`isOnlySurfaceNamed`), AND that same script
+//      is NOT also named inside this same unit's own "Required bounded outcome" field -- i.e.
 //      an existing mechanism this unit merely invokes, not the thing this unit itself is
-//      building or changing -- the route is that script itself: running it, not dispatching
-//      a reasoning worker, satisfies the unit. The annotation is required, not merely
-//      existence-on-disk plus absence from "Required bounded outcome": that weaker pair of
-//      signals is not by itself proof of non-modification -- a valid contract whose outcome
-//      describes the same file without literally repeating its exact backtick path (a
-//      paraphrase, no filename quoted) would otherwise be silently short-circuited to "just
-//      run the pre-change file" when its real job is to modify it (Stage 1 review finding on
-//      PR #401, issue #400's correction). "Files/surfaces expected to change" is, by its own
-//      field name, a list of files that DO change; a script can only correctly land in this
-//      route when the unit's own contract explicitly, truthfully asserts the opposite for
-//      that one entry. A script the unit's own "Required bounded outcome" names as its
-//      deliverable is still never routed this way even when annotated, as defense in depth;
-//      see `isUnitsOwnDeliverable` below.
+//      building or changing, and the unit's ENTIRE surface is that one invocation -- the
+//      route is that script itself: running it, not dispatching a reasoning worker, satisfies
+//      the unit. The annotation is required, not merely existence-on-disk plus absence from
+//      "Required bounded outcome": that weaker pair of signals is not by itself proof of
+//      non-modification -- a valid contract whose outcome describes the same file without
+//      literally repeating its exact backtick path (a paraphrase, no filename quoted) would
+//      otherwise be silently short-circuited to "just run the pre-change file" when its real
+//      job is to modify it (Stage 1 review finding on PR #401, issue #400's correction).
+//      "Files/surfaces expected to change" is, by its own field name, a list of files that DO
+//      change; a script can only correctly land in this route when the unit's own contract
+//      explicitly, truthfully asserts the opposite for that one entry. The
+//      only-surface-named requirement is independently necessary: an annotated script sitting
+//      alongside a genuinely separate deliverable in the same field would otherwise still
+//      wrongly satisfy the whole unit by invoking only the safe entry, silently leaving the
+//      other named surface's real work undone (Stage 2 audit #402 finding on PR #401's own
+//      correction). A script the unit's own "Required bounded outcome" names as its
+//      deliverable is still never routed this way even when annotated and alone, as defense
+//      in depth; see `isUnitsOwnDeliverable` below.
 //   2. Else, if the unit's "Applicable role/capability" field names a skill or persona that
 //      actually exists under `.claude/skills/` or `.claude/personas/`, the route is that
 //      skill/persona.
@@ -137,6 +143,25 @@ export function hasInvokedNotModifiedAnnotation(filesSurfacesField, scriptPath) 
   return re.test(text);
 }
 
+// Pure. True when `scriptPath` is the ONLY code span named in `filesSurfacesField` -- i.e.
+// the field names nothing else the unit's own work touches or produces. Required in addition
+// to the annotation above: an annotated, pre-existing, non-deliverable script sitting
+// alongside a genuinely separate deliverable in the same field (e.g. "`gate.mjs` (invoked,
+// not modified), `new-feature.mjs` (new)") only proves that ONE entry is a safe invocation --
+// it says nothing about whether the rest of the unit's own required outcome is satisfied by
+// running that script. Without this check, `resolveUnitRoute` would take the deterministic
+// route as soon as the first existing, annotated, non-own-deliverable script is found and
+// silently leave any other named surface's real work unimplemented (Stage 2 audit #402
+// finding on PR #401's own correction: a unit whose outcome is "create a new feature module"
+// but whose Files/surfaces also lists an annotated pre-existing gate script was wrongly
+// routed to "just run the gate script", never dispatching the worker that must build the
+// actual feature). A unit whose ENTIRE Files/surfaces field is exactly that one annotated
+// script -- nothing else named -- is the only shape this route may ever apply to.
+export function isOnlySurfaceNamed(filesSurfacesField, scriptPath) {
+  const spans = extractCodeSpans(filesSurfacesField);
+  return spans.length === 1 && spans[0] === scriptPath;
+}
+
 // Pure. True when `scriptPath` also appears as a code span inside `requiredBoundedOutcomeField`
 // -- i.e. this unit's own "Required bounded outcome" names that same file as part of what this
 // unit itself must produce/change, not merely invoke. A unit that is building or modifying a
@@ -214,6 +239,7 @@ export function resolveUnitRoute(unit, { fileExists, skillNames = [], personaNam
   if (
     scriptPath &&
     hasInvokedNotModifiedAnnotation(unit?.filesSurfacesExpectedToChange, scriptPath) &&
+    isOnlySurfaceNamed(unit?.filesSurfacesExpectedToChange, scriptPath) &&
     !isUnitsOwnDeliverable(scriptPath, unit?.requiredBoundedOutcome)
   ) {
     return { route: `deterministic script: ${scriptPath}`, isReplanRequired: false, reason: null };

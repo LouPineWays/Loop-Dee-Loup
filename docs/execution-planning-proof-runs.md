@@ -138,34 +138,47 @@ found two real bugs in `prepare-dispatch-manifest.mjs`, both since fixed in corr
    prepare-dispatch-manifest.mjs` routing as current, contradicting the actually-merged code.
    Refreshed in the #400 correction round — see the comments' own edit history on #294 for the
    correction note and refreshed Dispatch Manifest.
-6. **Live, unguarded truthfulness gap in the deterministic-script route** (found in PR #401's
-   own Stage 1 review, correcting Stage 2 audit #400's initial "future work" framing of bug
-   4 above): even after bug 1's fix, `resolveUnitRoute` still inferred "genuine pre-existing
-   mechanism, not the unit's own deliverable" merely from a script's existence-on-disk plus
-   textual absence from "Required bounded outcome" — unsound whenever a valid contract's
-   outcome describes the same file without literally repeating its exact backtick path (a
-   paraphrase). Such a unit would be silently short-circuited to "just run the pre-change
-   file" when its real job is to modify it. This did not affect any of #294's 5 real units
-   (none use this route post-bug-1), but was a live latent defect for any future unit — not
-   merely a documentation/schema-gap concern as bug 4's initial disposition assumed. Fixed by
-   requiring an explicit, fixed annotation — `(invoked, not modified)` — immediately after a
-   script's own path in "Files/surfaces expected to change" before that entry is eligible for
-   the route at all (`hasInvokedNotModifiedAnnotation`), on top of the pre-existing
-   `isUnitsOwnDeliverable` check kept as defense in depth. This also resolved bug 4: with a
-   truthful, non-contradictory way for a contract to assert non-modification now available,
-   the scenario-4 constructed exercise was rebuilt validly instead of remaining retracted —
-   see `294-scenario-04-deterministic-route.json`'s `history` section.
-7. **Incomplete synthetic contract in the scenario-5 exercise** (found in PR #401's own Stage
-   1 review): `294-scenario-05-escalation-recombination-exercise.mjs`'s synthetic unit
-   populated only 5 of the 13 fixed Worker Unit Contract fields — a shape
+6. **Live, unguarded truthfulness gap in the deterministic-script route, part 1: unproven
+   non-modification** (found in PR #401's first Stage 1 review round, correcting Stage 2
+   audit #400's initial "future work" framing of bug 4 above): even after bug 1's fix,
+   `resolveUnitRoute` still inferred "genuine pre-existing mechanism, not the unit's own
+   deliverable" merely from a script's existence-on-disk plus textual absence from "Required
+   bounded outcome" — unsound whenever a valid contract's outcome describes the same file
+   without literally repeating its exact backtick path (a paraphrase). Such a unit would be
+   silently short-circuited to "just run the pre-change file" when its real job is to modify
+   it. This did not affect any of #294's 5 real units (none use this route post-bug-1), but
+   was a live latent defect for any future unit — not merely a documentation/schema-gap
+   concern as bug 4's initial disposition assumed. Fixed by requiring an explicit, fixed
+   annotation — `(invoked, not modified)` — immediately after a script's own path in
+   "Files/surfaces expected to change" before that entry is eligible for the route at all
+   (`hasInvokedNotModifiedAnnotation`), on top of the pre-existing `isUnitsOwnDeliverable`
+   check kept as defense in depth.
+7. **Incomplete synthetic contract in the scenario-5 exercise** (found in PR #401's first
+   Stage 1 review round): `294-scenario-05-escalation-recombination-exercise.mjs`'s synthetic
+   unit populated only 5 of the 13 fixed Worker Unit Contract fields — a shape
    `parse-execution-plan.mjs`'s own required-field validation (bug/finding from Stage 1 review
    on PR #393) would reject if ever posted as a real comment, so the exercise only proved
    `buildManifestEntries` handles an internally injected malformed object, not that a valid
    planned unit can reach the claimed escalation path. Fixed by populating all 13 fields with
    a plausible, complete contract.
+8. **Live, unguarded truthfulness gap in the deterministic-script route, part 2: unproven
+   outcome completeness** (found in Stage 2 audit #402, on the very PR that fixed bug 6): bug
+   6's annotation fix protected only the ONE annotated entry — it never checked whether the
+   unit's Files/surfaces field named anything ELSE. A unit whose Files/surfaces listed an
+   annotated, genuinely pre-existing script ALONGSIDE a separate, real deliverable (e.g.
+   `` `gate.mjs` (invoked, not modified), `new-feature.mjs` (new) `` with an outcome like
+   "create a new feature module") was still wrongly routed to "just run the gate script,"
+   silently leaving the real deliverable unimplemented — reproducing the same unsatisfied-
+   outcome defect bugs 1 and 4 already fixed, via a different field shape. Fixed by requiring
+   the annotated script to be the ONLY code span named in "Files/surfaces expected to change"
+   at all (`isOnlySurfaceNamed`), on top of `hasInvokedNotModifiedAnnotation` and
+   `isUnitsOwnDeliverable`. With this, the scenario-4 constructed exercise was extended with a
+   third case (`mixed_surface`) proving the fix — see
+   `294-scenario-04-deterministic-route.json`'s `history` section for the full five-round
+   record of this scenario's own evidence.
 
-See issues #396 and #400, and PR #401's own Stage 1 review, for the full evidence trail on
-all seven findings. `format-unit-dispatch-prompt.mjs` is not implicated in any of them.
+See issues #396, #400, and #402 for the full evidence trail on all eight findings.
+`format-unit-dispatch-prompt.mjs` is not implicated in any of them.
 
 ## Verdict
 
@@ -176,18 +189,20 @@ Integration/PR worker has not run yet; no comparable telemetry/control exists fo
 mechanism's first real use). Per the same precedent this record follows
 (`docs/execution-boundary-experiment.md`), this result does not by itself claim scenarios 4,
 5, 7, and 10 as validated by real historical occurrence — it establishes that the shipped
-mechanism, as corrected through the #396, #400, and #401 correction rounds, behaves correctly
-on every scenario that could actually be observed with real, live repository state,
-supplemented by clearly-labeled constructed exercises for scenarios 4 and 5 (both now valid,
-non-contradictory synthetic substitutes), and records the remaining two (7 and 10) honestly
-rather than fabricating evidence for them. Scenario 4's own history across three correction
-rounds is itself part of this record's evidence: not just a documentation fix each time, but
-successively deeper findings culminating in a real, previously-live safety gap in the shipped
-routing mechanism (bug 6 above) — a gap none of the 5 real #294 units happened to trigger, but
-that a future unit plausibly could have. This proof-run record's own original "Bugs found:
-None" claim was itself found wrong by the process it was meant to support, across three
-separate correction rounds — a reminder that this document, like the mechanism it documents,
-is not self-verifying and depends on the same independent review discipline
-(`docs/bounded-review-cycle.md`) applied to any other shipped change, and that a finding's
-first-pass disposition ("future work," "proof methodology only") is itself subject to that
-same scrutiny rather than being the last word.
+mechanism, as corrected through Stage 2 audits #396 and #400 and PR #401's own two Stage 1
+review rounds, behaves correctly on every scenario that could actually be observed with real,
+live repository state, supplemented by clearly-labeled constructed exercises for scenarios 4
+and 5 (both now valid, non-contradictory synthetic substitutes), and records the remaining
+two (7 and 10) honestly rather than fabricating evidence for them. Scenario 4's own history
+across five rounds is itself part of this record's evidence: not just a documentation fix
+each time, but successively deeper findings culminating in two real, previously-live safety
+gaps in the shipped routing mechanism (bugs 6 and 8 above) — gaps none of the 5 real #294
+units happened to trigger, but that a future unit plausibly could have, and where the first
+attempted fix (bug 6) was itself found incomplete on its own next review round (bug 8) rather
+than accepted at face value. This proof-run record's own original "Bugs found: None" claim
+was itself found wrong by the process it was meant to support, repeatedly — a reminder that
+this document, like the mechanism it documents, is not self-verifying and depends on the same
+independent review discipline (`docs/bounded-review-cycle.md`) applied to any other shipped
+change, and that a finding's first-pass disposition ("future work," "proof methodology
+only," even a just-shipped fix) is itself subject to that same scrutiny rather than being the
+last word.

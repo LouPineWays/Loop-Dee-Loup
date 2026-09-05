@@ -25,14 +25,19 @@
 // deterministic-script route at all (`hasInvokedNotModifiedAnnotation`). Mere existence and
 // textual absence from "Required bounded outcome" are no longer sufficient by themselves.
 //
-// This exercise demonstrates BOTH halves of the fixed mechanism against the real,
-// unmodified, shipped `resolveUnitRoute` (imported directly, never reimplemented):
-//   1. A synthetic unit whose Files/surfaces entry carries the annotation correctly routes
-//      deterministically -- the case this scenario is meant to cover.
-//   2. The exact adversarial shape Stage 1 review found on PR #401 -- a valid contract whose
+// This exercise demonstrates THREE cases against the real, unmodified, shipped
+// `resolveUnitRoute` (imported directly, never reimplemented):
+//   1. A synthetic unit whose Files/surfaces entry carries the annotation, and names nothing
+//      else, correctly routes deterministically -- the case this scenario is meant to cover.
+//   2. The adversarial shape Stage 1 review found on PR #401 -- a valid contract whose
 //      outcome paraphrases the same file without quoting its exact path, and whose
-//      Files/surfaces entry carries NO annotation -- now correctly falls through to a
+//      Files/surfaces entry carries NO annotation -- correctly falls through to a
 //      reasoning-worker route instead of being wrongly treated as a deterministic mechanism.
+//   3. The adversarial shape Stage 2 audit #402 found -- a unit whose Files/surfaces names
+//      BOTH an annotated, genuinely pre-existing script AND a separate, real deliverable --
+//      correctly falls through to a reasoning-worker route too, rather than being routed
+//      solely to the annotated script and silently leaving the separate deliverable
+//      unimplemented.
 //
 // Run with (from the repository root; no network/`gh` access required -- this exercise
 // checks real on-disk file existence only, no live issue fetch):
@@ -98,6 +103,22 @@ const paraphrasedModificationUnit = {
   prerequisitesDependencies: "none.",
 };
 
+// Case 3: the exact adversarial shape Stage 2 audit #402 found -- a valid contract that
+// genuinely both invokes a real pre-existing script (annotated correctly) AND owes a
+// separate, real deliverable the invoked script cannot produce. Naming a second surface
+// alongside the annotated one must disqualify the deterministic route entirely, even though
+// the annotated entry itself is perfectly truthful in isolation.
+const mixedSurfaceUnit = {
+  unitId: "294-SYNTH-ROUTE-MIXED",
+  state: "PLANNED",
+  requiredBoundedOutcome: "Create a new feature module.",
+  applicableRoleCapability: "bounded coding worker (see Shared Contract).",
+  filesSurfacesExpectedToChange:
+    "`tools/orchestration/ready-dispatch-gate.mjs` (invoked, not modified), " +
+    "`tools/orchestration/new-feature.mjs` (new).",
+  prerequisitesDependencies: "none.",
+};
+
 const results = {
   valid_invocation: resolveUnitRoute(validInvocationUnit, {
     fileExists: realFileExists,
@@ -105,6 +126,11 @@ const results = {
     personaNames: [],
   }),
   paraphrased_modification: resolveUnitRoute(paraphrasedModificationUnit, {
+    fileExists: realFileExists,
+    skillNames: [],
+    personaNames: [],
+  }),
+  mixed_surface: resolveUnitRoute(mixedSurfaceUnit, {
     fileExists: realFileExists,
     skillNames: [],
     personaNames: [],
