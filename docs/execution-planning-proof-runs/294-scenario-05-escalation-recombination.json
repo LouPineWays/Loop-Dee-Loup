@@ -8,16 +8,16 @@
     "No other live multi-unit execution plan (i.e. another Issue carrying a real '## Execution Plan Index (v1)' comment) currently exists in this repository to search for a genuine occurrence elsewhere."
   ],
   "constructed_exercise": {
-    "description": "Per this unit's own contract's escalation condition (fabricating a passing result for a scenario that did not really happen is prohibited, but a clearly-labeled synthetic input that genuinely exercises the real, unmodified shipped mechanism is not the same thing), the real buildManifestEntries()/resolveUnitRoute() functions were imported directly (never reimplemented) from the real, unmodified tools/orchestration/prepare-dispatch-manifest.mjs, and run against the REAL live #294 plan (fetched via the real, unmodified parse-execution-plan.mjs) with one additional synthetic unit ('294-SYNTH') appended in-memory only -- never posted to GitHub -- to simulate discovering mid-plan that a unit's capability/coupling cannot be resolved deterministically.",
+    "description": "Per this unit's own contract's escalation condition (fabricating a passing result for a scenario that did not really happen is prohibited, but a clearly-labeled synthetic input that genuinely exercises the real, unmodified shipped mechanism is not the same thing), the real buildManifestEntries()/resolveUnitRoute() functions were imported directly (never reimplemented) from the real, unmodified tools/orchestration/prepare-dispatch-manifest.mjs, and run against the REAL live #294 plan (fetched via the real, unmodified parse-execution-plan.mjs) with one additional synthetic unit ('294-SYNTH') appended in-memory only -- never posted to GitHub -- to simulate discovering mid-plan that a unit's capability/coupling cannot be resolved deterministically. The synthetic unit carries all thirteen fixed Worker Unit Contract fields (a Stage 1 review finding on PR #401 found the original version populated only five, which parse-execution-plan.mjs's own required-field validation would reject if this were ever posted as a real comment -- it only proved buildManifestEntries handles an internally injected malformed object, not that a valid planned unit can reach this escalation path; this version is a genuinely complete, plausible contract).",
     "committed_script": "docs/execution-planning-proof-runs/294-scenario-05-escalation-recombination-exercise.mjs",
     "exact_command": "node docs/execution-planning-proof-runs/294-scenario-05-escalation-recombination-exercise.mjs",
     "exit_code": 0,
     "observed_output": [
       { "unitId": "294-A", "route": "stronger/general worker", "dispatchReady": true, "note": "DONE" },
-      { "unitId": "294-B", "route": "deterministic script: tools/orchestration/parse-execution-plan.mjs", "dispatchReady": true, "note": "DONE" },
-      { "unitId": "294-C", "route": "deterministic script: tools/orchestration/prepare-dispatch-manifest.mjs", "dispatchReady": true, "note": "DONE" },
-      { "unitId": "294-D", "route": "stronger/general worker", "dispatchReady": true, "note": "prerequisites satisfied: 294-A, 294-B, 294-C" },
-      { "unitId": "294-E", "route": "stronger/general worker", "dispatchReady": false, "note": "blocked on: 294-D (not yet DONE)" },
+      { "unitId": "294-B", "route": "bounded implementation worker", "dispatchReady": true, "note": "DONE" },
+      { "unitId": "294-C", "route": "bounded implementation worker", "dispatchReady": true, "note": "DONE" },
+      { "unitId": "294-D", "route": "stronger/general worker", "dispatchReady": true, "note": "DONE" },
+      { "unitId": "294-E", "route": "stronger/general worker", "dispatchReady": true, "note": "DONE" },
       {
         "unitId": "294-SYNTH",
         "route": "REPLAN_REQUIRED",
@@ -25,7 +25,7 @@
         "note": "capability class \"quantum whisperer worker (undefined capability class)\" parsed from \"Applicable role/capability\" does not resolve via the fixed script/skill/persona/capability-class table -- routing this unit would require real per-unit judgment rather than a deterministic lookup"
       }
     ],
-    "interpretation": "The synthetic unit is correctly flagged REPLAN_REQUIRED with an explicit, specific reason naming the unresolved capability class -- exactly the 'safely escalated ... without losing durable state' behavior scenario 5 requires: the five REAL units (294-A through 294-E) route and report dispatch-readiness identically to the scenario-4 live run, completely unaffected by the unresolved unit sitting alongside them in the same plan/manifest computation. No micro-Issue is created to flag the unresolved unit -- it simply surfaces as one line in the manifest for a human/planner to resolve."
+    "interpretation": "The synthetic unit -- now a complete, valid 13-field contract -- is correctly flagged REPLAN_REQUIRED with an explicit, specific reason naming the unresolved capability class -- exactly the 'safely escalated ... without losing durable state' behavior scenario 5 requires: the five REAL units (294-A through 294-E, all DONE as of the #396/#399/#401 correction rounds) route and report dispatch-readiness identically to the scenario-4 live run, completely unaffected by the unresolved unit sitting alongside them in the same plan/manifest computation. No micro-Issue is created to flag the unresolved unit -- it simply surfaces as one line in the manifest for a human/planner to resolve."
   },
   "pre_existing_shipped_test_coverage": {
     "note": "Independently of this proof-run, 294-C's own already-shipped test suite (written before this unit was dispatched, not authored by this unit) already contains a REPLAN_REQUIRED fixture covering the same code path.",

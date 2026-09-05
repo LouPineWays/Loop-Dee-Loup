@@ -7,14 +7,23 @@
 // deterministic table rather than any per-unit judgment:
 //
 //   1. If the unit's own "Files/surfaces expected to change" field already names an
-//      existing non-test script file (checked against the real filesystem) that is NOT
-//      also named inside this same unit's own "Required bounded outcome" field -- i.e. an
-//      existing mechanism this unit merely invokes, not the thing this unit itself is
+//      existing non-test script file (checked against the real filesystem), immediately
+//      followed by the fixed annotation "(invoked, not modified)", AND that same script is
+//      NOT also named inside this same unit's own "Required bounded outcome" field -- i.e.
+//      an existing mechanism this unit merely invokes, not the thing this unit itself is
 //      building or changing -- the route is that script itself: running it, not dispatching
-//      a reasoning worker, satisfies the unit. A script the unit's own "Required bounded
-//      outcome" names as its deliverable is never routed this way, even when a pre-change
-//      (or not-yet-existing) copy already happens to exist on disk; see
-//      `isUnitsOwnDeliverable` below.
+//      a reasoning worker, satisfies the unit. The annotation is required, not merely
+//      existence-on-disk plus absence from "Required bounded outcome": that weaker pair of
+//      signals is not by itself proof of non-modification -- a valid contract whose outcome
+//      describes the same file without literally repeating its exact backtick path (a
+//      paraphrase, no filename quoted) would otherwise be silently short-circuited to "just
+//      run the pre-change file" when its real job is to modify it (Stage 1 review finding on
+//      PR #401, issue #400's correction). "Files/surfaces expected to change" is, by its own
+//      field name, a list of files that DO change; a script can only correctly land in this
+//      route when the unit's own contract explicitly, truthfully asserts the opposite for
+//      that one entry. A script the unit's own "Required bounded outcome" names as its
+//      deliverable is still never routed this way even when annotated, as defense in depth;
+//      see `isUnitsOwnDeliverable` below.
 //   2. Else, if the unit's "Applicable role/capability" field names a skill or persona that
 //      actually exists under `.claude/skills/` or `.claude/personas/`, the route is that
 //      skill/persona.
@@ -110,6 +119,24 @@ export function findExistingScriptPath(filesSurfacesField, { fileExists }) {
   return null;
 }
 
+// The one fixed phrase a "Files/surfaces expected to change" entry must carry, immediately
+// after its own backtick-quoted path, for that entry to be eligible for the
+// deterministic-script route -- see the module comment above for why mere existence-on-disk
+// is not sufficient. Exact phrase, case-sensitive; not a fuzzy/nearby-text check.
+const INVOKED_NOT_MODIFIED_ANNOTATION = "(invoked, not modified)";
+
+// Pure. True when `scriptPath`'s own backtick-quoted span inside `filesSurfacesField` is
+// immediately followed (optionally after whitespace) by the fixed
+// INVOKED_NOT_MODIFIED_ANNOTATION phrase -- the only truthful way a contract can assert this
+// file is a pre-existing mechanism the unit merely invokes, not one it is itself changing.
+export function hasInvokedNotModifiedAnnotation(filesSurfacesField, scriptPath) {
+  const text = filesSurfacesField ?? "";
+  const escapedPath = scriptPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedAnnotation = INVOKED_NOT_MODIFIED_ANNOTATION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp("`" + escapedPath + "`\\s*" + escapedAnnotation);
+  return re.test(text);
+}
+
 // Pure. True when `scriptPath` also appears as a code span inside `requiredBoundedOutcomeField`
 // -- i.e. this unit's own "Required bounded outcome" names that same file as part of what this
 // unit itself must produce/change, not merely invoke. A unit that is building or modifying a
@@ -184,7 +211,11 @@ export function extractCapabilityClassLabel(capabilityField) {
 // REPLAN_REQUIRED case (why routing could not resolve deterministically).
 export function resolveUnitRoute(unit, { fileExists, skillNames = [], personaNames = [] } = {}) {
   const scriptPath = findExistingScriptPath(unit?.filesSurfacesExpectedToChange, { fileExists });
-  if (scriptPath && !isUnitsOwnDeliverable(scriptPath, unit?.requiredBoundedOutcome)) {
+  if (
+    scriptPath &&
+    hasInvokedNotModifiedAnnotation(unit?.filesSurfacesExpectedToChange, scriptPath) &&
+    !isUnitsOwnDeliverable(scriptPath, unit?.requiredBoundedOutcome)
+  ) {
     return { route: `deterministic script: ${scriptPath}`, isReplanRequired: false, reason: null };
   }
 
