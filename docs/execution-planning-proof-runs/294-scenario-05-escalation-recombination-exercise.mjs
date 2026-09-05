@@ -51,17 +51,34 @@ if (parsed.exitCode !== 0) {
 }
 
 // Append one synthetic unit, in-memory only, never posted to GitHub, simulating a unit
-// whose capability/coupling was discovered mid-plan to be unresolvable.
+// whose capability/coupling was discovered mid-plan to be unresolvable. Populated with all
+// thirteen fixed Worker Unit Contract fields -- not merely the handful buildManifestEntries
+// itself reads -- so this is a genuinely complete, plausible contract a real plan could
+// contain, per parse-execution-plan.mjs's own required-field validation (a Stage 1 review
+// finding on PR #401 found the prior, partial version of this fixture would be rejected by
+// that validation if it were ever posted as a real comment, so it could not actually prove a
+// valid planned unit can reach the claimed escalation path).
 const planWithSynthetic = {
   ...parsed.plan,
   units: {
     ...parsed.plan.units,
     "294-SYNTH": {
       unitId: "294-SYNTH",
-      state: "PLANNED",
-      filesSurfacesExpectedToChange: "`docs/some-newly-discovered-coupling.md` (new).",
+      parentExecutionIssue: "#294",
+      requiredBoundedOutcome:
+        "`docs/some-newly-discovered-coupling.md` (new) -- a short documentation note " +
+        "capturing a coupling discovered mid-plan that this exercise models as requiring an " +
+        "unresolvable capability class.",
       applicableRoleCapability: "quantum whisperer worker (undefined capability class).",
+      authorityInputPointers: "this exercise's own module comment above.",
+      relevantSharedContractPointer: "this Issue's \"## Shared Contract (v1)\" comment -- \"Route-relevant capability classes\" section.",
       prerequisitesDependencies: "none.",
+      filesSurfacesExpectedToChange: "`docs/some-newly-discovered-coupling.md` (new).",
+      observableCompletionCondition: "the new documentation note exists and is linked from this record.",
+      verificationRequired: "manual review of the new documentation note's content.",
+      durableOutputStateExpected: "a commit adding the new documentation note; this comment's own State field updated to DONE.",
+      interruptEscalationConditions: "already triggered -- this unit's own capability class does not resolve deterministically, per its own escalation condition.",
+      state: "PLANNED",
     },
   },
 };

@@ -1,31 +1,38 @@
-// Scenario 4 (Deterministic route) constructed exercise -- Stage 2 audit #396 correction.
+// Scenario 4 (Deterministic route) constructed exercise -- Stage 2 audit #400 correction,
+// round 3 (this repository's own live evidence of a three-round correction sequence: audit
+// #396 found the original real-world example was the wrong example; PR #399's Stage 1 review
+// found the first synthetic substitute's outcome was unsatisfiable by its selected route;
+// Stage 2 audit #400 found the second synthetic substitute's own contract was internally
+// contradictory AND that the underlying resolveUnitRoute mechanism itself had a live,
+// unguarded truthfulness gap -- see below).
 //
-// The ORIGINAL scenario-4 proof-run (see 294-scenario-04-deterministic-route.json's own
-// "honest_caveat" for the full history) pointed at real #294 units 294-B/294-C, whose own
+// The ORIGINAL scenario-4 proof-run pointed at real #294 units 294-B/294-C, whose own
 // "Files/surfaces expected to change" field happened to name the very script each unit was
-// itself building. That was never actually the right example for this scenario: the
-// "deterministic route" case in #294's own "Verification" section is about a planner routing
-// a unit to a genuine PRE-EXISTING mechanism the unit merely invokes, not a script the unit
-// is itself producing. PR #393's Stage 1 fix (`isUnitsOwnDeliverable`) correctly closed that
-// gap -- a script named as a unit's own deliverable in its "Required bounded outcome" field
-// is now excluded from the deterministic-script route -- which means 294-B/294-C no longer
-// demonstrate this scenario at all post-fix (see the refreshed live-run section of the
-// sibling JSON artifact).
+// itself building. That was never the right example: the "deterministic route" case in
+// #294's own "Verification" section is about a planner routing a unit to a genuine
+// PRE-EXISTING mechanism it merely invokes, not a script the unit is itself producing.
+// PR #393's Stage 1 fix (`isUnitsOwnDeliverable`) closed that specific gap for the real
+// units, but Stage 2 audit #400's own Stage 1 review round (on PR #401) found the deeper
+// underlying problem: `resolveUnitRoute` inferred "genuine pre-existing mechanism" merely
+// from a script's existence-on-disk plus absence from "Required bounded outcome" -- which is
+// unsound whenever a valid unit's outcome describes the same file without literally
+// repeating its exact backtick path (a paraphrase). Such a unit would be silently
+// short-circuited to "just run the pre-change file" when its real job is to modify it.
 //
-// No real unit in #294's own history has "Files/surfaces expected to change" naming a
-// pre-existing script that is genuinely NOT that unit's own deliverable (every real unit in
-// this plan built the scripts it named). So, per the same constructed-exercise precedent
-// scenario 5 already established (294-scenario-05-escalation-recombination-exercise.mjs --
-// see that file for the full precedent rationale), this script instead genuinely exercises
-// the REAL shipped, unmodified `resolveUnitRoute` function -- imported directly from
-// tools/orchestration/prepare-dispatch-manifest.mjs, never reimplemented -- against one
-// synthetic unit constructed in-memory only (never posted to GitHub) whose
-// "Files/surfaces expected to change" field names a real, already-existing repository script
-// (`tools/orchestration/ready-dispatch-gate.mjs`, a pre-fix-era script this synthetic unit
-// merely invokes) while its own "Required bounded outcome" names a completely different
-// synthetic deliverable file. This demonstrates the fixed mechanism still correctly routes
-// to a genuine pre-existing mechanism when that is what the unit's own fields actually
-// describe -- the case scenario 4 is meant to cover.
+// The fix: `resolveUnitRoute` now requires an EXPLICIT, fixed annotation --
+// "(invoked, not modified)" -- immediately after a script's own backtick-quoted path in
+// "Files/surfaces expected to change" before that entry is eligible for the
+// deterministic-script route at all (`hasInvokedNotModifiedAnnotation`). Mere existence and
+// textual absence from "Required bounded outcome" are no longer sufficient by themselves.
+//
+// This exercise demonstrates BOTH halves of the fixed mechanism against the real,
+// unmodified, shipped `resolveUnitRoute` (imported directly, never reimplemented):
+//   1. A synthetic unit whose Files/surfaces entry carries the annotation correctly routes
+//      deterministically -- the case this scenario is meant to cover.
+//   2. The exact adversarial shape Stage 1 review found on PR #401 -- a valid contract whose
+//      outcome paraphrases the same file without quoting its exact path, and whose
+//      Files/surfaces entry carries NO annotation -- now correctly falls through to a
+//      reasoning-worker route instead of being wrongly treated as a deterministic mechanism.
 //
 // Run with (from the repository root; no network/`gh` access required -- this exercise
 // checks real on-disk file existence only, no live issue fetch):
@@ -47,22 +54,17 @@ function realFileExists(relPath) {
   return existsSync(path.join(REPO_ROOT, relPath));
 }
 
-// A synthetic unit that merely INVOKES a real, pre-existing script
-// (tools/orchestration/ready-dispatch-gate.mjs) -- named in "Files/surfaces expected to
-// change" -- and whose entire "Required bounded outcome" is satisfied by running that one
-// script and acting on its verdict; there is no separate deliverable this synthetic unit
-// still owes once the gate check runs (a Stage 1 review finding on this correction's own
-// first attempt used a synthetic outcome requiring a second, unrelated documentation
-// deliverable the gate script cannot produce -- a false-positive route that left the unit's
-// real outcome unfinished, not the scenario's promised case of a unit completely solvable by
-// an existing mechanism). Deliberately, "Required bounded outcome" below describes running
-// "the gate check named in Files/surfaces below" in prose rather than repeating the script's
-// path in backticks, because isUnitsOwnDeliverable() checks for the script's path appearing
-// as a code span in this exact field -- naming it there (even just to describe invoking it)
-// would wrongly self-trigger the "own deliverable" exclusion this exercise is meant to stay
-// clear of.
-const syntheticUnit = {
-  unitId: "294-SYNTH-ROUTE",
+// Case 1: a synthetic unit that merely INVOKES a real, pre-existing script
+// (tools/orchestration/ready-dispatch-gate.mjs), correctly annotated, and whose entire
+// "Required bounded outcome" is satisfied by running that one script and acting on its
+// verdict -- no separate deliverable is left outstanding (a Stage 1 review finding on this
+// exercise's first attempt used an outcome requiring a second, unrelated deliverable the
+// gate script cannot produce; this version fixes that too). Deliberately, "Required bounded
+// outcome" below never repeats the invoked script's own path in backticks, because
+// isUnitsOwnDeliverable() checks for the script's path appearing as a code span in this
+// exact field -- naming it there would wrongly self-trigger the "own deliverable" exclusion.
+const validInvocationUnit = {
+  unitId: "294-SYNTH-ROUTE-VALID",
   state: "PLANNED",
   requiredBoundedOutcome:
     "Invoking the pre-existing orchestration gate check named in this unit's own " +
@@ -71,15 +73,42 @@ const syntheticUnit = {
     "deliverable exists once that gate check has run.",
   applicableRoleCapability: "bounded coding worker (see Shared Contract).",
   filesSurfacesExpectedToChange:
-    "`tools/orchestration/ready-dispatch-gate.mjs` (invoked as a pre-existing gate check, " +
-    "not modified -- running it fully satisfies this unit's own required outcome above).",
+    "`tools/orchestration/ready-dispatch-gate.mjs` (invoked, not modified) -- running it " +
+    "fully satisfies this unit's own required outcome above.",
   prerequisitesDependencies: "none.",
 };
 
-const result = resolveUnitRoute(syntheticUnit, {
-  fileExists: realFileExists,
-  skillNames: [],
-  personaNames: [],
-});
+// Case 2: the exact adversarial shape Stage 1 review found on PR #401 -- a VALID contract
+// (the unit genuinely intends to MODIFY this script) whose "Required bounded outcome"
+// paraphrases the work without quoting the file's exact path, and whose Files/surfaces entry
+// carries no "(invoked, not modified)" annotation because the unit is NOT merely invoking
+// this file, it is changing it. Before this fix, a script's mere existence-on-disk plus
+// (coincidental) textual absence from Required bounded outcome was sufficient to wrongly
+// route this unit to "just run the pre-change file" -- exactly backwards, since the unit's
+// whole job is to change that file.
+const paraphrasedModificationUnit = {
+  unitId: "294-SYNTH-ROUTE-INVALID",
+  state: "PLANNED",
+  requiredBoundedOutcome:
+    "Update the plan-parsing table used by the routing tool so it recognizes one new " +
+    "Worker Unit Contract field, and add a regression test for the new field.",
+  applicableRoleCapability: "bounded coding worker (see Shared Contract).",
+  filesSurfacesExpectedToChange:
+    "`tools/orchestration/parse-execution-plan.mjs`, `tools/orchestration/parse-execution-plan.test.mjs`.",
+  prerequisitesDependencies: "none.",
+};
 
-console.log(JSON.stringify(result, null, 2));
+const results = {
+  valid_invocation: resolveUnitRoute(validInvocationUnit, {
+    fileExists: realFileExists,
+    skillNames: [],
+    personaNames: [],
+  }),
+  paraphrased_modification: resolveUnitRoute(paraphrasedModificationUnit, {
+    fileExists: realFileExists,
+    skillNames: [],
+    personaNames: [],
+  }),
+};
+
+console.log(JSON.stringify(results, null, 2));
