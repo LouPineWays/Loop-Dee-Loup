@@ -194,7 +194,26 @@ found two real bugs in `prepare-dispatch-manifest.mjs`, both since fixed in corr
    `294-scenario-04-deterministic-route.json`'s `history` section for the full, precisely-
    attributed six-round record of this scenario's own evidence.
 
-See issues #396, #400, and #402 for the full evidence trail on all nine findings.
+10. **Deterministic-script route verifies field structure, not outcome completeness — a
+   documented trust boundary, not a bug fixed in code** (found in Stage 2 audit #404, on PR
+   #403's merge): even after bug 9's whole-field anchor, `resolveUnitRoute` still cannot
+   verify that a unit's full "Required bounded outcome" is completely satisfied by running
+   its sole annotated script — a structurally valid unit whose outcome genuinely requires
+   follow-up judgment beyond the script call (e.g. "run this checker and close the linked
+   issue based on its verdict") still takes the route, even though the follow-up action is
+   real, unfinished work. This scenario's own `valid_invocation` exercise fixture originally
+   claimed an outcome of "...and acting on its verdict," exposing exactly this gap. Closing it
+   in code would require semantically parsing outcome prose — the per-unit judgment #294's own
+   founder clarification says deterministic routing must never become ("routing itself turns
+   into a second planning pass"). The founder reviewed this specific finding directly and
+   chose to document it as an explicit trust boundary in `resolveUnitRoute`'s own module
+   comment — this route verifies field structure only, and a contract whose outcome isn't
+   actually complete once its annotated script runs is a contract-authoring error this tool
+   is not designed to catch, the same trust already extended to a unit's "State" or
+   "Verification required" fields not lying — rather than attempting an eighth structural fix.
+   The exercise's outcome text was corrected to genuinely match what the route verifies.
+
+See issues #396, #400, #402, and #404 for the full evidence trail on all ten findings.
 `format-unit-dispatch-prompt.mjs` is not implicated in any of them.
 
 ## Verdict
@@ -206,22 +225,30 @@ Integration/PR worker has not run yet; no comparable telemetry/control exists fo
 mechanism's first real use). Per the same precedent this record follows
 (`docs/execution-boundary-experiment.md`), this result does not by itself claim scenarios 4,
 5, 7, and 10 as validated by real historical occurrence — it establishes that the shipped
-mechanism, as corrected through Stage 2 audits #396, #400, and #402 and the Stage 1 review
-rounds on PRs #399, #401, and #403, behaves correctly on every scenario that could actually
-be observed with real, live repository state, supplemented by clearly-labeled constructed
+mechanism, as corrected through Stage 2 audits #396, #400, #402, and #404 and the Stage 1
+review rounds on PRs #399, #401, and #403, behaves correctly (within the documented
+structural-eligibility scope described below) on every scenario that could actually be
+observed with real, live repository state, supplemented by clearly-labeled constructed
 exercises for scenarios 4 and 5 (both now valid, non-contradictory synthetic substitutes),
 and records the remaining two (7 and 10) honestly rather than fabricating evidence for them.
-Scenario 4's own history across six rounds is itself part of this record's evidence: not just
-a documentation fix each time, but successively deeper findings culminating in three real,
-previously-live safety gaps in the shipped routing mechanism (bugs 6, 8, and 9 above) — gaps
-none of the 5 real #294 units happened to trigger, but that a future unit plausibly could
-have, and where each attempted fix (PR #401's annotation, then PR #403's own first-commit
-span count) was itself found incomplete on the very next review round rather than accepted at
-face value — including this record's own history section, twice caught misstating which PR
-fixed which defect. This proof-run record's own original "Bugs found: None" claim was itself
-found wrong by the process it was meant to support, repeatedly — a reminder that this
-document, like the mechanism it documents, is not self-verifying and depends on the same
-independent review discipline (`docs/bounded-review-cycle.md`) applied to any other shipped
-change, and that a finding's first-pass disposition ("future work," "proof methodology
-only," even a just-shipped fix, even this record's own provenance claims) is itself subject
-to that same scrutiny rather than being the last word.
+Scenario 4's own history across seven rounds is itself part of this record's evidence: not
+just a documentation fix each time, but successively deeper findings culminating in three
+real, previously-live safety gaps in the shipped routing mechanism (bugs 6, 8, and 9 above) —
+gaps none of the 5 real #294 units happened to trigger, but that a future unit plausibly could
+have, and where each attempted fix (PR #401's annotation, then PR #403's own first-commit span
+count) was itself found incomplete on the very next review round rather than accepted at face
+value — including this record's own history section, twice caught misstating which PR fixed
+which defect. The seventh round (bug 10) found something qualitatively different from the
+first six: not a fixable structural gap, but an inherent limit of what field-structure
+checking can ever verify about outcome completeness without semantic judgment — resolved by a
+founder-reviewed decision to document that limit explicitly rather than keep iterating in
+code, since closing it for real would itself require the "second planning pass" deterministic
+routing is designed never to become. This proof-run record's own original "Bugs found: None"
+claim was itself found wrong by the process it was meant to support, repeatedly — a reminder
+that this document, like the mechanism it documents, is not self-verifying and depends on the
+same independent review discipline (`docs/bounded-review-cycle.md`) applied to any other
+shipped change, that a finding's first-pass disposition ("future work," "proof methodology
+only," even a just-shipped fix, even this record's own provenance claims) is itself subject to
+that same scrutiny rather than being the last word, and that not every finding demands another
+code change — some demand an honest, durable statement of what the mechanism does and does not
+promise.

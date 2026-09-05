@@ -1,5 +1,5 @@
 // Scenario 4 (Deterministic route) constructed exercise. This scenario's own evidence has
-// gone through five correction rounds -- see 294-scenario-04-deterministic-route.json's
+// gone through seven correction rounds -- see 294-scenario-04-deterministic-route.json's
 // `history` field for the complete record; summary: audit #396 found the original real-world
 // example (real units 294-B/294-C routing to their own deliverables) was the wrong example
 // entirely, fixed by PR #393's `isUnitsOwnDeliverable`; two subsequent synthetic substitutes
@@ -14,13 +14,28 @@
 // and (in tension with that first finding) a genuinely single-surface field wrapped in its
 // own explanatory prose or duplicate mention was needlessly declined.
 //
-// The current fix (`extractSoleInvokedNotModifiedPath` in prepare-dispatch-manifest.mjs)
-// resolves this by anchoring the ENTIRE "Files/surfaces expected to change" field to be
-// exactly one backtick-quoted path immediately followed by the fixed
-// "(invoked, not modified)" phrase and nothing else (an optional trailing period aside) --
-// see that function's own module comment for the full defect/fix history and the deliberate
-// precision trade-off this whole-field anchor makes (a genuinely safe field wrapped in extra
-// prose is declined too, rather than risk another per-token exception).
+// The `extractSoleInvokedNotModifiedPath` fix (in prepare-dispatch-manifest.mjs) resolved
+// those by anchoring the ENTIRE "Files/surfaces expected to change" field to be exactly one
+// backtick-quoted path immediately followed by the fixed "(invoked, not modified)" phrase and
+// nothing else (an optional trailing period aside) -- see that function's own module comment
+// for the full defect/fix history and the deliberate precision trade-off this whole-field
+// anchor makes (a genuinely safe field wrapped in extra prose is declined too, rather than
+// risk another per-token exception).
+//
+// Stage 2 audit #404 then found a deeper limit: this route verifies FIELD STRUCTURE only
+// (Files/surfaces names exactly one valid pre-existing script) -- it cannot verify that a
+// unit's full "Required bounded outcome" is completely satisfied by running that script
+// alone. A unit whose outcome genuinely needs follow-up judgment beyond the script call (this
+// exercise's own `validInvocationUnit` outcome text originally said "...and acting on its
+// verdict", exposing exactly this gap) would still take this route. Closing that would
+// require semantically parsing outcome prose -- the per-unit judgment #294's own founder
+// clarification says deterministic routing must never become. This was resolved by
+// documenting the limit as an explicit trust boundary in `resolveUnitRoute`'s own module
+// comment (routing verifies field structure, not outcome-completeness -- a contract whose
+// outcome isn't actually complete once its script runs is a contract-authoring error this
+// tool does not catch, same as trusting a "State" field isn't lying) rather than attempting a
+// further structural fix, and by correcting this exercise's own outcome text below to
+// genuinely match what the route verifies rather than overclaim it.
 //
 // This exercise demonstrates THREE cases against the real, unmodified, shipped
 // `resolveUnitRoute` (imported directly, never reimplemented):
@@ -77,21 +92,26 @@ function commonFields(caseLabel) {
 
 // Case 1: a synthetic unit that merely INVOKES a real, pre-existing script
 // (tools/orchestration/ready-dispatch-gate.mjs), correctly annotated, and whose entire
-// "Required bounded outcome" is satisfied by running that one script and acting on its
-// verdict -- no separate deliverable is left outstanding (a Stage 1 review finding on this
-// exercise's first attempt used an outcome requiring a second, unrelated deliverable the
-// gate script cannot produce; this version fixes that too). Deliberately, "Required bounded
-// outcome" below never repeats the invoked script's own path in backticks, because
-// isUnitsOwnDeliverable() checks for the script's path appearing as a code span in this
-// exact field -- naming it there would wrongly self-trigger the "own deliverable" exclusion.
+// "Required bounded outcome" is EXACTLY that invocation -- running the script IS the whole
+// job, with no follow-up judgment or action required beyond it (Stage 2 audit #404 found an
+// earlier version of this outcome text said "...and acting on its verdict", which
+// resolveUnitRoute's own structural check cannot actually verify is complete -- see this
+// mechanism's own explicit trust-boundary comment in prepare-dispatch-manifest.mjs for why
+// that gap is documented rather than chased with a fifth structural fix; this outcome text
+// was corrected to make the case genuinely match what the route verifies, not overclaim it).
+// A Stage 1 review finding on this exercise's first attempt separately found an outcome
+// requiring a second, unrelated deliverable the gate script cannot produce; this version
+// fixes that too. Deliberately, "Required bounded outcome" below never repeats the invoked
+// script's own path in backticks, because isUnitsOwnDeliverable() checks for the script's
+// path appearing as a code span in this exact field -- naming it there would wrongly
+// self-trigger the "own deliverable" exclusion.
 const validInvocationUnit = {
   unitId: "294-SYNTH-ROUTE-VALID",
   ...commonFields("valid_invocation"),
   requiredBoundedOutcome:
     "Invoking the pre-existing orchestration gate check named in this unit's own " +
-    "Files/surfaces field, against this synthetic unit's own (hypothetical) control issue, " +
-    "and acting on its verdict is this unit's entire required outcome -- no separate " +
-    "deliverable exists once that gate check has run.",
+    "Files/surfaces field is this unit's entire required outcome, complete the moment that " +
+    "gate check has run -- no follow-up action and no separate deliverable exists.",
   applicableRoleCapability: "bounded coding worker (see Shared Contract).",
   // Must be EXACTLY the one annotated path with nothing else, per
   // extractSoleInvokedNotModifiedPath's whole-field anchor -- any trailing explanation here
