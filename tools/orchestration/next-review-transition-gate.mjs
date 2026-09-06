@@ -29,7 +29,9 @@
 // Verdict derivation (every verdict below carries a literal `stopAfter: true` field):
 //
 //   Pre-merge phase (a settled "PR" reference, no settled "Stage 2"/Audit reference yet):
-//     - stage1-gate NOT_REQUESTED or PENDING            -> NO_ACTION_YET
+//     - stage1-gate NOT_REQUESTED                       -> NO_ACTION_YET
+//     - stage1-gate PENDING with findings-bearing unbound genuine matches -> AMBIGUOUS
+//     - stage1-gate PENDING otherwise                   -> NO_ACTION_YET
 //     - stage1-gate EXEMPT, and
 //         lifecycle-gate merge-ready MERGE_READY(*)      -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2
 //         lifecycle-gate merge-ready BLOCKED_CLOSING_REFERENCE -> STAGE1_CORRECTION_REQUIRED
@@ -190,7 +192,22 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
     parseAffirmativeStage1Disposition(stage1Disposition),
     context.head,
   );
-  if (stage1.state === "NOT_REQUESTED" || stage1.state === "PENDING") {
+  if (stage1.state === "NOT_REQUESTED") {
+    return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
+  }
+  if (stage1.state === "PENDING") {
+    if (hasFindingsStage1Response(stage1)) {
+      return {
+        state: "AMBIGUOUS",
+        stopAfter: true,
+        ...context,
+        stage1,
+        mergeReady,
+        reason:
+          "stage1-gate is still PENDING at the current head, but unbound genuine matches already include a " +
+          "findings-bearing Stage 1 response; fail closed and verify those findings before proceeding.",
+      };
+    }
     return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
   }
 

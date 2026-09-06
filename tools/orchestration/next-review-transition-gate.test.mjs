@@ -63,6 +63,21 @@ test("resolvePreMergeVerdict: PENDING -> NO_ACTION_YET regardless of merge-ready
   assert.equal(v.stopAfter, true);
 });
 
+test("resolvePreMergeVerdict: PENDING with findings-bearing unbound genuine matches -> AMBIGUOUS", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("PENDING", {
+      matches: [],
+      unboundGenuineMatches: [
+        { body_excerpt: "### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request." },
+      ],
+    }),
+    mergeReady: mergeReady("MERGE_READY"),
+  });
+  assert.equal(v.state, "AMBIGUOUS");
+  assert.equal(v.stopAfter, true);
+  assert.match(v.reason, /unbound genuine matches/);
+});
+
 test("resolvePreMergeVerdict: RESPONSE_RECEIVED + MERGE_READY -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", () => {
   const v = resolvePreMergeVerdict({ stage1: stage1("RESPONSE_RECEIVED"), mergeReady: mergeReady("MERGE_READY") });
   assert.equal(v.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
