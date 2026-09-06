@@ -1369,9 +1369,24 @@ test("extractResponseVerdict (PR #429 finding P2): a same-character but shorter 
   assert.equal(extractResponseVerdict(body), "NOT CLEAN");
 });
 
-test("extractResponseVerdict (PR #429 finding P2): a differently-charactered fence-looking line inside an outer fence does not close it either", () => {
-  const body = ["```", "Example of a tilde fence: ~~~", "```", "", "## Stage 2 Audit — CLEAN"].join("\n");
-  assert.equal(extractResponseVerdict(body), "CLEAN");
+// Audit #430 finding (P2): the fixture below previously embedded "~~~" mid-line inside prose
+// ("Example of a tilde fence: ~~~"), which never matches FENCE_LINE_PATTERN's line-start anchor
+// (`^\s*(`{3,}|~{3,})`) in the first place — so it exercised nothing about the character/length
+// comparison the P2 fix actually added. Replaced with a standalone `~~~` delimiter line so the
+// fixture is a genuine fence-looking line of a different character than the outer opener, proving
+// it neither closes the outer fence nor lets the quoted heading between the two tilde lines leak
+// out as a genuine declaration.
+test("extractResponseVerdict (PR #429 finding P2): a standalone differently-charactered fence-looking line inside an outer fence does not close it, so a quoted heading between them stays excluded", () => {
+  const body = ["```", "~~~", "## Stage 2 Audit — CLEAN", "~~~", "```", "", "Verdict: NOT CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+// Audit #430 finding (P2): the prior suite covered a same-length closer and shorter same-character
+// closers, but never a *longer* same-character closer — the other half of the ">=" comparison in
+// computeFencedCodeBlockMask.
+test("extractResponseVerdict (PR #429 finding P2): a longer same-character closer validly closes the fence, so genuine content after it is visible", () => {
+  const body = ["```", "Example of the heading shape:", "## Stage 2 Audit — CLEAN", "````", "", "Verdict: NOT CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
 });
 
 test("extractResponseVerdict (PR #429): ordinary matched-length fences (the pre-existing common case) are unaffected by the character/length comparison", () => {
