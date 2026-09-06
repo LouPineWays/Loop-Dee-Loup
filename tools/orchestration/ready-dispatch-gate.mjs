@@ -105,7 +105,52 @@
 
 import { execFileSync } from "node:child_process";
 
-const KNOWN_LIFECYCLE_STATES = ["READY", "EXECUTING", "VERIFYING", "REVIEW", "AUDIT", "CORRECTION", "BLOCKED", "BLOCKED_FAILURE", "BLOCKED_EXTERNAL"];
+const KNOWN_LIFECYCLE_STATES = [
+  "READY",
+  "READY_FOR_PLAN",
+  "PLAN_READY",
+  "ROUTED",
+  "EXECUTION_COMPLETE",
+  "EXECUTING",
+  "VERIFYING",
+  "REVIEW",
+  "AUDIT",
+  "CORRECTION",
+  "BLOCKED",
+  "BLOCKED_FAILURE",
+  "BLOCKED_EXTERNAL",
+];
+
+// #397's four new pre-PR Lifecycle values (docs/operating-model.md's "Execution-stage
+// session boundaries" Plan/Route/Execute/Integrate pipeline), sitting between the existing
+// READY (direct single-worker dispatch) and the existing post-PR states. Recognizing these
+// here — rather than in a second, competing gate script — is #397's own explicit
+// requirement: AGENTS.md's "first action" contract names this one script for any
+// control-plane Issue, so a second script would leave that contract's own "run this one
+// script first" instruction silently incomplete for a pipeline-using control Issue. Each
+// value produces its own dispatch-ready verdict shape (see evaluateReadyDispatchGate below)
+// rather than collapsing into READY_TO_DISPATCH, because each authorizes a genuinely
+// different next action, not "dispatch one worker by the recorded route":
+//   READY_FOR_PLAN      -> dispatch the planning worker reference-only (Route must be the
+//                          literal value "planning worker" -- the one new state whose
+//                          Route is a specific required value, not merely "settled").
+//   PLAN_READY          -> run tools/orchestration/prepare-dispatch-manifest.mjs
+//                          --execution-issue <N> (a deterministic script invocation, never a
+//                          model-worker dispatch).
+//   ROUTED              -> read the Dispatch Manifest (tools/orchestration/
+//                          parse-execution-plan.mjs) and dispatch every currently
+//                          dispatch_ready unit via
+//                          tools/orchestration/format-unit-dispatch-prompt.mjs.
+//   EXECUTION_COMPLETE  -> dispatch the Integration/PR worker reference-only.
+// This gate deliberately does NOT itself read the execution Issue's Plan Index/Dispatch
+// Manifest comments to resolve PLAN_READY/ROUTED/EXECUTION_COMPLETE any further than
+// confirming the Lifecycle value and Execution pointer -- doing so would both violate this
+// file's own "exactly ONE read" invariant (see the module comment above) and require
+// importing tools/orchestration/parse-execution-plan.mjs, which itself imports
+// resolveRepoIdentity from *this* file, so a deeper import here would be circular. The
+// caller acts on this gate's compact verdict by invoking the named already-shipped script
+// next, exactly as it already does for READY_TO_DISPATCH's { executionIssue, route } triple.
+const PRE_PR_DISPATCH_LIFECYCLE_VALUES = new Set(["READY_FOR_PLAN", "PLAN_READY", "ROUTED", "EXECUTION_COMPLETE"]);
 
 // Issue #370 (Stage 1 finding on #368's PR): the ad hoc "- **Lifecycle:**" bullet
 // convention uses the bare word "BLOCKED", but `.github/ISSUE_TEMPLATE/parent-execution.yml`'s
@@ -334,6 +379,14 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   // doesn't apply". Populated as a subset of `reasons`, never a separate parse.
   const blockingReasons = [];
 
+  // Which of the dispatch-eligible Lifecycle values (existing READY, or #397's four new
+  // pre-PR pipeline values) this control Issue currently records — null when Lifecycle is
+  // missing, a blocking value, or an unrecognized/mid-cycle value that stays ordinary
+  // NOT_READY. Populated here, acted on only after every other field below has also been
+  // validated, exactly mirroring how the pre-existing READY path already defers its own
+  // verdict construction to the end of this function.
+  let dispatchLifecycle = null;
+
   if (lifecycleRaw === null) {
     reasons.push('no "- **Lifecycle:**" bullet or "### State" heading found in the control Issue body');
   } else if (BLOCKING_LIFECYCLE_VALUES.has(lifecycleRaw.toUpperCase())) {
@@ -341,7 +394,11 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
       `lifecycle is "${lifecycleRaw}" — this control Issue has an explicit blocking lifecycle state and must not receive a fresh immediate dispatch`;
     reasons.push(msg);
     blockingReasons.push(msg);
-  } else if (lifecycleRaw.toUpperCase() !== "READY") {
+  } else if (lifecycleRaw.toUpperCase() === "READY") {
+    dispatchLifecycle = "READY";
+  } else if (PRE_PR_DISPATCH_LIFECYCLE_VALUES.has(lifecycleRaw.toUpperCase())) {
+    dispatchLifecycle = lifecycleRaw.toUpperCase();
+  } else {
     reasons.push(
       `lifecycle is "${lifecycleRaw}", not READY` +
         (KNOWN_LIFECYCLE_STATES.includes(lifecycleRaw.toUpperCase())
@@ -361,6 +418,13 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
 
   if (routeRaw === null || routeRaw === "" || isNoneSentinel(routeRaw)) {
     reasons.push(`Route is not settled (found: ${JSON.stringify(routeRaw)})`);
+  } else if (dispatchLifecycle === "READY_FOR_PLAN" && routeRaw.trim().toLowerCase() !== "planning worker") {
+    // READY_FOR_PLAN is the one new pre-PR value whose Route must be a specific literal
+    // value, not merely "settled" — it always dispatches the planning worker specifically
+    // (#397's Shared Contract: "Route: must be planning worker").
+    reasons.push(
+      `lifecycle is READY_FOR_PLAN but Route is "${routeRaw}", not "planning worker" — READY_FOR_PLAN always dispatches the planning worker`,
+    );
   }
 
   if (blockerRaw === null) {
@@ -387,11 +451,29 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
     return { status: "NOT_READY", reasons };
   }
 
-  return {
-    status: "READY_TO_DISPATCH",
-    executionIssue: execution.issue,
-    route: routeRaw,
-  };
+  // Every field required for dispatchLifecycle's own path has already been validated above
+  // (reasons.length === 0), so dispatchLifecycle is guaranteed to be non-null here — a null
+  // value would already have produced a `reasons` entry (missing/blocking/unrecognized
+  // Lifecycle) and returned NOT_READY/BLOCKED above instead of reaching this point.
+  switch (dispatchLifecycle) {
+    case "READY":
+      return { status: "READY_TO_DISPATCH", executionIssue: execution.issue, route: routeRaw };
+    // #397's four new pre-PR pipeline values — see PRE_PR_DISPATCH_LIFECYCLE_VALUES's own
+    // comment above for why each gets its own status rather than collapsing into
+    // READY_TO_DISPATCH: each authorizes a genuinely different next action for the caller
+    // to perform (a different already-shipped script, not "dispatch one worker by route").
+    case "READY_FOR_PLAN":
+      return { status: "READY_TO_DISPATCH_PLANNING", executionIssue: execution.issue, route: routeRaw };
+    case "PLAN_READY":
+      return { status: "READY_TO_RUN_DISPATCH_MANIFEST", executionIssue: execution.issue };
+    case "ROUTED":
+      return { status: "READY_TO_DISPATCH_UNITS", executionIssue: execution.issue };
+    case "EXECUTION_COMPLETE":
+      return { status: "READY_TO_DISPATCH_INTEGRATION", executionIssue: execution.issue, route: routeRaw };
+    /* c8 ignore next 2 -- unreachable: dispatchLifecycle is always one of the above once reasons is empty */
+    default:
+      throw new Error(`unreachable: dispatchLifecycle "${dispatchLifecycle}" with no unsatisfied reasons`);
+  }
 }
 
 // Pure. Parses a `git remote get-url origin` value into an "owner/repo" slug. Accepts the
@@ -536,6 +618,28 @@ export async function checkReadyDispatch(
   }
   if (result.status === "NOT_READY") {
     return { exitCode: 3, state: "NOT_READY", controlIssue: Number(controlIssue), repo: resolvedRepo, reasons: result.reasons };
+  }
+
+  // #397's four new pre-PR pipeline verdicts each get their own exit code, distinct from
+  // READY_TO_DISPATCH's 0 and from each other, so a caller (or a test) can never mistake one
+  // for another purely from the exit code alone. Chosen to avoid every exit code already
+  // fixed above (0, 1, 3, 4) and below (none currently used past 4), documented together
+  // here since there is no established prior convention this had to match.
+  const EXIT_CODES_BY_STATUS = {
+    READY_TO_DISPATCH_PLANNING: 5,
+    READY_TO_RUN_DISPATCH_MANIFEST: 6,
+    READY_TO_DISPATCH_UNITS: 7,
+    READY_TO_DISPATCH_INTEGRATION: 8,
+  };
+  if (result.status in EXIT_CODES_BY_STATUS) {
+    return {
+      exitCode: EXIT_CODES_BY_STATUS[result.status],
+      state: result.status,
+      controlIssue: Number(controlIssue),
+      repo: resolvedRepo,
+      executionIssue: result.executionIssue,
+      ...(result.route !== undefined ? { route: result.route } : {}),
+    };
   }
 
   return {

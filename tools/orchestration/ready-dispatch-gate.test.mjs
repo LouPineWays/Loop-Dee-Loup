@@ -795,3 +795,140 @@ test("checkReadyDispatch: missing --control-issue fails closed with exit 1 even 
   assert.equal(result.exitCode, 1);
   assert.equal(resolveCalls, 0);
 });
+
+// --- #397: four new pre-PR pipeline Lifecycle values ------------------------------------
+
+// The exact #408 reproduction shape from #397's Shared Contract root-cause finding: control
+// Issue #408 with Lifecycle: READY_FOR_PLAN, Route: planning worker used to read NOT_READY
+// ("lifecycle is READY_FOR_PLAN, not READY") purely because READY_FOR_PLAN was absent from
+// this gate's recognized states — this is the fixture that must now dispatch instead.
+const ISSUE_408_BODY = `## Current state
+
+- **Lifecycle:** READY_FOR_PLAN
+- **Execution:** #407
+- **Route:** planning worker
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("evaluateReadyDispatchGate: the exact #408 reproduction shape resolves to READY_TO_DISPATCH_PLANNING, not NOT_READY (#397's own root-cause finding)", () => {
+  const result = evaluateReadyDispatchGate(ISSUE_408_BODY);
+  assert.equal(result.status, "READY_TO_DISPATCH_PLANNING");
+  assert.equal(result.executionIssue, 407);
+  assert.equal(result.route, "planning worker");
+});
+
+test("checkReadyDispatch: the exact #408 reproduction shape reports exit 5, state READY_TO_DISPATCH_PLANNING, from a single read", async () => {
+  let calls = 0;
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 408 },
+    {
+      ghIssueViewImpl: async () => {
+        calls++;
+        return { body: ISSUE_408_BODY, state: "OPEN" };
+      },
+    },
+  );
+  assert.equal(calls, 1);
+  assert.equal(result.exitCode, 5);
+  assert.equal(result.state, "READY_TO_DISPATCH_PLANNING");
+  assert.equal(result.executionIssue, 407);
+  assert.equal(result.route, "planning worker");
+});
+
+test("evaluateReadyDispatchGate: READY_FOR_PLAN with any other Route value is NOT_READY, never dispatched with the wrong route", () => {
+  const body =
+    "- **Lifecycle:** READY_FOR_PLAN\n- **Execution:** #407\n- **Route:** implementation worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "NOT_READY");
+  assert.ok(result.reasons.some((r) => r.includes("READY_FOR_PLAN") && r.includes("planning worker")));
+});
+
+test("evaluateReadyDispatchGate: READY_FOR_PLAN with an active Blocker is BLOCKED, not NOT_READY (issue #368's split still applies to the new states)", () => {
+  const body =
+    "- **Lifecycle:** READY_FOR_PLAN\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** waiting on something\n- **Founder decision:** none\n";
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "BLOCKED");
+});
+
+test("evaluateReadyDispatchGate: PLAN_READY resolves to READY_TO_RUN_DISPATCH_MANIFEST, with no Route-value requirement beyond settled", () => {
+  const body =
+    "- **Lifecycle:** PLAN_READY\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "READY_TO_RUN_DISPATCH_MANIFEST");
+  assert.equal(result.executionIssue, 407);
+  assert.equal("route" in result, false);
+});
+
+test("checkReadyDispatch: PLAN_READY reports exit 6, state READY_TO_RUN_DISPATCH_MANIFEST", async () => {
+  const body =
+    "- **Lifecycle:** PLAN_READY\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 408 },
+    { ghIssueViewImpl: async () => ({ body, state: "OPEN" }) },
+  );
+  assert.equal(result.exitCode, 6);
+  assert.equal(result.state, "READY_TO_RUN_DISPATCH_MANIFEST");
+  assert.equal(result.executionIssue, 407);
+});
+
+test("evaluateReadyDispatchGate: ROUTED resolves to READY_TO_DISPATCH_UNITS", () => {
+  const body =
+    "- **Lifecycle:** ROUTED\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "READY_TO_DISPATCH_UNITS");
+  assert.equal(result.executionIssue, 407);
+});
+
+test("checkReadyDispatch: ROUTED reports exit 7, state READY_TO_DISPATCH_UNITS", async () => {
+  const body =
+    "- **Lifecycle:** ROUTED\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 408 },
+    { ghIssueViewImpl: async () => ({ body, state: "OPEN" }) },
+  );
+  assert.equal(result.exitCode, 7);
+  assert.equal(result.state, "READY_TO_DISPATCH_UNITS");
+});
+
+test("evaluateReadyDispatchGate: EXECUTION_COMPLETE resolves to READY_TO_DISPATCH_INTEGRATION", () => {
+  const body =
+    "- **Lifecycle:** EXECUTION_COMPLETE\n- **Execution:** #407\n- **Route:** integration worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "READY_TO_DISPATCH_INTEGRATION");
+  assert.equal(result.executionIssue, 407);
+  assert.equal(result.route, "integration worker");
+});
+
+test("checkReadyDispatch: EXECUTION_COMPLETE reports exit 8, state READY_TO_DISPATCH_INTEGRATION", async () => {
+  const body =
+    "- **Lifecycle:** EXECUTION_COMPLETE\n- **Execution:** #407\n- **Route:** integration worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 408 },
+    { ghIssueViewImpl: async () => ({ body, state: "OPEN" }) },
+  );
+  assert.equal(result.exitCode, 8);
+  assert.equal(result.state, "READY_TO_DISPATCH_INTEGRATION");
+  assert.equal(result.route, "integration worker");
+});
+
+test("evaluateReadyDispatchGate: an unresolved Founder decision on a ROUTED control Issue is BLOCKED, not NOT_READY", () => {
+  const body =
+    "- **Lifecycle:** ROUTED\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** choose an option\n";
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "BLOCKED");
+});
+
+test("evaluateReadyDispatchGate: PLAN_READY/ROUTED/EXECUTION_COMPLETE still require a settled Execution pointer and Route, and reject a self-referential Execution pointer", () => {
+  for (const lifecycle of ["PLAN_READY", "ROUTED", "EXECUTION_COMPLETE"]) {
+    const missingExecution = `- **Lifecycle:** ${lifecycle}\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n`;
+    assert.equal(evaluateReadyDispatchGate(missingExecution).status, "NOT_READY", `expected NOT_READY for ${lifecycle} with no Execution`);
+
+    const missingRoute = `- **Lifecycle:** ${lifecycle}\n- **Execution:** #407\n- **Blocker:** none\n- **Founder decision:** none\n`;
+    assert.equal(evaluateReadyDispatchGate(missingRoute).status, "NOT_READY", `expected NOT_READY for ${lifecycle} with no Route`);
+
+    const selfRef = `- **Lifecycle:** ${lifecycle}\n- **Execution:** #42\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n`;
+    const selfRefResult = evaluateReadyDispatchGate(selfRef, 42);
+    assert.equal(selfRefResult.status, "NOT_READY", `expected NOT_READY for ${lifecycle} with a self-referential Execution pointer`);
+  }
+});

@@ -98,6 +98,51 @@ export function formatDispatchPrompt({ controlIssue, executionIssue, route }) {
   );
 }
 
+// Pure. Renders the fixed reference-only "Planning worker dispatch" template for #397's new
+// READY_FOR_PLAN pre-PR Lifecycle value (tools/orchestration/ready-dispatch-gate.mjs's
+// READY_TO_DISPATCH_PLANNING verdict). Deliberately carries no `route` parameter, unlike
+// formatDispatchPrompt above: #397's Shared Contract fixes this template to "control Issue +
+// execution Issue references only" — READY_FOR_PLAN's Route is always the fixed literal
+// "planning worker" (already enforced by the gate itself), so restating it in the prompt
+// would add nothing a fresh planning worker doesn't already know from the word "Planning" in
+// this template's own first line.
+export function formatPlanningWorkerDispatchPrompt({ controlIssue, executionIssue }) {
+  if (!isPositiveInteger(controlIssue) || !isPositiveInteger(executionIssue)) {
+    throw new Error("formatPlanningWorkerDispatchPrompt requires controlIssue and executionIssue to be positive integers");
+  }
+  return (
+    `Planning worker dispatch. Execution Issue: #${executionIssue}. Controlling Issue: #${controlIssue}.\n\n` +
+    `Read #${executionIssue} directly from GitHub for its full outcome, constraints, and acceptance ` +
+    `criteria — it was not restated here on purpose. Determine whether it is one bounded vertical ` +
+    `slice or genuinely requires decomposition per AGENTS.md. If it requires decomposition, produce ` +
+    `this Issue's Execution Plan Index, Shared Contract, and Worker Unit Contract comments per ` +
+    `docs/operating-model.md's durable plan artifact conventions and do not begin implementing any ` +
+    `resulting unit yourself. Report back using AGENTS.md's Slice handoff format once the plan (or the ` +
+    `single-slice determination) is durable, then stop.`
+  );
+}
+
+// Pure. Renders the fixed reference-only "Integration/PR worker dispatch" template for
+// #397's new EXECUTION_COMPLETE pre-PR Lifecycle value (ready-dispatch-gate.mjs's
+// READY_TO_DISPATCH_INTEGRATION verdict). Also carries no `route` parameter, for the same
+// reason as the planning template above — the Integration/PR worker's job is fixed by
+// docs/bounded-review-cycle.md § Integration/PR worker, not by a route string.
+export function formatIntegrationWorkerDispatchPrompt({ controlIssue, executionIssue }) {
+  if (!isPositiveInteger(controlIssue) || !isPositiveInteger(executionIssue)) {
+    throw new Error("formatIntegrationWorkerDispatchPrompt requires controlIssue and executionIssue to be positive integers");
+  }
+  return (
+    `Integration/PR worker dispatch. Execution Issue: #${executionIssue}. Controlling Issue: ` +
+    `#${controlIssue}.\n\n` +
+    `Read #${executionIssue}'s own Execution Plan Index, Shared Contract, and Worker Unit Contract ` +
+    `comments directly from GitHub — they were not restated here on purpose. Integrate the completed ` +
+    `units and open the one PR per docs/bounded-review-cycle.md § Integration/PR worker. Report back ` +
+    `using AGENTS.md's Slice handoff format. Once the PR exists — Stage 1 review requested, or a ` +
+    `recorded Stage 1 exemption for non-review-worthy work — stop, per docs/operating-model.md § ` +
+    `Watched lifecycle breakpoints.`
+  );
+}
+
 // Pure. Same reference-only size proxy diagnostic-trace.mjs's classifyPreDispatch uses
 // (DEFAULT_REFERENCE_THRESHOLD_CHARS = 700), duplicated rather than imported: this
 // directory and tools/telemetry are separate consumer-distributed units that should not
@@ -134,21 +179,53 @@ function readStdinIfPiped() {
   }
 }
 
+// #397's two new templates are selected by the piped gate result's own `state` field —
+// ready-dispatch-gate.mjs's READY_TO_DISPATCH_PLANNING/READY_TO_DISPATCH_INTEGRATION verdicts
+// — never by a caller re-deciding which template applies. READY_TO_DISPATCH keeps using the
+// original "Implementation worker dispatch" template unchanged. Neither new template takes a
+// `route` field (see each formatter's own comment for why), so the field set piped through
+// differs by kind.
+const TEMPLATES_BY_STATE = {
+  READY_TO_DISPATCH: { formatter: formatDispatchPrompt, needsRoute: true },
+  READY_TO_DISPATCH_PLANNING: { formatter: formatPlanningWorkerDispatchPrompt, needsRoute: false },
+  READY_TO_DISPATCH_INTEGRATION: { formatter: formatIntegrationWorkerDispatchPrompt, needsRoute: false },
+};
+
+// Explicit-fields mode's equivalent of the state-based selection above, for a caller
+// re-rendering a prompt outside a live pipe (e.g. this script's own tests). Defaults to
+// "implementation" so every pre-existing explicit-fields invocation keeps working unchanged.
+const FORMATTERS_BY_KIND = {
+  implementation: { formatter: formatDispatchPrompt, needsRoute: true },
+  planning: { formatter: formatPlanningWorkerDispatchPrompt, needsRoute: false },
+  integration: { formatter: formatIntegrationWorkerDispatchPrompt, needsRoute: false },
+};
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
 
+  let formatter;
   let fields = null;
-  if (args["control-issue"] || args["execution-issue"] || args.route) {
+  if (args["control-issue"] || args["execution-issue"] || args.route || args.kind) {
+    const kind = args.kind ?? "implementation";
+    const entry = FORMATTERS_BY_KIND[kind];
+    if (!entry) {
+      process.stderr.write(
+        `format-dispatch-prompt.mjs: unknown --kind ${JSON.stringify(kind)} — use "implementation", "planning", or "integration"\n`,
+      );
+      process.exit(2);
+      return;
+    }
+    formatter = entry.formatter;
     fields = {
       controlIssue: args["control-issue"] != null ? Number(args["control-issue"]) : null,
       executionIssue: args["execution-issue"] != null ? Number(args["execution-issue"]) : null,
-      route: args.route ?? null,
+      ...(entry.needsRoute ? { route: args.route ?? null } : {}),
     };
   } else {
     const stdin = readStdinIfPiped();
     if (!stdin) {
       process.stderr.write(
-        "format-dispatch-prompt.mjs: pipe ready-dispatch-gate.mjs's JSON output on stdin, or pass --control-issue/--execution-issue/--route explicitly\n",
+        "format-dispatch-prompt.mjs: pipe ready-dispatch-gate.mjs's JSON output on stdin, or pass --control-issue/--execution-issue/--route (and optionally --kind) explicitly\n",
       );
       process.exit(2);
       return;
@@ -161,25 +238,33 @@ function main() {
       process.exit(2);
       return;
     }
-    // Stage 1 review finding on this PR: the original `parsed.state && parsed.state !==
-    // "READY_TO_DISPATCH"` check only rejected an explicit non-ready state — a payload
-    // that omitted `state` entirely (a malformed or schema-drifted gate result that still
-    // happened to carry controlIssue/executionIssue/route) fell through this check and
-    // was formatted into a dispatch prompt anyway. `state` must be exactly the string
-    // "READY_TO_DISPATCH"; anything else, including absent, is refused.
-    if (parsed.state !== "READY_TO_DISPATCH") {
+    // Stage 1 review finding on this PR (pre-#397): the original `parsed.state &&
+    // parsed.state !== "READY_TO_DISPATCH"` check only rejected an explicit non-ready
+    // state — a payload that omitted `state` entirely (a malformed or schema-drifted gate
+    // result that still happened to carry controlIssue/executionIssue/route) fell through
+    // this check and was formatted into a dispatch prompt anyway. `state` must be exactly
+    // one of the recognized ready states above; anything else, including absent, is refused.
+    const entry = TEMPLATES_BY_STATE[parsed.state];
+    if (!entry) {
       process.stderr.write(
-        `format-dispatch-prompt.mjs: input state is ${JSON.stringify(parsed.state ?? null)}, not "READY_TO_DISPATCH" — refusing to format a dispatch prompt for a non-ready or malformed gate result\n`,
+        `format-dispatch-prompt.mjs: input state is ${JSON.stringify(parsed.state ?? null)}, not "READY_TO_DISPATCH" ` +
+          `(or "READY_TO_DISPATCH_PLANNING"/"READY_TO_DISPATCH_INTEGRATION") — refusing to format a dispatch prompt ` +
+          "for a non-ready or malformed gate result\n",
       );
       process.exit(2);
       return;
     }
-    fields = { controlIssue: parsed.controlIssue, executionIssue: parsed.executionIssue, route: parsed.route };
+    formatter = entry.formatter;
+    fields = {
+      controlIssue: parsed.controlIssue,
+      executionIssue: parsed.executionIssue,
+      ...(entry.needsRoute ? { route: parsed.route } : {}),
+    };
   }
 
   let prompt;
   try {
-    prompt = assertReferenceOnly(formatDispatchPrompt(fields));
+    prompt = assertReferenceOnly(formatter(fields));
   } catch (err) {
     process.stderr.write(`format-dispatch-prompt.mjs: ${err.message}\n`);
     process.exit(1);
