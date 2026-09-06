@@ -1,0 +1,15 @@
+{
+  "scenario": "4. Merge -> Stage 2 breakpoint",
+  "status": "Demonstrated (real, historical replay against the exact recorded durable state)",
+  "representative_real_work": "Control Issue #375's own real recorded durable reference: PR #376 at its frozen head fd1baa68eefd9dabec69784fa1c5390e9fa31ae5, the same PR/head #375's own mid-cycle comment (issuecomment-5541631991) named for a fresh controller to check.",
+  "command": "node tools/orchestration/next-review-transition-gate.mjs --pr 376 --head fd1baa68eefd9dabec69784fa1c5390e9fa31ae5 --issue 375",
+  "result_summary": {
+    "exitCode": 0,
+    "state": "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
+    "stopAfter": true,
+    "stage1_state": "RESPONSE_RECEIVED",
+    "mergeReady_state": "MERGE_READY"
+  },
+  "full_output_note": "Full raw JSON (including the real Stage 1 response evidence -- 5 discussion comments + 1 review + 1 issue-comment, all chatgpt-codex-connector[bot], matched at the frozen head) is reproduced verbatim by re-running the command above; omitted here for brevity, not because it was unfavorable.",
+  "observation": "At the exact PR/head #375's own durable comment recorded, the corrected composed gate resolves to exactly one verdict -- STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2, carrying a literal stopAfter:true -- rather than #375's own real prose instruction, which asked a fresh controller to 'verify/fix findings if any, then merge ... open the Stage 2 audit issue, trigger it, and end' in one continuation. The gate's verdict authorizes exactly the merge+Stage2-trigger action and nothing past it; it does not itself continue on to check or wait for the Stage 2 result (per the module comment: 'once that reference is durable, this verdict's job is done -- the gate does not itself continue on to check Stage 2'). This is the same real evidence reused for scenario 6's negative control below, since it is the one live/historical case where the corrected mechanism's single-verdict behavior and the old broad prose's multi-step scope can be directly compared at the identical durable reference point."
+}

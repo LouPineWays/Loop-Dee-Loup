@@ -1,0 +1,33 @@
+{
+  "scenario": "7. Context/economic evidence where available",
+  "status": "Demonstrated (real character-count comparisons); not the sole success criterion per #397's own constraint",
+  "comparisons": [
+    {
+      "class_of_dispatch": "Planning-worker dispatch for a READY_FOR_PLAN control Issue",
+      "before": "A controller falling through to free reasoning (the pre-397-B bug) would need to read and potentially restate the full execution Issue body to plan against it.",
+      "before_size_chars": 10393,
+      "before_source": "Execution Issue #407's real, current full body (gh issue view 407 --json body), read live during this unit's own work.",
+      "after": "The terse planning-worker dispatch prompt actually emitted by format-dispatch-prompt.mjs from ready-dispatch-gate.mjs's real #408 verdict.",
+      "after_size_chars": 679,
+      "after_source": "docs/next-review-transition-proof-runs/397-scenario-01-terse-implementation-dispatch.json",
+      "reduction_factor_approx": 15.3
+    },
+    {
+      "class_of_dispatch": "Post-PR 'what happens next' control-surface instruction",
+      "before": "Control Issue #375's own real, broad 'Next authorized transition' comment (issuecomment-5541631991), the exact source text #397's bug report and this unit's own negative-control scenario cite.",
+      "before_size_chars": 1175,
+      "before_source": "GitHub API, comment id 5541631991, read live during this unit's own work.",
+      "after": "next-review-transition-gate.mjs's single-verdict JSON for the same real PR/head (scenario 4/6's artifact); the actionable content a controller need read is exactly one 'state' field value (e.g. \"STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2\", 39 characters) plus that verdict's one fixed associated action, not a six-step paragraph.",
+      "after_size_chars_verdict_field_only": 39,
+      "note": "The full raw gate JSON (~2.2KB) also carries the underlying stage1/mergeReady evidence objects for auditability; the point of comparison for controller *prompt* economics is the verdict field a controller actually needs to act on, not the full diagnostic payload, which a controller does not have to read or relay to a worker."
+    },
+    {
+      "class_of_dispatch": "This unit's own worker-unit dispatch (397-C)",
+      "before": "Worker Unit Contract 397-C's full comment body on #397 (the durable specification this unit had to read directly).",
+      "before_size_chars_approx": 3000,
+      "after": "The actual dispatching message this session received: two GitHub comment URLs, the parent Issue number, and one sentence stating the fields were deliberately not restated.",
+      "after_size_chars_approx": 420
+    }
+  ],
+  "caveat_per_397_constraint": "#397's own Verification section explicitly says: 'do not make raw token reduction the sole success criterion. Correct stage separation and artifact authority are mandatory.' These character-count comparisons are supporting evidence for the same class of dispatch (real before/after text, not estimated), not a claim that token reduction alone validates the correction -- scenarios 1-6's structural/stage-separation evidence is the primary basis for this proof run's verdict."
+}

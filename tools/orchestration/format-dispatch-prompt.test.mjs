@@ -6,7 +6,12 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatDispatchPrompt, assertReferenceOnly } from "./format-dispatch-prompt.mjs";
+import {
+  formatDispatchPrompt,
+  formatPlanningWorkerDispatchPrompt,
+  formatIntegrationWorkerDispatchPrompt,
+  assertReferenceOnly,
+} from "./format-dispatch-prompt.mjs";
 
 test("formatDispatchPrompt includes the exact control Issue, execution Issue, and route", () => {
   const prompt = formatDispatchPrompt({ controlIssue: 322, executionIssue: 321, route: "implementation worker" });
@@ -139,4 +144,138 @@ test("CLI: a malformed explicit --control-issue value fails closed", async () =>
   );
   assert.notEqual(result.status, 0);
   assert.equal(result.stdout, "");
+});
+
+// -- #397's two new templates: "Planning worker dispatch" / "Integration/PR worker dispatch" ---
+
+test("formatPlanningWorkerDispatchPrompt includes the exact control Issue and execution Issue references and no route", () => {
+  const prompt = formatPlanningWorkerDispatchPrompt({ controlIssue: 408, executionIssue: 407 });
+  assert.match(prompt, /^Planning worker dispatch\./);
+  assert.match(prompt, /#407/);
+  assert.match(prompt, /#408/);
+  assert.ok(!prompt.includes("Route:"));
+});
+
+test("formatPlanningWorkerDispatchPrompt stays well under the reference-only threshold", () => {
+  const prompt = formatPlanningWorkerDispatchPrompt({ controlIssue: 408, executionIssue: 407 });
+  assert.ok(prompt.length < 700, `expected < 700 chars, got ${prompt.length}`);
+});
+
+test("formatPlanningWorkerDispatchPrompt throws for missing/invalid required fields", () => {
+  assert.throws(() => formatPlanningWorkerDispatchPrompt({ controlIssue: null, executionIssue: 407 }));
+  assert.throws(() => formatPlanningWorkerDispatchPrompt({ controlIssue: 408, executionIssue: NaN }));
+  assert.throws(() => formatPlanningWorkerDispatchPrompt({ controlIssue: 408, executionIssue: -7 }));
+});
+
+test("formatPlanningWorkerDispatchPrompt never contains restated AGENTS.md contract prose", () => {
+  const prompt = formatPlanningWorkerDispatchPrompt({ controlIssue: 408, executionIssue: 407 });
+  for (const forbidden of ["STATUS", "OUTCOME", "CHANGED", "VERIFIED", "DECISIONS", "NEW RISKS", "Founder interrupt conditions"]) {
+    assert.ok(!prompt.includes(forbidden), `prompt unexpectedly contains restated field "${forbidden}"`);
+  }
+});
+
+test("formatIntegrationWorkerDispatchPrompt includes the exact control Issue and execution Issue references and no route", () => {
+  const prompt = formatIntegrationWorkerDispatchPrompt({ controlIssue: 408, executionIssue: 407 });
+  assert.match(prompt, /^Integration\/PR worker dispatch\./);
+  assert.match(prompt, /#407/);
+  assert.match(prompt, /#408/);
+  assert.ok(!prompt.includes("Route:"));
+});
+
+test("formatIntegrationWorkerDispatchPrompt stays well under the reference-only threshold", () => {
+  const prompt = formatIntegrationWorkerDispatchPrompt({ controlIssue: 408, executionIssue: 407 });
+  assert.ok(prompt.length < 700, `expected < 700 chars, got ${prompt.length}`);
+});
+
+test("formatIntegrationWorkerDispatchPrompt includes the PR-open stop clause", () => {
+  const prompt = formatIntegrationWorkerDispatchPrompt({ controlIssue: 408, executionIssue: 407 });
+  assert.match(prompt, /stop/i);
+  assert.match(prompt, /Watched lifecycle breakpoints/);
+});
+
+test("formatIntegrationWorkerDispatchPrompt throws for missing/invalid required fields", () => {
+  assert.throws(() => formatIntegrationWorkerDispatchPrompt({ controlIssue: 408, executionIssue: null }));
+  assert.throws(() => formatIntegrationWorkerDispatchPrompt({ controlIssue: 12.5, executionIssue: 407 }));
+});
+
+// -- CLI: state-based template selection (piped mode) ----------------------------------------
+
+function runCli(input) {
+  return (async () => {
+    const { spawnSync } = await import("node:child_process");
+    const { fileURLToPath } = await import("node:url");
+    const scriptPath = fileURLToPath(new URL("./format-dispatch-prompt.mjs", import.meta.url));
+    return spawnSync(process.execPath, [scriptPath], { input: JSON.stringify(input), encoding: "utf8" });
+  })();
+}
+
+test("CLI: piped READY_TO_DISPATCH_PLANNING selects the planning template", async () => {
+  const result = await runCli({ state: "READY_TO_DISPATCH_PLANNING", controlIssue: 408, executionIssue: 407, route: "planning worker" });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Planning worker dispatch\./);
+  assert.match(result.stdout, /#407/);
+  assert.match(result.stdout, /#408/);
+});
+
+test("CLI: piped READY_TO_DISPATCH_INTEGRATION selects the integration template", async () => {
+  const result = await runCli({ state: "READY_TO_DISPATCH_INTEGRATION", controlIssue: 408, executionIssue: 407, route: "integration worker" });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Integration\/PR worker dispatch\./);
+  assert.match(result.stdout, /#407/);
+  assert.match(result.stdout, /#408/);
+});
+
+test("CLI: piped READY_TO_DISPATCH still selects the original implementation template", async () => {
+  const result = await runCli({ state: "READY_TO_DISPATCH", controlIssue: 322, executionIssue: 321, route: "implementation worker" });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Implementation worker dispatch\./);
+});
+
+test("CLI: an unrecognized state is still refused, error message names every recognized state", async () => {
+  const result = await runCli({ state: "SOMETHING_ELSE", controlIssue: 408, executionIssue: 407 });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /not "READY_TO_DISPATCH"/);
+  assert.match(result.stderr, /READY_TO_DISPATCH_PLANNING/);
+  assert.match(result.stderr, /READY_TO_DISPATCH_INTEGRATION/);
+});
+
+// -- CLI: explicit --kind selection (explicit-fields mode) ------------------------------------
+
+test("CLI: explicit --kind planning selects the planning template without --route", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const scriptPath = fileURLToPath(new URL("./format-dispatch-prompt.mjs", import.meta.url));
+  const result = spawnSync(
+    process.execPath,
+    [scriptPath, "--control-issue", "408", "--execution-issue", "407", "--kind", "planning"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Planning worker dispatch\./);
+});
+
+test("CLI: explicit --kind integration selects the integration template without --route", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const scriptPath = fileURLToPath(new URL("./format-dispatch-prompt.mjs", import.meta.url));
+  const result = spawnSync(
+    process.execPath,
+    [scriptPath, "--control-issue", "408", "--execution-issue", "407", "--kind", "integration"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Integration\/PR worker dispatch\./);
+});
+
+test("CLI: an unknown --kind fails closed with exit 2", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const scriptPath = fileURLToPath(new URL("./format-dispatch-prompt.mjs", import.meta.url));
+  const result = spawnSync(
+    process.execPath,
+    [scriptPath, "--control-issue", "408", "--execution-issue", "407", "--kind", "bogus"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /unknown --kind/);
 });

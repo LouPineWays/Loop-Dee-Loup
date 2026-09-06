@@ -1,0 +1,15 @@
+{
+  "scenario": "3. Stage 1 breakpoint",
+  "status": "Demonstrated (real, historical)",
+  "representative_real_work": "Control Issue #375 / PR #376 (#374's own implementation and proving lifecycle, 2026-09-04).",
+  "real_timeline": [
+    { "time": "2026-09-04T13:57:44Z", "event": "Control Issue #375 created." },
+    { "time": "2026-09-04T14:08:39Z", "event": "Stage 1 `@codex review` triggered on PR #376 at frozen head fd1baa68e." },
+    { "time": "2026-09-04T14:08:49Z", "event": "Durable 'Control state (updated)' comment posted (issuecomment-5541631991), recording Lifecycle: REVIEW and a 'Next authorized transition' for a later session -- the controller stopped here rather than waiting inline for the Stage 1 response." },
+    { "time": "2026-09-04T14:10:39Z", "event": "Codex Stage 1 finding posted (issuecomment-5541654391, a real P1 finding: stale four-breakpoint reference in AGENTS.md)." },
+    { "time": "2026-09-04T14:15:49Z", "event": "PR #376 merged (per `gh pr list`), after the finding was fixed at a later commit and re-verified." },
+    { "time": "2026-09-04T19:33:19Z", "event": "Control Issue #375 finally closed as DONE, ~5h18m after the merge -- consistent with a separate later session handling the Stage 2 audit (#380) trigger/wait/verify and closing out, per #375's own final body text: 'This session (start-to-finish across the Blocker/#381 detour) is itself a further proof point in #374's proving lifecycle: multiple fresh contexts ... reconstructed successive transitions from durable GitHub state rather than one continuous reasoning context.'" }
+  ],
+  "caveat": "GitHub timestamps and durable comment/body content are the only artifacts this proof run can observe; they cannot literally prove which wall-clock conversation context authored each transition. The evidence is: (a) the AGENTS.md contract in force at the time required a fresh `work on #375` invocation to resume, (b) a durable comment was posted precisely at the Stage 1 trigger point stating the controller was ending there, and (c) a multi-hour gap separates the merge from the final close, consistent with -- and per #375's own body, explicitly claimed as -- separate fresh controller contexts rather than one continuous session.",
+  "observation": "This is the real precedent the corrected mechanism formalizes: #375 already demonstrated stopping at the Stage 1 breakpoint via a durable comment and resuming later from that comment plus the PR alone. next-review-transition-gate.mjs (397-B) now makes that same behavior mechanical rather than dependent on a controller choosing to write a good handoff comment -- see scenario 4/6's artifacts for the corrected gate's own single-verdict output at this exact real historical decision point."
+}

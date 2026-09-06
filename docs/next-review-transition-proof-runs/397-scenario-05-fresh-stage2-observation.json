@@ -1,0 +1,38 @@
+{
+  "scenario": "5. Fresh Stage 2 observation",
+  "status": "Demonstrated -- partly real (NO_ACTION_YET / AMBIGUOUS cases), partly constructed exercise (STAGE2_CLOSE_READY / STAGE2_CORRECTION_REQUIRED cases; see reason)",
+  "real_replay": [
+    {
+      "command": "node tools/orchestration/next-review-transition-gate.mjs --audit-issue 384",
+      "context": "Real, closed CLEAN audit (#381/#382's own cycle); work issue #381 is already CLOSED.",
+      "result": { "exitCode": 0, "state": "NO_ACTION_YET", "stopAfter": true, "postAudit_state": "OK", "rawVerdict": "CLEAN", "workIssueState": "CLOSED" }
+    },
+    {
+      "command": "node tools/orchestration/next-review-transition-gate.mjs --audit-issue 380",
+      "context": "Real, CLEAN audit for #374/#375's own cycle; work issue #374 is CLOSED, but the Audit Issue #380 itself remains open on GitHub -- the exact orphaned-audit defect execution Issue #407/control #408 exists to fix. Out of #397's own scope; noted here only because it surfaced naturally while gathering real evidence for this scenario.",
+      "result": { "exitCode": 0, "state": "NO_ACTION_YET", "stopAfter": true, "postAudit_state": "OK", "rawVerdict": "CLEAN", "workIssueState": "CLOSED" }
+    },
+    {
+      "command": "node tools/orchestration/next-review-transition-gate.mjs --audit-issue 406",
+      "context": "Real, closed CLEAN audit for #306's own terminal correction (#404's audit). Surfaced an unexpected but honestly-reported real result below.",
+      "result": {
+        "exitCode": 4,
+        "state": "AMBIGUOUS",
+        "stopAfter": true,
+        "postAudit_state": "PREMATURE_CLOSURE",
+        "rawVerdict": "CLEAN",
+        "reportEvidence_backed": false,
+        "reportEvidence_reason": "1 post-trigger bot response(s) found, none is a completed audit report (verification checklist walk-through is incomplete (response has 8 numbered item(s), requested checklist has 9))"
+      },
+      "observation": "This is a real, surprising result found while exercising the mechanism, reported honestly per this unit's own contract rather than omitted: lifecycle-gate.mjs's post-audit checklist-count check does not currently recognize the completed report backing #406's own real CLEAN verdict as satisfying its checklist-walk-through requirement (8 vs 9 items). The composed gate correctly fails closed (AMBIGUOUS) rather than declaring STAGE2_CLOSE_READY on unverified evidence -- exactly the fail-closed behavior scenario 6 (negative control) and #397's requirement 6 call for -- but the specific checklist-count mismatch itself is a candidate finding for a future correction outside this unit's own scope (397-C exercises 397-A/397-B/397-E's shipped scripts; it does not modify their behavior per this unit's own Worker Unit Contract)."
+    }
+  ],
+  "why_constructed_exercise_also_needed": "No real, currently-open Audit Issue in this repository is in the 'backed CLEAN, work issue still OPEN' shape that produces STAGE2_CLOSE_READY (every real CLEAN audit found had already been closed out), and no real currently-open Audit Issue carries a completed NOT CLEAN report either. Both cases were therefore additionally exercised via docs/next-review-transition-proof-runs/397-scenario-05-fresh-stage2-observation-exercise.mjs, calling the shipped, unmodified resolvePostMergeVerdict function directly with synthetic postAudit fixtures reproducing each shape.",
+  "exercise_script": "docs/next-review-transition-proof-runs/397-scenario-05-fresh-stage2-observation-exercise.mjs",
+  "exercise_command": "node docs/next-review-transition-proof-runs/397-scenario-05-fresh-stage2-observation-exercise.mjs",
+  "exercise_results": {
+    "case_A_clean_work_issue_open": { "state": "STAGE2_CLOSE_READY", "stopAfter": true },
+    "case_B_not_clean": { "state": "STAGE2_CORRECTION_REQUIRED", "stopAfter": true }
+  },
+  "observation": "Across the three real replays and the two constructed cases, a fresh controller consulting only durable Audit-Issue evidence resolves to exactly one of the four applicable verdicts (NO_ACTION_YET, AMBIGUOUS, STAGE2_CLOSE_READY, STAGE2_CORRECTION_REQUIRED) with no prior Stage 1 controller history required or consulted in any case, satisfying scenario 5's requirement."
+}

@@ -1,0 +1,33 @@
+{
+  "scenario": "2. Terse correction dispatch",
+  "status": "Demonstrated via constructed exercise (not a real occurrence) -- see reason below",
+  "reason_no_real_occurrence": "resolvePreMergeVerdict's STAGE1_CORRECTION_REQUIRED verdict fires only for the one concrete, mechanically-detectable pre-merge defect the composed checks can see: a GitHub closing-reference violation (lifecycle-gate.mjs checkMergeReady returning BLOCKED_CLOSING_REFERENCE), per next-review-transition-gate.mjs's own module comment. An ordinary 'Codex found a bug, a fix commit landed, re-trigger Stage 1' cycle (the shape every real Stage-1-then-correction PR in this repository's history actually took, e.g. PR #399, #401, #403) instead surfaces as a fresh NOT_REQUESTED state at the new head, which resolves to NO_ACTION_YET, not STAGE1_CORRECTION_REQUIRED. No PR in this repository's current history is live in the closing-reference-violation state (the repository's own standing rule -- never write Fixes/Closes/Resolves # in a review-worthy LDL PR body -- makes this defect deliberately rare in practice), so no real live/historical case exists to replay for this exact verdict.",
+  "exercise_script": "docs/next-review-transition-proof-runs/397-scenario-02-terse-correction-dispatch-exercise.mjs",
+  "command": "node docs/next-review-transition-proof-runs/397-scenario-02-terse-correction-dispatch-exercise.mjs",
+  "constructed_fixture": {
+    "stage1": {
+      "exitCode": 0,
+      "state": "RESPONSE_RECEIVED",
+      "triggerTimestamp": "2026-09-06T00:00:00Z"
+    },
+    "mergeReady": {
+      "exitCode": 2,
+      "state": "BLOCKED_CLOSING_REFERENCE",
+      "violations": [
+        {
+          "source": "closingIssuesReferences",
+          "detail": "PR LouPineWays/Loop-Dee-Loup#999999 carries a GitHub closing reference ... to issue #999998."
+        }
+      ]
+    }
+  },
+  "result": {
+    "state": "STAGE1_CORRECTION_REQUIRED",
+    "stopAfter": true,
+    "repo": "LouPineWays/Loop-Dee-Loup",
+    "pr": "999999",
+    "issue": "999998"
+  },
+  "exit_code": 0,
+  "observation": "The unmodified, shipped resolvePreMergeVerdict function resolves a genuine Stage 1 response combined with a closing-reference violation to exactly one verdict (STAGE1_CORRECTION_REQUIRED, stopAfter:true), naming only the PR/issue references -- not the finding text. Per docs/bounded-review-cycle.md's already-shipped correction-dispatch discipline (real, unmodified by this unit, read directly rather than re-verified here), the correction worker dispatched from this verdict reads 'PR #<N>' and its own review comments directly; the controller does not restate the finding narrative in the dispatch prompt. This is the same terse-correction discipline this repository's real correction PRs (#399, #401, #403) already followed in practice, just not through this specific verdict path (those went through the more common fix-and-re-trigger route, which this gate resolves to NO_ACTION_YET rather than STAGE1_CORRECTION_REQUIRED -- a distinct but equally reference-only path, since NO_ACTION_YET itself dispatches nothing and simply waits for the fresh Stage 1 trigger's own genuine response)."
+}

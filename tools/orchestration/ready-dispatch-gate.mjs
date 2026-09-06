@@ -45,6 +45,15 @@
 //   - **Blocker:** none
 //   - **Founder decision:** none — <optional trailing explanation>
 //
+// Issue #397 corrective unit 397-E: live control Issues #398/#408 actually author this
+// field as "- **Execution issue:** #123", not "- **Execution:** #123". 397-B's own
+// regression fixture silently normalized the live spelling to the legacy one before ever
+// exercising the gate, so it never proved the gate accepted the shape real thin controls
+// use. Both spellings are read as one execution-pointer field (readExecutionBulletField
+// below); when both are present and resolve to different issue numbers, that is a genuine
+// authoring conflict and fails closed to NOT_READY rather than silently preferring either
+// spelling.
+//
 // Stage 1 review finding on this PR: `.github/ISSUE_TEMPLATE/parent-execution.yml` — a
 // coarser, whole-feature controller template, not specific to this two-plane thin
 // control/execution pattern — never actually renders these bullets; it renders "###
@@ -105,7 +114,52 @@
 
 import { execFileSync } from "node:child_process";
 
-const KNOWN_LIFECYCLE_STATES = ["READY", "EXECUTING", "VERIFYING", "REVIEW", "AUDIT", "CORRECTION", "BLOCKED", "BLOCKED_FAILURE", "BLOCKED_EXTERNAL"];
+const KNOWN_LIFECYCLE_STATES = [
+  "READY",
+  "READY_FOR_PLAN",
+  "PLAN_READY",
+  "ROUTED",
+  "EXECUTION_COMPLETE",
+  "EXECUTING",
+  "VERIFYING",
+  "REVIEW",
+  "AUDIT",
+  "CORRECTION",
+  "BLOCKED",
+  "BLOCKED_FAILURE",
+  "BLOCKED_EXTERNAL",
+];
+
+// #397's four new pre-PR Lifecycle values (docs/operating-model.md's "Execution-stage
+// session boundaries" Plan/Route/Execute/Integrate pipeline), sitting between the existing
+// READY (direct single-worker dispatch) and the existing post-PR states. Recognizing these
+// here — rather than in a second, competing gate script — is #397's own explicit
+// requirement: AGENTS.md's "first action" contract names this one script for any
+// control-plane Issue, so a second script would leave that contract's own "run this one
+// script first" instruction silently incomplete for a pipeline-using control Issue. Each
+// value produces its own dispatch-ready verdict shape (see evaluateReadyDispatchGate below)
+// rather than collapsing into READY_TO_DISPATCH, because each authorizes a genuinely
+// different next action, not "dispatch one worker by the recorded route":
+//   READY_FOR_PLAN      -> dispatch the planning worker reference-only (Route must be the
+//                          literal value "planning worker" -- the one new state whose
+//                          Route is a specific required value, not merely "settled").
+//   PLAN_READY          -> run tools/orchestration/prepare-dispatch-manifest.mjs
+//                          --execution-issue <N> (a deterministic script invocation, never a
+//                          model-worker dispatch).
+//   ROUTED              -> read the Dispatch Manifest (tools/orchestration/
+//                          parse-execution-plan.mjs) and dispatch every currently
+//                          dispatch_ready unit via
+//                          tools/orchestration/format-unit-dispatch-prompt.mjs.
+//   EXECUTION_COMPLETE  -> dispatch the Integration/PR worker reference-only.
+// This gate deliberately does NOT itself read the execution Issue's Plan Index/Dispatch
+// Manifest comments to resolve PLAN_READY/ROUTED/EXECUTION_COMPLETE any further than
+// confirming the Lifecycle value and Execution pointer -- doing so would both violate this
+// file's own "exactly ONE read" invariant (see the module comment above) and require
+// importing tools/orchestration/parse-execution-plan.mjs, which itself imports
+// resolveRepoIdentity from *this* file, so a deeper import here would be circular. The
+// caller acts on this gate's compact verdict by invoking the named already-shipped script
+// next, exactly as it already does for READY_TO_DISPATCH's { executionIssue, route } triple.
+const PRE_PR_DISPATCH_LIFECYCLE_VALUES = new Set(["READY_FOR_PLAN", "PLAN_READY", "ROUTED", "EXECUTION_COMPLETE"]);
 
 // Issue #370 (Stage 1 finding on #368's PR): the ad hoc "- **Lifecycle:**" bullet
 // convention uses the bare word "BLOCKED", but `.github/ISSUE_TEMPLATE/parent-execution.yml`'s
@@ -270,20 +324,53 @@ export function isNoneSentinel(value) {
 }
 
 // Pure. Extracts the single execution-Issue number a control Issue's "Execution" bullet
-// points at. Returns { ok: true, issue } for exactly one distinct "#N" reference, or
-// { ok: false, reason } for zero or more than one — a control Issue naming more than one
-// execution pointer is not "one current execution pointer" (AGENTS.md's immediate-dispatch
-// gate requirement) and must not be treated as dispatch-ready.
+// points at. Returns { ok: true, issue } for exactly one distinct reference — either a
+// literal "#N" or a full GitHub issue/PR URL (".../issues/N" or ".../pull/N", an optional
+// "#issuecomment-..." anchor ignored) — or { ok: false, reason } for zero or more than one.
+// Issue #398's live control-Issue body used a full PR URL in its "PR:" bullet where every
+// other reference field used "#N"; next-review-transition-gate.mjs's shared use of this
+// function for the "PR" and "Stage 2" bullets (not just "Execution") means both authored
+// shapes must resolve the same way rather than forcing control Issues to be rewritten to
+// match one narrower convention. A control Issue naming more than one distinct pointer is
+// not "one current execution pointer" (AGENTS.md's immediate-dispatch gate requirement) and
+// must not be treated as dispatch-ready.
 export function parseExecutionPointer(value) {
   if (typeof value !== "string" || !value.trim()) {
     return { ok: false, reason: "Execution field is missing or empty" };
   }
-  const refs = [...new Set([...value.matchAll(/#(\d+)/g)].map((m) => Number(m[1])))];
-  if (refs.length === 0) return { ok: false, reason: `Execution field "${value}" names no #N issue reference` };
+  const hashRefs = [...value.matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
+  const urlRefs = [...value.matchAll(/\/(?:pull|issues)\/(\d+)/g)].map((m) => Number(m[1]));
+  const refs = [...new Set([...hashRefs, ...urlRefs])];
+  if (refs.length === 0) return { ok: false, reason: `Execution field "${value}" names no #N issue reference or GitHub issue/PR URL` };
   if (refs.length > 1) {
     return { ok: false, reason: `Execution field names more than one execution pointer (${refs.map((n) => `#${n}`).join(", ")}), not "one current execution pointer"` };
   }
   return { ok: true, issue: refs[0] };
+}
+
+// Pure. Reads the control Issue's execution-pointer bullet under either observed spelling
+// as one field: the legacy ad hoc "- **Execution:**" bullet (control Issues #311/#322) and
+// the live "- **Execution issue:**" spelling real thin controls #398/#408 actually use.
+// Issue #397 corrective unit 397-E — see the module comment above for why this alias
+// exists. When only one spelling is present, its value is used verbatim (existing
+// legacy-only control Issues keep working unchanged). When both are present and each
+// resolves to exactly one execution pointer, differing issue numbers are a genuine
+// authoring conflict: returns { conflict: true } rather than silently preferring either
+// spelling, so the caller can fail closed to NOT_READY with an explicit reason instead of
+// dispatching against a guess. Malformed values on one side (e.g. "none") do not by
+// themselves trigger a conflict — parseExecutionPointer's own missing/multi-valued
+// handling still applies to whichever value is selected.
+export function readExecutionBulletField(body) {
+  const legacy = parseControlBullet(body, "Execution");
+  const liveSpelling = parseControlBullet(body, "Execution issue");
+  if (legacy !== null && liveSpelling !== null) {
+    const legacyPointer = parseExecutionPointer(legacy);
+    const livePointer = parseExecutionPointer(liveSpelling);
+    if (legacyPointer.ok && livePointer.ok && legacyPointer.issue !== livePointer.issue) {
+      return { conflict: true, legacy, liveSpelling };
+    }
+  }
+  return { conflict: false, value: liveSpelling ?? legacy };
 }
 
 // Pure core: evaluates AGENTS.md's immediate-dispatch gate against an already-fetched
@@ -324,7 +411,10 @@ export function parseExecutionPointer(value) {
 // which template created it.
 export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   const lifecycleRaw = parseControlBullet(body, "Lifecycle") ?? parseHeadingField(body, "State");
-  const executionRaw = parseControlBullet(body, "Execution") ?? extractActiveExecutionRef(parseHeadingBlock(body, "Minimum authority"));
+  const executionField = readExecutionBulletField(body);
+  const executionRaw = executionField.conflict
+    ? null
+    : executionField.value ?? extractActiveExecutionRef(parseHeadingBlock(body, "Minimum authority"));
   const routeRaw = parseControlBullet(body, "Route");
   const blockerRaw = parseControlBullet(body, "Blocker") ?? parseHeadingField(body, "Current blocker");
   const founderDecisionRaw = parseControlBullet(body, "Founder decision") ?? parseHeadingField(body, "Founder interrupt");
@@ -334,6 +424,14 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   // doesn't apply". Populated as a subset of `reasons`, never a separate parse.
   const blockingReasons = [];
 
+  // Which of the dispatch-eligible Lifecycle values (existing READY, or #397's four new
+  // pre-PR pipeline values) this control Issue currently records — null when Lifecycle is
+  // missing, a blocking value, or an unrecognized/mid-cycle value that stays ordinary
+  // NOT_READY. Populated here, acted on only after every other field below has also been
+  // validated, exactly mirroring how the pre-existing READY path already defers its own
+  // verdict construction to the end of this function.
+  let dispatchLifecycle = null;
+
   if (lifecycleRaw === null) {
     reasons.push('no "- **Lifecycle:**" bullet or "### State" heading found in the control Issue body');
   } else if (BLOCKING_LIFECYCLE_VALUES.has(lifecycleRaw.toUpperCase())) {
@@ -341,7 +439,11 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
       `lifecycle is "${lifecycleRaw}" — this control Issue has an explicit blocking lifecycle state and must not receive a fresh immediate dispatch`;
     reasons.push(msg);
     blockingReasons.push(msg);
-  } else if (lifecycleRaw.toUpperCase() !== "READY") {
+  } else if (lifecycleRaw.toUpperCase() === "READY") {
+    dispatchLifecycle = "READY";
+  } else if (PRE_PR_DISPATCH_LIFECYCLE_VALUES.has(lifecycleRaw.toUpperCase())) {
+    dispatchLifecycle = lifecycleRaw.toUpperCase();
+  } else {
     reasons.push(
       `lifecycle is "${lifecycleRaw}", not READY` +
         (KNOWN_LIFECYCLE_STATES.includes(lifecycleRaw.toUpperCase())
@@ -350,7 +452,14 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
     );
   }
 
-  const execution = parseExecutionPointer(executionRaw);
+  const execution = executionField.conflict
+    ? {
+        ok: false,
+        reason:
+          `Execution pointer is ambiguous: "- **Execution:**" names ${JSON.stringify(executionField.legacy)} ` +
+          `while "- **Execution issue:**" names ${JSON.stringify(executionField.liveSpelling)} — these must resolve to the same execution Issue`,
+      }
+    : parseExecutionPointer(executionRaw);
   if (!execution.ok) {
     reasons.push(execution.reason);
   } else if (controlIssueNumber != null && execution.issue === Number(controlIssueNumber)) {
@@ -361,6 +470,13 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
 
   if (routeRaw === null || routeRaw === "" || isNoneSentinel(routeRaw)) {
     reasons.push(`Route is not settled (found: ${JSON.stringify(routeRaw)})`);
+  } else if (dispatchLifecycle === "READY_FOR_PLAN" && routeRaw.trim().toLowerCase() !== "planning worker") {
+    // READY_FOR_PLAN is the one new pre-PR value whose Route must be a specific literal
+    // value, not merely "settled" — it always dispatches the planning worker specifically
+    // (#397's Shared Contract: "Route: must be planning worker").
+    reasons.push(
+      `lifecycle is READY_FOR_PLAN but Route is "${routeRaw}", not "planning worker" — READY_FOR_PLAN always dispatches the planning worker`,
+    );
   }
 
   if (blockerRaw === null) {
@@ -387,11 +503,29 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
     return { status: "NOT_READY", reasons };
   }
 
-  return {
-    status: "READY_TO_DISPATCH",
-    executionIssue: execution.issue,
-    route: routeRaw,
-  };
+  // Every field required for dispatchLifecycle's own path has already been validated above
+  // (reasons.length === 0), so dispatchLifecycle is guaranteed to be non-null here — a null
+  // value would already have produced a `reasons` entry (missing/blocking/unrecognized
+  // Lifecycle) and returned NOT_READY/BLOCKED above instead of reaching this point.
+  switch (dispatchLifecycle) {
+    case "READY":
+      return { status: "READY_TO_DISPATCH", executionIssue: execution.issue, route: routeRaw };
+    // #397's four new pre-PR pipeline values — see PRE_PR_DISPATCH_LIFECYCLE_VALUES's own
+    // comment above for why each gets its own status rather than collapsing into
+    // READY_TO_DISPATCH: each authorizes a genuinely different next action for the caller
+    // to perform (a different already-shipped script, not "dispatch one worker by route").
+    case "READY_FOR_PLAN":
+      return { status: "READY_TO_DISPATCH_PLANNING", executionIssue: execution.issue, route: routeRaw };
+    case "PLAN_READY":
+      return { status: "READY_TO_RUN_DISPATCH_MANIFEST", executionIssue: execution.issue };
+    case "ROUTED":
+      return { status: "READY_TO_DISPATCH_UNITS", executionIssue: execution.issue };
+    case "EXECUTION_COMPLETE":
+      return { status: "READY_TO_DISPATCH_INTEGRATION", executionIssue: execution.issue, route: routeRaw };
+    /* c8 ignore next 2 -- unreachable: dispatchLifecycle is always one of the above once reasons is empty */
+    default:
+      throw new Error(`unreachable: dispatchLifecycle "${dispatchLifecycle}" with no unsatisfied reasons`);
+  }
 }
 
 // Pure. Parses a `git remote get-url origin` value into an "owner/repo" slug. Accepts the
@@ -536,6 +670,28 @@ export async function checkReadyDispatch(
   }
   if (result.status === "NOT_READY") {
     return { exitCode: 3, state: "NOT_READY", controlIssue: Number(controlIssue), repo: resolvedRepo, reasons: result.reasons };
+  }
+
+  // #397's four new pre-PR pipeline verdicts each get their own exit code, distinct from
+  // READY_TO_DISPATCH's 0 and from each other, so a caller (or a test) can never mistake one
+  // for another purely from the exit code alone. Chosen to avoid every exit code already
+  // fixed above (0, 1, 3, 4) and below (none currently used past 4), documented together
+  // here since there is no established prior convention this had to match.
+  const EXIT_CODES_BY_STATUS = {
+    READY_TO_DISPATCH_PLANNING: 5,
+    READY_TO_RUN_DISPATCH_MANIFEST: 6,
+    READY_TO_DISPATCH_UNITS: 7,
+    READY_TO_DISPATCH_INTEGRATION: 8,
+  };
+  if (result.status in EXIT_CODES_BY_STATUS) {
+    return {
+      exitCode: EXIT_CODES_BY_STATUS[result.status],
+      state: result.status,
+      controlIssue: Number(controlIssue),
+      repo: resolvedRepo,
+      executionIssue: result.executionIssue,
+      ...(result.route !== undefined ? { route: result.route } : {}),
+    };
   }
 
   return {
