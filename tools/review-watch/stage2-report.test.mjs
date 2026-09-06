@@ -346,6 +346,48 @@ test("extractResponseVerdict: reproduces issue #421's real genuine CLEAN Stage 2
   assert.equal(extractResponseVerdict(ISSUE_421_COMMENT), "CLEAN");
 });
 
+// -- extractResponseVerdict: a literal/fenced verdict example in evidence must never be read as
+// the report's own declared verdict (issue #422 recurred a second time, Stage 1 review finding on
+// PR #424) ------------------------------------------------------------------------------------
+
+test("extractResponseVerdict: a fenced '# CLEAN' example inside verification evidence is not read as the verdict; the real trailing 'Verdict' / 'NOT CLEAN' field is", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. The parser fails to reject a standalone verdict heading quoted as an example, such as:",
+    "",
+    "```",
+    "# CLEAN",
+    "```",
+    "",
+    "This must be fixed so only a genuine verdict declaration is honored.",
+    "",
+    "### Verdict",
+    "",
+    "NOT CLEAN",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("extractResponseVerdict: a fenced 'CLEAN' example with no real verdict declaration anywhere else extracts nothing, rather than the fenced example", () => {
+  const body = ["Example of the shape under discussion:", "", "```", "# CLEAN", "```", "", "No other verdict is stated."].join("\n");
+  assert.equal(extractResponseVerdict(body), null);
+});
+
+test("extractResponseVerdict: a tilde-fenced verdict example is excluded the same way as a backtick-fenced one", () => {
+  const body = ["~~~", "NOT CLEAN", "~~~", "", "### Verdict", "", "CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), "CLEAN");
+});
+
+test("extractResponseVerdict: two genuinely conflicting standalone verdict declarations outside any fence fail closed to null rather than silently resolving to the first one found", () => {
+  const body = ["# CLEAN", "", "Some intervening prose changed the outcome.", "", "# NOT CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), null);
+});
+
+test("extractResponseVerdict: issue #421's real response is unaffected by fenced-example exclusion (no fences present, must still resolve to CLEAN)", () => {
+  assert.equal(extractResponseVerdict(ISSUE_421_COMMENT), "CLEAN");
+});
+
 // -- countNumberedItems ------------------------------------------------------------------------
 
 test("countNumberedItems: counts each top-level numbered line", () => {
@@ -537,6 +579,23 @@ test("isCompletedStage2AuditReport: reports every failed signal when multiple ar
   const result = isCompletedStage2AuditReport("Looks fine to me.", { mergeCommit: MERGE_COMMIT });
   assert.equal(result.complete, false);
   assert.equal(result.reasons.length, 3);
+});
+
+// Stage 1 review finding on PR #424 (issue #422 recurred a second time): a fenced "# CLEAN"
+// example quoted as evidence must never authorize a CLEAN closure over the report's own explicit
+// NOT CLEAN verdict.
+test("isCompletedStage2AuditReport: a fenced '# CLEAN' example in evidence never authorizes CLEAN over the report's actual NOT CLEAN verdict", () => {
+  const body = validReport({
+    verdictLine: "### Verdict\n\nNOT CLEAN",
+  }).replace(
+    "1. Confirmed the classifier rejects the exact #229 kickoff — CONFIRMED",
+    ["1. Confirmed a standalone verdict heading quoted as an example, e.g.:", "", "```", "# CLEAN", "```", "", "is not misread as this report's own verdict — CONFIRMED"].join(
+      "\n",
+    ),
+  );
+  const result = isCompletedStage2AuditReport(body, { mergeCommit: MERGE_COMMIT });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "NOT CLEAN", "a fenced CLEAN example in evidence must never override the report's real NOT CLEAN verdict");
 });
 
 test("isCompletedStage2AuditReport: a NOT CLEAN report is not misread as CLEAN via a findings sentence that merely mentions the word 'verdict' (Stage 1 review finding on PR #231)", () => {
