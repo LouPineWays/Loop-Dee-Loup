@@ -100,6 +100,14 @@
 //   node tools/orchestration/prepare-dispatch-manifest.mjs --execution-issue 294 --comment-id 5550677338
 //   node tools/orchestration/prepare-dispatch-manifest.mjs --execution-issue 294 --create
 //
+// Exit codes on the persisted (--comment-id/--create) path: 0 = DISPATCH_MANIFEST_VERIFIED
+// (durably persisted and verified, safe basis for Lifecycle: ROUTED); 1 = operational/
+// write-verification failure; 2 = the execution plan itself could not be parsed; 3 = the
+// manifest was NOT persisted because at least one unit resolved to route=REPLAN_REQUIRED
+// (docs/operating-model.md:261 -- a REPLAN_REQUIRED unit is a fail-closed stop, never an
+// authorized transition to ROUTED; stdout/exit code alone is not authoritative unless it is
+// this 0/DISPATCH_MANIFEST_VERIFIED case).
+//
 // Tests: node --test tools/orchestration/prepare-dispatch-manifest.test.mjs
 
 import { execFileSync } from "node:child_process";
@@ -455,7 +463,13 @@ function parseCommentPermalinkIdentity(url) {
     const m = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/issues\/(\d+)\/?$/);
     const commentId = extractCommentIdFromUrl(parsed.hash);
     if (!m || !commentId) return null;
-    return { repo: `${m[1]}/${m[2]}`.toLowerCase(), issue: Number(m[3]), commentId };
+    // Stage 1 review finding on PR #420 (ready-dispatch-gate.mjs's identical copy of this
+    // parser): the scheme+host must be part of comment identity, not just path+fragment --
+    // otherwise a foreign URL sharing a path and comment fragment with the real permalink
+    // would compare equal to it. Origin is compared alongside repo/issue/commentId by every
+    // caller below rather than hardcoded to one host, so a GitHub Enterprise origin still
+    // compares correctly as long as both sides of a comparison resolve to the same origin.
+    return { origin: parsed.origin.toLowerCase(), repo: `${m[1]}/${m[2]}`.toLowerCase(), issue: Number(m[3]), commentId };
   } catch {
     return null;
   }
@@ -559,6 +573,31 @@ export async function runPrepareDispatchManifest(
   const body = formatDispatchManifestBody(parsed.plan, entries);
 
   if (commentId || create) {
+    // Stage 1 review finding on PR #420: a manifest containing any unroutable unit must
+    // never be persisted/verified as a basis for PLAN_READY -> ROUTED. docs/operating-
+    // model.md:261 is explicit that a REPLAN_REQUIRED unit "is a fail-closed stop, never
+    // an authorized transition to ROUTED", and that "stdout alone is not authoritative
+    // routing state" -- so this CLI's own success payload must not claim
+    // DISPATCH_MANIFEST_VERIFIED when that would be false. Checked before any write so an
+    // unroutable manifest is never persisted as though it were the authoritative one.
+    const replanRequiredUnitIds = entries.filter((e) => e.route === "REPLAN_REQUIRED").map((e) => e.unitId);
+    if (replanRequiredUnitIds.length > 0) {
+      return {
+        exitCode: 3,
+        ok: false,
+        state: "REPLAN_REQUIRED",
+        repo: parsed.repo,
+        executionIssue: parsed.executionIssue,
+        replanRequiredUnitIds,
+        entries,
+        body,
+        message:
+          `prepare-dispatch-manifest.mjs: manifest cannot be persisted/verified -- unit(s) ` +
+          `${replanRequiredUnitIds.join(", ")} have route=REPLAN_REQUIRED. Lifecycle must not advance to ` +
+          `ROUTED; resolve routing (replan) before creating/updating the Dispatch Manifest.`,
+      };
+    }
+
     const expectedRepo = String(parsed.repo ?? "").toLowerCase();
     const writeResult = await postImpl({ repo: parsed.repo, executionIssue: parsed.executionIssue, commentId, body });
     const manifestIdentity = normalizeManifestIdentity(writeResult);
@@ -610,6 +649,7 @@ export async function runPrepareDispatchManifest(
       !readManifestIdentity ||
       writeManifestIdentity.repo !== expectedRepo ||
       readManifestIdentity.repo !== expectedRepo ||
+      writeManifestIdentity.origin !== readManifestIdentity.origin ||
       writeManifestIdentity.repo !== readManifestIdentity.repo ||
       writeManifestIdentity.issue !== readManifestIdentity.issue ||
       writeManifestIdentity.commentId !== readManifestIdentity.commentId
@@ -748,9 +788,11 @@ export async function runPrepareDispatchManifest(
       !manifestPlanIndexIdentity ||
       !canonicalPlanIndexIdentity ||
       !reparsedPlanIndexIdentity ||
+      canonicalPlanIndexIdentity.origin !== reparsedPlanIndexIdentity.origin ||
       canonicalPlanIndexIdentity.repo !== reparsedPlanIndexIdentity.repo ||
       canonicalPlanIndexIdentity.issue !== reparsedPlanIndexIdentity.issue ||
       canonicalPlanIndexIdentity.commentId !== reparsedPlanIndexIdentity.commentId ||
+      manifestPlanIndexIdentity.origin !== canonicalPlanIndexIdentity.origin ||
       manifestPlanIndexIdentity.repo !== canonicalPlanIndexIdentity.repo ||
       manifestPlanIndexIdentity.issue !== canonicalPlanIndexIdentity.issue ||
       manifestPlanIndexIdentity.commentId !== canonicalPlanIndexIdentity.commentId
@@ -766,6 +808,7 @@ export async function runPrepareDispatchManifest(
     if (
       !reparsedDispatchManifestIdentity ||
       !persistedManifestIdentity ||
+      reparsedDispatchManifestIdentity.origin !== persistedManifestIdentity.origin ||
       reparsedDispatchManifestIdentity.repo !== persistedManifestIdentity.repo ||
       reparsedDispatchManifestIdentity.issue !== persistedManifestIdentity.issue ||
       reparsedDispatchManifestIdentity.commentId !== persistedManifestIdentity.commentId
@@ -830,6 +873,11 @@ async function main() {
   if (result.exitCode === 2) {
     process.stderr.write(`prepare-dispatch-manifest.mjs: plan could not be parsed:\n${result.errors.join("\n")}\n`);
     process.exit(2);
+    return;
+  }
+  if (result.exitCode === 3) {
+    process.stderr.write(`${result.message}\n`);
+    process.exit(3);
     return;
   }
   if (result.state === "DISPATCH_MANIFEST_VERIFIED") {

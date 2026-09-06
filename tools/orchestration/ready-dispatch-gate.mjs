@@ -94,7 +94,11 @@
 //   ERROR — the control Issue could not be read, --control-issue was missing/invalid, or
 //     (issue #344) the current repository identity could not be established from the
 //     checkout (no configured `origin` remote, or a remote URL that isn't a recognizable
-//     GitHub owner/repo). Distinct from NOT_READY and BLOCKED: this means authoritative
+//     GitHub owner/repo). Also returned (Stage 1 review finding on PR #420) when ROUTED's
+//     own durable manifest verification hits an operational read/fetch failure — the
+//     execution plan or Dispatch Manifest comment could not be read at all (network, `gh
+//     api`, or unresolved repository identity), as opposed to being read and found
+//     malformed. Distinct from NOT_READY and BLOCKED in every case: this means authoritative
 //     control state was never reached at all, not that it was read and found unsatisfied
 //     or blocking — it must never be treated as license to fall through to execution-Issue
 //     inspection on the theory that "the gate said something." exit 1.
@@ -326,12 +330,33 @@ function parseIssueNumberFromIssueUrl(issueUrl) {
   return m ? Number(m[1]) : null;
 }
 
+// Pure. Extracts a Dispatch Manifest comment's own "- **Plan index:**" backlink. Uses the
+// same last-occurrence-wins convention as `parseControlBullet` above, rather than the first
+// match a bare `.match()` would return: a malformed or concurrently-edited manifest body
+// containing more than one such bullet must not have its first (possibly stale/incorrect)
+// occurrence silently accepted as authoritative while a later, conflicting bullet is
+// ignored (Stage 1 review finding on PR #420). A manifest with zero such bullets still
+// returns null, exactly as before.
 function parseManifestPlanIndexUrl(body) {
   if (typeof body !== "string") return null;
-  const match = body.match(/^- \*\*Plan index:\*\*\s*(\S+)\s*$/im);
+  const pattern = /^-\s*\*\*Plan index:\*\*\s*(\S+)\s*$/i;
+  let match = null;
+  for (const line of body.split("\n")) {
+    const m = pattern.exec(line);
+    if (m) match = m;
+  }
   return match ? match[1] : null;
 }
 
+// Pure. Extracts a comment permalink's identity: origin (scheme+host), owner/repo, issue
+// number, and comment id. Stage 1 review finding on this PR: a foreign permalink such as
+// `https://attacker.example/owner/repo/issues/407#issuecomment-123` shares its path and
+// fragment with a real GitHub comment, so omitting scheme+host from identity let it compare
+// equal to the genuine comment returned by the API. `origin` is included precisely so every
+// caller below compares it alongside repo/issue/commentId — never hardcoded to one host, so
+// a GitHub Enterprise origin still compares correctly as long as both sides of a comparison
+// resolve to the same origin (e.g. the pointer parsed from durable state vs. the canonical
+// URL the API itself returned).
 function parseCommentPermalinkIdentity(url) {
   if (typeof url !== "string") return null;
   try {
@@ -339,7 +364,7 @@ function parseCommentPermalinkIdentity(url) {
     const m = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/issues\/(\d+)\/?$/);
     const commentId = extractCommentIdFromUrl(parsed.hash);
     if (!m || !commentId) return null;
-    return { repo: `${m[1]}/${m[2]}`.toLowerCase(), issue: Number(m[3]), commentId };
+    return { origin: parsed.origin.toLowerCase(), repo: `${m[1]}/${m[2]}`.toLowerCase(), issue: Number(m[3]), commentId };
   } catch {
     return null;
   }
@@ -656,12 +681,30 @@ export async function verifyRoutedDispatchManifest(
   { parseExecutionPlanImpl = defaultParseExecutionPlanImpl, ghCommentViewImpl = defaultGhCommentView } = {},
 ) {
   const parsed = await parseExecutionPlanImpl({ repo, executionIssue });
-  if (!parsed || parsed.exitCode !== 0) {
+  // Stage 1 review finding on this PR: parse-execution-plan.mjs itself already distinguishes
+  // an operational failure (exitCode 1 — missing arg, unresolved repo identity, or a `gh
+  // api` call that threw, e.g. network/permission failure) from malformed/unparseable
+  // durable state (exitCode 2 — the plan comments were read fine but do not parse as a
+  // valid Execution Plan). Collapsing both into the same `{ ok: false }` shape here erased
+  // that distinction by the time it reached `checkReadyDispatch`, which then converted every
+  // case to NOT_READY — and AGENTS.md's controller contract treats NOT_READY as permission
+  // to fall through to normal issue reasoning, which is correct for malformed state but
+  // wrong for an unreadable authoritative source that must instead stop as a gate error.
+  if (!parsed || parsed.exitCode === 1) {
+    return {
+      ok: false,
+      operationalError: true,
+      reason:
+        "operational failure reading execution plan while verifying ROUTED Dispatch Manifest: " +
+        (parsed?.message ?? "unknown operational failure"),
+    };
+  }
+  if (parsed.exitCode !== 0) {
     return {
       ok: false,
       reason:
         "could not parse execution plan while verifying ROUTED Dispatch Manifest: " +
-        (parsed?.message ?? ((parsed?.errors ?? []).join(" | ") || "unknown parse failure")),
+        ((parsed.errors ?? []).join(" | ") || "unknown parse failure"),
     };
   }
 
@@ -681,9 +724,13 @@ export async function verifyRoutedDispatchManifest(
   try {
     manifestComment = await ghCommentViewImpl({ repo, commentId: manifestCommentId });
   } catch (err) {
+    // A thrown read here is a `gh api` / network / permission failure — the manifest's
+    // existence and content were never actually observed, so this is an operational
+    // failure, not evidence the manifest itself is malformed or missing.
     return {
       ok: false,
-      reason: `Dispatch manifest read-back failed for comment #${manifestCommentId}: ${err.message}`,
+      operationalError: true,
+      reason: `operational failure reading Dispatch manifest comment #${manifestCommentId}: ${err.message}`,
     };
   }
   const manifestIssue = parseIssueNumberFromIssueUrl(manifestComment?.issue_url);
@@ -702,6 +749,7 @@ export async function verifyRoutedDispatchManifest(
     !manifestCanonicalIdentity ||
     manifestPointerIdentity.repo !== expectedRepo ||
     manifestCanonicalIdentity.repo !== expectedRepo ||
+    manifestPointerIdentity.origin !== manifestCanonicalIdentity.origin ||
     manifestPointerIdentity.repo !== manifestCanonicalIdentity.repo ||
     manifestPointerIdentity.issue !== manifestCanonicalIdentity.issue ||
     manifestPointerIdentity.commentId !== manifestCanonicalIdentity.commentId
@@ -725,6 +773,7 @@ export async function verifyRoutedDispatchManifest(
   if (
     !manifestPlanIndexIdentity ||
     !canonicalPlanIndexIdentity ||
+    manifestPlanIndexIdentity.origin !== canonicalPlanIndexIdentity.origin ||
     manifestPlanIndexIdentity.repo !== canonicalPlanIndexIdentity.repo ||
     manifestPlanIndexIdentity.issue !== canonicalPlanIndexIdentity.issue ||
     manifestPlanIndexIdentity.commentId !== canonicalPlanIndexIdentity.commentId
@@ -822,6 +871,19 @@ export async function checkReadyDispatch(
       { parseExecutionPlanImpl, ghCommentViewImpl },
     );
     if (!manifestCheck.ok) {
+      // Stage 1 review finding on this PR: an operational read/fetch failure (network, `gh
+      // api`, or unresolved repository identity) means authoritative durable state was
+      // never actually reached, not that it was read and found malformed. Reporting that as
+      // NOT_READY would license the controller to fall through to normal issue reasoning
+      // (AGENTS.md's own NOT_READY contract) over a control-plane read that simply never
+      // completed; this is instead an ERROR the caller must stop and repair, same as the
+      // top-level `gh issue view` failure above.
+      if (manifestCheck.operationalError) {
+        return {
+          exitCode: 1,
+          message: `Operational failure verifying ROUTED Dispatch Manifest for ${resolvedRepo}#${result.executionIssue}: ${manifestCheck.reason}`,
+        };
+      }
       return {
         exitCode: 3,
         state: "NOT_READY",

@@ -857,6 +857,51 @@ test("runPrepareDispatchManifest fails closed when persistence returns no canoni
   assert.match(result.message, /missing canonical comment identity/i);
 });
 
+// Stage 1 review finding on PR #420: a manifest containing an unroutable (REPLAN_REQUIRED)
+// unit must never be persisted/verified as DISPATCH_MANIFEST_VERIFIED -- that would let a
+// controller advance PLAN_READY -> ROUTED on a manifest docs/operating-model.md:261
+// explicitly says is a fail-closed stop.
+test("runPrepareDispatchManifest rejects persistence when any unit resolves to REPLAN_REQUIRED", async () => {
+  const fakePlan = {
+    ok: true,
+    exitCode: 0,
+    repo: "LouPineWays/Loop-Dee-Loup",
+    executionIssue: 294,
+    plan: planWith({
+      "294-A": unit({ unitId: "294-A", state: "DONE" }),
+      "294-B": unit({
+        unitId: "294-B",
+        state: "PLANNED",
+        applicableRoleCapability: "some capability class not in the fixed table",
+        filesSurfacesExpectedToChange: "`docs/new-guide.md` (new).",
+        prerequisitesDependencies: "none.",
+      }),
+    }),
+  };
+  let postCalled = false;
+  const result = await runPrepareDispatchManifest(
+    { executionIssue: 294, create: true },
+    {
+      parseExecutionPlanImpl: async () => fakePlan,
+      fileExists: fileExistsFrom([]),
+      skillNames: [],
+      personaNames: [],
+      postImpl: async () => {
+        postCalled = true;
+        throw new Error("postImpl must not be called when a unit is REPLAN_REQUIRED");
+      },
+    },
+  );
+  assert.equal(postCalled, false);
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.ok, false);
+  assert.equal(result.state, "REPLAN_REQUIRED");
+  assert.deepEqual(result.replanRequiredUnitIds, ["294-B"]);
+  assert.notEqual(result.state, "DISPATCH_MANIFEST_VERIFIED");
+  assert.match(result.message, /294-B/);
+  assert.match(result.message, /REPLAN_REQUIRED/);
+});
+
 test("runPrepareDispatchManifest fails closed when persisted manifest belongs to the wrong execution Issue", async () => {
   const fakePlan = {
     ok: true,
