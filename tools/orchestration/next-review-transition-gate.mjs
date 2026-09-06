@@ -30,9 +30,15 @@
 //
 //   Pre-merge phase (a settled "PR" reference, no settled "Stage 2"/Audit reference yet):
 //     - stage1-gate NOT_REQUESTED or PENDING            -> NO_ACTION_YET
-//     - stage1-gate EXEMPT or RESPONSE_RECEIVED, and
+//     - stage1-gate EXEMPT, and
 //         lifecycle-gate merge-ready MERGE_READY(*)      -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2
 //         lifecycle-gate merge-ready BLOCKED_CLOSING_REFERENCE -> STAGE1_CORRECTION_REQUIRED
+//     - stage1-gate RESPONSE_RECEIVED with a clean-pass response (consumer-sync-gate.mjs's
+//       `isCleanStage1Response`), and lifecycle-gate merge-ready MERGE_READY(*) -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2
+//     - stage1-gate RESPONSE_RECEIVED with findings preamble -> STAGE1_CORRECTION_REQUIRED,
+//       except a control Issue Stage 1 bullet that is both satisfied/exempt and explicitly
+//       head-scoped to this same current head also allows merge-ready progression
+//     - stage1-gate RESPONSE_RECEIVED without a clean-pass or findings preamble -> NO_ACTION_YET
 //     - anything else (operational error from either check, or a combination this gate does
 //       not recognize)                                   -> AMBIGUOUS
 //
@@ -44,21 +50,11 @@
 //     - anything else (PREMATURE_CLOSURE, an operational error, or a state
 //       this gate does not recognize)                                      -> AMBIGUOUS
 //
-// Neither stage1-gate.mjs nor lifecycle-gate.mjs exposes a signal for "did the reviewer
-// report a substantive finding" as distinct from "did a genuine response happen at all" —
-// that would require semantically parsing review comment text, exactly the kind of
-// judgment this repository's deterministic gates deliberately do not attempt (see
-// stage1-gate.mjs's and lifecycle-gate.mjs's own module comments). `STAGE1_CORRECTION_
-// REQUIRED` is therefore scoped to the one concrete, mechanically-detectable pre-merge
-// defect available from these two composed checks — a closing-reference violation — not to
-// "the reviewer found a bug," which remains a fresh PR-review/fix worker's job per
-// docs/operating-model.md's Watched lifecycle breakpoint 2 before this gate is ever
-// consulted for a "safe to merge" verdict. `STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2`
-// firing whenever stage1-gate reports a genuine response and merge-ready reports no
-// closing-reference problem mirrors exactly what `tools/review-watch/merge-ready-gate.mjs`
-// (docs/bounded-review-cycle.md step 8's own authoritative pre-merge command) already
-// treats as sufficient to merge — this script does not lower that bar, it only adds the
-// dispatch-shape verdict on top of the same two composed checks.
+// `stage1-gate.mjs` signals whether a genuine response happened at the current head. Whether
+// that response is a clean pass or a findings-bearing reply is resolved with
+// consumer-sync-gate.mjs's `isCleanStage1Response` helper, which is deliberately anchored to
+// Codex's own known fixed Stage 1 preambles (clean pass vs findings) and does not semantically
+// adjudicate arbitrary findings.
 //
 // AMBIGUOUS is a founder-interrupt-eligible fail-closed stop (AGENTS.md § Founder interrupt
 // conditions, "a failed safety/correctness gate with no authorized recovery path"), never
@@ -87,9 +83,16 @@
 // Tests: node --test tools/orchestration/next-review-transition-gate.test.mjs
 
 import { execFileSync } from "node:child_process";
-import { parseControlBullet, parseExecutionPointer, isNoneSentinel, resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
+import {
+  parseControlBullet,
+  parseExecutionPointer,
+  isNoneSentinel,
+  resolveRepoIdentity,
+  readExecutionBulletField,
+} from "./ready-dispatch-gate.mjs";
 import { run as stage1Run } from "../review-watch/stage1-gate.mjs";
 import { checkMergeReady, checkPostAudit } from "../review-watch/lifecycle-gate.mjs";
+import { isCleanStage1Response } from "../review-watch/consumer-sync-gate.mjs";
 
 // Pure. Reads one optional "- **Label:** value" control-Issue bullet that is expected to
 // hold either the explicit "none" sentinel or exactly one "#N" issue reference (the same
@@ -127,7 +130,30 @@ function hasTrustworthyExitCode(result) {
 // stage1-gate result and lifecycle-gate `checkMergeReady` result. See the module comment's
 // verdict-derivation table for the exact mapping and why "actionable finding" content is
 // not, and cannot be, evaluated here.
-export function resolvePreMergeVerdict({ stage1, mergeReady }, context = {}) {
+function isMergeReadyState(state) {
+  return state === "MERGE_READY" || state === "MERGE_READY_NO_WORK_ISSUE";
+}
+
+function stage1DispositionMarksSatisfied(raw) {
+  if (typeof raw !== "string" || !raw.trim() || isNoneSentinel(raw)) return false;
+  return /\bsatisfied\b/i.test(raw) || /\bexempt\b/i.test(raw);
+}
+
+function stage1DispositionMatchesHead(raw, head) {
+  if (typeof raw !== "string" || typeof head !== "string" || !head.trim()) return false;
+  const match = raw.match(/\b([0-9a-f]{7,40})\b/i);
+  if (!match) return false;
+  const token = match[1].toLowerCase();
+  return head.toLowerCase().startsWith(token);
+}
+
+const FINDINGS_PREAMBLE_PATTERN = /^### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request\./;
+
+function hasFindingsStage1Response(stage1) {
+  return (stage1.matches ?? []).some((m) => FINDINGS_PREAMBLE_PATTERN.test(m.body_excerpt ?? ""));
+}
+
+export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition = null }, context = {}) {
   if (!hasTrustworthyExitCode(stage1) || !hasTrustworthyExitCode(mergeReady)) {
     return {
       state: "AMBIGUOUS",
@@ -157,17 +183,36 @@ export function resolvePreMergeVerdict({ stage1, mergeReady }, context = {}) {
     };
   }
 
+  const stage1DispositionSatisfiedAtHead =
+    stage1DispositionMarksSatisfied(stage1Disposition) && stage1DispositionMatchesHead(stage1Disposition, context.head);
   if (stage1.state === "NOT_REQUESTED" || stage1.state === "PENDING") {
     return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
   }
 
-  if (stage1.state === "EXEMPT" || stage1.state === "RESPONSE_RECEIVED") {
-    if (mergeReady.state === "MERGE_READY" || mergeReady.state === "MERGE_READY_NO_WORK_ISSUE") {
-      return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context, stage1, mergeReady };
+  if (stage1.state === "EXEMPT") {
+    if (isMergeReadyState(mergeReady.state)) {
+      return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
     }
     if (mergeReady.state === "BLOCKED_CLOSING_REFERENCE") {
-      return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context, stage1, mergeReady };
+      return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context };
     }
+  }
+
+  if (stage1.state === "RESPONSE_RECEIVED") {
+    if (isCleanStage1Response(stage1)) {
+      if (isMergeReadyState(mergeReady.state)) {
+        return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
+      }
+      if (mergeReady.state === "BLOCKED_CLOSING_REFERENCE") {
+        return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context };
+      }
+    } else if (hasFindingsStage1Response(stage1)) {
+      if (stage1DispositionSatisfiedAtHead && isMergeReadyState(mergeReady.state)) {
+        return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
+      }
+      return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context };
+    }
+    return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
   }
 
   return {
@@ -178,7 +223,8 @@ export function resolvePreMergeVerdict({ stage1, mergeReady }, context = {}) {
     mergeReady,
     reason:
       `stage1-gate state ${JSON.stringify(stage1.state)} combined with lifecycle-gate merge-ready state ` +
-      `${JSON.stringify(mergeReady.state)} does not resolve to exactly one known pre-merge transition`,
+      `${JSON.stringify(mergeReady.state)} and Stage 1 disposition ${JSON.stringify(stage1Disposition)} ` +
+      "does not resolve to exactly one known pre-merge transition",
   };
 }
 
@@ -213,7 +259,7 @@ export function resolvePostMergeVerdict({ postAudit }, context = {}) {
 
   if (postAudit.state === "OK") {
     if (postAudit.rawVerdict === "NOT CLEAN") {
-      return { state: "STAGE2_CORRECTION_REQUIRED", stopAfter: true, ...context, postAudit };
+      return { state: "STAGE2_CORRECTION_REQUIRED", stopAfter: true, ...context };
     }
     // rawVerdict is null/PENDING, or CLEAN-but-not-yet-backed-by-a-completed-report (verdict
     // nulled out by checkPostAudit itself in that case) -- either way, no completed Stage 2
@@ -262,7 +308,7 @@ function exitCodeFor(state) {
   }
 }
 
-async function resolvePreMerge({ repo, pr, head, issue, controlIssue }, { stage1RunImpl, checkMergeReadyImpl }) {
+async function resolvePreMerge({ repo, pr, head, issue, stage1Disposition = null, controlIssue }, { stage1RunImpl, checkMergeReadyImpl }) {
   let stage1;
   try {
     stage1 = await stage1RunImpl({ repo, number: pr, head });
@@ -272,13 +318,13 @@ async function resolvePreMerge({ repo, pr, head, issue, controlIssue }, { stage1
 
   let mergeReady;
   try {
-    mergeReady = await checkMergeReadyImpl({ repo, pr, issue: issue == null ? "none" : issue });
+    mergeReady = await checkMergeReadyImpl({ repo, pr, issue });
   } catch (err) {
     mergeReady = { exitCode: 1, message: `lifecycle-gate merge-ready threw: ${err.message}` };
   }
 
-  const context = { repo, pr, head, issue: issue ?? null, ...(controlIssue != null ? { controlIssue } : {}) };
-  const verdict = resolvePreMergeVerdict({ stage1, mergeReady }, context);
+  const context = { repo, pr, head, issue, ...(controlIssue != null ? { controlIssue } : {}) };
+  const verdict = resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition }, context);
   return { exitCode: exitCodeFor(verdict.state), ...verdict };
 }
 
@@ -350,8 +396,16 @@ export async function runNextReviewTransitionGate(
         message: "Missing required arg: --head is required alongside --pr in direct-reference mode.",
       };
     }
+    if (args.issue === undefined) {
+      return {
+        exitCode: 1,
+        message:
+          "Missing required arg: --issue is required alongside --pr and --head in direct-reference mode " +
+          '(use "--issue none" only for the explicit no-work-issue path).',
+      };
+    }
     return resolvePreMerge(
-      { repo, pr: args.pr, head: args.head, issue: args.issue ?? null, controlIssue: null },
+      { repo, pr: args.pr, head: args.head, issue: args.issue, controlIssue: null },
       { stage1RunImpl, checkMergeReadyImpl },
     );
   }
@@ -372,6 +426,16 @@ export async function runNextReviewTransitionGate(
   }
   const body = controlData.body ?? "";
   const controlIssueNumber = Number(args.controlIssue);
+  if (controlData.state !== "OPEN") {
+    return {
+      exitCode: 4,
+      state: "AMBIGUOUS",
+      stopAfter: true,
+      repo,
+      controlIssue: controlIssueNumber,
+      reason: `control Issue ${repo}#${controlIssueNumber} is ${controlData.state}, not OPEN`,
+    };
+  }
 
   const auditRef = parseOptionalIssueRef(parseControlBullet(body, "Stage 2"), "Stage 2");
   if (auditRef.kind === "issue") {
@@ -390,7 +454,15 @@ export async function runNextReviewTransitionGate(
 
   const prRef = parseOptionalIssueRef(parseControlBullet(body, "PR"), "PR");
   if (prRef.kind === "issue") {
-    const executionRef = parseExecutionPointer(parseControlBullet(body, "Execution"));
+    const executionField = readExecutionBulletField(body);
+    const executionRef = executionField.conflict
+      ? {
+          ok: false,
+          reason:
+            `Execution pointer is ambiguous: "- **Execution:**" names ${JSON.stringify(executionField.legacy)} ` +
+            `while "- **Execution issue:**" names ${JSON.stringify(executionField.liveSpelling)} — these must resolve to the same execution Issue`,
+        }
+      : parseExecutionPointer(executionField.value);
     if (!executionRef.ok) {
       return {
         exitCode: 4,
@@ -412,9 +484,10 @@ export async function runNextReviewTransitionGate(
         return { exitCode: 1, message: `gh pr view failed for ${repo}#${prRef.issue}: ${err.message}` };
       }
     }
+    const stage1Disposition = parseControlBullet(body, "Stage 1");
 
     return resolvePreMerge(
-      { repo, pr: prRef.issue, head, issue: executionRef.issue, controlIssue: controlIssueNumber },
+      { repo, pr: prRef.issue, head, issue: executionRef.issue, stage1Disposition, controlIssue: controlIssueNumber },
       { stage1RunImpl, checkMergeReadyImpl },
     );
   }

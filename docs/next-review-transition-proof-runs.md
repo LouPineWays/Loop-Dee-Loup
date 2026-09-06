@@ -49,7 +49,7 @@ real-occurrence cases.
 | # | Scenario | Status | Artifact |
 | - | -------- | ------ | -------- |
 | 1 | Terse implementation-unit dispatch | Demonstrated (real, live) | `docs/next-review-transition-proof-runs/397-scenario-01-terse-implementation-dispatch.json` |
-| 2 | Terse correction dispatch | Demonstrated via constructed exercise (not a real occurrence) -- no PR is currently live in the closing-reference-violation state this verdict requires | `docs/next-review-transition-proof-runs/397-scenario-02-terse-correction-dispatch.json` (+ `-exercise.mjs`) |
+| 2 | Terse correction dispatch | Demonstrated via constructed exercise (not a real occurrence) for the closing-reference variant; findings-bearing Stage 1 responses are now also correction-triggering | `docs/next-review-transition-proof-runs/397-scenario-02-terse-correction-dispatch.json` (+ `-exercise.mjs`) |
 | 3 | Stage 1 breakpoint | Demonstrated (real, historical) | `docs/next-review-transition-proof-runs/397-scenario-03-stage1-breakpoint.json` |
 | 4 | Merge -> Stage 2 breakpoint | Demonstrated (real, historical replay at the exact recorded durable reference) | `docs/next-review-transition-proof-runs/397-scenario-04-merge-stage2-breakpoint.json` |
 | 5 | Fresh Stage 2 observation | Demonstrated -- partly real (NO_ACTION_YET/AMBIGUOUS), partly constructed exercise (STAGE2_CLOSE_READY/STAGE2_CORRECTION_REQUIRED; no real currently-open case exists for either) | `docs/next-review-transition-proof-runs/397-scenario-05-fresh-stage2-observation.json` (+ `-exercise.mjs`) |
