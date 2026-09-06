@@ -1184,3 +1184,201 @@ test("isCompletedStage2AuditReport: issue #421's real response, given a delibera
   assert.equal(result.complete, false, "an incorrect mergeCommit must never be forgiven merely because the response carries a genuine standalone verdict heading");
   assert.equal(result.verdict, null);
 });
+
+// -- extractResponseVerdict: the combined "Stage 2 Audit — <verdict>" heading must join the same
+// fence-aware, all-declaration collection the standalone heading already uses (Stage 2 audit #426,
+// correcting PR #424's own Stage 1 finding: this shape was left on a separate body-wide, non-fence-
+// aware, first-match-only scan). Regression matrix per audit #426 / issue #422 comment 5562041511. -
+
+test("extractResponseVerdict (audit #426, matrix item 1): a backtick-fenced '## Stage 2 Audit — CLEAN' example with no genuine declaration anywhere else extracts nothing", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. The parser must not read a fenced combined heading as a declaration, e.g.:",
+    "",
+    "```",
+    "## Stage 2 Audit — CLEAN",
+    "```",
+    "",
+    "No other verdict is stated in this body.",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), null);
+});
+
+test("extractResponseVerdict (audit #426, matrix item 2): the same fenced combined-heading example alongside a genuine non-fenced 'Verdict: NOT CLEAN' resolves to the genuine verdict, not the fenced example", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. The parser must not read a fenced combined heading as a declaration, e.g.:",
+    "",
+    "```",
+    "## Stage 2 Audit — CLEAN",
+    "```",
+    "",
+    "### Verdict",
+    "",
+    "NOT CLEAN",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("extractResponseVerdict (audit #426, matrix item 3): a tilde-fenced combined heading is excluded as evidence the same way a backtick-fenced one is", () => {
+  const body = ["~~~", "## Stage 2 Audit — NOT CLEAN", "~~~", "", "### Verdict", "", "CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), "CLEAN");
+});
+
+test("extractResponseVerdict (audit #426, matrix item 4): two genuine, non-fenced, conflicting combined headings fail closed to null rather than resolving to whichever appeared first", () => {
+  const body = ["## Stage 2 Audit — CLEAN", "", "Some intervening prose changed the outcome.", "", "## Stage 2 Audit — NOT CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), null);
+});
+
+test("extractResponseVerdict (audit #426, matrix item 5): repeated genuine combined headings that agree resolve to the agreed verdict", () => {
+  const body = ["## Stage 2 Audit — CLEAN", "", "Some prose repeats the verdict for emphasis.", "", "## Stage 2 Audit — CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), "CLEAN");
+});
+
+test("extractResponseVerdict (audit #426, matrix item 6): issue #421's accepted bare standalone '# CLEAN' fixture still resolves to CLEAN, unaffected by the combined-heading fix", () => {
+  assert.equal(extractResponseVerdict(ISSUE_421_COMMENT), "CLEAN");
+});
+
+test("extractResponseVerdict (audit #426): a fenced combined heading and a fenced standalone heading in the same body, with a genuine non-fenced label elsewhere, both stay excluded", () => {
+  const body = [
+    "```",
+    "## Stage 2 Audit — CLEAN",
+    "```",
+    "",
+    "~~~",
+    "# NOT CLEAN",
+    "~~~",
+    "",
+    "Verdict: NOT CLEAN",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("isCompletedStage2AuditReport (audit #426, matrix item 8): a completed-report evaluation fails closed to no verdict when the only apparent verdict is fenced combined-heading evidence", () => {
+  const body = validReport({
+    verdictLine: "",
+  }).replace(
+    "1. Confirmed the classifier rejects the exact #229 kickoff — CONFIRMED",
+    [
+      "1. Confirmed a fenced combined heading quoted as an example, e.g.:",
+      "",
+      "```",
+      "## Stage 2 Audit — CLEAN",
+      "```",
+      "",
+      "is not misread as this report's own verdict — CONFIRMED",
+    ].join("\n"),
+  );
+  const result = isCompletedStage2AuditReport(body, { mergeCommit: MERGE_COMMIT });
+  assert.equal(result.complete, false, "fenced combined-heading evidence with no genuine verdict declaration must never back a completed report");
+  assert.equal(result.verdict, null);
+  assert.ok(result.reasons.some((r) => r.includes("no explicit CLEAN/NOT CLEAN verdict")));
+});
+
+test("isCompletedStage2AuditReport (audit #426): a fenced combined-heading example never overrides the report's actual genuine NOT CLEAN verdict", () => {
+  const body = validReport({
+    verdictLine: "### Verdict\n\nNOT CLEAN",
+  }).replace(
+    "1. Confirmed the classifier rejects the exact #229 kickoff — CONFIRMED",
+    [
+      "1. Confirmed a fenced combined heading quoted as an example, e.g.:",
+      "",
+      "```",
+      "## Stage 2 Audit — CLEAN",
+      "```",
+      "",
+      "is not misread as this report's own verdict — CONFIRMED",
+    ].join("\n"),
+  );
+  const result = isCompletedStage2AuditReport(body, { mergeCommit: MERGE_COMMIT });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "NOT CLEAN", "a fenced combined-heading example in evidence must never override the report's real NOT CLEAN verdict");
+});
+
+// -- extractResponseVerdict / computeFencedCodeBlockMask: Stage 1 review findings on PR #429
+// (correcting audit #426's own P1). P1: a plain four-space/tab-indented example (no fence
+// delimiter at all) was misread as a genuine declaration because the per-line scan trims each
+// line before matching. P2: computeFencedCodeBlockMask toggled on any fence-looking line
+// regardless of character/length, so a response quoting Markdown fence syntax as an example (an
+// outer fence containing an inner, shorter-or-different-character fence-looking line) closed the
+// mask early and re-opened it at the real closing fence, leaving genuine content after it
+// incorrectly excluded. -
+
+test("extractResponseVerdict (PR #429 finding P1): a four-space-indented combined heading example, with no genuine declaration elsewhere, extracts nothing", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. A quoted example of the heading shape, indented as a plain code block:",
+    "",
+    "    ## Stage 2 Audit — CLEAN",
+    "",
+    "No other verdict is stated anywhere in this body.",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), null);
+});
+
+test("extractResponseVerdict (PR #429 finding P1): a tab-indented standalone heading example, with no genuine declaration elsewhere, extracts nothing", () => {
+  const body = ["Findings text.", "", "\t# CLEAN", "", "No other verdict is stated anywhere in this body."].join("\n");
+  assert.equal(extractResponseVerdict(body), null);
+});
+
+test("extractResponseVerdict (PR #429 finding P1): an indented combined-heading example alongside a genuine non-indented 'Verdict: NOT CLEAN' resolves to the genuine verdict", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. A quoted example, indented as a plain code block:",
+    "",
+    "    ## Stage 2 Audit — CLEAN",
+    "",
+    "### Verdict",
+    "",
+    "NOT CLEAN",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("extractResponseVerdict (PR #429 finding P2): a literal shorter fence-looking line quoted inside an outer longer fence does not prematurely close the mask, so a genuine unfenced declaration after the real closing fence is still recognized", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. Documenting fence syntax:",
+    "",
+    "````",
+    "Example of a closing fence:",
+    "```",
+    "````",
+    "",
+    "## Stage 2 Audit — CLEAN",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), "CLEAN");
+});
+
+test("extractResponseVerdict (PR #429 finding P2): a same-character but shorter fence-looking line inside an outer fence still masks a combined heading quoted inside it", () => {
+  const body = [
+    "````",
+    "Example of the heading shape:",
+    "```",
+    "## Stage 2 Audit — CLEAN",
+    "```",
+    "````",
+    "",
+    "Verdict: NOT CLEAN",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("extractResponseVerdict (PR #429 finding P2): a differently-charactered fence-looking line inside an outer fence does not close it either", () => {
+  const body = ["```", "Example of a tilde fence: ~~~", "```", "", "## Stage 2 Audit — CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), "CLEAN");
+});
+
+test("extractResponseVerdict (PR #429): ordinary matched-length fences (the pre-existing common case) are unaffected by the character/length comparison", () => {
+  const body = ["```", "## Stage 2 Audit — CLEAN", "```", "", "Verdict: NOT CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("extractResponseVerdict (PR #429): issue #421's accepted bare standalone '# CLEAN' fixture still resolves to CLEAN, unaffected by either fix", () => {
+  assert.equal(extractResponseVerdict(ISSUE_421_COMMENT), "CLEAN");
+});

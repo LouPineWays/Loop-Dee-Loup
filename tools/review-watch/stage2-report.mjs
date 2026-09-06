@@ -143,8 +143,18 @@ const VERDICT_TOKEN_PATTERN = /\b(NOT CLEAN|CLEAN)\b/i;
 // token with nothing else, while "Stage 2 Audit of clean-close behavior" and "Stage 2 Audit
 // status was CLEAN, now NOT CLEAN" both interpose ordinary prose between "Audit" and any
 // separator, so neither reaches the token position this pattern requires.
+// Stage 2 audit #426 (correction of PR #424's own Stage 1 finding): this pattern used to be
+// evaluated with a single body-wide, non-global `.exec(normalized)` call — before the fenced-code
+// mask existed at all, and even after that mask was added for the standalone-heading/label shapes,
+// this one was left out of it. That meant (1) a fenced `## Stage 2 Audit — CLEAN` example quoted as
+// evidence could be read as the response's own declared verdict, and (2) only the *first* combined
+// heading in the whole body was ever collected, so two genuinely conflicting combined headings
+// resolved to whichever appeared first instead of failing closed. The pattern itself is unchanged;
+// it is now checked per-line inside extractResponseVerdict's same fence-aware collection loop the
+// standalone-heading shape already uses, so every non-fenced combined heading is collected and
+// conflicts are resolved the same uniform way as the other three shapes.
 const STAGE2_HEADING_VERDICT_PATTERN =
-  /^(?:#{1,6}\s*)?stage\s*2\s+audit\b(?:\s*verdict)?\s*[:—-]\s*\*{0,2}\s*(NOT CLEAN|CLEAN)\b\*{0,2}[.!]?\s*$/im;
+  /^(?:#{1,6}\s*)?stage\s*2\s+audit\b(?:\s*verdict)?\s*[:—-]\s*\*{0,2}\s*(NOT CLEAN|CLEAN)\b\*{0,2}[.!]?\s*$/i;
 
 // A standalone verdict heading: an entire line — anywhere in the body, not anchored to the
 // start — that reduces to *exactly* the token `CLEAN` or `NOT CLEAN` and nothing else, once
@@ -177,24 +187,71 @@ const STANDALONE_VERDICT_HEADING_PATTERN = /^(?:#{1,6}\s*)?\*{0,2}\s*(NOT CLEAN|
 // verdict heading looks like — as the response's own declared verdict. Stage 1 review finding on
 // this PR (issue #422 recurred): the standalone-heading shape was checked body-wide with no
 // awareness of quoted/fenced content, so such a literal example matched before the report's own
-// real "### Verdict" / "NOT CLEAN" field was ever reached.
-const FENCE_LINE_PATTERN = /^\s*(?:`{3,}|~{3,})/;
+// real "### Verdict" / "NOT CLEAN" field was ever reached. Captures the delimiter run itself (not
+// just detecting one exists) so computeFencedCodeBlockMask can compare the closing delimiter's
+// character and length against the opener's, rather than treating every fence-looking line as an
+// interchangeable toggle.
+const FENCE_LINE_PATTERN = /^\s*(`{3,}|~{3,})/;
 
 // Pure. For each line index in `lines`, whether that line sits inside (or is itself) a fenced
-// code block delimiter. Symmetric toggle: the line that opens a fence and the line that closes it
-// are both masked, along with everything between them.
+// code block delimiter. The line that opens a fence and the line that actually closes it are both
+// masked, along with everything between them.
+//
+// Stage 1 review finding on this PR (audit #426 correction, P2): an earlier version toggled
+// `inFence` on *any* fence-looking line regardless of character or length, so a response quoting
+// Markdown fence syntax as an example — e.g. an outer four-backtick fence containing a literal
+// three-backtick line illustrating what a closing fence looks like — closed the mask early at that
+// inner line. With one such inner delimiter, the mask then re-opens at the real (four-backtick)
+// closing line instead of closing there, leaving it stuck "in fence" for everything after —
+// silently excluding a genuine, unfenced verdict declaration that follows. Per CommonMark, a
+// fence only closes on a delimiter using the *same character* and *at least as many* repeats as
+// the one that opened it; a fence-looking line that doesn't meet both conditions is content inside
+// the still-open fence, not a delimiter of its own. This tracks the open fence's character/length
+// and applies exactly that comparison — still a coarse, line-local toggle (one nesting level, not
+// full CommonMark fence parsing), consistent with this module's existing Non-goals.
 function computeFencedCodeBlockMask(lines) {
   const mask = new Array(lines.length).fill(false);
-  let inFence = false;
+  let openFence = null; // { char, length } while inside a fence, otherwise null.
   for (let i = 0; i < lines.length; i++) {
-    if (FENCE_LINE_PATTERN.test(lines[i])) {
+    const match = FENCE_LINE_PATTERN.exec(lines[i]);
+    if (match) {
+      const marker = match[1];
+      const char = marker[0];
+      const length = marker.length;
+      if (!openFence) {
+        openFence = { char, length };
+      } else if (char === openFence.char && length >= openFence.length) {
+        openFence = null;
+      }
+      // A fence-looking line that neither opens nor validly closes the current fence (wrong
+      // character, or shorter than the opener) is content inside it — still masked, and the
+      // fence stays open.
       mask[i] = true;
-      inFence = !inFence;
       continue;
     }
-    mask[i] = inFence;
+    mask[i] = openFence !== null;
   }
   return mask;
+}
+
+// A non-blank line carrying its own four-space (or one-tab) leading indentation — CommonMark's
+// plain "indented code block", which needs no ```/~~~ delimiter at all. Stage 1 review finding on
+// this PR (audit #426 correction, P1): STAGE2_HEADING_VERDICT_PATTERN and
+// STANDALONE_VERDICT_HEADING_PATTERN are matched against each line's *trimmed* content, so an
+// indented example quoting one of these headings was misread as a genuine declaration —
+// FENCE_LINE_PATTERN only recognizes fenced blocks, not plain indentation, and trimming discards
+// the very indentation that would have identified it as quoted content. Coarse and line-local
+// (matching this module's existing Non-goals: no arbitrary CommonMark parsing, no list-context
+// continuation rules) — it only asks "does this line itself carry four-space/tab indentation."
+const INDENTED_CODE_LINE_PATTERN = /^(?:\t| {4,})\S/;
+
+// Pure. Lines that must never be read as a genuine verdict declaration: fenced code block content
+// (computeFencedCodeBlockMask) plus any line carrying its own four-space/tab indentation
+// (INDENTED_CODE_LINE_PATTERN) — the same exclusion an indented example deserves whether or not it
+// also happens to sit inside a fence.
+function computeExcludedLineMask(lines) {
+  const fencedMask = computeFencedCodeBlockMask(lines);
+  return lines.map((line, i) => fencedMask[i] || INDENTED_CODE_LINE_PATTERN.test(line));
 }
 
 function normalizeVerdictToken(token) {
@@ -209,14 +266,21 @@ function normalizeVerdictToken(token) {
 // non-blank line is checked after a label with no same-line token, so an unrelated later mention
 // of CLEAN/NOT CLEAN elsewhere in the body is never mistaken for the labelled value.
 //
-// The standalone-heading and label shapes are scanned line-by-line with fenced code block content
-// excluded (computeFencedCodeBlockMask) — a quoted/fenced example must never itself count as a
-// declaration. Every genuine (non-excluded) declaration found across all four shapes is collected
-// rather than returning on the first match: when they all agree, that is the verdict; when the
-// body carries none, the verdict is null; when two or more disagree, this fails closed and
-// returns null rather than silently picking whichever declaration happened to appear first
-// (Stage 1 review finding on this PR) — an explicit genuine verdict must never be overridable by
-// an incidental or conflicting declaration elsewhere in the same body.
+// Every shape except the leading status line (which, by construction, can only ever match the very
+// start of the whole trimmed response — there is nothing to scan line-by-line) is scanned
+// line-by-line with quoted/excluded content masked out (computeExcludedLineMask: fenced code
+// block content plus plain four-space/tab-indented lines) — a quoted example must never itself
+// count as a declaration, however it is quoted. This applies uniformly to the combined "Stage 2
+// Audit — <verdict>" heading and the standalone heading together in the same loop (audit #426: an
+// earlier revision left the combined-heading shape on a separate, non-fence-aware, first-match-only
+// body scan, so a fenced example of it could be read as a genuine declaration and a second genuine
+// combined heading was never collected at all) as well as the "Verdict" label shape below. Every
+// genuine (non-excluded) declaration found across all four shapes is collected rather than
+// returning on the first match: when they all agree, that is the verdict; when the body carries
+// none, the verdict is null; when two or more disagree, this fails closed and returns null rather
+// than silently picking whichever declaration happened to appear first (Stage 1 review finding on
+// PR #424) — an explicit genuine verdict must never be overridable by an incidental or conflicting
+// declaration elsewhere in the same body.
 export function extractResponseVerdict(text) {
   const normalized = (text ?? "").trim();
   if (!normalized) return null;
@@ -226,20 +290,20 @@ export function extractResponseVerdict(text) {
   const leading = LEADING_VERDICT_PATTERN.exec(normalized);
   if (leading) tokens.add(normalizeVerdictToken(leading[1]));
 
-  const stage2Heading = STAGE2_HEADING_VERDICT_PATTERN.exec(normalized);
-  if (stage2Heading) tokens.add(normalizeVerdictToken(stage2Heading[1]));
-
   const lines = normalized.split("\n");
-  const fencedMask = computeFencedCodeBlockMask(lines);
+  const excludedMask = computeExcludedLineMask(lines);
 
   for (let i = 0; i < lines.length; i++) {
-    if (fencedMask[i]) continue;
-    const standaloneMatch = STANDALONE_VERDICT_HEADING_PATTERN.exec(lines[i].trim());
+    if (excludedMask[i]) continue;
+    const trimmedLine = lines[i].trim();
+    const stage2Match = STAGE2_HEADING_VERDICT_PATTERN.exec(trimmedLine);
+    if (stage2Match) tokens.add(normalizeVerdictToken(stage2Match[1]));
+    const standaloneMatch = STANDALONE_VERDICT_HEADING_PATTERN.exec(trimmedLine);
     if (standaloneMatch) tokens.add(normalizeVerdictToken(standaloneMatch[1]));
   }
 
   for (let i = 0; i < lines.length; i++) {
-    if (fencedMask[i]) continue;
+    if (excludedMask[i]) continue;
     const labelMatch = VERDICT_LABEL_LINE_PATTERN.exec(lines[i].trim());
     if (!labelMatch) continue;
     const rest = (labelMatch[1] ?? "").trim();
@@ -249,7 +313,7 @@ export function extractResponseVerdict(text) {
       continue;
     }
     for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
-      if (fencedMask[j]) break;
+      if (excludedMask[j]) break;
       const candidate = lines[j].trim();
       if (candidate === "") continue;
       const match = VERDICT_TOKEN_PATTERN.exec(candidate);
