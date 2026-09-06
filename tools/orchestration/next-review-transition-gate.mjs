@@ -29,7 +29,9 @@
 // Verdict derivation (every verdict below carries a literal `stopAfter: true` field):
 //
 //   Pre-merge phase (a settled "PR" reference, no settled "Stage 2"/Audit reference yet):
-//     - stage1-gate NOT_REQUESTED or PENDING            -> NO_ACTION_YET
+//     - stage1-gate NOT_REQUESTED                       -> NO_ACTION_YET
+//     - stage1-gate PENDING with findings-bearing unbound genuine matches -> AMBIGUOUS
+//     - stage1-gate PENDING otherwise                   -> NO_ACTION_YET
 //     - stage1-gate EXEMPT, and
 //         lifecycle-gate merge-ready MERGE_READY(*)      -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2
 //         lifecycle-gate merge-ready BLOCKED_CLOSING_REFERENCE -> STAGE1_CORRECTION_REQUIRED
@@ -134,23 +136,26 @@ function isMergeReadyState(state) {
   return state === "MERGE_READY" || state === "MERGE_READY_NO_WORK_ISSUE";
 }
 
-function stage1DispositionMarksSatisfied(raw) {
-  if (typeof raw !== "string" || !raw.trim() || isNoneSentinel(raw)) return false;
-  return /\bsatisfied\b/i.test(raw) || /\bexempt\b/i.test(raw);
+function parseAffirmativeStage1Disposition(raw) {
+  if (typeof raw !== "string") return null;
+  const text = raw.trim();
+  if (!text || isNoneSentinel(text)) return null;
+  const match = /^(satisfied|exempt)\s+at\s+([0-9a-f]{7,40})$/i.exec(text);
+  if (!match) return null;
+  return { state: match[1].toLowerCase(), sha: match[2].toLowerCase() };
 }
 
-function stage1DispositionMatchesHead(raw, head) {
-  if (typeof raw !== "string" || typeof head !== "string" || !head.trim()) return false;
-  const match = raw.match(/\b([0-9a-f]{7,40})\b/i);
-  if (!match) return false;
-  const token = match[1].toLowerCase();
-  return head.toLowerCase().startsWith(token);
+function stage1DispositionMatchesHead(disposition, head) {
+  if (!disposition || typeof head !== "string" || !head.trim()) return false;
+  return head.toLowerCase().startsWith(disposition.sha);
 }
 
 const FINDINGS_PREAMBLE_PATTERN = /^### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request\./;
 
 function hasFindingsStage1Response(stage1) {
-  return (stage1.matches ?? []).some((m) => FINDINGS_PREAMBLE_PATTERN.test(m.body_excerpt ?? ""));
+  return [...(stage1.matches ?? []), ...(stage1.unboundGenuineMatches ?? [])].some((m) =>
+    FINDINGS_PREAMBLE_PATTERN.test(m.body_excerpt ?? ""),
+  );
 }
 
 export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition = null }, context = {}) {
@@ -183,9 +188,26 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
     };
   }
 
-  const stage1DispositionSatisfiedAtHead =
-    stage1DispositionMarksSatisfied(stage1Disposition) && stage1DispositionMatchesHead(stage1Disposition, context.head);
-  if (stage1.state === "NOT_REQUESTED" || stage1.state === "PENDING") {
+  const stage1DispositionSatisfiedAtHead = stage1DispositionMatchesHead(
+    parseAffirmativeStage1Disposition(stage1Disposition),
+    context.head,
+  );
+  if (stage1.state === "NOT_REQUESTED") {
+    return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
+  }
+  if (stage1.state === "PENDING") {
+    if (hasFindingsStage1Response(stage1)) {
+      return {
+        state: "AMBIGUOUS",
+        stopAfter: true,
+        ...context,
+        stage1,
+        mergeReady,
+        reason:
+          "stage1-gate is still PENDING at the current head, but unbound genuine matches already include a " +
+          "findings-bearing Stage 1 response; fail closed and verify those findings before proceeding.",
+      };
+    }
     return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
   }
 

@@ -1,7 +1,7 @@
 {
   "scenario": "2. Terse correction dispatch",
   "status": "Demonstrated via constructed exercise (not a real occurrence) -- see reason below",
-  "reason_no_real_occurrence": "resolvePreMergeVerdict's STAGE1_CORRECTION_REQUIRED verdict now covers two deterministic pre-merge correction triggers: a findings-bearing Stage 1 response at the current head, or a merge-ready closing-reference violation (lifecycle-gate.mjs checkMergeReady returning BLOCKED_CLOSING_REFERENCE). No PR in this repository's current history is live in the specific closing-reference-violation state used by this exercise (the standing rule against Fixes/Closes/Resolves keywords in review-worthy LDL PR bodies makes this defect rare), so this scenario remains a constructed replay for that path.",
+  "reason_no_real_occurrence": "resolvePreMergeVerdict's STAGE1_CORRECTION_REQUIRED verdict includes a findings-bearing Stage 1 response at the current head even when merge state is otherwise MERGE_READY. No PR in this repository's current history currently presents that exact findings-driven state in a way this proof unit could replay as a live, bounded example without reopening a completed review cycle, so this scenario remains a constructed replay of the findings-only path.",
   "exercise_script": "docs/next-review-transition-proof-runs/397-scenario-02-terse-correction-dispatch-exercise.mjs",
   "command": "node docs/next-review-transition-proof-runs/397-scenario-02-terse-correction-dispatch-exercise.mjs",
   "constructed_fixture": {
@@ -11,14 +11,8 @@
       "triggerTimestamp": "2026-09-06T00:00:00Z"
     },
     "mergeReady": {
-      "exitCode": 2,
-      "state": "BLOCKED_CLOSING_REFERENCE",
-      "violations": [
-        {
-          "source": "closingIssuesReferences",
-          "detail": "PR LouPineWays/Loop-Dee-Loup#999999 carries a GitHub closing reference ... to issue #999998."
-        }
-      ]
+      "exitCode": 0,
+      "state": "MERGE_READY"
     }
   },
   "result": {
@@ -29,5 +23,5 @@
     "issue": "999998"
   },
   "exit_code": 0,
-  "observation": "The shipped resolvePreMergeVerdict function resolves a findings-bearing Stage 1 response and/or a closing-reference violation to STAGE1_CORRECTION_REQUIRED while keeping the correction transition reference-only (PR/issue refs, no restated finding narrative). For a new head with no review trigger yet, stage1-gate still reports NOT_REQUESTED and this gate stays NO_ACTION_YET; correction does not auto-authorize from stale free-text status."
+  "observation": "The shipped resolvePreMergeVerdict function resolves a findings-bearing Stage 1 response to STAGE1_CORRECTION_REQUIRED even when merge state is otherwise MERGE_READY, while keeping the correction transition reference-only (PR/issue refs, no restated finding narrative). For a new head with no review trigger yet, stage1-gate still reports NOT_REQUESTED and this gate stays NO_ACTION_YET; correction does not auto-authorize from stale free-text status."
 }
