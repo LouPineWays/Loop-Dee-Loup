@@ -16,6 +16,7 @@ import {
   readExecutionBulletField,
   evaluateReadyDispatchGate,
   checkReadyDispatch,
+  verifyRoutedDispatchManifest,
   parseOwnerRepoFromRemoteUrl,
   resolveRepoIdentity,
 } from "./ready-dispatch-gate.mjs";
@@ -974,23 +975,273 @@ test("checkReadyDispatch: PLAN_READY reports exit 6, state READY_TO_RUN_DISPATCH
   assert.equal(result.executionIssue, 407);
 });
 
-test("evaluateReadyDispatchGate: ROUTED resolves to READY_TO_DISPATCH_UNITS", () => {
+test("evaluateReadyDispatchGate: ROUTED requires manifest verification before READY_TO_DISPATCH_UNITS", () => {
   const body =
     "- **Lifecycle:** ROUTED\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
   const result = evaluateReadyDispatchGate(body);
-  assert.equal(result.status, "READY_TO_DISPATCH_UNITS");
+  assert.equal(result.status, "READY_TO_VERIFY_DISPATCH_MANIFEST");
   assert.equal(result.executionIssue, 407);
 });
 
-test("checkReadyDispatch: ROUTED reports exit 7, state READY_TO_DISPATCH_UNITS", async () => {
+test("checkReadyDispatch: ROUTED reports exit 7 only when the manifest pointer and comment are verified", async () => {
   const body =
     "- **Lifecycle:** ROUTED\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
   const result = await checkReadyDispatch(
     { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 408 },
-    { ghIssueViewImpl: async () => ({ body, state: "OPEN" }) },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        repo: "LouPineWays/Loop-Dee-Loup",
+        executionIssue: 407,
+        plan: {
+          planIndex: {
+            commentId: 100,
+            url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
+            dispatchManifest: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+          },
+        },
+      }),
+      ghCommentViewImpl: async () => ({
+        id: 200,
+        html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+        issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/407",
+        body:
+          "## Dispatch Manifest (v1)\n\n- **Plan index:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100\n",
+      }),
+    },
   );
   assert.equal(result.exitCode, 7);
   assert.equal(result.state, "READY_TO_DISPATCH_UNITS");
+  assert.equal(result.manifestCommentId, 200);
+  assert.equal(result.manifestUrl, "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200");
+  assert.equal(result.planIndexUrl, "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100");
+});
+
+test("checkReadyDispatch: ROUTED with Dispatch manifest pointer 'none' is NOT_READY", async () => {
+  const body =
+    "- **Lifecycle:** ROUTED\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 408 },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        repo: "LouPineWays/Loop-Dee-Loup",
+        executionIssue: 407,
+        plan: {
+          planIndex: {
+            commentId: 100,
+            url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
+            dispatchManifest: "none",
+          },
+        },
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "NOT_READY");
+  assert.ok(result.reasons.some((r) => r.includes("Dispatch manifest pointer")));
+});
+
+test("checkReadyDispatch: ROUTED fails closed when referenced manifest belongs to the wrong issue", async () => {
+  const body =
+    "- **Lifecycle:** ROUTED\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 408 },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        repo: "LouPineWays/Loop-Dee-Loup",
+        executionIssue: 407,
+        plan: {
+          planIndex: {
+            commentId: 100,
+            url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
+            dispatchManifest: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+          },
+        },
+      }),
+      ghCommentViewImpl: async () => ({
+        id: 200,
+        html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+        issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/999",
+        body:
+          "## Dispatch Manifest (v1)\n\n- **Plan index:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100\n",
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "NOT_READY");
+  assert.ok(result.reasons.some((r) => r.includes("belongs to issue #999")));
+});
+
+test("verifyRoutedDispatchManifest: fails closed when manifest Plan index backlink does not match parsed plan", async () => {
+  const result = await verifyRoutedDispatchManifest(
+    { repo: "LouPineWays/Loop-Dee-Loup", executionIssue: 407 },
+    {
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        repo: "LouPineWays/Loop-Dee-Loup",
+        executionIssue: 407,
+        plan: {
+          planIndex: {
+            commentId: 100,
+            url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
+            dispatchManifest: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+          },
+        },
+      }),
+      ghCommentViewImpl: async () => ({
+        id: 200,
+        html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+        issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/407",
+        body:
+          "## Dispatch Manifest (v1)\n\n- **Plan index:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-999\n",
+      }),
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /Plan index backlink/i);
+});
+
+// Stage 1 review findings on PR #420 -- four regressions, one per finding.
+
+test("verifyRoutedDispatchManifest: a duplicate 'Plan index:' bullet resolves via last-occurrence, matching parseControlBullet's convention, not the first", async () => {
+  // The manifest's own body carries two "Plan index" bullets: a correct first one and a
+  // conflicting, wrong second one. Before this fix, a bare `.match()` returned the FIRST
+  // (correct) bullet, silently accepting an ambiguous/malformed manifest. The established
+  // ambiguity-safe convention (parseControlBullet) uses the LAST occurrence instead, so a
+  // manifest authored (or concurrently edited) into this shape must fail verification --
+  // the last bullet here deliberately does not match the canonical Plan Index URL.
+  const result = await verifyRoutedDispatchManifest(
+    { repo: "LouPineWays/Loop-Dee-Loup", executionIssue: 407 },
+    {
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        repo: "LouPineWays/Loop-Dee-Loup",
+        executionIssue: 407,
+        plan: {
+          planIndex: {
+            commentId: 100,
+            url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
+            dispatchManifest: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+          },
+        },
+      }),
+      ghCommentViewImpl: async () => ({
+        id: 200,
+        html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+        issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/407",
+        body:
+          "## Dispatch Manifest (v1)\n\n" +
+          "- **Plan index:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100\n" +
+          "- **Plan index:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-999\n",
+      }),
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /Plan index backlink/i);
+  assert.match(result.reason, /999/);
+});
+
+test("verifyRoutedDispatchManifest: rejects a Dispatch manifest pointer whose origin differs from the comment's real canonical origin", async () => {
+  // Stage 1 review finding: the Plan Index's own Dispatch manifest pointer can be crafted
+  // by an attacker to reuse the real repo/issue/commentId path segments under a foreign
+  // host (e.g. "https://attacker.example/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200"),
+  // which shares path+fragment with the genuine GitHub comment permalink. Before this fix,
+  // identity comparison ignored scheme+host entirely, so repo/issue/commentId equality alone
+  // let this pointer pass as if it referenced the real comment. The commentId is still
+  // extracted and the real comment #200 is genuinely fetched (repo/executionIssue come from
+  // trusted params, not the pointer's host) -- but its real, GitHub-hosted canonical
+  // `html_url` must not be treated as matching a pointer whose own origin is foreign.
+  const result = await verifyRoutedDispatchManifest(
+    { repo: "LouPineWays/Loop-Dee-Loup", executionIssue: 407 },
+    {
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        repo: "LouPineWays/Loop-Dee-Loup",
+        executionIssue: 407,
+        plan: {
+          planIndex: {
+            commentId: 100,
+            url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
+            dispatchManifest: "https://attacker.example/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+          },
+        },
+      }),
+      ghCommentViewImpl: async () => ({
+        id: 200,
+        html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+        issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/407",
+        body:
+          "## Dispatch Manifest (v1)\n\n- **Plan index:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100\n",
+      }),
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /pointer mismatch/i);
+});
+
+test("checkReadyDispatch: ROUTED reports ERROR (exit 1), not NOT_READY, when the execution plan read fails operationally", async () => {
+  // Stage 1 review finding: an operational read failure (network/gh api/unresolved repo
+  // identity, surfaced here as parse-execution-plan.mjs's own exitCode 1) means authoritative
+  // durable state was never actually reached -- distinct from exitCode 2 (state was read but
+  // does not parse). Reporting this as NOT_READY would license the controller to fall through
+  // to normal issue reasoning per AGENTS.md's NOT_READY contract, which is wrong for a control
+  // read that simply never completed.
+  const body =
+    "- **Lifecycle:** ROUTED\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 408 },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 1,
+        message: "gh api call failed for LouPineWays/Loop-Dee-Loup issue #407 comments: network error",
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.notEqual(result.state, "NOT_READY");
+  assert.match(result.message, /operational failure/i);
+});
+
+test("checkReadyDispatch: ROUTED reports ERROR (exit 1), not NOT_READY, when the Dispatch manifest comment read-back throws", async () => {
+  const body =
+    "- **Lifecycle:** ROUTED\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 408 },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        repo: "LouPineWays/Loop-Dee-Loup",
+        executionIssue: 407,
+        plan: {
+          planIndex: {
+            commentId: 100,
+            url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
+            dispatchManifest: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+          },
+        },
+      }),
+      ghCommentViewImpl: async () => {
+        throw new Error("network error");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.notEqual(result.state, "NOT_READY");
+  assert.match(result.message, /operational failure/i);
 });
 
 test("evaluateReadyDispatchGate: EXECUTION_COMPLETE resolves to READY_TO_DISPATCH_INTEGRATION", () => {
