@@ -1296,3 +1296,89 @@ test("isCompletedStage2AuditReport (audit #426): a fenced combined-heading examp
   assert.equal(result.complete, true);
   assert.equal(result.verdict, "NOT CLEAN", "a fenced combined-heading example in evidence must never override the report's real NOT CLEAN verdict");
 });
+
+// -- extractResponseVerdict / computeFencedCodeBlockMask: Stage 1 review findings on PR #429
+// (correcting audit #426's own P1). P1: a plain four-space/tab-indented example (no fence
+// delimiter at all) was misread as a genuine declaration because the per-line scan trims each
+// line before matching. P2: computeFencedCodeBlockMask toggled on any fence-looking line
+// regardless of character/length, so a response quoting Markdown fence syntax as an example (an
+// outer fence containing an inner, shorter-or-different-character fence-looking line) closed the
+// mask early and re-opened it at the real closing fence, leaving genuine content after it
+// incorrectly excluded. -
+
+test("extractResponseVerdict (PR #429 finding P1): a four-space-indented combined heading example, with no genuine declaration elsewhere, extracts nothing", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. A quoted example of the heading shape, indented as a plain code block:",
+    "",
+    "    ## Stage 2 Audit — CLEAN",
+    "",
+    "No other verdict is stated anywhere in this body.",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), null);
+});
+
+test("extractResponseVerdict (PR #429 finding P1): a tab-indented standalone heading example, with no genuine declaration elsewhere, extracts nothing", () => {
+  const body = ["Findings text.", "", "\t# CLEAN", "", "No other verdict is stated anywhere in this body."].join("\n");
+  assert.equal(extractResponseVerdict(body), null);
+});
+
+test("extractResponseVerdict (PR #429 finding P1): an indented combined-heading example alongside a genuine non-indented 'Verdict: NOT CLEAN' resolves to the genuine verdict", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. A quoted example, indented as a plain code block:",
+    "",
+    "    ## Stage 2 Audit — CLEAN",
+    "",
+    "### Verdict",
+    "",
+    "NOT CLEAN",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("extractResponseVerdict (PR #429 finding P2): a literal shorter fence-looking line quoted inside an outer longer fence does not prematurely close the mask, so a genuine unfenced declaration after the real closing fence is still recognized", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. Documenting fence syntax:",
+    "",
+    "````",
+    "Example of a closing fence:",
+    "```",
+    "````",
+    "",
+    "## Stage 2 Audit — CLEAN",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), "CLEAN");
+});
+
+test("extractResponseVerdict (PR #429 finding P2): a same-character but shorter fence-looking line inside an outer fence still masks a combined heading quoted inside it", () => {
+  const body = [
+    "````",
+    "Example of the heading shape:",
+    "```",
+    "## Stage 2 Audit — CLEAN",
+    "```",
+    "````",
+    "",
+    "Verdict: NOT CLEAN",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("extractResponseVerdict (PR #429 finding P2): a differently-charactered fence-looking line inside an outer fence does not close it either", () => {
+  const body = ["```", "Example of a tilde fence: ~~~", "```", "", "## Stage 2 Audit — CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), "CLEAN");
+});
+
+test("extractResponseVerdict (PR #429): ordinary matched-length fences (the pre-existing common case) are unaffected by the character/length comparison", () => {
+  const body = ["```", "## Stage 2 Audit — CLEAN", "```", "", "Verdict: NOT CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("extractResponseVerdict (PR #429): issue #421's accepted bare standalone '# CLEAN' fixture still resolves to CLEAN, unaffected by either fix", () => {
+  assert.equal(extractResponseVerdict(ISSUE_421_COMMENT), "CLEAN");
+});
