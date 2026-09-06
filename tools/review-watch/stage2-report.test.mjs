@@ -28,6 +28,15 @@ function readFixture(name) {
 
 const MERGE_COMMIT = "b281dbd5e7590b8ac2992753cd875f5e6472d556";
 
+// Issue #422: Stage 2 audit issue #421's real genuine CLEAN response (comment 5561188778, exact
+// merge commit `d2695cb64a34c26468386014ce602020b119d148`) ends its "### Founder Judgment"
+// section with a standalone "# CLEAN" heading — not at the start of the body, not prefixed with
+// "Stage 2 Audit". Exact real response body and its exact real requested checklist text (issue
+// #421's own "Verification checklist" field), not paraphrased reconstructions.
+const ISSUE_421_COMMIT = "d2695cb64a34c26468386014ce602020b119d148";
+const ISSUE_421_COMMENT = readFixture("issue-421-comment.txt");
+const ISSUE_421_CHECKLIST = readFixture("issue-421-checklist.txt");
+
 function validReport({ commit = MERGE_COMMIT, verdictLine = "Verdict: CLEAN", leading = null } = {}) {
   const lines = [];
   if (leading) lines.push(leading);
@@ -307,6 +316,78 @@ test("extractResponseVerdict: the same ambiguous heading with no real verdict li
   );
 });
 
+// -- extractResponseVerdict: a standalone verdict heading anywhere in the body, not prefixed with
+// "Stage 2 Audit" (issue #422, Stage 2 audit issue #421's real response, comment 5561188778) ---
+
+test("extractResponseVerdict: a bare '# CLEAN' heading appearing well after the start of the body, with no 'Stage 2 Audit' prefix (issue #422's observed shape)", () => {
+  const body = ["### Founder Judgment", "", "Not required.", "", "# CLEAN", "", "Some closing summary prose follows."].join("\n");
+  assert.equal(extractResponseVerdict(body), "CLEAN");
+});
+
+test("extractResponseVerdict: a bare 'NOT CLEAN' standalone heading, not at the start of the body", () => {
+  const body = ["### Findings", "", "One actionable finding below.", "", "# NOT CLEAN", "", "See findings for detail."].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("extractResponseVerdict: a standalone verdict heading tolerates bold emphasis and trailing punctuation", () => {
+  assert.equal(extractResponseVerdict("Some prose.\n\n## **CLEAN**\n\nMore prose."), "CLEAN");
+  assert.equal(extractResponseVerdict("Some prose.\n\n# CLEAN.\n\nMore prose."), "CLEAN");
+});
+
+test("extractResponseVerdict: a heading merely discussing CLEAN/NOT CLEAN as its topic is not read as a standalone verdict heading (must not regress the issue #268/#278 false-positive guard)", () => {
+  assert.equal(extractResponseVerdict("## Stage 2 Audit of clean-close behavior\n\nFindings below."), null);
+  assert.equal(
+    extractResponseVerdict("## Stage 2 Audit status was CLEAN, now NOT CLEAN\n\nSome prose with no verdict label."),
+    null,
+  );
+});
+
+test("extractResponseVerdict: reproduces issue #421's real genuine CLEAN Stage 2 response body — a standalone '# CLEAN' heading after '### Founder Judgment', not at the start of the body", () => {
+  assert.equal(extractResponseVerdict(ISSUE_421_COMMENT), "CLEAN");
+});
+
+// -- extractResponseVerdict: a literal/fenced verdict example in evidence must never be read as
+// the report's own declared verdict (issue #422 recurred a second time, Stage 1 review finding on
+// PR #424) ------------------------------------------------------------------------------------
+
+test("extractResponseVerdict: a fenced '# CLEAN' example inside verification evidence is not read as the verdict; the real trailing 'Verdict' / 'NOT CLEAN' field is", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. The parser fails to reject a standalone verdict heading quoted as an example, such as:",
+    "",
+    "```",
+    "# CLEAN",
+    "```",
+    "",
+    "This must be fixed so only a genuine verdict declaration is honored.",
+    "",
+    "### Verdict",
+    "",
+    "NOT CLEAN",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("extractResponseVerdict: a fenced 'CLEAN' example with no real verdict declaration anywhere else extracts nothing, rather than the fenced example", () => {
+  const body = ["Example of the shape under discussion:", "", "```", "# CLEAN", "```", "", "No other verdict is stated."].join("\n");
+  assert.equal(extractResponseVerdict(body), null);
+});
+
+test("extractResponseVerdict: a tilde-fenced verdict example is excluded the same way as a backtick-fenced one", () => {
+  const body = ["~~~", "NOT CLEAN", "~~~", "", "### Verdict", "", "CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), "CLEAN");
+});
+
+test("extractResponseVerdict: two genuinely conflicting standalone verdict declarations outside any fence fail closed to null rather than silently resolving to the first one found", () => {
+  const body = ["# CLEAN", "", "Some intervening prose changed the outcome.", "", "# NOT CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), null);
+});
+
+test("extractResponseVerdict: issue #421's real response is unaffected by fenced-example exclusion (no fences present, must still resolve to CLEAN)", () => {
+  assert.equal(extractResponseVerdict(ISSUE_421_COMMENT), "CLEAN");
+});
+
 // -- countNumberedItems ------------------------------------------------------------------------
 
 test("countNumberedItems: counts each top-level numbered line", () => {
@@ -498,6 +579,23 @@ test("isCompletedStage2AuditReport: reports every failed signal when multiple ar
   const result = isCompletedStage2AuditReport("Looks fine to me.", { mergeCommit: MERGE_COMMIT });
   assert.equal(result.complete, false);
   assert.equal(result.reasons.length, 3);
+});
+
+// Stage 1 review finding on PR #424 (issue #422 recurred a second time): a fenced "# CLEAN"
+// example quoted as evidence must never authorize a CLEAN closure over the report's own explicit
+// NOT CLEAN verdict.
+test("isCompletedStage2AuditReport: a fenced '# CLEAN' example in evidence never authorizes CLEAN over the report's actual NOT CLEAN verdict", () => {
+  const body = validReport({
+    verdictLine: "### Verdict\n\nNOT CLEAN",
+  }).replace(
+    "1. Confirmed the classifier rejects the exact #229 kickoff — CONFIRMED",
+    ["1. Confirmed a standalone verdict heading quoted as an example, e.g.:", "", "```", "# CLEAN", "```", "", "is not misread as this report's own verdict — CONFIRMED"].join(
+      "\n",
+    ),
+  );
+  const result = isCompletedStage2AuditReport(body, { mergeCommit: MERGE_COMMIT });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "NOT CLEAN", "a fenced CLEAN example in evidence must never override the report's real NOT CLEAN verdict");
 });
 
 test("isCompletedStage2AuditReport: a NOT CLEAN report is not misread as CLEAN via a findings sentence that merely mentions the word 'verdict' (Stage 1 review finding on PR #231)", () => {
@@ -1058,4 +1156,31 @@ test("countVerificationWalkthroughItems (Stage 1 finding P2 on this PR): a neste
     2,
     "the nested '#### Unit tests' subheading must not re-expose the Checks section's command bullets to candidacy",
   );
+});
+
+// -- issue #422: a genuine, complete Stage 2 audit response whose verdict is declared as a
+// standalone "# CLEAN" heading well after the start of the body (following its own "### Founder
+// Judgment" section), not prefixed with "Stage 2 Audit" — the fourth real observed verdict shape.
+// Fixtures are the exact real response body (comment 5561188778 on issue #421) and its exact
+// real requested checklist (issue #421's own "Verification checklist" field), not paraphrased
+// reconstructions.
+
+test("isCompletedStage2AuditReport: reproduces issue #421's real genuine CLEAN Stage 2 response as complete — previously misclassified as having no explicit CLEAN/NOT CLEAN verdict because the '# CLEAN' heading matched none of the three previously-recognized shapes", () => {
+  const result = isCompletedStage2AuditReport(ISSUE_421_COMMENT, {
+    mergeCommit: ISSUE_421_COMMIT,
+    requestedChecklist: ISSUE_421_CHECKLIST,
+  });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "CLEAN");
+  assert.deepEqual(result.reasons, []);
+});
+
+test("isCompletedStage2AuditReport: issue #421's real response, given a deliberately wrong mergeCommit, is correctly rejected despite the genuine standalone '# CLEAN' verdict heading", () => {
+  const wrongMergeCommit = "deadbeef00000000000000000000000000000000";
+  const result = isCompletedStage2AuditReport(ISSUE_421_COMMENT, {
+    mergeCommit: wrongMergeCommit,
+    requestedChecklist: ISSUE_421_CHECKLIST,
+  });
+  assert.equal(result.complete, false, "an incorrect mergeCommit must never be forgiven merely because the response carries a genuine standalone verdict heading");
+  assert.equal(result.verdict, null);
 });
