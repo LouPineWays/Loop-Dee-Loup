@@ -112,13 +112,13 @@ export function formatPlanningWorkerDispatchPrompt({ controlIssue, executionIssu
   }
   return (
     `Planning worker dispatch. Execution Issue: #${executionIssue}. Controlling Issue: #${controlIssue}.\n\n` +
-    `Read #${executionIssue} directly from GitHub for its full outcome, constraints, and acceptance ` +
-    `criteria — it was not restated here on purpose. Determine whether it is one bounded vertical ` +
-    `slice or genuinely requires decomposition per AGENTS.md. If it requires decomposition, produce ` +
-    `this Issue's Execution Plan Index, Shared Contract, and Worker Unit Contract comments per ` +
-    `docs/operating-model.md's durable plan artifact conventions and do not begin implementing any ` +
-    `resulting unit yourself. Report back using AGENTS.md's Slice handoff format once the plan (or the ` +
-    `single-slice determination) is durable, then stop.`
+    `Read #${executionIssue} from GitHub for its full outcome, constraints, and acceptance criteria — ` +
+    `it was not restated here on purpose. Determine whether it is one bounded vertical slice or requires ` +
+    `decomposition per AGENTS.md. If decomposition is required, follow ` +
+    `AGENTS.md's Decomposition boundary (create slice Issues, record dependencies, close the source Issue) ` +
+    `and stop — do not create plan artifacts on this same Issue. If it is one bounded slice, produce this ` +
+    `Issue's Execution Plan Index, Shared Contract, and Worker Unit Contract comments per docs/operating-model.md, ` +
+    `do not begin implementing units yourself, and stop.`
   );
 }
 
