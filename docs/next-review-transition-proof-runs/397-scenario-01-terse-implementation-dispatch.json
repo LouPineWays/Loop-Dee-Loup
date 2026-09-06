@@ -1,0 +1,22 @@
+{
+  "scenario": "1. Terse implementation-unit dispatch",
+  "status": "Demonstrated (real, live)",
+  "representative_real_work": "Control Issue #408 (Lifecycle: READY_FOR_PLAN, Route: planning worker, Execution: #407), read live on 2026-09-06. #408 is the exact live reproduction #397's own bug report was written against; it had not moved on by the time this unit ran, so no synthetic substitute was needed.",
+  "commands": [
+    "node tools/orchestration/ready-dispatch-gate.mjs --control-issue 408",
+    "node tools/orchestration/ready-dispatch-gate.mjs --control-issue 408 | node tools/orchestration/format-dispatch-prompt.mjs"
+  ],
+  "gate_output": {
+    "exitCode": 5,
+    "state": "READY_TO_DISPATCH_PLANNING",
+    "controlIssue": 408,
+    "repo": "LouPineWays/Loop-Dee-Loup",
+    "executionIssue": 407,
+    "route": "planning worker"
+  },
+  "dispatch_prompt_emitted": "Planning worker dispatch. Execution Issue: #407. Controlling Issue: #408.\n\nRead #407 directly from GitHub for its full outcome, constraints, and acceptance criteria — it was not restated here on purpose. Determine whether it is one bounded vertical slice or genuinely requires decomposition per AGENTS.md. If it requires decomposition, produce this Issue's Execution Plan Index, Shared Contract, and Worker Unit Contract comments per docs/operating-model.md's durable plan artifact conventions and do not begin implementing any resulting unit yourself. Report back using AGENTS.md's Slice handoff format once the plan (or the single-slice determination) is durable, then stop.",
+  "dispatch_prompt_char_count": 679,
+  "execution_issue_407_full_body_char_count": 10393,
+  "observation": "Before 397-B, ready-dispatch-gate.mjs returned NOT_READY for this exact control Issue (per #397's own root-cause finding: READY_FOR_PLAN was absent from KNOWN_LIFECYCLE_STATES), which licensed a controller to fall through and read #407 directly. After 397-A/B/E, the same live #408 now resolves deterministically to READY_TO_DISPATCH_PLANNING and the emitted dispatch prompt carries only the two issue-number references plus a fixed instruction template -- none of #407's own ~10,400-character body (problem statement, live reproductions, required behavior, acceptance criteria) is restated. The planning worker recovers its own complete instructions by reading #407 directly, exactly as the Shared Contract requires.",
+  "corroborating_evidence": "This very worker unit's own dispatch (397-C, received to start this proof-run session) is a second, independent real instance of the same discipline: the dispatching message named only 'Parent execution Issue: #397', the Worker Unit Contract comment URL, and the Shared Contract comment URL, explicitly stating 'outcome, capability, files, verification, and State were not restated here on purpose' -- this unit had to read both linked comments directly from GitHub to recover its own instructions, the same terse-dispatch shape scenario 1 requires."
+}
