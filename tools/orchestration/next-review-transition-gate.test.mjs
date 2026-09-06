@@ -98,13 +98,39 @@ test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED -> STAGE1_CORRE
   assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
 });
 
-test("resolvePreMergeVerdict: NOT_REQUESTED + Stage 1 disposition satisfied + MERGE_READY -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", () => {
+test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED + Stage 1 disposition satisfied at this head + MERGE_READY -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", () => {
   const v = resolvePreMergeVerdict({
-    stage1: stage1("NOT_REQUESTED"),
+    stage1: stage1("RESPONSE_RECEIVED", {
+      matches: [{ body_excerpt: "### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request." }],
+      unboundGenuineMatches: [],
+    }),
     mergeReady: mergeReady("MERGE_READY"),
-    stage1Disposition: "satisfied",
-  });
+    stage1Disposition: "satisfied at 1234abc",
+  }, { head: "1234abcdef9876" });
   assert.equal(v.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + stale/non-head-scoped Stage 1 disposition still stays NO_ACTION_YET", () => {
+  const v = resolvePreMergeVerdict(
+    {
+      stage1: stage1("NOT_REQUESTED"),
+      mergeReady: mergeReady("MERGE_READY"),
+      stage1Disposition: "satisfied at 1234abc",
+    },
+    { head: "fffffff1234567" },
+  );
+  assert.equal(v.state, "NO_ACTION_YET");
+});
+
+test("resolvePreMergeVerdict: RESPONSE_RECEIVED without clean-pass or findings preamble (kickoff/ack shape) -> NO_ACTION_YET", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("RESPONSE_RECEIVED", {
+      matches: [{ body_excerpt: "Starting review... I will report back with findings." }],
+      unboundGenuineMatches: [],
+    }),
+    mergeReady: mergeReady("MERGE_READY"),
+  });
+  assert.equal(v.state, "NO_ACTION_YET");
 });
 
 test("resolvePreMergeVerdict: an operational error from either composed check -> AMBIGUOUS, never silently treated as a state", () => {
@@ -298,6 +324,18 @@ const CONTROL_BODY_PRE_MERGE = `## Current state
 - **Founder decision:** none
 `;
 
+const CONTROL_BODY_PRE_MERGE_SATISFIED = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #375
+- **Route:** implementation worker
+- **PR:** #376
+- **Stage 1:** satisfied at 1234abc
+- **Stage 2:** none
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
 const CONTROL_BODY_POST_MERGE = `## Current state
 
 - **Lifecycle:** AUDIT
@@ -351,6 +389,22 @@ test("runNextReviewTransitionGate: control-Issue mode with a settled PR (no Stag
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
   assert.equal(result.controlIssue, 322);
+});
+
+test("runNextReviewTransitionGate: Stage 1 satisfied text does not override NOT_REQUESTED at a different live head", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        assert.equal(number, "322");
+        return { body: CONTROL_BODY_PRE_MERGE_SATISFIED, state: "OPEN" };
+      },
+      ghPrHeadImpl: async () => "deadbeefcafef00d",
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+    },
+  );
+  assert.equal(result.state, "NO_ACTION_YET");
 });
 
 test("runNextReviewTransitionGate: control-Issue mode honors an explicit --head, skipping the PR-head read", async () => {

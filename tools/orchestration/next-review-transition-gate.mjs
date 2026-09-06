@@ -29,14 +29,16 @@
 // Verdict derivation (every verdict below carries a literal `stopAfter: true` field):
 //
 //   Pre-merge phase (a settled "PR" reference, no settled "Stage 2"/Audit reference yet):
-//     - stage1-gate NOT_REQUESTED or PENDING            -> NO_ACTION_YET, unless the control
-//       Issue's own Stage 1 bullet is explicitly satisfied/exempt and merge-ready is already met
+//     - stage1-gate NOT_REQUESTED or PENDING            -> NO_ACTION_YET
 //     - stage1-gate EXEMPT, and
 //         lifecycle-gate merge-ready MERGE_READY(*)      -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2
 //         lifecycle-gate merge-ready BLOCKED_CLOSING_REFERENCE -> STAGE1_CORRECTION_REQUIRED
 //     - stage1-gate RESPONSE_RECEIVED with a clean-pass response (consumer-sync-gate.mjs's
 //       `isCleanStage1Response`), and lifecycle-gate merge-ready MERGE_READY(*) -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2
-//     - stage1-gate RESPONSE_RECEIVED with findings or ambiguous response shape -> STAGE1_CORRECTION_REQUIRED
+//     - stage1-gate RESPONSE_RECEIVED with findings preamble -> STAGE1_CORRECTION_REQUIRED,
+//       except a control Issue Stage 1 bullet that is both satisfied/exempt and explicitly
+//       head-scoped to this same current head also allows merge-ready progression
+//     - stage1-gate RESPONSE_RECEIVED without a clean-pass or findings preamble -> NO_ACTION_YET
 //     - anything else (operational error from either check, or a combination this gate does
 //       not recognize)                                   -> AMBIGUOUS
 //
@@ -137,6 +139,20 @@ function stage1DispositionMarksSatisfied(raw) {
   return /\bsatisfied\b/i.test(raw) || /\bexempt\b/i.test(raw);
 }
 
+function stage1DispositionMatchesHead(raw, head) {
+  if (typeof raw !== "string" || typeof head !== "string" || !head.trim()) return false;
+  const match = raw.match(/\b([0-9a-f]{7,40})\b/i);
+  if (!match) return false;
+  const token = match[1].toLowerCase();
+  return head.toLowerCase().startsWith(token);
+}
+
+const FINDINGS_PREAMBLE_PATTERN = /^### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request\./;
+
+function hasFindingsStage1Response(stage1) {
+  return (stage1.matches ?? []).some((m) => FINDINGS_PREAMBLE_PATTERN.test(m.body_excerpt ?? ""));
+}
+
 export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition = null }, context = {}) {
   if (!hasTrustworthyExitCode(stage1) || !hasTrustworthyExitCode(mergeReady)) {
     return {
@@ -167,16 +183,9 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
     };
   }
 
-  const stage1DispositionSatisfied = stage1DispositionMarksSatisfied(stage1Disposition);
+  const stage1DispositionSatisfiedAtHead =
+    stage1DispositionMarksSatisfied(stage1Disposition) && stage1DispositionMatchesHead(stage1Disposition, context.head);
   if (stage1.state === "NOT_REQUESTED" || stage1.state === "PENDING") {
-    if (stage1DispositionSatisfied) {
-      if (isMergeReadyState(mergeReady.state)) {
-        return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
-      }
-      if (mergeReady.state === "BLOCKED_CLOSING_REFERENCE") {
-        return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context };
-      }
-    }
     return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
   }
 
@@ -190,15 +199,20 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
   }
 
   if (stage1.state === "RESPONSE_RECEIVED") {
-    if (!isCleanStage1Response(stage1)) {
+    if (isCleanStage1Response(stage1)) {
+      if (isMergeReadyState(mergeReady.state)) {
+        return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
+      }
+      if (mergeReady.state === "BLOCKED_CLOSING_REFERENCE") {
+        return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context };
+      }
+    } else if (hasFindingsStage1Response(stage1)) {
+      if (stage1DispositionSatisfiedAtHead && isMergeReadyState(mergeReady.state)) {
+        return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
+      }
       return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context };
     }
-    if (isMergeReadyState(mergeReady.state)) {
-      return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
-    }
-    if (mergeReady.state === "BLOCKED_CLOSING_REFERENCE") {
-      return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context };
-    }
+    return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
   }
 
   return {
