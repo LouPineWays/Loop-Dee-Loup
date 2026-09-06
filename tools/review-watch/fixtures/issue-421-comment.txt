@@ -1,0 +1,58 @@
+## Stage 2 Audit
+
+**Exact merge commit:** `d2695cb64a34c26468386014ce602020b119d148`
+
+### Severity Summary
+
+| Severity | Count |
+|---|---:|
+| P0 | 0 |
+| P1 | 0 |
+| P2 | 0 |
+| P3 | 0 |
+
+### Findings
+
+No actionable correctness, lifecycle, durability, security, documentation-authority, or acceptance defects were found.
+
+### Verification Performed
+
+1. **REPLAN_REQUIRED persistence guard — PASS.** Both `--create` and `--comment-id` enter the same persistence branch, where every resolved entry is checked before `postImpl` can execute. An unroutable unit returns exit code 3 with state `REPLAN_REQUIRED`; only a fully verified manifest can return `DISPATCH_MANIFEST_VERIFIED`. This matches the authoritative Route/Prepare contract.
+
+2. **Duplicate Plan Index backlink handling — PASS.** The parser iterates through all matching bullets and retains the last occurrence. The regression fixture supplies a valid first backlink followed by an invalid second backlink and confirms rejection. Single-backlink manifests continue through the existing valid-manifest path.
+
+3. **Permalink origin identity — PASS.** Comment identity now contains the normalized URL origin, and the ROUTED manifest-pointer and Plan-Index-backlink comparisons include origin alongside repository, issue, and comment identity. The preparation path likewise includes origin in write/read, backlink, and reparsed-manifest comparisons. The foreign-origin regression test confirms rejection.
+
+4. **Operational failure classification — PASS.** Execution-plan exit code 1 and thrown manifest-comment reads produce `operationalError: true`; `checkReadyDispatch` translates that to exit code 1 rather than the fallthrough-authorizing `NOT_READY` exit code 3. Malformed durable state remains on the distinct NOT_READY path.
+
+5. **Regression and full-suite coverage — PASS.** The correction includes direct coverage for the pre-write REPLAN_REQUIRED behavior, duplicate backlinks, foreign origins, execution-plan operational failures, and thrown comment reads. The complete orchestration suite passed: **267 tests, 0 failures**.
+
+6. **Issue-closing lifecycle state — PASS.** GitHub reports an empty `closingIssuesReferences` array for PR #420; neither the correction-head message nor squash-merge message contains an auto-close keyword for #419. Issue #419 remains open with its prior NOT CLEAN audit authority intact.
+
+7. **Control-plane workflow execution — PASS.** GitHub Actions reports the **Control-plane paths** workflow completed successfully for the actual final PR head `8533bae6a38c43c56ed42ad7a33200ec33696b4b`.
+
+8. **Repository guards and exit-code compatibility — PASS.** Both deterministic repository checks reported OK. The full orchestration suite retained successful valid-manifest behavior, including `DISPATCH_MANIFEST_VERIFIED` and `READY_TO_DISPATCH_UNITS`, while preserving fail-closed distinctions for malformed and operational failure cases.
+
+### Checks Run
+
+- ✅ `node --test tools/orchestration/*.test.mjs`
+- ✅ `node tools/check-control-plane-paths.mjs`
+- ✅ `node tools/check-startup-budget.mjs`
+- ✅ `gh pr view 420 --repo LouPineWays/Loop-Dee-Loup --json number,title,state,mergedAt,mergeCommit,headRefOid,baseRefName,closingIssuesReferences,commits,files`
+- ✅ `gh issue view 419 --repo LouPineWays/Loop-Dee-Loup --json number,state,title,body`
+- ✅ `gh api 'repos/LouPineWays/Loop-Dee-Loup/actions/runs?head_sha=8533bae6a38c43c56ed42ad7a33200ec33696b4b' --jq '.workflow_runs[] | [.name,.conclusion,.status,.head_sha,.html_url] | @tsv'`
+- ✅ `gh api repos/LouPineWays/Loop-Dee-Loup/commits/8533bae6a38c43c56ed42ad7a33200ec33696b4b --jq '.sha + "\n" + .commit.message'`
+- ✅ `gh api repos/LouPineWays/Loop-Dee-Loup/commits/d2695cb64a34c26468386014ce602020b119d148 --jq '.sha + "\n" + .commit.message'`
+- ✅ `git status --short --branch`
+
+### Founder Judgment
+
+Not required.
+
+Repository contents were not modified, committed, or submitted in another pull request because this `@codex review` invocation is expressly read-only.
+
+# CLEAN
+
+The exact merged commit `d2695cb64a34c26468386014ce602020b119d148` resolves all four Stage 1 findings, preserves the intended valid-manifest transitions, passes the complete orchestration and control-plane checks, has successful required CI at the frozen PR head, and leaves issue #419 open without an auto-close reference.
+
+ [View task →](https://chatgpt.com/s/cd_6a9dad94abac819190877acc6e02060a)

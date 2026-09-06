@@ -146,17 +146,40 @@ const VERDICT_TOKEN_PATTERN = /\b(NOT CLEAN|CLEAN)\b/i;
 const STAGE2_HEADING_VERDICT_PATTERN =
   /^(?:#{1,6}\s*)?stage\s*2\s+audit\b(?:\s*verdict)?\s*[:—-]\s*\*{0,2}\s*(NOT CLEAN|CLEAN)\b\*{0,2}[.!]?\s*$/im;
 
+// A standalone verdict heading: an entire line — anywhere in the body, not anchored to the
+// start — that reduces to *exactly* the token `CLEAN` or `NOT CLEAN` and nothing else, once
+// optional Markdown heading markup ("#" through "######") and optional bold/italic emphasis
+// markup are stripped (only trailing "."/"!" punctuation additionally tolerated). Issue #422's
+// real observed shape: Stage 2 audit issue #421's genuine, substantively complete response
+// (comment 5561188778) ends its "### Founder Judgment" section with a bare "# CLEAN" heading,
+// well after the start of the body and with no "Stage 2 Audit" prefix. That matches none of the
+// three shapes above: LEADING_VERDICT_PATTERN only looks at the very first content of the whole
+// response; STAGE2_HEADING_VERDICT_PATTERN requires the literal "Stage 2 Audit" text before the
+// separator and token; and VERDICT_LABEL_LINE_PATTERN requires the line to literally be the word
+// "verdict", not the token itself.
+//
+// Checked with the multiline flag (unlike LEADING_VERDICT_PATTERN) so it can match this heading
+// wherever it sits in the body. Requiring the *entire* line — not merely containing the token —
+// is what keeps this safe against the same false-positive class already fixed for
+// STAGE2_HEADING_VERDICT_PATTERN (issue #268/#278): a heading merely *discussing* the topic
+// ("## Stage 2 Audit of clean-close behavior") or a line mentioning both tokens
+// ("## Stage 2 Audit status was CLEAN, now NOT CLEAN") never reduces to just the bare token once
+// stripped, so neither can match here either.
+const STANDALONE_VERDICT_HEADING_PATTERN = /^(?:#{1,6}\s*)?\*{0,2}\s*(NOT CLEAN|CLEAN)\s*\*{0,2}[.!]?\s*$/im;
+
 function normalizeVerdictToken(token) {
   return token.toUpperCase() === "CLEAN" ? "CLEAN" : "NOT CLEAN";
 }
 
-// Pure. Extracts the response's own explicit verdict, or null. Three recognized shapes: a
+// Pure. Extracts the response's own explicit verdict, or null. Four recognized shapes: a
 // leading status line, a "Verdict" label followed — on the same line or the next non-blank
-// line — by the token, or a "Stage 2 Audit [Verdict] <sep> <token>" heading declaring the token
-// directly. Only the immediate next non-blank line is checked after a label with no same-line
-// token, so an unrelated later mention of CLEAN/NOT CLEAN elsewhere in the body is never
-// mistaken for the labelled value. The three checks are tried in order but are mutually
-// exclusive in practice (a given line matches at most one shape), so order does not matter.
+// line — by the token, a "Stage 2 Audit [Verdict] <sep> <token>" heading declaring the token
+// directly, or a standalone heading/line anywhere in the body whose entire content (once
+// heading/bold markup is stripped) is exactly the token (issue #422). Only the immediate next
+// non-blank line is checked after a label with no same-line token, so an unrelated later mention
+// of CLEAN/NOT CLEAN elsewhere in the body is never mistaken for the labelled value. The four
+// checks are tried in order but are mutually exclusive in practice (a given line matches at most
+// one shape), so order does not matter.
 export function extractResponseVerdict(text) {
   const normalized = (text ?? "").trim();
   if (!normalized) return null;
@@ -166,6 +189,9 @@ export function extractResponseVerdict(text) {
 
   const stage2Heading = STAGE2_HEADING_VERDICT_PATTERN.exec(normalized);
   if (stage2Heading) return normalizeVerdictToken(stage2Heading[1]);
+
+  const standaloneHeading = STANDALONE_VERDICT_HEADING_PATTERN.exec(normalized);
+  if (standaloneHeading) return normalizeVerdictToken(standaloneHeading[1]);
 
   const lines = normalized.split("\n");
   for (let i = 0; i < lines.length; i++) {
