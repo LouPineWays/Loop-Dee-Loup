@@ -45,6 +45,15 @@
 //   - **Blocker:** none
 //   - **Founder decision:** none — <optional trailing explanation>
 //
+// Issue #397 corrective unit 397-E: live control Issues #398/#408 actually author this
+// field as "- **Execution issue:** #123", not "- **Execution:** #123". 397-B's own
+// regression fixture silently normalized the live spelling to the legacy one before ever
+// exercising the gate, so it never proved the gate accepted the shape real thin controls
+// use. Both spellings are read as one execution-pointer field (readExecutionBulletField
+// below); when both are present and resolve to different issue numbers, that is a genuine
+// authoring conflict and fails closed to NOT_READY rather than silently preferring either
+// spelling.
+//
 // Stage 1 review finding on this PR: `.github/ISSUE_TEMPLATE/parent-execution.yml` — a
 // coarser, whole-feature controller template, not specific to this two-plane thin
 // control/execution pattern — never actually renders these bullets; it renders "###
@@ -331,6 +340,31 @@ export function parseExecutionPointer(value) {
   return { ok: true, issue: refs[0] };
 }
 
+// Pure. Reads the control Issue's execution-pointer bullet under either observed spelling
+// as one field: the legacy ad hoc "- **Execution:**" bullet (control Issues #311/#322) and
+// the live "- **Execution issue:**" spelling real thin controls #398/#408 actually use.
+// Issue #397 corrective unit 397-E — see the module comment above for why this alias
+// exists. When only one spelling is present, its value is used verbatim (existing
+// legacy-only control Issues keep working unchanged). When both are present and each
+// resolves to exactly one execution pointer, differing issue numbers are a genuine
+// authoring conflict: returns { conflict: true } rather than silently preferring either
+// spelling, so the caller can fail closed to NOT_READY with an explicit reason instead of
+// dispatching against a guess. Malformed values on one side (e.g. "none") do not by
+// themselves trigger a conflict — parseExecutionPointer's own missing/multi-valued
+// handling still applies to whichever value is selected.
+export function readExecutionBulletField(body) {
+  const legacy = parseControlBullet(body, "Execution");
+  const liveSpelling = parseControlBullet(body, "Execution issue");
+  if (legacy !== null && liveSpelling !== null) {
+    const legacyPointer = parseExecutionPointer(legacy);
+    const livePointer = parseExecutionPointer(liveSpelling);
+    if (legacyPointer.ok && livePointer.ok && legacyPointer.issue !== livePointer.issue) {
+      return { conflict: true, legacy, liveSpelling };
+    }
+  }
+  return { conflict: false, value: liveSpelling ?? legacy };
+}
+
 // Pure core: evaluates AGENTS.md's immediate-dispatch gate against an already-fetched
 // control Issue body. `controlIssueNumber`, when given, rejects a self-referential
 // Execution pointer (Stage 1 review finding on this PR: a malformed control Issue #42
@@ -369,7 +403,10 @@ export function parseExecutionPointer(value) {
 // which template created it.
 export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   const lifecycleRaw = parseControlBullet(body, "Lifecycle") ?? parseHeadingField(body, "State");
-  const executionRaw = parseControlBullet(body, "Execution") ?? extractActiveExecutionRef(parseHeadingBlock(body, "Minimum authority"));
+  const executionField = readExecutionBulletField(body);
+  const executionRaw = executionField.conflict
+    ? null
+    : executionField.value ?? extractActiveExecutionRef(parseHeadingBlock(body, "Minimum authority"));
   const routeRaw = parseControlBullet(body, "Route");
   const blockerRaw = parseControlBullet(body, "Blocker") ?? parseHeadingField(body, "Current blocker");
   const founderDecisionRaw = parseControlBullet(body, "Founder decision") ?? parseHeadingField(body, "Founder interrupt");
@@ -407,7 +444,14 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
     );
   }
 
-  const execution = parseExecutionPointer(executionRaw);
+  const execution = executionField.conflict
+    ? {
+        ok: false,
+        reason:
+          `Execution pointer is ambiguous: "- **Execution:**" names ${JSON.stringify(executionField.legacy)} ` +
+          `while "- **Execution issue:**" names ${JSON.stringify(executionField.liveSpelling)} — these must resolve to the same execution Issue`,
+      }
+    : parseExecutionPointer(executionRaw);
   if (!execution.ok) {
     reasons.push(execution.reason);
   } else if (controlIssueNumber != null && execution.issue === Number(controlIssueNumber)) {
