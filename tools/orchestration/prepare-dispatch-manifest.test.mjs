@@ -594,7 +594,7 @@ test("buildNote reports blocked dependencies when not ready", () => {
 
 function planWith(units) {
   return {
-    planIndex: { url: "https://github.com/OWNER/REPO/issues/294#issuecomment-1" },
+    planIndex: { commentId: 1, url: "https://github.com/OWNER/REPO/issues/294#issuecomment-1", dispatchManifest: "none" },
     units,
   };
 }
@@ -724,20 +724,57 @@ test("runPrepareDispatchManifest invokes postImpl with the composed body when --
     plan: planWith({ "294-A": unit({ unitId: "294-A", state: "DONE" }) }),
   };
   let captured = null;
-  await runPrepareDispatchManifest(
+  let patched = null;
+  let lastManifestUrl = null;
+  let manifestBody = null;
+  const result = await runPrepareDispatchManifest(
     { executionIssue: 294, commentId: "12345" },
     {
-      parseExecutionPlanImpl: async () => fakePlan,
+      parseExecutionPlanImpl: async () =>
+        lastManifestUrl
+          ? { ...fakePlan, plan: { ...fakePlan.plan, planIndex: { ...fakePlan.plan.planIndex, dispatchManifest: lastManifestUrl } } }
+          : fakePlan,
       fileExists: fileExistsFrom([]),
       skillNames: [],
       personaNames: [],
-      postImpl: (args) => {
+      postImpl: async (args) => {
         captured = args;
+        manifestBody = args.body;
+        return {
+          id: 12345,
+          html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-12345",
+          issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+        };
+      },
+      getCommentImpl: async ({ commentId }) => {
+        if (Number(commentId) === 1) {
+          return {
+            id: 1,
+            html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-1",
+            issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+            body: "## Execution Plan Index (v1)\n- **Dispatch manifest:** none\n",
+          };
+        }
+        return {
+          id: 12345,
+          html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-12345",
+          issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+          body: manifestBody,
+        };
+      },
+      patchCommentImpl: async (args) => {
+        patched = args;
+        const match = args.body.match(/- \*\*Dispatch manifest:\*\* (\S+)/);
+        lastManifestUrl = match ? match[1] : null;
       },
     },
   );
   assert.equal(captured.commentId, "12345");
   assert.match(captured.body, /## Dispatch Manifest \(v1\)/);
+  assert.equal(result.state, "DISPATCH_MANIFEST_VERIFIED");
+  assert.equal(result.manifestCommentId, 12345);
+  assert.equal(result.manifestUrl, "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-12345");
+  assert.ok(patched.body.includes(result.manifestUrl));
 });
 
 test("runPrepareDispatchManifest invokes postImpl with the composed body when --create is given", async () => {
@@ -749,21 +786,237 @@ test("runPrepareDispatchManifest invokes postImpl with the composed body when --
     plan: planWith({ "294-A": unit({ unitId: "294-A", state: "DONE" }) }),
   };
   let captured = null;
-  await runPrepareDispatchManifest(
+  let lastManifestUrl = null;
+  const result = await runPrepareDispatchManifest(
     { executionIssue: 294, create: true },
     {
-      parseExecutionPlanImpl: async () => fakePlan,
+      parseExecutionPlanImpl: async () =>
+        lastManifestUrl
+          ? { ...fakePlan, plan: { ...fakePlan.plan, planIndex: { ...fakePlan.plan.planIndex, dispatchManifest: lastManifestUrl } } }
+          : fakePlan,
       fileExists: fileExistsFrom([]),
       skillNames: [],
       personaNames: [],
-      postImpl: (args) => {
+      postImpl: async (args) => {
         captured = args;
+        return {
+          id: 55555,
+          html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-55555",
+          issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+        };
+      },
+      getCommentImpl: async ({ commentId }) => {
+        if (Number(commentId) === 1) {
+          return {
+            id: 1,
+            html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-1",
+            issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+            body: "## Execution Plan Index (v1)\n- **Dispatch manifest:** none\n",
+          };
+        }
+        return {
+          id: 55555,
+          html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-55555",
+          issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+          body: captured.body,
+        };
+      },
+      patchCommentImpl: async ({ body }) => {
+        const match = body.match(/- \*\*Dispatch manifest:\*\* (\S+)/);
+        lastManifestUrl = match ? match[1] : null;
       },
     },
   );
   assert.equal(captured.commentId, undefined);
   assert.equal(captured.executionIssue, 294);
   assert.match(captured.body, /## Dispatch Manifest \(v1\)/);
+  assert.equal(result.state, "DISPATCH_MANIFEST_VERIFIED");
+  assert.equal(result.manifestCommentId, 55555);
+});
+
+test("runPrepareDispatchManifest fails closed when persistence returns no canonical comment identity", async () => {
+  const fakePlan = {
+    ok: true,
+    exitCode: 0,
+    repo: "LouPineWays/Loop-Dee-Loup",
+    executionIssue: 294,
+    plan: planWith({ "294-A": unit({ unitId: "294-A", state: "DONE" }) }),
+  };
+  const result = await runPrepareDispatchManifest(
+    { executionIssue: 294, create: true },
+    {
+      parseExecutionPlanImpl: async () => fakePlan,
+      fileExists: fileExistsFrom([]),
+      skillNames: [],
+      personaNames: [],
+      postImpl: async () => undefined,
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /missing canonical comment identity/i);
+});
+
+test("runPrepareDispatchManifest fails closed when persisted manifest belongs to the wrong execution Issue", async () => {
+  const fakePlan = {
+    ok: true,
+    exitCode: 0,
+    repo: "LouPineWays/Loop-Dee-Loup",
+    executionIssue: 294,
+    plan: planWith({ "294-A": unit({ unitId: "294-A", state: "DONE" }) }),
+  };
+  const result = await runPrepareDispatchManifest(
+    { executionIssue: 294, create: true },
+    {
+      parseExecutionPlanImpl: async () => fakePlan,
+      fileExists: fileExistsFrom([]),
+      skillNames: [],
+      personaNames: [],
+      postImpl: async () => ({
+        id: 777,
+        html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/295#issuecomment-777",
+        issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/295",
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /belongs to issue #295/i);
+});
+
+test("runPrepareDispatchManifest fails closed when read-back manifest body differs from the generated body", async () => {
+  const fakePlan = {
+    ok: true,
+    exitCode: 0,
+    repo: "LouPineWays/Loop-Dee-Loup",
+    executionIssue: 294,
+    plan: planWith({ "294-A": unit({ unitId: "294-A", state: "DONE" }) }),
+  };
+  const result = await runPrepareDispatchManifest(
+    { executionIssue: 294, create: true },
+    {
+      parseExecutionPlanImpl: async () => fakePlan,
+      fileExists: fileExistsFrom([]),
+      skillNames: [],
+      personaNames: [],
+      postImpl: async () => ({
+        id: 889,
+        html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-889",
+        issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+      }),
+      getCommentImpl: async ({ commentId }) => {
+        if (Number(commentId) === 889) {
+          return {
+            id: 889,
+            html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-889",
+            issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+            body: "## Dispatch Manifest (v1)\n- **Plan index:** wrong\n",
+          };
+        }
+        return {
+          id: 1,
+          html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-1",
+          issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+          body: "## Execution Plan Index (v1)\n- **Dispatch manifest:** none\n",
+        };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /does not match the generated body/i);
+});
+
+test("runPrepareDispatchManifest fails closed when Plan Index update throws", async () => {
+  const fakePlan = {
+    ok: true,
+    exitCode: 0,
+    repo: "LouPineWays/Loop-Dee-Loup",
+    executionIssue: 294,
+    plan: planWith({ "294-A": unit({ unitId: "294-A", state: "DONE" }) }),
+  };
+  let manifestBody = null;
+  const result = await runPrepareDispatchManifest(
+    { executionIssue: 294, create: true },
+    {
+      parseExecutionPlanImpl: async () => fakePlan,
+      fileExists: fileExistsFrom([]),
+      skillNames: [],
+      personaNames: [],
+      postImpl: async (args) => {
+        manifestBody = args.body;
+        return {
+          id: 991,
+          html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-991",
+          issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+        };
+      },
+      getCommentImpl: async ({ commentId }) =>
+        Number(commentId) === 991
+          ? {
+              id: 991,
+              html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-991",
+              issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+              body: manifestBody,
+            }
+          : {
+              id: 1,
+              html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-1",
+              issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+              body: "## Execution Plan Index (v1)\n- **Dispatch manifest:** none\n",
+            },
+      patchCommentImpl: async () => {
+        throw new Error("patch failed");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /failed updating Plan Index/i);
+});
+
+test("runPrepareDispatchManifest fails closed when Plan Index verification does not contain the manifest URL", async () => {
+  const fakePlan = {
+    ok: true,
+    exitCode: 0,
+    repo: "LouPineWays/Loop-Dee-Loup",
+    executionIssue: 294,
+    plan: planWith({ "294-A": unit({ unitId: "294-A", state: "DONE" }) }),
+  };
+  let manifestBody = null;
+  const result = await runPrepareDispatchManifest(
+    { executionIssue: 294, create: true },
+    {
+      parseExecutionPlanImpl: async () => ({
+        ...fakePlan,
+        plan: { ...fakePlan.plan, planIndex: { ...fakePlan.plan.planIndex, dispatchManifest: "none" } },
+      }),
+      fileExists: fileExistsFrom([]),
+      skillNames: [],
+      personaNames: [],
+      postImpl: async (args) => {
+        manifestBody = args.body;
+        return {
+          id: 992,
+          html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-992",
+          issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+        };
+      },
+      getCommentImpl: async ({ commentId }) =>
+        Number(commentId) === 992
+          ? {
+              id: 992,
+              html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-992",
+              issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+              body: manifestBody,
+            }
+          : {
+              id: 1,
+              html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-1",
+              issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+              body: "## Execution Plan Index (v1)\n- **Dispatch manifest:** none\n",
+            },
+      patchCommentImpl: async () => ({}),
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /Plan Index verification mismatch/i);
 });
 
 test("runPrepareDispatchManifest returns stdout-only body without persisting when neither --create nor --comment-id is given", async () => {

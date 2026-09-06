@@ -16,6 +16,7 @@ import {
   readExecutionBulletField,
   evaluateReadyDispatchGate,
   checkReadyDispatch,
+  verifyRoutedDispatchManifest,
   parseOwnerRepoFromRemoteUrl,
   resolveRepoIdentity,
 } from "./ready-dispatch-gate.mjs";
@@ -974,23 +975,135 @@ test("checkReadyDispatch: PLAN_READY reports exit 6, state READY_TO_RUN_DISPATCH
   assert.equal(result.executionIssue, 407);
 });
 
-test("evaluateReadyDispatchGate: ROUTED resolves to READY_TO_DISPATCH_UNITS", () => {
+test("evaluateReadyDispatchGate: ROUTED requires manifest verification before READY_TO_DISPATCH_UNITS", () => {
   const body =
     "- **Lifecycle:** ROUTED\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
   const result = evaluateReadyDispatchGate(body);
-  assert.equal(result.status, "READY_TO_DISPATCH_UNITS");
+  assert.equal(result.status, "READY_TO_VERIFY_DISPATCH_MANIFEST");
   assert.equal(result.executionIssue, 407);
 });
 
-test("checkReadyDispatch: ROUTED reports exit 7, state READY_TO_DISPATCH_UNITS", async () => {
+test("checkReadyDispatch: ROUTED reports exit 7 only when the manifest pointer and comment are verified", async () => {
   const body =
     "- **Lifecycle:** ROUTED\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
   const result = await checkReadyDispatch(
     { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 408 },
-    { ghIssueViewImpl: async () => ({ body, state: "OPEN" }) },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        repo: "LouPineWays/Loop-Dee-Loup",
+        executionIssue: 407,
+        plan: {
+          planIndex: {
+            url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
+            dispatchManifest: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+          },
+        },
+      }),
+      ghCommentViewImpl: async () => ({
+        id: 200,
+        html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+        issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/407",
+        body:
+          "## Dispatch Manifest (v1)\n\n- **Plan index:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100\n",
+      }),
+    },
   );
   assert.equal(result.exitCode, 7);
   assert.equal(result.state, "READY_TO_DISPATCH_UNITS");
+  assert.equal(result.manifestCommentId, 200);
+  assert.equal(result.manifestUrl, "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200");
+  assert.equal(result.planIndexUrl, "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100");
+});
+
+test("checkReadyDispatch: ROUTED with Dispatch manifest pointer 'none' is NOT_READY", async () => {
+  const body =
+    "- **Lifecycle:** ROUTED\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 408 },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        repo: "LouPineWays/Loop-Dee-Loup",
+        executionIssue: 407,
+        plan: {
+          planIndex: {
+            url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
+            dispatchManifest: "none",
+          },
+        },
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "NOT_READY");
+  assert.ok(result.reasons.some((r) => r.includes("Dispatch manifest pointer")));
+});
+
+test("checkReadyDispatch: ROUTED fails closed when referenced manifest belongs to the wrong issue", async () => {
+  const body =
+    "- **Lifecycle:** ROUTED\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 408 },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        repo: "LouPineWays/Loop-Dee-Loup",
+        executionIssue: 407,
+        plan: {
+          planIndex: {
+            url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
+            dispatchManifest: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+          },
+        },
+      }),
+      ghCommentViewImpl: async () => ({
+        id: 200,
+        html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+        issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/999",
+        body:
+          "## Dispatch Manifest (v1)\n\n- **Plan index:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100\n",
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "NOT_READY");
+  assert.ok(result.reasons.some((r) => r.includes("belongs to issue #999")));
+});
+
+test("verifyRoutedDispatchManifest: fails closed when manifest Plan index backlink does not match parsed plan", async () => {
+  const result = await verifyRoutedDispatchManifest(
+    { repo: "LouPineWays/Loop-Dee-Loup", executionIssue: 407 },
+    {
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        repo: "LouPineWays/Loop-Dee-Loup",
+        executionIssue: 407,
+        plan: {
+          planIndex: {
+            url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
+            dispatchManifest: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+          },
+        },
+      }),
+      ghCommentViewImpl: async () => ({
+        id: 200,
+        html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
+        issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/407",
+        body:
+          "## Dispatch Manifest (v1)\n\n- **Plan index:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-999\n",
+      }),
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /Plan index backlink/i);
 });
 
 test("evaluateReadyDispatchGate: EXECUTION_COMPLETE resolves to READY_TO_DISPATCH_INTEGRATION", () => {

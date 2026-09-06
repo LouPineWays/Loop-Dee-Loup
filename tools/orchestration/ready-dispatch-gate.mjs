@@ -15,14 +15,10 @@
 // forbidden transition; until one exists, live dispatch behavior is verified by #283's
 // fresh-session proof, not a fabricated test." This script is that guard.
 //
-// It performs exactly ONE read — `gh issue view <control-issue>` — and nothing else: no
-// execution-Issue read, no PR query, no comment fetch. That is deliberate, not an
-// oversight: bundling a second read into the same investigative step is exactly how both
-// prior regressions happened, so the gate itself must be structurally incapable of
-// reconnaissance. AGENTS.md's corrected Session execution text requires this script to be
-// the orchestrating session's first tool call for a dispatched control-plane Issue,
-// followed immediately by acting on its verdict — never a second freeform
-// `gh issue view` on the same Issue number first.
+// It starts with exactly ONE control-plane read — `gh issue view <control-issue>` — and no
+// freeform reconnaissance. For ROUTED only, it then performs deterministic durable-state
+// verification reads (Execution Plan parse + referenced manifest comment read-back) before
+// authorizing unit dispatch, so `Lifecycle: ROUTED` alone cannot advance work.
 //
 // Repository identity — issue #344: a live `work on #322` proving session hand-typed
 // `--repo Wolfscairn-LouPine/Loop-Dee-Loup` (the wrong owner; the real remote is
@@ -151,15 +147,10 @@ const KNOWN_LIFECYCLE_STATES = [
 //                          dispatch_ready unit via
 //                          tools/orchestration/format-unit-dispatch-prompt.mjs.
 //   EXECUTION_COMPLETE  -> dispatch the Integration/PR worker reference-only.
-// This gate deliberately does NOT itself read the execution Issue's Plan Index/Dispatch
-// Manifest comments to resolve PLAN_READY/ROUTED/EXECUTION_COMPLETE any further than
-// confirming the Lifecycle value and Execution pointer -- doing so would both violate this
-// file's own "exactly ONE read" invariant (see the module comment above) and require
-// importing tools/orchestration/parse-execution-plan.mjs, which itself imports
-// resolveRepoIdentity from *this* file, so a deeper import here would be circular. The
-// caller acts on this gate's compact verdict by invoking the named already-shipped script
-// next, exactly as it already does for READY_TO_DISPATCH's { executionIssue, route } triple.
+// For ROUTED only, checkReadyDispatch performs an additional deterministic verification pass
+// against durable execution-plan/manifest state before returning READY_TO_DISPATCH_UNITS.
 const PRE_PR_DISPATCH_LIFECYCLE_VALUES = new Set(["READY_FOR_PLAN", "PLAN_READY", "ROUTED", "EXECUTION_COMPLETE"]);
+const DISPATCH_MANIFEST_HEADING = /^## Dispatch Manifest \(v1\)$/;
 
 // Issue #370 (Stage 1 finding on #368's PR): the ad hoc "- **Lifecycle:**" bullet
 // convention uses the bare word "BLOCKED", but `.github/ISSUE_TEMPLATE/parent-execution.yml`'s
@@ -321,6 +312,24 @@ export function extractActiveExecutionRef(block) {
 // the two.
 export function isNoneSentinel(value) {
   return typeof value === "string" && /^none\b/i.test(value.trim());
+}
+
+function extractCommentIdFromUrl(url) {
+  if (typeof url !== "string") return null;
+  const m = url.match(/#issuecomment-(\d+)$/);
+  return m ? Number(m[1]) : null;
+}
+
+function parseIssueNumberFromIssueUrl(issueUrl) {
+  if (typeof issueUrl !== "string") return null;
+  const m = issueUrl.match(/\/issues\/(\d+)$/);
+  return m ? Number(m[1]) : null;
+}
+
+function parseManifestPlanIndexUrl(body) {
+  if (typeof body !== "string") return null;
+  const match = body.match(/^- \*\*Plan index:\*\*\s*(\S+)\s*$/im);
+  return match ? match[1] : null;
 }
 
 // Pure. Extracts the single execution-Issue number a control Issue's "Execution" bullet
@@ -519,7 +528,7 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
     case "PLAN_READY":
       return { status: "READY_TO_RUN_DISPATCH_MANIFEST", executionIssue: execution.issue };
     case "ROUTED":
-      return { status: "READY_TO_DISPATCH_UNITS", executionIssue: execution.issue };
+      return { status: "READY_TO_VERIFY_DISPATCH_MANIFEST", executionIssue: execution.issue };
     case "EXECUTION_COMPLETE":
       return { status: "READY_TO_DISPATCH_INTEGRATION", executionIssue: execution.issue, route: routeRaw };
     /* c8 ignore next 2 -- unreachable: dispatchLifecycle is always one of the above once reasons is empty */
@@ -617,13 +626,102 @@ function defaultGhIssueView({ repo, number }) {
   return JSON.parse(raw);
 }
 
+function defaultGhCommentView({ repo, commentId }) {
+  const raw = execFileSync("gh", ["api", `repos/${repo}/issues/comments/${commentId}`], {
+    encoding: "utf8",
+  });
+  return JSON.parse(raw);
+}
+
+async function defaultParseExecutionPlanImpl({ repo, executionIssue }) {
+  const { runParseExecutionPlan } = await import("./parse-execution-plan.mjs");
+  return runParseExecutionPlan({ repo, executionIssue });
+}
+
+export async function verifyRoutedDispatchManifest(
+  { repo, executionIssue },
+  { parseExecutionPlanImpl = defaultParseExecutionPlanImpl, ghCommentViewImpl = defaultGhCommentView } = {},
+) {
+  const parsed = await parseExecutionPlanImpl({ repo, executionIssue });
+  if (!parsed || parsed.exitCode !== 0) {
+    return {
+      ok: false,
+      reason:
+        "could not parse execution plan while verifying ROUTED Dispatch Manifest: " +
+        (parsed?.message ?? ((parsed?.errors ?? []).join(" | ") || "unknown parse failure")),
+    };
+  }
+
+  const manifestUrl = parsed.plan?.planIndex?.dispatchManifest;
+  if (manifestUrl === null || manifestUrl === undefined || manifestUrl === "" || isNoneSentinel(manifestUrl)) {
+    return { ok: false, reason: `Execution Plan Index has no settled Dispatch manifest pointer (found: ${JSON.stringify(manifestUrl)})` };
+  }
+  const manifestCommentId = extractCommentIdFromUrl(manifestUrl);
+  if (!manifestCommentId) {
+    return { ok: false, reason: `Dispatch manifest pointer is not a comment permalink: ${JSON.stringify(manifestUrl)}` };
+  }
+
+  let manifestComment;
+  try {
+    manifestComment = await ghCommentViewImpl({ repo, commentId: manifestCommentId });
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `Dispatch manifest read-back failed for comment #${manifestCommentId}: ${err.message}`,
+    };
+  }
+  const manifestIssue = parseIssueNumberFromIssueUrl(manifestComment?.issue_url);
+  if (manifestIssue !== Number(executionIssue)) {
+    return {
+      ok: false,
+      reason:
+        `Dispatch manifest comment #${manifestCommentId} belongs to issue #${manifestIssue}, expected #${executionIssue}.`,
+    };
+  }
+  if (manifestComment?.html_url !== manifestUrl) {
+    return {
+      ok: false,
+      reason:
+        `Dispatch manifest pointer mismatch: Plan Index references ${manifestUrl}, but comment #${manifestCommentId} canonical URL is ${manifestComment?.html_url}.`,
+    };
+  }
+  const lines = (manifestComment?.body ?? "").split("\n").map((line) => line.trim());
+  if (!lines.some((line) => DISPATCH_MANIFEST_HEADING.test(line))) {
+    return {
+      ok: false,
+      reason: `Dispatch manifest comment #${manifestCommentId} does not contain required heading "## Dispatch Manifest (v1)".`,
+    };
+  }
+  const manifestPlanIndexUrl = parseManifestPlanIndexUrl(manifestComment?.body ?? "");
+  if (!manifestPlanIndexUrl || manifestPlanIndexUrl !== parsed.plan.planIndex.url) {
+    return {
+      ok: false,
+      reason:
+        `Dispatch manifest comment #${manifestCommentId} Plan index backlink is ${JSON.stringify(manifestPlanIndexUrl)}, ` +
+        `expected ${JSON.stringify(parsed.plan.planIndex.url)}.`,
+    };
+  }
+  return {
+    ok: true,
+    executionIssue: Number(executionIssue),
+    planIndexUrl: parsed.plan.planIndex.url,
+    manifestCommentId,
+    manifestUrl,
+  };
+}
+
 // `ghIssueViewImpl` is injected so tests can drive this end-to-end without touching the
-// real network or `gh` CLI. This function makes exactly one read of the control Issue —
-// no execution-Issue read, no PR query — by construction: there is no code path here that
-// could reach for anything else.
+// real network or `gh` CLI. This function always starts from one control-Issue read; when
+// lifecycle is ROUTED it then performs deterministic durable manifest verification reads
+// through verifyRoutedDispatchManifest before authorizing unit dispatch.
 export async function checkReadyDispatch(
   { repo, controlIssue },
-  { ghIssueViewImpl = defaultGhIssueView, resolveRepoIdentityImpl = resolveRepoIdentity } = {},
+  {
+    ghIssueViewImpl = defaultGhIssueView,
+    resolveRepoIdentityImpl = resolveRepoIdentity,
+    parseExecutionPlanImpl = defaultParseExecutionPlanImpl,
+    ghCommentViewImpl = defaultGhCommentView,
+  } = {},
 ) {
   if (!controlIssue) {
     return { exitCode: 1, message: "Missing required arg: --control-issue is required." };
@@ -683,6 +781,31 @@ export async function checkReadyDispatch(
     READY_TO_DISPATCH_UNITS: 7,
     READY_TO_DISPATCH_INTEGRATION: 8,
   };
+  if (result.status === "READY_TO_VERIFY_DISPATCH_MANIFEST") {
+    const manifestCheck = await verifyRoutedDispatchManifest(
+      { repo: resolvedRepo, executionIssue: result.executionIssue },
+      { parseExecutionPlanImpl, ghCommentViewImpl },
+    );
+    if (!manifestCheck.ok) {
+      return {
+        exitCode: 3,
+        state: "NOT_READY",
+        controlIssue: Number(controlIssue),
+        repo: resolvedRepo,
+        reasons: [manifestCheck.reason],
+      };
+    }
+    return {
+      exitCode: EXIT_CODES_BY_STATUS.READY_TO_DISPATCH_UNITS,
+      state: "READY_TO_DISPATCH_UNITS",
+      controlIssue: Number(controlIssue),
+      repo: resolvedRepo,
+      executionIssue: result.executionIssue,
+      planIndexUrl: manifestCheck.planIndexUrl,
+      manifestCommentId: manifestCheck.manifestCommentId,
+      manifestUrl: manifestCheck.manifestUrl,
+    };
+  }
   if (result.status in EXIT_CODES_BY_STATUS) {
     return {
       exitCode: EXIT_CODES_BY_STATUS[result.status],

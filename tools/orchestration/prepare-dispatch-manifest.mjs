@@ -107,7 +107,7 @@ import { existsSync, readdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runParseExecutionPlan } from "./parse-execution-plan.mjs";
+import { runParseExecutionPlan, parseBulletBlock } from "./parse-execution-plan.mjs";
 
 const REPO_ROOT = path.resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -436,19 +436,72 @@ function defaultDirNames(relDir) {
   }
 }
 
+function parseIssueNumberFromIssueUrl(issueUrl) {
+  if (typeof issueUrl !== "string") return null;
+  const m = issueUrl.match(/\/issues\/(\d+)$/);
+  return m ? Number(m[1]) : null;
+}
+
+function normalizeManifestIdentity(record) {
+  if (record === null || typeof record !== "object") return null;
+  const commentId = Number(record.id);
+  const commentUrl = typeof record.html_url === "string" ? record.html_url : null;
+  const issueUrl = typeof record.issue_url === "string" ? record.issue_url : null;
+  if (!Number.isFinite(commentId) || !commentUrl || !issueUrl) return null;
+  return { commentId, commentUrl, issueUrl, issueNumber: parseIssueNumberFromIssueUrl(issueUrl) };
+}
+
+function updateDispatchManifestPointer(planIndexBody, manifestUrl) {
+  if (typeof planIndexBody !== "string") return null;
+  const lines = planIndexBody.split("\n");
+  let replaced = false;
+  const next = lines.map((line) => {
+    if (/^-\s*\*\*Dispatch manifest:\*\*/i.test(line)) {
+      replaced = true;
+      return `- **Dispatch manifest:** ${manifestUrl}`;
+    }
+    return line;
+  });
+  return replaced ? next.join("\n") : null;
+}
+
 function defaultPost({ repo, executionIssue, commentId, body }) {
   const tmpFile = path.join(tmpdir(), `dispatch-manifest-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
   writeFileSync(tmpFile, body, "utf8");
   try {
     if (commentId) {
-      execFileSync("gh", ["api", `repos/${repo}/issues/comments/${commentId}`, "-X", "PATCH", "-F", `body=@${tmpFile}`], {
+      const raw = execFileSync("gh", ["api", `repos/${repo}/issues/comments/${commentId}`, "-X", "PATCH", "-F", `body=@${tmpFile}`], {
         encoding: "utf8",
       });
+      return JSON.parse(raw);
     } else {
-      execFileSync("gh", ["api", `repos/${repo}/issues/${executionIssue}/comments`, "-X", "POST", "-F", `body=@${tmpFile}`], {
+      const raw = execFileSync("gh", ["api", `repos/${repo}/issues/${executionIssue}/comments`, "-X", "POST", "-F", `body=@${tmpFile}`], {
         encoding: "utf8",
       });
+      return JSON.parse(raw);
     }
+  } finally {
+    try {
+      unlinkSync(tmpFile);
+    } catch {
+      // best-effort cleanup only
+    }
+  }
+}
+
+function defaultGetComment({ repo, commentId }) {
+  const raw = execFileSync("gh", ["api", `repos/${repo}/issues/comments/${commentId}`], { encoding: "utf8" });
+  return JSON.parse(raw);
+}
+
+function defaultPatchComment({ repo, commentId, body }) {
+  const tmpFile = path.join(tmpdir(), `dispatch-plan-index-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
+  writeFileSync(tmpFile, body, "utf8");
+  try {
+    const raw = execFileSync("gh", ["api", `repos/${repo}/issues/comments/${commentId}`, "-X", "PATCH", "-F", `body=@${tmpFile}`], {
+      encoding: "utf8",
+    });
+    return JSON.parse(raw);
   } finally {
     try {
       unlinkSync(tmpFile);
@@ -469,6 +522,8 @@ export async function runPrepareDispatchManifest(
     skillNames = defaultDirNames(".claude/skills"),
     personaNames = defaultDirNames(".claude/personas"),
     postImpl = defaultPost,
+    getCommentImpl = defaultGetComment,
+    patchCommentImpl = defaultPatchComment,
   } = {},
 ) {
   const parsed = await parseExecutionPlanImpl({ repo, executionIssue });
@@ -480,7 +535,135 @@ export async function runPrepareDispatchManifest(
   const body = formatDispatchManifestBody(parsed.plan, entries);
 
   if (commentId || create) {
-    postImpl({ repo: parsed.repo, executionIssue: parsed.executionIssue, commentId, body });
+    const writeResult = await postImpl({ repo: parsed.repo, executionIssue: parsed.executionIssue, commentId, body });
+    const manifestIdentity = normalizeManifestIdentity(writeResult);
+    if (!manifestIdentity) {
+      return {
+        exitCode: 1,
+        message:
+          "prepare-dispatch-manifest.mjs: persisted manifest response is missing canonical comment identity (id/html_url/issue_url).",
+      };
+    }
+    if (manifestIdentity.issueNumber !== Number(parsed.executionIssue)) {
+      return {
+        exitCode: 1,
+        message:
+          `prepare-dispatch-manifest.mjs: persisted manifest comment #${manifestIdentity.commentId} belongs to issue #${manifestIdentity.issueNumber}, ` +
+          `expected #${parsed.executionIssue}.`,
+      };
+    }
+
+    let persistedManifest;
+    try {
+      persistedManifest = await getCommentImpl({ repo: parsed.repo, commentId: manifestIdentity.commentId });
+    } catch (err) {
+      return {
+        exitCode: 1,
+        message: `prepare-dispatch-manifest.mjs: failed reading persisted manifest comment #${manifestIdentity.commentId}: ${err.message}`,
+      };
+    }
+    const persistedIdentity = normalizeManifestIdentity(persistedManifest);
+    if (!persistedIdentity) {
+      return {
+        exitCode: 1,
+        message:
+          `prepare-dispatch-manifest.mjs: read-back for manifest comment #${manifestIdentity.commentId} is missing canonical identity.`,
+      };
+    }
+    if (persistedIdentity.issueNumber !== Number(parsed.executionIssue)) {
+      return {
+        exitCode: 1,
+        message:
+          `prepare-dispatch-manifest.mjs: read-back manifest comment #${persistedIdentity.commentId} belongs to issue #${persistedIdentity.issueNumber}, ` +
+          `expected #${parsed.executionIssue}.`,
+      };
+    }
+    if (persistedIdentity.commentUrl !== manifestIdentity.commentUrl) {
+      return {
+        exitCode: 1,
+        message:
+          `prepare-dispatch-manifest.mjs: read-back manifest URL mismatch for comment #${persistedIdentity.commentId} ` +
+          `(${persistedIdentity.commentUrl} != ${manifestIdentity.commentUrl}).`,
+      };
+    }
+    if ((persistedManifest.body ?? "") !== body) {
+      return {
+        exitCode: 1,
+        message:
+          `prepare-dispatch-manifest.mjs: read-back manifest body for comment #${persistedIdentity.commentId} does not match the generated body.`,
+      };
+    }
+
+    let planIndexComment;
+    try {
+      planIndexComment = await getCommentImpl({ repo: parsed.repo, commentId: parsed.plan.planIndex.commentId });
+    } catch (err) {
+      return {
+        exitCode: 1,
+        message:
+          `prepare-dispatch-manifest.mjs: failed reading Plan Index comment #${parsed.plan.planIndex.commentId}: ${err.message}`,
+      };
+    }
+    const updatedPlanIndexBody = updateDispatchManifestPointer(planIndexComment.body ?? "", persistedIdentity.commentUrl);
+    if (!updatedPlanIndexBody) {
+      return {
+        exitCode: 1,
+        message:
+          `prepare-dispatch-manifest.mjs: Plan Index comment #${parsed.plan.planIndex.commentId} has no "- **Dispatch manifest:**" bullet to update.`,
+      };
+    }
+
+    try {
+      await patchCommentImpl({
+        repo: parsed.repo,
+        commentId: parsed.plan.planIndex.commentId,
+        body: updatedPlanIndexBody,
+      });
+    } catch (err) {
+      return {
+        exitCode: 1,
+        message:
+          `prepare-dispatch-manifest.mjs: failed updating Plan Index comment #${parsed.plan.planIndex.commentId}: ${err.message}`,
+      };
+    }
+
+    const reparsed = await parseExecutionPlanImpl({ repo: parsed.repo, executionIssue: parsed.executionIssue });
+    if (reparsed.exitCode !== 0) {
+      return {
+        exitCode: 1,
+        message:
+          `prepare-dispatch-manifest.mjs: failed verifying Plan Index Dispatch manifest pointer after update: ` +
+          (reparsed.message ?? ((reparsed.errors ?? []).join(" | ") || "unknown parse failure")),
+      };
+    }
+    if (parseBulletBlock(persistedManifest.body ?? "", "Plan index") !== parsed.plan.planIndex.url) {
+      return {
+        exitCode: 1,
+        message:
+          `prepare-dispatch-manifest.mjs: persisted manifest comment #${persistedIdentity.commentId} does not backlink to Plan Index ${parsed.plan.planIndex.url}.`,
+      };
+    }
+    if (reparsed.plan.planIndex.dispatchManifest !== persistedIdentity.commentUrl) {
+      return {
+        exitCode: 1,
+        message:
+          `prepare-dispatch-manifest.mjs: Plan Index verification mismatch (dispatch manifest is ` +
+          `${JSON.stringify(reparsed.plan.planIndex.dispatchManifest)}, expected ${JSON.stringify(persistedIdentity.commentUrl)}).`,
+      };
+    }
+
+    return {
+      exitCode: 0,
+      ok: true,
+      state: "DISPATCH_MANIFEST_VERIFIED",
+      repo: parsed.repo,
+      executionIssue: parsed.executionIssue,
+      planIndexUrl: reparsed.plan.planIndex.url,
+      manifestCommentId: persistedIdentity.commentId,
+      manifestUrl: persistedIdentity.commentUrl,
+      entries,
+      body,
+    };
   }
 
   return { exitCode: 0, ok: true, repo: parsed.repo, executionIssue: parsed.executionIssue, entries, body };
@@ -523,7 +706,19 @@ async function main() {
     process.exit(2);
     return;
   }
-  process.stdout.write(result.body);
+  if (result.state === "DISPATCH_MANIFEST_VERIFIED") {
+    process.stdout.write(
+      `${JSON.stringify({
+        state: result.state,
+        executionIssue: result.executionIssue,
+        planIndexUrl: result.planIndexUrl,
+        manifestCommentId: result.manifestCommentId,
+        manifestUrl: result.manifestUrl,
+      })}\n`,
+    );
+  } else {
+    process.stdout.write(result.body);
+  }
   process.exit(0);
 }
 
