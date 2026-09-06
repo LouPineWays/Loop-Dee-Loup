@@ -124,6 +124,29 @@ test("parseExecutionPointer: exactly one #N is ok; zero or multiple fail closed"
   assert.ok(multi.reason.includes("#318"));
 });
 
+// Issue #398: the control Issue's own "PR:" bullet used a full GitHub PR URL where every
+// other reference field used "#N" — next-review-transition-gate.mjs's AMBIGUOUS verdict
+// on that live body was the reproduction for this gap.
+test("parseExecutionPointer: a full GitHub issue/PR URL resolves the same as \"#N\"", () => {
+  assert.deepEqual(parseExecutionPointer("https://github.com/LouPineWays/Loop-Dee-Loup/pull/413"), { ok: true, issue: 413 });
+  assert.deepEqual(parseExecutionPointer("https://github.com/LouPineWays/Loop-Dee-Loup/issues/397"), { ok: true, issue: 397 });
+  // A trailing comment anchor must not be swallowed into the numeric id.
+  assert.deepEqual(
+    parseExecutionPointer("Plan Index https://github.com/LouPineWays/Loop-Dee-Loup/issues/397#issuecomment-5553519600"),
+    { ok: true, issue: 397 },
+  );
+  // The same issue referenced twice, once by "#N" and once by URL, is one pointer, not two.
+  assert.deepEqual(
+    parseExecutionPointer("see #413 — https://github.com/LouPineWays/Loop-Dee-Loup/pull/413"),
+    { ok: true, issue: 413 },
+  );
+  // Two distinct URLs still fail closed as more than one pointer.
+  const multi = parseExecutionPointer(
+    "https://github.com/LouPineWays/Loop-Dee-Loup/pull/413 and https://github.com/LouPineWays/Loop-Dee-Loup/pull/420",
+  );
+  assert.equal(multi.ok, false);
+});
+
 // Issue #368: the exact control #301 reproduction shape from the incident report.
 const CONTROL_301_BODY = `## Current state
 

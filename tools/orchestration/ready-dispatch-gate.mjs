@@ -324,16 +324,24 @@ export function isNoneSentinel(value) {
 }
 
 // Pure. Extracts the single execution-Issue number a control Issue's "Execution" bullet
-// points at. Returns { ok: true, issue } for exactly one distinct "#N" reference, or
-// { ok: false, reason } for zero or more than one — a control Issue naming more than one
-// execution pointer is not "one current execution pointer" (AGENTS.md's immediate-dispatch
-// gate requirement) and must not be treated as dispatch-ready.
+// points at. Returns { ok: true, issue } for exactly one distinct reference — either a
+// literal "#N" or a full GitHub issue/PR URL (".../issues/N" or ".../pull/N", an optional
+// "#issuecomment-..." anchor ignored) — or { ok: false, reason } for zero or more than one.
+// Issue #398's live control-Issue body used a full PR URL in its "PR:" bullet where every
+// other reference field used "#N"; next-review-transition-gate.mjs's shared use of this
+// function for the "PR" and "Stage 2" bullets (not just "Execution") means both authored
+// shapes must resolve the same way rather than forcing control Issues to be rewritten to
+// match one narrower convention. A control Issue naming more than one distinct pointer is
+// not "one current execution pointer" (AGENTS.md's immediate-dispatch gate requirement) and
+// must not be treated as dispatch-ready.
 export function parseExecutionPointer(value) {
   if (typeof value !== "string" || !value.trim()) {
     return { ok: false, reason: "Execution field is missing or empty" };
   }
-  const refs = [...new Set([...value.matchAll(/#(\d+)/g)].map((m) => Number(m[1])))];
-  if (refs.length === 0) return { ok: false, reason: `Execution field "${value}" names no #N issue reference` };
+  const hashRefs = [...value.matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
+  const urlRefs = [...value.matchAll(/\/(?:pull|issues)\/(\d+)/g)].map((m) => Number(m[1]));
+  const refs = [...new Set([...hashRefs, ...urlRefs])];
+  if (refs.length === 0) return { ok: false, reason: `Execution field "${value}" names no #N issue reference or GitHub issue/PR URL` };
   if (refs.length > 1) {
     return { ok: false, reason: `Execution field names more than one execution pointer (${refs.map((n) => `#${n}`).join(", ")}), not "one current execution pointer"` };
   }
