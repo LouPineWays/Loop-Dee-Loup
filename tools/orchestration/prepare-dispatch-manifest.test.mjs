@@ -750,8 +750,8 @@ test("runPrepareDispatchManifest invokes postImpl with the composed body when --
         if (Number(commentId) === 1) {
           return {
             id: 1,
-            html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-1",
-            issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+            html_url: "https://github.com/OWNER/REPO/issues/294#issuecomment-1",
+            issue_url: "https://api.github.com/repos/OWNER/REPO/issues/294",
             body: "## Execution Plan Index (v1)\n- **Dispatch manifest:** none\n",
           };
         }
@@ -809,8 +809,8 @@ test("runPrepareDispatchManifest invokes postImpl with the composed body when --
         if (Number(commentId) === 1) {
           return {
             id: 1,
-            html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-1",
-            issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+            html_url: "https://github.com/OWNER/REPO/issues/294#issuecomment-1",
+            issue_url: "https://api.github.com/repos/OWNER/REPO/issues/294",
             body: "## Execution Plan Index (v1)\n- **Dispatch manifest:** none\n",
           };
         }
@@ -842,6 +842,7 @@ test("runPrepareDispatchManifest fails closed when persistence returns no canoni
     executionIssue: 294,
     plan: planWith({ "294-A": unit({ unitId: "294-A", state: "DONE" }) }),
   };
+  let manifestBody = null;
   const result = await runPrepareDispatchManifest(
     { executionIssue: 294, create: true },
     {
@@ -880,6 +881,42 @@ test("runPrepareDispatchManifest fails closed when persisted manifest belongs to
   );
   assert.equal(result.exitCode, 1);
   assert.match(result.message, /belongs to issue #295/i);
+});
+
+test("runPrepareDispatchManifest fails closed when parsed plan has no Plan Index comment id", async () => {
+  const fakePlan = {
+    ok: true,
+    exitCode: 0,
+    repo: "LouPineWays/Loop-Dee-Loup",
+    executionIssue: 294,
+    plan: { ...planWith({ "294-A": unit({ unitId: "294-A", state: "DONE" }) }), planIndex: { url: "https://example.test/no-id" } },
+  };
+  let manifestBody = null;
+  const result = await runPrepareDispatchManifest(
+    { executionIssue: 294, create: true },
+    {
+      parseExecutionPlanImpl: async () => fakePlan,
+      fileExists: fileExistsFrom([]),
+      skillNames: [],
+      personaNames: [],
+      postImpl: async (args) => {
+        manifestBody = args.body;
+        return {
+          id: 778,
+          html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-778",
+          issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+        };
+      },
+      getCommentImpl: async () => ({
+        id: 778,
+        html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/294#issuecomment-778",
+        issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/294",
+        body: manifestBody,
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /no canonical Plan Index comment id/i);
 });
 
 test("runPrepareDispatchManifest fails closed when read-back manifest body differs from the generated body", async () => {
@@ -1016,7 +1053,7 @@ test("runPrepareDispatchManifest fails closed when Plan Index verification does 
     },
   );
   assert.equal(result.exitCode, 1);
-  assert.match(result.message, /Plan Index verification mismatch/i);
+  assert.match(result.message, /does not backlink to canonical Plan Index URL/i);
 });
 
 test("runPrepareDispatchManifest returns stdout-only body without persisting when neither --create nor --comment-id is given", async () => {

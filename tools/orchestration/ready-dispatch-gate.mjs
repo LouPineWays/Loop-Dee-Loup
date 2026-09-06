@@ -332,6 +332,19 @@ function parseManifestPlanIndexUrl(body) {
   return match ? match[1] : null;
 }
 
+function parseCommentPermalinkIdentity(url) {
+  if (typeof url !== "string") return null;
+  try {
+    const parsed = new URL(url);
+    const m = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/issues\/(\d+)\/?$/);
+    const commentId = extractCommentIdFromUrl(parsed.hash);
+    if (!m || !commentId) return null;
+    return { repo: `${m[1]}/${m[2]}`.toLowerCase(), issue: Number(m[3]), commentId };
+  } catch {
+    return null;
+  }
+}
+
 // Pure. Extracts the single execution-Issue number a control Issue's "Execution" bullet
 // points at. Returns { ok: true, issue } for exactly one distinct reference — either a
 // literal "#N" or a full GitHub issue/PR URL (".../issues/N" or ".../pull/N", an optional
@@ -656,6 +669,9 @@ export async function verifyRoutedDispatchManifest(
   if (manifestUrl === null || manifestUrl === undefined || manifestUrl === "" || isNoneSentinel(manifestUrl)) {
     return { ok: false, reason: `Execution Plan Index has no settled Dispatch manifest pointer (found: ${JSON.stringify(manifestUrl)})` };
   }
+  if (typeof parsed.plan?.planIndex?.url !== "string" || !parsed.plan.planIndex.url.trim()) {
+    return { ok: false, reason: "Execution Plan Index has no canonical URL to verify manifest backlinks against." };
+  }
   const manifestCommentId = extractCommentIdFromUrl(manifestUrl);
   if (!manifestCommentId) {
     return { ok: false, reason: `Dispatch manifest pointer is not a comment permalink: ${JSON.stringify(manifestUrl)}` };
@@ -678,7 +694,18 @@ export async function verifyRoutedDispatchManifest(
         `Dispatch manifest comment #${manifestCommentId} belongs to issue #${manifestIssue}, expected #${executionIssue}.`,
     };
   }
-  if (manifestComment?.html_url !== manifestUrl) {
+  const manifestPointerIdentity = parseCommentPermalinkIdentity(manifestUrl);
+  const manifestCanonicalIdentity = parseCommentPermalinkIdentity(manifestComment?.html_url ?? "");
+  const expectedRepo = String(repo ?? "").toLowerCase();
+  if (
+    !manifestPointerIdentity ||
+    !manifestCanonicalIdentity ||
+    manifestPointerIdentity.repo !== expectedRepo ||
+    manifestCanonicalIdentity.repo !== expectedRepo ||
+    manifestPointerIdentity.repo !== manifestCanonicalIdentity.repo ||
+    manifestPointerIdentity.issue !== manifestCanonicalIdentity.issue ||
+    manifestPointerIdentity.commentId !== manifestCanonicalIdentity.commentId
+  ) {
     return {
       ok: false,
       reason:
@@ -693,12 +720,20 @@ export async function verifyRoutedDispatchManifest(
     };
   }
   const manifestPlanIndexUrl = parseManifestPlanIndexUrl(manifestComment?.body ?? "");
-  if (!manifestPlanIndexUrl || manifestPlanIndexUrl !== parsed.plan.planIndex.url) {
+  const manifestPlanIndexIdentity = parseCommentPermalinkIdentity(manifestPlanIndexUrl);
+  const canonicalPlanIndexIdentity = parseCommentPermalinkIdentity(parsed.plan.planIndex.url);
+  if (
+    !manifestPlanIndexIdentity ||
+    !canonicalPlanIndexIdentity ||
+    manifestPlanIndexIdentity.repo !== canonicalPlanIndexIdentity.repo ||
+    manifestPlanIndexIdentity.issue !== canonicalPlanIndexIdentity.issue ||
+    manifestPlanIndexIdentity.commentId !== canonicalPlanIndexIdentity.commentId
+  ) {
     return {
       ok: false,
       reason:
         `Dispatch manifest comment #${manifestCommentId} Plan index backlink is ${JSON.stringify(manifestPlanIndexUrl)}, ` +
-        `expected ${JSON.stringify(parsed.plan.planIndex.url)}.`,
+        `expected canonical URL ${JSON.stringify(parsed.plan.planIndex.url)}.`,
     };
   }
   return {

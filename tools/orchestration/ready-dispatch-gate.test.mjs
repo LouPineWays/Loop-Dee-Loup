@@ -997,6 +997,7 @@ test("checkReadyDispatch: ROUTED reports exit 7 only when the manifest pointer a
         executionIssue: 407,
         plan: {
           planIndex: {
+            commentId: 100,
             url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
             dispatchManifest: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
           },
@@ -1032,6 +1033,7 @@ test("checkReadyDispatch: ROUTED with Dispatch manifest pointer 'none' is NOT_RE
         executionIssue: 407,
         plan: {
           planIndex: {
+            commentId: 100,
             url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
             dispatchManifest: "none",
           },
@@ -1058,6 +1060,7 @@ test("checkReadyDispatch: ROUTED fails closed when referenced manifest belongs t
         executionIssue: 407,
         plan: {
           planIndex: {
+            commentId: 100,
             url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
             dispatchManifest: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
           },
@@ -1088,6 +1091,7 @@ test("verifyRoutedDispatchManifest: fails closed when manifest Plan index backli
         executionIssue: 407,
         plan: {
           planIndex: {
+            commentId: 100,
             url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
             dispatchManifest: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
           },
