@@ -143,8 +143,18 @@ const VERDICT_TOKEN_PATTERN = /\b(NOT CLEAN|CLEAN)\b/i;
 // token with nothing else, while "Stage 2 Audit of clean-close behavior" and "Stage 2 Audit
 // status was CLEAN, now NOT CLEAN" both interpose ordinary prose between "Audit" and any
 // separator, so neither reaches the token position this pattern requires.
+// Stage 2 audit #426 (correction of PR #424's own Stage 1 finding): this pattern used to be
+// evaluated with a single body-wide, non-global `.exec(normalized)` call — before the fenced-code
+// mask existed at all, and even after that mask was added for the standalone-heading/label shapes,
+// this one was left out of it. That meant (1) a fenced `## Stage 2 Audit — CLEAN` example quoted as
+// evidence could be read as the response's own declared verdict, and (2) only the *first* combined
+// heading in the whole body was ever collected, so two genuinely conflicting combined headings
+// resolved to whichever appeared first instead of failing closed. The pattern itself is unchanged;
+// it is now checked per-line inside extractResponseVerdict's same fence-aware collection loop the
+// standalone-heading shape already uses, so every non-fenced combined heading is collected and
+// conflicts are resolved the same uniform way as the other three shapes.
 const STAGE2_HEADING_VERDICT_PATTERN =
-  /^(?:#{1,6}\s*)?stage\s*2\s+audit\b(?:\s*verdict)?\s*[:—-]\s*\*{0,2}\s*(NOT CLEAN|CLEAN)\b\*{0,2}[.!]?\s*$/im;
+  /^(?:#{1,6}\s*)?stage\s*2\s+audit\b(?:\s*verdict)?\s*[:—-]\s*\*{0,2}\s*(NOT CLEAN|CLEAN)\b\*{0,2}[.!]?\s*$/i;
 
 // A standalone verdict heading: an entire line — anywhere in the body, not anchored to the
 // start — that reduces to *exactly* the token `CLEAN` or `NOT CLEAN` and nothing else, once
@@ -209,14 +219,20 @@ function normalizeVerdictToken(token) {
 // non-blank line is checked after a label with no same-line token, so an unrelated later mention
 // of CLEAN/NOT CLEAN elsewhere in the body is never mistaken for the labelled value.
 //
-// The standalone-heading and label shapes are scanned line-by-line with fenced code block content
-// excluded (computeFencedCodeBlockMask) — a quoted/fenced example must never itself count as a
-// declaration. Every genuine (non-excluded) declaration found across all four shapes is collected
-// rather than returning on the first match: when they all agree, that is the verdict; when the
-// body carries none, the verdict is null; when two or more disagree, this fails closed and
-// returns null rather than silently picking whichever declaration happened to appear first
-// (Stage 1 review finding on this PR) — an explicit genuine verdict must never be overridable by
-// an incidental or conflicting declaration elsewhere in the same body.
+// Every shape except the leading status line (which, by construction, can only ever match the very
+// start of the whole trimmed response — there is nothing to scan line-by-line) is scanned
+// line-by-line with fenced code block content excluded (computeFencedCodeBlockMask) — a
+// quoted/fenced example must never itself count as a declaration. This applies uniformly to the
+// combined "Stage 2 Audit — <verdict>" heading and the standalone heading together in the same
+// loop (audit #426: an earlier revision left the combined-heading shape on a separate, non-
+// fence-aware, first-match-only body scan, so a fenced example of it could be read as a genuine
+// declaration and a second genuine combined heading was never collected at all) as well as the
+// "Verdict" label shape below. Every genuine (non-excluded) declaration found across all four
+// shapes is collected rather than returning on the first match: when they all agree, that is the
+// verdict; when the body carries none, the verdict is null; when two or more disagree, this fails
+// closed and returns null rather than silently picking whichever declaration happened to appear
+// first (Stage 1 review finding on PR #424) — an explicit genuine verdict must never be overridable
+// by an incidental or conflicting declaration elsewhere in the same body.
 export function extractResponseVerdict(text) {
   const normalized = (text ?? "").trim();
   if (!normalized) return null;
@@ -226,15 +242,15 @@ export function extractResponseVerdict(text) {
   const leading = LEADING_VERDICT_PATTERN.exec(normalized);
   if (leading) tokens.add(normalizeVerdictToken(leading[1]));
 
-  const stage2Heading = STAGE2_HEADING_VERDICT_PATTERN.exec(normalized);
-  if (stage2Heading) tokens.add(normalizeVerdictToken(stage2Heading[1]));
-
   const lines = normalized.split("\n");
   const fencedMask = computeFencedCodeBlockMask(lines);
 
   for (let i = 0; i < lines.length; i++) {
     if (fencedMask[i]) continue;
-    const standaloneMatch = STANDALONE_VERDICT_HEADING_PATTERN.exec(lines[i].trim());
+    const trimmedLine = lines[i].trim();
+    const stage2Match = STAGE2_HEADING_VERDICT_PATTERN.exec(trimmedLine);
+    if (stage2Match) tokens.add(normalizeVerdictToken(stage2Match[1]));
+    const standaloneMatch = STANDALONE_VERDICT_HEADING_PATTERN.exec(trimmedLine);
     if (standaloneMatch) tokens.add(normalizeVerdictToken(standaloneMatch[1]));
   }
 
