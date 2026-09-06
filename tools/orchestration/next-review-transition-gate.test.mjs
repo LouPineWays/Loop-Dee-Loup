@@ -110,6 +110,30 @@ test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED + Stage 1 dispo
   assert.equal(v.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
 });
 
+test("resolvePreMergeVerdict: negative Stage 1 disposition text does not satisfy merge even when it names the current head", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("RESPONSE_RECEIVED", {
+      matches: [{ body_excerpt: "### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request." }],
+      unboundGenuineMatches: [],
+    }),
+    mergeReady: mergeReady("MERGE_READY"),
+    stage1Disposition: "not satisfied at 1234abc",
+  }, { head: "1234abcdef9876" });
+  assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+});
+
+test("resolvePreMergeVerdict: an affirmative Stage 1 disposition without an exact-head sha does not satisfy merge", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("RESPONSE_RECEIVED", {
+      matches: [{ body_excerpt: "### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request." }],
+      unboundGenuineMatches: [],
+    }),
+    mergeReady: mergeReady("MERGE_READY"),
+    stage1Disposition: "satisfied",
+  }, { head: "1234abcdef9876" });
+  assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+});
+
 test("resolvePreMergeVerdict: NOT_REQUESTED + stale/non-head-scoped Stage 1 disposition still stays NO_ACTION_YET", () => {
   const v = resolvePreMergeVerdict(
     {
@@ -131,6 +155,19 @@ test("resolvePreMergeVerdict: RESPONSE_RECEIVED without clean-pass or findings p
     mergeReady: mergeReady("MERGE_READY"),
   });
   assert.equal(v.state, "NO_ACTION_YET");
+});
+
+test("resolvePreMergeVerdict: findings-bearing unbound genuine matches participate in correction routing", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("RESPONSE_RECEIVED", {
+      matches: [{ body_excerpt: "Codex Review: Didn't find any major issues." }],
+      unboundGenuineMatches: [
+        { body_excerpt: "### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request." },
+      ],
+    }),
+    mergeReady: mergeReady("MERGE_READY"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
 });
 
 test("resolvePreMergeVerdict: an operational error from either composed check -> AMBIGUOUS, never silently treated as a state", () => {

@@ -740,6 +740,57 @@ test("runPrepareDispatchManifest invokes postImpl with the composed body when --
   assert.match(captured.body, /## Dispatch Manifest \(v1\)/);
 });
 
+test("runPrepareDispatchManifest invokes postImpl with the composed body when --create is given", async () => {
+  const fakePlan = {
+    ok: true,
+    exitCode: 0,
+    repo: "LouPineWays/Loop-Dee-Loup",
+    executionIssue: 294,
+    plan: planWith({ "294-A": unit({ unitId: "294-A", state: "DONE" }) }),
+  };
+  let captured = null;
+  await runPrepareDispatchManifest(
+    { executionIssue: 294, create: true },
+    {
+      parseExecutionPlanImpl: async () => fakePlan,
+      fileExists: fileExistsFrom([]),
+      skillNames: [],
+      personaNames: [],
+      postImpl: (args) => {
+        captured = args;
+      },
+    },
+  );
+  assert.equal(captured.commentId, undefined);
+  assert.equal(captured.executionIssue, 294);
+  assert.match(captured.body, /## Dispatch Manifest \(v1\)/);
+});
+
+test("runPrepareDispatchManifest returns stdout-only body without persisting when neither --create nor --comment-id is given", async () => {
+  const fakePlan = {
+    ok: true,
+    exitCode: 0,
+    repo: "LouPineWays/Loop-Dee-Loup",
+    executionIssue: 294,
+    plan: planWith({ "294-A": unit({ unitId: "294-A", state: "DONE" }) }),
+  };
+  let postCalls = 0;
+  const result = await runPrepareDispatchManifest(
+    { executionIssue: 294 },
+    {
+      parseExecutionPlanImpl: async () => fakePlan,
+      fileExists: fileExistsFrom([]),
+      skillNames: [],
+      personaNames: [],
+      postImpl: () => {
+        postCalls++;
+      },
+    },
+  );
+  assert.equal(postCalls, 0);
+  assert.match(result.body, /## Dispatch Manifest \(v1\)/);
+});
+
 // --- CLI ---------------------------------------------------------------------------
 
 test("CLI: missing --execution-issue fails closed", async () => {

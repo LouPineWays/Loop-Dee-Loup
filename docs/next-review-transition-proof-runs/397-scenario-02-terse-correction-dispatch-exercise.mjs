@@ -2,12 +2,11 @@
 // Constructed exercise for #397 Verification scenario 2 ("Terse correction dispatch"),
 // worker unit 397-C under execution Issue #397 / control Issue #398.
 //
-// This exercise is CONSTRUCTED, not a real historical occurrence. It replays one deterministic
-// correction path (`BLOCKED_CLOSING_REFERENCE`) using synthetic stage1/mergeReady inputs to
-// confirm `resolvePreMergeVerdict` still resolves to `STAGE1_CORRECTION_REQUIRED` with a
-// reference-only correction transition. Current logic also routes findings-bearing Stage 1
-// responses to `STAGE1_CORRECTION_REQUIRED`, while a new head with no trigger remains
-// `NOT_REQUESTED` -> `NO_ACTION_YET`; this script focuses only the closing-reference variant.
+// This exercise is CONSTRUCTED, not a real historical occurrence. It isolates the findings-only
+// correction path: a findings-bearing Stage 1 response at the current head, with merge state
+// otherwise MERGE_READY, must still resolve to `STAGE1_CORRECTION_REQUIRED` with a reference-only
+// correction transition. The proof deliberately avoids a simultaneous closing-reference block so
+// the findings-bearing branch, not some independent merge-ready failure, is what drives the result.
 //
 // Run: node docs/next-review-transition-proof-runs/397-scenario-02-terse-correction-dispatch-exercise.mjs
 
@@ -28,22 +27,13 @@ const syntheticStage1ResponseReceived = {
   ],
 };
 
-const syntheticMergeReadyBlockedClosingReference = {
-  exitCode: 2,
-  state: "BLOCKED_CLOSING_REFERENCE",
-  violations: [
-    {
-      source: "closingIssuesReferences",
-      detail:
-        'PR LouPineWays/Loop-Dee-Loup#999999 carries a GitHub closing reference (PR-body keyword or ' +
-        'Development-sidebar link) to issue #999998. Use a non-closing reference (e.g. "Addresses #999998") ' +
-        "instead, and remove or decline the Development-sidebar link if one is set.",
-    },
-  ],
+const syntheticMergeReady = {
+  exitCode: 0,
+  state: "MERGE_READY",
 };
 
 const result = resolvePreMergeVerdict(
-  { stage1: syntheticStage1ResponseReceived, mergeReady: syntheticMergeReadyBlockedClosingReference },
+  { stage1: syntheticStage1ResponseReceived, mergeReady: syntheticMergeReady },
   { repo: "LouPineWays/Loop-Dee-Loup", pr: "999999", issue: "999998" },
 );
 
@@ -55,6 +45,6 @@ if (result.state !== "STAGE1_CORRECTION_REQUIRED" || result.stopAfter !== true) 
 }
 
 console.log(
-  "\nPASS: a findings-bearing Stage 1 response plus a closing-reference violation resolves to " +
+  "\nPASS: a findings-bearing Stage 1 response alone, with merge state otherwise MERGE_READY, resolves to " +
     "STAGE1_CORRECTION_REQUIRED (stopAfter:true) with reference-only correction routing.",
 );
