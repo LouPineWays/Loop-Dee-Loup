@@ -243,6 +243,29 @@ test("resolvePostMergeVerdict: ACCEPTED_NO_WORK_ISSUE -> STAGE2_CLOSE_READY", ()
   assert.equal(v.state, "STAGE2_CLOSE_READY");
 });
 
+// Issue #407 unit 407-B: STAGE2_CLOSE_READY must carry a deterministic `nextCommand` naming
+// the exact real `lifecycle-gate.mjs close-audit` invocation, not just a prose reminder.
+test("resolvePostMergeVerdict: STAGE2_CLOSE_READY carries a deterministic close-audit nextCommand (issue #407 unit 407-B, the #380/#384 fix)", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("READY_TO_CLOSE", { verdict: "CLEAN" }) },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 380 },
+  );
+  assert.equal(v.state, "STAGE2_CLOSE_READY");
+  assert.equal(
+    v.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-audit --repo LouPineWays/Loop-Dee-Loup --audit-issue 380",
+  );
+});
+
+test("resolvePostMergeVerdict: ACCEPTED_NO_WORK_ISSUE also carries the close-audit nextCommand", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("ACCEPTED_NO_WORK_ISSUE", { verdict: "CLEAN" }) },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 384 },
+  );
+  assert.equal(v.state, "STAGE2_CLOSE_READY");
+  assert.ok(v.nextCommand.includes("--audit-issue 384"));
+});
+
 test("resolvePostMergeVerdict: OK with rawVerdict NOT CLEAN -> STAGE2_CORRECTION_REQUIRED", () => {
   const v = resolvePostMergeVerdict({ postAudit: postAudit("OK", { rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN" }) });
   assert.equal(v.state, "STAGE2_CORRECTION_REQUIRED");

@@ -46,6 +46,9 @@
 //
 //   Post-merge phase (a settled "Stage 2"/Audit reference):
 //     - lifecycle-gate post-audit READY_TO_CLOSE or ACCEPTED_NO_WORK_ISSUE -> STAGE2_CLOSE_READY
+//       (issue #407 unit 407-B: this verdict also carries `nextCommand`, the exact real
+//       `lifecycle-gate.mjs close-audit` invocation the caller must run next — never only a
+//       prose reminder to close the audit issue "where policy requires it")
 //     - lifecycle-gate post-audit OK with rawVerdict "NOT CLEAN"           -> STAGE2_CORRECTION_REQUIRED
 //     - lifecycle-gate post-audit OK with any other rawVerdict (no
 //       completed report backing a verdict yet)                            -> NO_ACTION_YET
@@ -276,7 +279,20 @@ export function resolvePostMergeVerdict({ postAudit }, context = {}) {
   }
 
   if (postAudit.state === "READY_TO_CLOSE" || postAudit.state === "ACCEPTED_NO_WORK_ISSUE") {
-    return { state: "STAGE2_CLOSE_READY", stopAfter: true, ...context, postAudit };
+    // Issue #407 unit 407-B (Shared Contract item 9, the #380/#384 fix): STAGE2_CLOSE_READY
+    // must deterministically lead to invoking `lifecycle-gate.mjs close-audit`, not only
+    // closing the work issue — a prose reminder alone already proved insufficient. `context`
+    // here always carries `repo` and `auditIssue` (this branch is reached only from
+    // resolvePostMerge, which supplies both), so `nextCommand` names the exact real
+    // (non-dry-run) invocation the caller must run next, never left to be reconstructed by
+    // hand or skipped.
+    return {
+      state: "STAGE2_CLOSE_READY",
+      stopAfter: true,
+      ...context,
+      postAudit,
+      nextCommand: `node tools/review-watch/lifecycle-gate.mjs close-audit --repo ${context.repo} --audit-issue ${context.auditIssue}`,
+    };
   }
 
   if (postAudit.state === "OK") {
