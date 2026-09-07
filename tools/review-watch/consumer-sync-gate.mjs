@@ -230,6 +230,18 @@ const CLEAN_REVIEW_PATTERN = /^Codex Review: Didn't find any major issues\./;
 // preambles (if either) a message opens with.
 const FINDINGS_PREAMBLE_PATTERN = /^### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request\./;
 
+// Pure. Both fixed preambles above are anchored with `^`, matching only when the excerpt's
+// very first character starts the phrase. PR #435's own live regression: the genuine review
+// bound to commit `30b36035c9` opens with an insignificant leading newline before "### 💡
+// Codex Review", which the anchored pattern then fails to match, silently misclassifying a
+// findings-bearing response as neither clean-pass nor findings-bearing. Trimming only
+// insignificant outer whitespace before testing tolerates that formatting noise without
+// inspecting or adjudicating any actual finding content -- the same narrow, two-fixed-string
+// scope these patterns already keep (see FINDINGS_PREAMBLE_PATTERN's own comment above).
+function stripOuterWhitespace(text) {
+  return (text ?? "").trim();
+}
+
 // Pure. `stage1` is stage1-gate.mjs's own result (nested under merge-ready-gate.mjs's
 // composed `gate.stage1`). A genuine response existing (RESPONSE_RECEIVED) only proves Stage
 // 1 happened -- stage1-gate.mjs's own header comment is explicit that it "does not evaluate
@@ -254,8 +266,8 @@ export function isCleanStage1Response(stage1) {
   // preamble -- so a lone kickoff/ack comment (matching neither fixed preamble) doesn't block
   // an otherwise-clean round, while a genuine findings-bearing review among the matches still
   // does.
-  const hasCleanMatch = matches.some((m) => CLEAN_REVIEW_PATTERN.test(m.body_excerpt ?? ""));
-  const hasFindingsMatch = matches.some((m) => FINDINGS_PREAMBLE_PATTERN.test(m.body_excerpt ?? ""));
+  const hasCleanMatch = matches.some((m) => CLEAN_REVIEW_PATTERN.test(stripOuterWhitespace(m.body_excerpt)));
+  const hasFindingsMatch = matches.some((m) => FINDINGS_PREAMBLE_PATTERN.test(stripOuterWhitespace(m.body_excerpt)));
   return hasCleanMatch && !hasFindingsMatch;
 }
 

@@ -64,6 +64,27 @@
 // created it.
 //
 // Verdicts:
+//   AUDIT_ISSUE_DETECTED — issue #407 unit 407-B (Shared Contract item 8), the #432 fix: the
+//     directly-dispatched Issue is itself a canonical Stage 2 Audit Issue (a real
+//     "audit-control-issue.yml"-rendered body — parseStage2Verdict, "### Merged PR", and
+//     "### Work issue" all resolve non-null; see classifyAuditIssue), never inferred from the
+//     issue title. Checked before every other classification below, so it never falls through
+//     to generic NOT_READY reasoning merely because a Stage 2 Audit Issue has no Lifecycle/
+//     Blocker/Founder-decision bullets at all. Stage 1 review finding on PR #435: checkReadyDispatch
+//     classifies this shape from the fetched body *before* applying its own control-Issue
+//     open-state guard, not after — a directly-dispatched audit Issue that is already closed
+//     (e.g. a founder re-invoking `work on #N` against a Stage 2 Audit Issue `close-audit`
+//     already closed) must still route through AUDIT_ISSUE_DETECTED to
+//     next-review-transition-gate.mjs's own idempotent ALREADY_TERMINAL result, not fall into
+//     the same ordinary "control Issue is CLOSED, not OPEN" NOT_READY that a closed *thin
+//     control* Issue correctly reports. exit 9. Result carries { auditIssue,
+//     nextCommand } — run `nextCommand` (tools/orchestration/next-review-transition-gate.mjs
+//     --audit-issue <N>) and act on *its* verdict per AGENTS.md § Session execution:
+//     STAGE2_CLOSE_READY invokes `lifecycle-gate.mjs close-audit` and stops;
+//     STAGE2_CORRECTION_REQUIRED dispatches correction by reference and stops; NO_ACTION_YET/
+//     AMBIGUOUS stop per their existing meaning. Never read the linked execution/work Issue,
+//     inspect stage2-report.mjs's source, or write an ad hoc parser script to resolve this by
+//     hand.
 //   READY_TO_DISPATCH — every gate field satisfied. exit 0. Result carries
 //     { controlIssue, executionIssue, route } — the exact reference-only triple to hand
 //     the dispatched worker; nothing else belongs in that prompt (AGENTS.md § Subagent
@@ -113,6 +134,13 @@
 // Tests: node --test tools/orchestration/ready-dispatch-gate.test.mjs
 
 import { execFileSync } from "node:child_process";
+// Deliberate, documented exception to this file's usual practice of not importing
+// tools/review-watch internals (issue #407 unit 407-B, Shared Contract item 8) — the same
+// exception next-review-transition-gate.mjs's own module comment already documents for its
+// own imports from tools/review-watch. classifyAuditIssue below reuses lifecycle-gate.mjs's
+// own field parsers rather than re-deriving a second, competing reading of the
+// audit-control-issue template's rendered shape.
+import { parseStage2Verdict, parseFormField } from "../review-watch/lifecycle-gate.mjs";
 
 const KNOWN_LIFECYCLE_STATES = [
   "READY",
@@ -420,6 +448,26 @@ export function readExecutionBulletField(body) {
   return { conflict: false, value: liveSpelling ?? legacy };
 }
 
+// Pure. Issue #407 unit 407-B (Shared Contract item 8) — the #432 fix: recognizes a
+// directly-dispatched Issue as a canonical Stage 2 Audit Issue via positive multi-field
+// classification, never inferred from the issue title (compare defaultGhIssueList's own
+// "[Audit]" title-prefix caveat in lifecycle-gate.mjs — a title is candidate-discovery only,
+// never closure/classification evidence). True only when every one of these independently
+// resolves non-null against the body: `parseStage2Verdict` (a real PENDING/CLEAN/NOT CLEAN
+// dropdown reading — lifecycle-gate.mjs's own audit-control-issue.yml parser, reused rather
+// than re-derived), the "### Merged PR" heading, and the "### Work issue" heading. A thin
+// control Issue using the ad hoc "- **Label:**" bullet convention (parseControlBullet) never
+// has a "### Verdict"-shaped dropdown field at all, so this never misfires against an
+// ordinary control Issue — only a real audit-control-issue.yml-rendered body can satisfy all
+// three simultaneously.
+export function classifyAuditIssue(body) {
+  return (
+    parseStage2Verdict(body ?? "") !== null &&
+    parseFormField(body ?? "", "Merged PR") !== null &&
+    parseFormField(body ?? "", "Work issue") !== null
+  );
+}
+
 // Pure core: evaluates AGENTS.md's immediate-dispatch gate against an already-fetched
 // control Issue body. `controlIssueNumber`, when given, rejects a self-referential
 // Execution pointer (Stage 1 review finding on this PR: a malformed control Issue #42
@@ -457,6 +505,23 @@ export function readExecutionBulletField(body) {
 // must include an explicit "- **Route:**" bullet somewhere in its body regardless of
 // which template created it.
 export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
+  // Issue #407 unit 407-B: evaluated first, before any of the generic Lifecycle-bullet
+  // parsing below — a directly-dispatched canonical Stage 2 Audit Issue is a disjoint
+  // classification, never a variant of NOT_READY the caller could fall through from (the
+  // #432 regression this exists to close). `nextCommand` names the exact next deterministic
+  // step (AGENTS.md § Session execution): the composed post-PR transition gate, never a
+  // freeform re-derivation of Stage 2 evidence.
+  if (classifyAuditIssue(body)) {
+    return {
+      status: "AUDIT_ISSUE_DETECTED",
+      auditIssue: controlIssueNumber != null ? Number(controlIssueNumber) : null,
+      nextCommand:
+        controlIssueNumber != null
+          ? `node tools/orchestration/next-review-transition-gate.mjs --audit-issue ${Number(controlIssueNumber)}`
+          : null,
+    };
+  }
+
   const lifecycleRaw = parseControlBullet(body, "Lifecycle") ?? parseHeadingField(body, "State");
   const executionField = readExecutionBulletField(body);
   const executionRaw = executionField.conflict
@@ -836,6 +901,27 @@ export async function checkReadyDispatch(
     return { exitCode: 1, message: `gh issue view failed for ${resolvedRepo}#${controlIssue}: ${err.message}` };
   }
 
+  const result = evaluateReadyDispatchGate(data.body ?? "", controlIssue);
+  // Issue #407 unit 407-B: AUDIT_ISSUE_DETECTED is disjoint from every other verdict below —
+  // checked first, before even the open-state guard, so a directly-dispatched Stage 2 Audit
+  // Issue never falls into BLOCKED/NOT_READY handling merely because it has no Lifecycle/
+  // Blocker/Founder-decision bullets at all (the #432 regression), and an *already-closed*
+  // directly-dispatched Audit Issue still reaches next-review-transition-gate.mjs's own
+  // idempotent ALREADY_TERMINAL result instead of the generic "is CLOSED, not OPEN" NOT_READY
+  // below (Stage 1 review finding on PR #435: the open-state guard used to run first, so a
+  // closed canonical Audit Issue could never reach this classification at all). exit 9 is the
+  // next unused integer after this file's existing 0/1/3/4/5/6/7/8.
+  if (result.status === "AUDIT_ISSUE_DETECTED") {
+    return {
+      exitCode: 9,
+      state: "AUDIT_ISSUE_DETECTED",
+      controlIssue: Number(controlIssue),
+      repo: resolvedRepo,
+      auditIssue: result.auditIssue,
+      nextCommand: result.nextCommand,
+    };
+  }
+
   if (data.state !== "OPEN") {
     return {
       exitCode: 3,
@@ -846,7 +932,6 @@ export async function checkReadyDispatch(
     };
   }
 
-  const result = evaluateReadyDispatchGate(data.body ?? "", controlIssue);
   if (result.status === "BLOCKED") {
     return { exitCode: 4, state: "BLOCKED", controlIssue: Number(controlIssue), repo: resolvedRepo, reasons: result.reasons };
   }

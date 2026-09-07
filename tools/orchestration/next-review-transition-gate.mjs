@@ -46,6 +46,18 @@
 //
 //   Post-merge phase (a settled "Stage 2"/Audit reference):
 //     - lifecycle-gate post-audit READY_TO_CLOSE or ACCEPTED_NO_WORK_ISSUE -> STAGE2_CLOSE_READY
+//       (issue #407 unit 407-B: this verdict also carries `nextCommand`, the exact real
+//       `lifecycle-gate.mjs close-audit` invocation the caller must run next — never only a
+//       prose reminder to close the audit issue "where policy requires it". Stage 1 review
+//       finding on PR #435: when a real gated work issue exists (READY_TO_CLOSE), `nextCommand`
+//       also chains `close-work-issue` first — `close-audit` alone never touches it — so
+//       ACCEPTED_NO_WORK_ISSUE, which has no work issue at all, keeps its audit-only shape.)
+//     - lifecycle-gate post-audit OK with verdict "CLEAN" and workIssueState "CLOSED" (the
+//       motivating resume case: work issue already closed, backed-CLEAN audit never consumed
+//       — the exact #380/#384 shape) -> STAGE2_CLOSE_READY, audit-only `nextCommand` (Stage 1
+//       review finding on PR #435: this combination reaches checkPostAudit's generic `OK`
+//       branch, never `READY_TO_CLOSE`, since that branch requires the work issue to still be
+//       open — it previously fell through to `NO_ACTION_YET` below instead)
 //     - lifecycle-gate post-audit OK with rawVerdict "NOT CLEAN"           -> STAGE2_CORRECTION_REQUIRED
 //     - lifecycle-gate post-audit OK with any other rawVerdict (no
 //       completed report backing a verdict yet)                            -> NO_ACTION_YET
@@ -152,9 +164,23 @@ function stage1DispositionMatchesHead(disposition, head) {
 
 const FINDINGS_PREAMBLE_PATTERN = /^### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request\./;
 
+// Live regression evidence on PR #435 itself: the genuine Codex review bound to commit
+// `30b36035c9` opens with an insignificant leading newline before "### 💡 Codex Review",
+// which this `^`-anchored pattern then fails to match -- silently misclassifying a
+// findings-bearing response and falling through to `NO_ACTION_YET` instead of
+// `STAGE1_CORRECTION_REQUIRED` below. Trimming only insignificant outer whitespace before
+// testing tolerates that formatting noise without inspecting or adjudicating any actual
+// finding content -- mirrors consumer-sync-gate.mjs's own `stripOuterWhitespace` fix for the
+// same duplicated pattern, kept as an independent copy here rather than a cross-module import
+// per this file's own module-comment convention (only `isCleanStage1Response` itself is a
+// documented import exception).
+function stripOuterWhitespace(text) {
+  return (text ?? "").trim();
+}
+
 function hasFindingsStage1Response(stage1) {
   return [...(stage1.matches ?? []), ...(stage1.unboundGenuineMatches ?? [])].some((m) =>
-    FINDINGS_PREAMBLE_PATTERN.test(m.body_excerpt ?? ""),
+    FINDINGS_PREAMBLE_PATTERN.test(stripOuterWhitespace(m.body_excerpt)),
   );
 }
 
@@ -276,10 +302,48 @@ export function resolvePostMergeVerdict({ postAudit }, context = {}) {
   }
 
   if (postAudit.state === "READY_TO_CLOSE" || postAudit.state === "ACCEPTED_NO_WORK_ISSUE") {
-    return { state: "STAGE2_CLOSE_READY", stopAfter: true, ...context, postAudit };
+    // Issue #407 unit 407-B (Shared Contract item 9, the #380/#384 fix): STAGE2_CLOSE_READY
+    // must deterministically lead to invoking `lifecycle-gate.mjs close-audit`, not only
+    // closing the work issue — a prose reminder alone already proved insufficient. `context`
+    // here always carries `repo` and `auditIssue` (this branch is reached only from
+    // resolvePostMerge, which supplies both), so `nextCommand` names the exact real
+    // (non-dry-run) invocation the caller must run next, never left to be reconstructed by
+    // hand or skipped.
+    //
+    // Stage 1 review finding on PR #435: `close-audit` alone deliberately never touches the
+    // gated work issue (Shared Contract item 3), so a CLEAN cycle that only ran `close-audit`
+    // left the work issue itself open indefinitely -- exactly the #380/#384 shape one step
+    // further down the chain. `READY_TO_CLOSE` always carries a real `postAudit.workIssue`
+    // (checkPostAudit's own no-work-issue branch reports `ACCEPTED_NO_WORK_ISSUE` instead, with
+    // `workIssue: null`), so `nextCommand` chains `close-work-issue` before `close-audit` only
+    // when there is a real gated work issue to close; `ACCEPTED_NO_WORK_ISSUE` keeps the
+    // audit-only behavior unchanged, since there is no work issue for it to close.
+    const closeAuditCommand = `node tools/review-watch/lifecycle-gate.mjs close-audit --repo ${context.repo} --audit-issue ${context.auditIssue}`;
+    const hasWorkIssue = typeof postAudit.workIssue === "number" && Number.isFinite(postAudit.workIssue);
+    const nextCommand = hasWorkIssue
+      ? `node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo ${context.repo} --work-issue ${postAudit.workIssue} --audit-issue ${context.auditIssue} && ${closeAuditCommand}`
+      : closeAuditCommand;
+    return { state: "STAGE2_CLOSE_READY", stopAfter: true, ...context, postAudit, nextCommand };
   }
 
   if (postAudit.state === "OK") {
+    // Stage 1 review finding on PR #435: the motivating resume case -- the work issue is
+    // already closed, but its backed-CLEAN audit was never consumed -- never reaches
+    // checkPostAudit's `READY_TO_CLOSE` branch at all (that branch requires the work issue to
+    // still be open); it surfaces here as plain `OK` with `verdict: "CLEAN"` and
+    // `workIssueState: "CLOSED"` instead, and previously fell all the way through to
+    // `NO_ACTION_YET` below -- preserving the exact #380/#384 defect this whole mechanism
+    // exists to fix. Route it to `STAGE2_CLOSE_READY` too, audit-only (the work issue is
+    // already closed, so only `close-audit` is needed -- never re-attempt closing it).
+    if (postAudit.verdict === "CLEAN" && postAudit.workIssueState === "CLOSED") {
+      return {
+        state: "STAGE2_CLOSE_READY",
+        stopAfter: true,
+        ...context,
+        postAudit,
+        nextCommand: `node tools/review-watch/lifecycle-gate.mjs close-audit --repo ${context.repo} --audit-issue ${context.auditIssue}`,
+      };
+    }
     if (postAudit.rawVerdict === "NOT CLEAN") {
       return { state: "STAGE2_CORRECTION_REQUIRED", stopAfter: true, ...context };
     }

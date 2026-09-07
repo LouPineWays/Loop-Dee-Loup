@@ -15,6 +15,7 @@ import {
   parseExecutionPointer,
   readExecutionBulletField,
   evaluateReadyDispatchGate,
+  classifyAuditIssue,
   checkReadyDispatch,
   verifyRoutedDispatchManifest,
   parseOwnerRepoFromRemoteUrl,
@@ -591,6 +592,107 @@ test("checkReadyDispatch: an ordinary NOT_READY control Issue (mid-cycle lifecyc
   );
   assert.equal(result.exitCode, 3);
   assert.equal(result.state, "NOT_READY");
+});
+
+// --- Issue #407 unit 407-B: AUDIT_ISSUE_DETECTED (the #432 direct-Stage-2-dispatch fix) ----
+//
+// Synthetic fixture shaped like a real audit-control-issue.yml render (never special-cased
+// by a real issue number, per the Shared Contract's fixture-discipline item) — carries the
+// three headings classifyAuditIssue requires: "### Verdict" (a real PENDING/CLEAN/NOT CLEAN
+// dropdown reading), "### Merged PR", and "### Work issue". A thin control Issue using the
+// ad hoc "- **Label:**" bullet convention never has this shape at all.
+function auditIssueBody(verdict) {
+  return `This issue is a **read-only Stage 2 control boundary**. Modify nothing.
+
+### Merged PR
+
+https://github.com/LouPineWays/Loop-Dee-Loup/pull/9001
+
+### Work issue
+
+#9000
+
+### Exact merge commit
+
+\`abcdef0123456789abcdef0123456789abcdef01\`
+
+### Verdict
+
+${verdict}
+`;
+}
+
+test("classifyAuditIssue: a real audit-control-issue.yml-shaped body is detected regardless of its current Verdict value", () => {
+  assert.equal(classifyAuditIssue(auditIssueBody("PENDING")), true);
+  assert.equal(classifyAuditIssue(auditIssueBody("CLEAN")), true);
+  assert.equal(classifyAuditIssue(auditIssueBody("NOT CLEAN")), true);
+});
+
+test("classifyAuditIssue: a thin control Issue (real #311 fixture) is never misclassified as an Audit Issue", () => {
+  assert.equal(classifyAuditIssue(ISSUE_311_BODY), false);
+  assert.equal(classifyAuditIssue(ISSUE_322_BODY), false);
+});
+
+test("classifyAuditIssue: missing any one of the three required fields fails closed to false", () => {
+  const noWorkIssue = auditIssueBody("PENDING").replace(/### Work issue\n\n#9000\n\n/, "");
+  const noMergedPr = auditIssueBody("PENDING").replace(/### Merged PR\n\nhttps:\/\/github\.com\/LouPineWays\/Loop-Dee-Loup\/pull\/9001\n\n/, "");
+  const noVerdict = auditIssueBody("PENDING").replace(/### Verdict\n\nPENDING\n/, "");
+  assert.equal(classifyAuditIssue(noWorkIssue), false);
+  assert.equal(classifyAuditIssue(noMergedPr), false);
+  assert.equal(classifyAuditIssue(noVerdict), false);
+});
+
+test("evaluateReadyDispatchGate: a directly-dispatched Audit Issue returns AUDIT_ISSUE_DETECTED, never NOT_READY, with a correct next-step pointer (issue #407 unit 407-B, the #432 fix)", () => {
+  const result = evaluateReadyDispatchGate(auditIssueBody("PENDING"), 9002);
+  assert.equal(result.status, "AUDIT_ISSUE_DETECTED");
+  assert.equal(result.auditIssue, 9002);
+  assert.equal(result.nextCommand, "node tools/orchestration/next-review-transition-gate.mjs --audit-issue 9002");
+});
+
+test("evaluateReadyDispatchGate: AUDIT_ISSUE_DETECTED is checked before the generic Lifecycle-bullet path even when the body happens to also carry an unrelated bullet-shaped line", () => {
+  const body = auditIssueBody("CLEAN") + "\n- **Lifecycle:** EXECUTING\n";
+  const result = evaluateReadyDispatchGate(body, 9003);
+  assert.equal(result.status, "AUDIT_ISSUE_DETECTED");
+});
+
+test("checkReadyDispatch: a directly-dispatched Audit Issue resolves end to end to exit 9 / AUDIT_ISSUE_DETECTED from a single control-plane read, no source-inspection or ad hoc parsing required (issue #407 unit 407-B)", async () => {
+  let calls = 0;
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 9004 },
+    {
+      ghIssueViewImpl: async ({ repo, number }) => {
+        calls++;
+        assert.equal(repo, "LouPineWays/Loop-Dee-Loup");
+        assert.equal(number, 9004);
+        return { body: auditIssueBody("CLEAN"), state: "OPEN" };
+      },
+    },
+  );
+  assert.equal(calls, 1);
+  assert.equal(result.exitCode, 9);
+  assert.equal(result.state, "AUDIT_ISSUE_DETECTED");
+  assert.equal(result.auditIssue, 9004);
+  assert.equal(result.nextCommand, "node tools/orchestration/next-review-transition-gate.mjs --audit-issue 9004");
+});
+
+test("checkReadyDispatch: a directly-dispatched Audit Issue with a NOT CLEAN dropdown still classifies as AUDIT_ISSUE_DETECTED — verdict interpretation is next-review-transition-gate.mjs's job, not this gate's", async () => {
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 9005 },
+    { ghIssueViewImpl: async () => ({ body: auditIssueBody("NOT CLEAN"), state: "OPEN" }) },
+  );
+  assert.equal(result.exitCode, 9);
+  assert.equal(result.state, "AUDIT_ISSUE_DETECTED");
+});
+
+test("checkReadyDispatch: a directly-dispatched Audit Issue that is already CLOSED still classifies as AUDIT_ISSUE_DETECTED, never the generic 'is CLOSED, not OPEN' NOT_READY (Stage 1 review finding on PR #435: the open-state guard previously ran before audit classification, so a closed canonical Audit Issue could never reach next-review-transition-gate.mjs's own idempotent ALREADY_TERMINAL result)", async () => {
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 9006 },
+    { ghIssueViewImpl: async () => ({ body: auditIssueBody("CLEAN"), state: "CLOSED" }) },
+  );
+  assert.equal(result.exitCode, 9);
+  assert.equal(result.state, "AUDIT_ISSUE_DETECTED");
+  assert.equal(result.auditIssue, 9006);
+  assert.equal(result.nextCommand, "node tools/orchestration/next-review-transition-gate.mjs --audit-issue 9006");
 });
 
 test("checkReadyDispatch: missing required args fails closed with exit 1", async () => {
