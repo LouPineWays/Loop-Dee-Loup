@@ -1081,6 +1081,12 @@ function defaultGhComment({ repo, workIssue, auditIssue }) {
 // never itself authorizes a close — every candidate found this way is still independently
 // re-evaluated through evaluateAuditCloseReadiness against its own structured fields.
 function defaultGhIssueList({ repo }) {
+  // Explicit maxBuffer: issue #407's own live reconciliation pass hit Node's execFileSync
+  // default 1 MiB buffer (this repository's `[Audit]`-titled corpus, fetched with `--state all`
+  // and full `body` text for up to 200 issues, already exceeds 1 MiB) and failed closed with
+  // `spawnSync gh ENOBUFS` on Windows instead of returning candidates — silently blocking every
+  // supersession search (`SUPERSEDED_CLOSE_READY`/`SUPERSEDED_CLOSED`), not just large ones. Sized
+  // generously above any currently plausible corpus rather than tuned to today's exact byte count.
   const raw = execFileSync(
     "gh",
     [
@@ -1091,7 +1097,7 @@ function defaultGhIssueList({ repo }) {
       "--json", "number,title,body,state,createdAt",
       "--limit", "200",
     ],
-    { encoding: "utf8" },
+    { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 },
   );
   return JSON.parse(raw);
 }
