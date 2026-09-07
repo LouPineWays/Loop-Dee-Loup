@@ -684,6 +684,17 @@ test("checkReadyDispatch: a directly-dispatched Audit Issue with a NOT CLEAN dro
   assert.equal(result.state, "AUDIT_ISSUE_DETECTED");
 });
 
+test("checkReadyDispatch: a directly-dispatched Audit Issue that is already CLOSED still classifies as AUDIT_ISSUE_DETECTED, never the generic 'is CLOSED, not OPEN' NOT_READY (Stage 1 review finding on PR #435: the open-state guard previously ran before audit classification, so a closed canonical Audit Issue could never reach next-review-transition-gate.mjs's own idempotent ALREADY_TERMINAL result)", async () => {
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 9006 },
+    { ghIssueViewImpl: async () => ({ body: auditIssueBody("CLEAN"), state: "CLOSED" }) },
+  );
+  assert.equal(result.exitCode, 9);
+  assert.equal(result.state, "AUDIT_ISSUE_DETECTED");
+  assert.equal(result.auditIssue, 9006);
+  assert.equal(result.nextCommand, "node tools/orchestration/next-review-transition-gate.mjs --audit-issue 9006");
+});
+
 test("checkReadyDispatch: missing required args fails closed with exit 1", async () => {
   const result = await checkReadyDispatch({ repo: null, controlIssue: null });
   assert.equal(result.exitCode, 1);

@@ -113,6 +113,33 @@ test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED -> STAGE1_CORRE
   assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
 });
 
+// PR #435's own live regression: the genuine Codex review body_excerpt for commit
+// `30b36035c9` began with an insignificant leading newline before "### 💡 Codex Review",
+// which the findings-preamble classifier's `^`-anchored pattern then failed to match --
+// silently falling through to NO_ACTION_YET instead of STAGE1_CORRECTION_REQUIRED. Mirrors
+// #435's actual evidence shape: a head-marked Stage 1 trigger, four bound inline-finding
+// matches, a commit-bound review match whose body_excerpt carries the observed leading
+// newline, and a concurrent commit-unbound "No findings" task-summary comment (real live
+// evidence: matches neither fixed preamble, and must not itself flip the verdict).
+test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED whose body_excerpt begins with a leading newline (PR #435's own live regression shape) still resolves to STAGE1_CORRECTION_REQUIRED, never NO_ACTION_YET", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("RESPONSE_RECEIVED", {
+      matches: [
+        { body_excerpt: "**P1 Badge** Close the gated work issue before stopping\n\nWhen `checkPostAudit` returns..." },
+        { body_excerpt: "**P1 Badge** Route already-consumed CLEAN audits to close-audit\n\nIn the motivating..." },
+        { body_excerpt: "**P2 Badge** Classify closed audit issues before the open-state guard\n\nFor a directly..." },
+        { body_excerpt: "**P2 Badge** Fetch all candidate successor audits\n\nOnce a repository has more than..." },
+        { body_excerpt: "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request." },
+        { body_excerpt: "No findings. The changes are internally consistent, fail closed on ambiguous evidence..." },
+      ],
+      unboundGenuineMatches: [],
+    }),
+    mergeReady: mergeReady("MERGE_READY"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.notEqual(v.state, "NO_ACTION_YET");
+});
+
 test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED + Stage 1 disposition satisfied at this head + MERGE_READY -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", () => {
   const v = resolvePreMergeVerdict({
     stage1: stage1("RESPONSE_RECEIVED", {
@@ -233,37 +260,44 @@ function postAudit(state, overrides = {}) {
 }
 
 test("resolvePostMergeVerdict: READY_TO_CLOSE -> STAGE2_CLOSE_READY", () => {
-  const v = resolvePostMergeVerdict({ postAudit: postAudit("READY_TO_CLOSE", { verdict: "CLEAN" }) });
+  const v = resolvePostMergeVerdict({ postAudit: postAudit("READY_TO_CLOSE", { verdict: "CLEAN", workIssue: 379 }) });
   assert.equal(v.state, "STAGE2_CLOSE_READY");
   assert.equal(v.stopAfter, true);
 });
 
 test("resolvePostMergeVerdict: ACCEPTED_NO_WORK_ISSUE -> STAGE2_CLOSE_READY", () => {
-  const v = resolvePostMergeVerdict({ postAudit: postAudit("ACCEPTED_NO_WORK_ISSUE", { verdict: "CLEAN" }) });
+  const v = resolvePostMergeVerdict({ postAudit: postAudit("ACCEPTED_NO_WORK_ISSUE", { verdict: "CLEAN", workIssue: null }) });
   assert.equal(v.state, "STAGE2_CLOSE_READY");
 });
 
-// Issue #407 unit 407-B: STAGE2_CLOSE_READY must carry a deterministic `nextCommand` naming
-// the exact real `lifecycle-gate.mjs close-audit` invocation, not just a prose reminder.
-test("resolvePostMergeVerdict: STAGE2_CLOSE_READY carries a deterministic close-audit nextCommand (issue #407 unit 407-B, the #380/#384 fix)", () => {
+// Issue #407 unit 407-B, carried one step further by a Stage 1 review finding on PR #435:
+// `close-audit` alone deliberately never touches the gated work issue (Shared Contract item
+// 3), so `nextCommand` must also close it when READY_TO_CLOSE names a real one -- otherwise a
+// CLEAN cycle leaves the work issue open indefinitely, one step down from the original
+// #380/#384 defect this whole mechanism exists to fix.
+test("resolvePostMergeVerdict: READY_TO_CLOSE with a real gated work issue carries a deterministic close-work-issue-then-close-audit nextCommand (Stage 1 review finding on PR #435)", () => {
   const v = resolvePostMergeVerdict(
-    { postAudit: postAudit("READY_TO_CLOSE", { verdict: "CLEAN" }) },
+    { postAudit: postAudit("READY_TO_CLOSE", { verdict: "CLEAN", workIssue: 379 }) },
     { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 380 },
   );
   assert.equal(v.state, "STAGE2_CLOSE_READY");
   assert.equal(
     v.nextCommand,
-    "node tools/review-watch/lifecycle-gate.mjs close-audit --repo LouPineWays/Loop-Dee-Loup --audit-issue 380",
+    "node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo LouPineWays/Loop-Dee-Loup --work-issue 379 --audit-issue 380 && " +
+      "node tools/review-watch/lifecycle-gate.mjs close-audit --repo LouPineWays/Loop-Dee-Loup --audit-issue 380",
   );
 });
 
-test("resolvePostMergeVerdict: ACCEPTED_NO_WORK_ISSUE also carries the close-audit nextCommand", () => {
+test("resolvePostMergeVerdict: ACCEPTED_NO_WORK_ISSUE carries only the audit-only close-audit nextCommand (no work issue exists to close)", () => {
   const v = resolvePostMergeVerdict(
-    { postAudit: postAudit("ACCEPTED_NO_WORK_ISSUE", { verdict: "CLEAN" }) },
+    { postAudit: postAudit("ACCEPTED_NO_WORK_ISSUE", { verdict: "CLEAN", workIssue: null }) },
     { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 384 },
   );
   assert.equal(v.state, "STAGE2_CLOSE_READY");
-  assert.ok(v.nextCommand.includes("--audit-issue 384"));
+  assert.equal(
+    v.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-audit --repo LouPineWays/Loop-Dee-Loup --audit-issue 384",
+  );
 });
 
 test("resolvePostMergeVerdict: OK with rawVerdict NOT CLEAN -> STAGE2_CORRECTION_REQUIRED", () => {
@@ -288,6 +322,36 @@ test("resolvePostMergeVerdict: OK with rawVerdict CLEAN but not backed by a comp
   // when no completed Stage 2 report backs the dropdown value yet -- this must not be
   // silently treated as ready to close.
   const v = resolvePostMergeVerdict({ postAudit: postAudit("OK", { rawVerdict: "CLEAN", verdict: null }) });
+  assert.equal(v.state, "NO_ACTION_YET");
+});
+
+// Stage 1 review finding on PR #435: the motivating resume case -- the work issue is already
+// closed but its backed-CLEAN audit was never consumed -- reaches checkPostAudit's generic
+// `OK` branch (never `READY_TO_CLOSE`, which requires the work issue to still be open) as
+// `verdict: "CLEAN"` / `workIssueState: "CLOSED"`, and previously fell through to
+// `NO_ACTION_YET` below, preserving the exact #380/#384 defect. Must route to
+// `STAGE2_CLOSE_READY` too, audit-only -- the work issue is already closed, so `nextCommand`
+// must never re-attempt closing it.
+test("resolvePostMergeVerdict: OK with verdict CLEAN and workIssueState CLOSED (already-consumed CLEAN, work issue closed but audit issue still open) -> STAGE2_CLOSE_READY, audit-only nextCommand", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("OK", { rawVerdict: "CLEAN", verdict: "CLEAN", workIssueState: "CLOSED", workIssue: 379 }) },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 380 },
+  );
+  assert.equal(v.state, "STAGE2_CLOSE_READY");
+  assert.equal(v.stopAfter, true);
+  assert.equal(
+    v.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-audit --repo LouPineWays/Loop-Dee-Loup --audit-issue 380",
+  );
+});
+
+test("resolvePostMergeVerdict: OK with verdict CLEAN but workIssueState still OPEN is not the already-consumed shape -> falls through to NO_ACTION_YET unchanged", () => {
+  // Defensive: checkPostAudit's own branching means CLEAN + still-open should always resolve
+  // to READY_TO_CLOSE, never plain OK -- but this gate must not itself invent a STAGE2_CLOSE_READY
+  // result from workIssueState alone without also requiring a backed CLEAN verdict.
+  const v = resolvePostMergeVerdict({
+    postAudit: postAudit("OK", { rawVerdict: "CLEAN", verdict: "CLEAN", workIssueState: "OPEN", workIssue: 379 }),
+  });
   assert.equal(v.state, "NO_ACTION_YET");
 });
 

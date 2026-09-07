@@ -70,7 +70,14 @@
 //     "### Work issue" all resolve non-null; see classifyAuditIssue), never inferred from the
 //     issue title. Checked before every other classification below, so it never falls through
 //     to generic NOT_READY reasoning merely because a Stage 2 Audit Issue has no Lifecycle/
-//     Blocker/Founder-decision bullets at all. exit 9. Result carries { auditIssue,
+//     Blocker/Founder-decision bullets at all. Stage 1 review finding on PR #435: checkReadyDispatch
+//     classifies this shape from the fetched body *before* applying its own control-Issue
+//     open-state guard, not after — a directly-dispatched audit Issue that is already closed
+//     (e.g. a founder re-invoking `work on #N` against a Stage 2 Audit Issue `close-audit`
+//     already closed) must still route through AUDIT_ISSUE_DETECTED to
+//     next-review-transition-gate.mjs's own idempotent ALREADY_TERMINAL result, not fall into
+//     the same ordinary "control Issue is CLOSED, not OPEN" NOT_READY that a closed *thin
+//     control* Issue correctly reports. exit 9. Result carries { auditIssue,
 //     nextCommand } — run `nextCommand` (tools/orchestration/next-review-transition-gate.mjs
 //     --audit-issue <N>) and act on *its* verdict per AGENTS.md § Session execution:
 //     STAGE2_CLOSE_READY invokes `lifecycle-gate.mjs close-audit` and stops;
@@ -894,22 +901,16 @@ export async function checkReadyDispatch(
     return { exitCode: 1, message: `gh issue view failed for ${resolvedRepo}#${controlIssue}: ${err.message}` };
   }
 
-  if (data.state !== "OPEN") {
-    return {
-      exitCode: 3,
-      state: "NOT_READY",
-      controlIssue: Number(controlIssue),
-      repo: resolvedRepo,
-      reasons: [`control Issue ${resolvedRepo}#${controlIssue} is ${data.state}, not OPEN`],
-    };
-  }
-
   const result = evaluateReadyDispatchGate(data.body ?? "", controlIssue);
   // Issue #407 unit 407-B: AUDIT_ISSUE_DETECTED is disjoint from every other verdict below —
-  // checked first so a directly-dispatched Stage 2 Audit Issue never falls into BLOCKED/
-  // NOT_READY handling merely because it has no Lifecycle/Blocker/Founder-decision bullets at
-  // all (the #432 regression). exit 9 is the next unused integer after this file's existing
-  // 0/1/3/4/5/6/7/8.
+  // checked first, before even the open-state guard, so a directly-dispatched Stage 2 Audit
+  // Issue never falls into BLOCKED/NOT_READY handling merely because it has no Lifecycle/
+  // Blocker/Founder-decision bullets at all (the #432 regression), and an *already-closed*
+  // directly-dispatched Audit Issue still reaches next-review-transition-gate.mjs's own
+  // idempotent ALREADY_TERMINAL result instead of the generic "is CLOSED, not OPEN" NOT_READY
+  // below (Stage 1 review finding on PR #435: the open-state guard used to run first, so a
+  // closed canonical Audit Issue could never reach this classification at all). exit 9 is the
+  // next unused integer after this file's existing 0/1/3/4/5/6/7/8.
   if (result.status === "AUDIT_ISSUE_DETECTED") {
     return {
       exitCode: 9,
@@ -920,6 +921,17 @@ export async function checkReadyDispatch(
       nextCommand: result.nextCommand,
     };
   }
+
+  if (data.state !== "OPEN") {
+    return {
+      exitCode: 3,
+      state: "NOT_READY",
+      controlIssue: Number(controlIssue),
+      repo: resolvedRepo,
+      reasons: [`control Issue ${resolvedRepo}#${controlIssue} is ${data.state}, not OPEN`],
+    };
+  }
+
   if (result.status === "BLOCKED") {
     return { exitCode: 4, state: "BLOCKED", controlIssue: Number(controlIssue), repo: resolvedRepo, reasons: result.reasons };
   }

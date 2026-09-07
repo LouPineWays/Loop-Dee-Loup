@@ -15,11 +15,13 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
   checkCloseAudit,
+  checkCloseWorkIssue,
   checkMergeReady,
   checkPostAudit,
   findClosingKeywordMatch,
   isNoWorkIssueSentinel,
   normalizeIssueNumber,
+  normalizeSearchIssuesPage,
   parseArgs,
   parseFormField,
   parseFormFieldBlock,
@@ -1519,4 +1521,114 @@ test("checkCloseAudit: a comment-post failure after a successful close still rep
   assert.equal(result.state, "CLOSED");
   assert.equal(result.commentPosted, false);
   assert.match(result.message, /could not post the durable explanation comment/);
+});
+
+// -- normalizeSearchIssuesPage (Stage 1 review finding on PR #435: real pagination for
+// defaultGhIssueList's candidate-successor search, replacing a fixed 200-issue --limit that
+// silently dropped candidates past it) ------------------------------------------------------
+
+test("normalizeSearchIssuesPage: maps REST Search API items to the { number, title, body, state, createdAt } shape checkCloseAudit's candidate walk expects", () => {
+  const page = {
+    total_count: 2,
+    items: [
+      { number: 396, title: "[Audit] #306", body: "body 396", state: "closed", created_at: "2026-09-05T09:59:55Z" },
+      { number: 406, title: "[Audit] #306", body: "body 406", state: "open", created_at: "2026-09-05T14:00:00Z" },
+    ],
+  };
+  assert.deepEqual(normalizeSearchIssuesPage(page), [
+    { number: 396, title: "[Audit] #306", body: "body 396", state: "CLOSED", createdAt: "2026-09-05T09:59:55Z" },
+    { number: 406, title: "[Audit] #306", body: "body 406", state: "OPEN", createdAt: "2026-09-05T14:00:00Z" },
+  ]);
+});
+
+test("normalizeSearchIssuesPage: filters out pull requests matching the same search text (the Search API returns both issues and PRs)", () => {
+  const page = {
+    items: [
+      { number: 9001, title: "[Audit] pr mention", body: "a PR, not an audit issue", state: "open", created_at: "2026-09-05T09:00:00Z", pull_request: { url: "https://api.github.com/repos/owner/repo/pulls/9001" } },
+      { number: 396, title: "[Audit] #306", body: "body 396", state: "closed", created_at: "2026-09-05T09:59:55Z" },
+    ],
+  };
+  const result = normalizeSearchIssuesPage(page);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].number, 396);
+});
+
+test("normalizeSearchIssuesPage: an empty or missing items array normalizes to an empty array", () => {
+  assert.deepEqual(normalizeSearchIssuesPage({ items: [] }), []);
+  assert.deepEqual(normalizeSearchIssuesPage({}), []);
+});
+
+// -- checkCloseWorkIssue (Stage 1 review finding on PR #435: STAGE2_CLOSE_READY's own
+// nextCommand previously never closed the gated work issue at all -- close-audit deliberately
+// never touches it, per issue #407 Shared Contract item 3) ----------------------------------
+
+test("checkCloseWorkIssue: CLOSED — an open work issue is closed with a durable comment naming the backing Stage 2 audit evidence", async () => {
+  const ghIssueViewImpl = async ({ number }) => {
+    assert.equal(number, 379);
+    return { state: "OPEN" };
+  };
+  const closeCalls = [];
+  const commentCalls = [];
+  const result = await checkCloseWorkIssue(
+    { repo: "owner/repo", "work-issue": 379, "audit-issue": 380 },
+    {
+      ghIssueViewImpl,
+      ghCloseImpl: async (a) => closeCalls.push(a),
+      ghCommentImpl: async (a) => commentCalls.push(a),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "CLOSED");
+  assert.equal(result.workIssue, 379);
+  assert.equal(closeCalls.length, 1);
+  assert.deepEqual(closeCalls[0], { repo: "owner/repo", workIssue: 379 });
+  assert.equal(commentCalls.length, 1);
+  assert.equal(commentCalls[0].workIssue, 379);
+  assert.equal(commentCalls[0].auditIssue, 380);
+});
+
+test("checkCloseWorkIssue: ALREADY_TERMINAL — a safe no-op on a work issue already closed, no close or comment attempted (idempotent rerun)", async () => {
+  const ghIssueViewImpl = async () => ({ state: "CLOSED" });
+  const result = await checkCloseWorkIssue(
+    { repo: "owner/repo", "work-issue": 379, "audit-issue": 380 },
+    {
+      ghIssueViewImpl,
+      ghCloseImpl: async () => assert.fail("must not attempt to close an already-closed work issue"),
+      ghCommentImpl: async () => assert.fail("must not comment on an already-closed work issue"),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "ALREADY_TERMINAL");
+  assert.equal(result.workIssue, 379);
+});
+
+test("checkCloseWorkIssue: a comment-post failure after a successful close still reports the close (never a failed exit), naming the comment failure", async () => {
+  const ghIssueViewImpl = async () => ({ state: "OPEN" });
+  const result = await checkCloseWorkIssue(
+    { repo: "owner/repo", "work-issue": 379, "audit-issue": 380 },
+    {
+      ghIssueViewImpl,
+      ghCloseImpl: async () => {},
+      ghCommentImpl: async () => {
+        throw new Error("transient network error");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0, "the issue is genuinely closed; this must not be reported as a blocked failure");
+  assert.equal(result.state, "CLOSED");
+  assert.equal(result.commentPosted, false);
+  assert.match(result.message, /could not post the durable explanation comment/);
+});
+
+test("checkCloseWorkIssue: exits 1 when required args are missing", async () => {
+  const result = await checkCloseWorkIssue({ repo: "owner/repo", "work-issue": 379 });
+  assert.equal(result.exitCode, 1);
+});
+
+test("checkCloseWorkIssue: exits 1 when gh issue view fails", async () => {
+  const result = await checkCloseWorkIssue(
+    { repo: "owner/repo", "work-issue": 379, "audit-issue": 380 },
+    { ghIssueViewImpl: async () => { throw new Error("not found"); } },
+  );
+  assert.equal(result.exitCode, 1);
 });

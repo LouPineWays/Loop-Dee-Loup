@@ -91,11 +91,23 @@
 //                  comment-post failure sees `ALREADY_TERMINAL` and never re-attempts either step
 //                  (never a duplicate close, never a duplicate comment).
 //
+//   close-work-issue — Stage 1 review finding on PR #435: `close-audit` above deliberately never
+//                  touches the gated work issue (Shared Contract item 3), which correctly closed
+//                  the audit-side half of the #380/#384 gap but left the work-issue half as only
+//                  a prose reminder in docs/bounded-review-cycle.md ("also close the implemented
+//                  work issue itself") — the same "mechanically unenforced" shape that already
+//                  proved insufficient once. This is a separate command, not a change to
+//                  `close-audit`'s own independence from work-issue state: idempotent
+//                  (`ALREADY_TERMINAL` on an already-closed work issue, no mutation attempted),
+//                  and closes first, then posts one explanatory comment naming the backing Stage
+//                  2 audit issue (same close-then-comment ordering as `close-audit`).
+//
 // Usage:
 //   node tools/review-watch/lifecycle-gate.mjs merge-ready --repo OWNER/REPO --pr 50 --issue 151
 //   node tools/review-watch/lifecycle-gate.mjs merge-ready --repo OWNER/REPO --pr 50 --issue none
 //   node tools/review-watch/lifecycle-gate.mjs post-audit --repo OWNER/REPO --audit-issue 160 [--recover true]
 //   node tools/review-watch/lifecycle-gate.mjs close-audit --repo OWNER/REPO --audit-issue 160 [--dry-run true]
+//   node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo OWNER/REPO --work-issue 151 --audit-issue 160
 //
 // Exit codes: 0 = MERGE_READY / MERGE_READY_NO_WORK_ISSUE / OK / READY_TO_CLOSE /
 // ALREADY_TERMINAL / CLOSE_READY / CLOSED / SUPERSEDED_CLOSE_READY / SUPERSEDED_CLOSED /
@@ -884,6 +896,87 @@ async function performCloseAudit(kind, { repo, auditIssue, body }, { ghCloseImpl
   };
 }
 
+// Pure. Builds the explanatory comment posted on a real (non-dry-run) work-issue close —
+// names the backing Stage 2 audit issue so a fresh reader never has to re-derive why this
+// work issue was closed by automation rather than by GitHub auto-close (Stage 1 step 8
+// deliberately forbids the latter).
+function closeWorkIssueComment({ repo, auditIssue }) {
+  return (
+    `Closed by \`tools/review-watch/lifecycle-gate.mjs close-work-issue\`: Stage 2 audit issue ` +
+    `${repo}#${auditIssue} recorded a CLEAN verdict backed by a completed Stage 2 audit report. Per ` +
+    `docs/bounded-review-cycle.md, merge != acceptance — only a CLEAN Stage 2 disposition may close a ` +
+    `review-worthy implementation issue, never GitHub auto-close on merge (issue #156).`
+  );
+}
+
+// Deterministic, idempotent work-issue close-out command (Stage 1 review finding on PR #435,
+// issue #407's own #380/#384 fix carried one step further): `checkCloseAudit`/`close-audit`
+// deliberately never touches the gated work issue at all (Shared Contract item 3 — this
+// audit's own terminal state must never depend on it), which correctly closed the audit-side
+// gap but left the *work*-issue side of `STAGE2_CLOSE_READY` as only a prose reminder ("also
+// close the implemented work issue itself") — exactly the kind of mechanically-unenforced step
+// that already proved insufficient once for the audit issue itself. This is a separate,
+// narrowly-scoped command rather than a change to `close-audit`'s own behavior, so
+// `checkCloseAudit`'s documented independence from work-issue state is preserved unchanged.
+// `ghIssueViewImpl`, `ghCloseImpl`, and `ghCommentImpl` are all injected so tests can drive
+// this end-to-end without touching the real network or `gh` CLI.
+export async function checkCloseWorkIssue(
+  args,
+  { ghIssueViewImpl = defaultGhIssueView, ghCloseImpl = defaultGhCloseWorkIssue, ghCommentImpl = defaultGhCloseWorkIssueComment } = {},
+) {
+  const { repo, "work-issue": workIssue, "audit-issue": auditIssue } = args;
+  if (!repo || !workIssue || !auditIssue) {
+    return { exitCode: 1, message: "Missing required args: --repo, --work-issue, and --audit-issue are all required." };
+  }
+  const workIssueNumber = Number(workIssue);
+  const auditIssueNumber = Number(auditIssue);
+
+  let workIssueData;
+  try {
+    workIssueData = await ghIssueViewImpl({ repo, number: workIssue });
+  } catch (err) {
+    return { exitCode: 1, message: `gh issue view failed for ${repo}#${workIssue}: ${err.message}` };
+  }
+
+  // Safe no-op regardless of caller: an already-closed work issue is already terminal, so a
+  // rerun (e.g. a fresh session resuming after a prior close, or after this command's own
+  // comment step failed) never re-attempts either mutation.
+  if (workIssueData.state === "CLOSED") {
+    return { exitCode: 0, state: "ALREADY_TERMINAL", workIssue: workIssueNumber };
+  }
+
+  try {
+    await ghCloseImpl({ repo, workIssue: workIssueNumber });
+  } catch (err) {
+    return { exitCode: 1, message: `gh issue close failed for ${repo}#${workIssue}: ${err.message}` };
+  }
+
+  let commentPosted = true;
+  let commentError = null;
+  try {
+    await ghCommentImpl({ repo, workIssue: workIssueNumber, auditIssue: auditIssueNumber });
+  } catch (err) {
+    commentPosted = false;
+    commentError = err.message;
+  }
+
+  return {
+    exitCode: 0,
+    state: "CLOSED",
+    workIssue: workIssueNumber,
+    commentPosted,
+    ...(commentError
+      ? {
+          commentError,
+          message:
+            `Closed ${repo}#${workIssue}, but could not post the durable explanation comment: ${commentError}. ` +
+            `The issue is closed; a follow-up should post the explanation by hand (rerunning close-work-issue will ` +
+            `not retry this step on its own, since the issue now reads as ALREADY_TERMINAL).`,
+        }
+      : {}),
+  };
+}
+
 // Deterministic, idempotent audit-issue terminalization predicate and close-out command (issue
 // #407) — see this file's module comment for the full state vocabulary and rationale.
 // `ghIssueViewImpl`, `ghApiImpl`, `ghIssueListImpl`, `ghCloseImpl`, and `ghCommentImpl` are all
@@ -1076,30 +1169,59 @@ function defaultGhComment({ repo, workIssue, auditIssue }) {
   execFileSync("gh", ["issue", "comment", String(workIssue), "--repo", repo, "--body", body], { encoding: "utf8" });
 }
 
+// Pure. Normalizes one page of the REST Search API's `/search/issues` response shape (`{
+// total_count, incomplete_results, items: [...] }`, each item's fields in GitHub's REST
+// snake_case with a lowercase "open"/"closed" state) into the same { number, title, body,
+// state, createdAt } shape `gh issue list --json` produces, which checkCloseAudit's candidate
+// walk (parseWorkIssueRef(candidate.body), candidate.createdAt, candidate.number) already
+// expects. The Search API's result set can include pull requests matching the same query
+// text; `pull_request` is present only on those, so filtering it out keeps candidates to
+// actual issues, matching what `gh issue list` itself would have returned.
+export function normalizeSearchIssuesPage(page) {
+  return (page?.items ?? [])
+    .filter((item) => !item.pull_request)
+    .map((item) => ({
+      number: item.number,
+      title: item.title,
+      body: item.body,
+      state: item.state === "open" ? "OPEN" : "CLOSED",
+      createdAt: item.created_at,
+    }));
+}
+
 // Candidate-discovery only (Shared Contract item 7): the "[Audit]" title prefix enumerates
 // candidate successor issues for checkCloseAudit's supersession search. The literal title text
 // never itself authorizes a close — every candidate found this way is still independently
 // re-evaluated through evaluateAuditCloseReadiness against its own structured fields.
+//
+// Stage 1 review finding on PR #435: `gh issue list --limit 200` silently drops every
+// candidate past the 200th once a repository's own `[Audit]`-titled corpus grows beyond that —
+// `gh issue list --help` documents `--limit` as "Maximum number of issues to fetch," a hard
+// truncation, not a page size, and sorting the returned array afterward cannot recover an
+// omitted issue. Fetches the REST Search API directly instead (`gh api search/issues`, the
+// same `--paginate --slurp` idiom `defaultGhApi` above already uses for issue-comments pages),
+// which follows the response's own `Link: rel="next"` header until exhausted rather than
+// stopping at one fixed page — recovering every candidate up to GitHub Search's own
+// documented 1,000-result ceiling, a platform limit this script cannot raise, rather than an
+// arbitrary client-side cap chosen without evidence of the real corpus size.
 function defaultGhIssueList({ repo }) {
-  // Explicit maxBuffer: issue #407's own live reconciliation pass hit Node's execFileSync
-  // default 1 MiB buffer (this repository's `[Audit]`-titled corpus, fetched with `--state all`
-  // and full `body` text for up to 200 issues, already exceeds 1 MiB) and failed closed with
-  // `spawnSync gh ENOBUFS` on Windows instead of returning candidates — silently blocking every
-  // supersession search (`SUPERSEDED_CLOSE_READY`/`SUPERSEDED_CLOSED`), not just large ones. Sized
-  // generously above any currently plausible corpus rather than tuned to today's exact byte count.
   const raw = execFileSync(
     "gh",
     [
-      "issue", "list",
-      "--repo", repo,
-      "--search", "[Audit] in:title",
-      "--state", "all",
-      "--json", "number,title,body,state,createdAt",
-      "--limit", "200",
+      "api", "search/issues",
+      // `-X GET` is required: `gh api` defaults to POST once any `-f` field is present, but
+      // `search/issues` only accepts `q` as a GET query parameter.
+      "-X", "GET",
+      "-f", `q=[Audit] in:title repo:${repo}`,
+      "-f", "per_page=100",
+      "--paginate", "--slurp",
     ],
+    // Same rationale as issue #407's own maxBuffer fix above: full issue `body` text across a
+    // multi-page `[Audit]` corpus can exceed Node's 1 MiB execFileSync default.
     { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 },
   );
-  return JSON.parse(raw);
+  const pages = JSON.parse(raw);
+  return pages.flatMap((page) => normalizeSearchIssuesPage(page));
 }
 
 function defaultGhCloseAuditIssue({ repo, auditIssue }) {
@@ -1108,6 +1230,15 @@ function defaultGhCloseAuditIssue({ repo, auditIssue }) {
 
 function defaultGhCloseAuditComment({ repo, auditIssue, body }) {
   execFileSync("gh", ["issue", "comment", String(auditIssue), "--repo", repo, "--body", body], { encoding: "utf8" });
+}
+
+function defaultGhCloseWorkIssue({ repo, workIssue }) {
+  execFileSync("gh", ["issue", "close", String(workIssue), "--repo", repo], { encoding: "utf8" });
+}
+
+function defaultGhCloseWorkIssueComment({ repo, workIssue, auditIssue }) {
+  const body = closeWorkIssueComment({ repo, auditIssue });
+  execFileSync("gh", ["issue", "comment", String(workIssue), "--repo", repo, "--body", body], { encoding: "utf8" });
 }
 
 async function main() {
@@ -1158,7 +1289,21 @@ async function main() {
     return;
   }
 
-  console.error(`Unknown subcommand: ${subcommand ?? "(none)"}. Use "merge-ready", "post-audit", or "close-audit".`);
+  if (subcommand === "close-work-issue") {
+    const result = await checkCloseWorkIssue(args);
+    if (result.exitCode === 1) {
+      console.error(result.message);
+      process.exit(1);
+      return;
+    }
+    console.log(JSON.stringify(result));
+    process.exit(result.exitCode);
+    return;
+  }
+
+  console.error(
+    `Unknown subcommand: ${subcommand ?? "(none)"}. Use "merge-ready", "post-audit", "close-audit", or "close-work-issue".`,
+  );
   process.exit(1);
 }
 
