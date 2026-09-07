@@ -58,14 +58,49 @@
 // still run — Stage 1, Stage 2, CI, and the bounded-reviewer-invocation rules are unaffected —
 // they only skip the closing-reference/premature-closure checks that have no issue to protect.
 //
+//   close-audit  — a Stage 2 audit's own verdict is not fully consumed until the audit
+//                  artifact itself reaches truthful durable terminal state (issue #407,
+//                  correcting #380/#384 and the #396→#406 correction-chain gap). `post-audit`
+//                  above only ever closes/reopens the *work* issue; a CLEAN, fully-consumed
+//                  audit could still sit open indefinitely (#380/#384), and a superseded
+//                  NOT CLEAN predecessor in a correction chain had no mechanical route to
+//                  terminal state at all even once its successor reached CLEAN (#396, closed
+//                  only by a founder writing the explanatory comment by hand). `close-audit`
+//                  computes this audit issue's own terminal state from durable evidence —
+//                  reusing `evaluateBackedCleanVerdict` (shared with `post-audit`'s
+//                  no-work-issue branch, so "is this audit's own verdict backed CLEAN" has
+//                  exactly one implementation) — and never inspects the gated work issue's own
+//                  state at all: `ALREADY_TERMINAL` (already CLOSED, a safe no-op, no mutation
+//                  even without `--dry-run`); `CLOSE_READY`/`CLOSED` (this audit's own verdict
+//                  is backed CLEAN by a completed Stage 2 audit report, regardless of the gated
+//                  work issue's open/closed state — the #380/#384 fix); `SUPERSEDED_CLOSE_READY`/
+//                  `SUPERSEDED_CLOSED` (this audit's own verdict is not backed CLEAN, but a
+//                  distinct, later-created audit issue naming the same Work issue independently
+//                  re-derives its own CLOSE_READY-ness under this same predicate — never merely
+//                  "exists," "has a newer number," or "is titled similarly" — the #396→#406
+//                  correction-chain fix); or `NOT_TERMINAL_YET` (none of the above — a normal,
+//                  non-error result, not a failure: active PENDING, invalid/incomplete/
+//                  provenance-unbacked evidence, or a NOT CLEAN/PENDING predecessor with no
+//                  qualifying successor yet). The `[Audit]` title prefix is used only to
+//                  *enumerate candidate* successor issues (`gh issue list --search`); it never
+//                  by itself authorizes a close — every close is authorized only by the
+//                  structured field/report evidence above. A real (non-dry-run) close posts one
+//                  explanatory comment naming the backing evidence, closing first and commenting
+//                  second (mirroring `recoverPrematureClosure`'s own precedent below): closing is
+//                  the primary, idempotency-observable state change, so a rerun after a
+//                  comment-post failure sees `ALREADY_TERMINAL` and never re-attempts either step
+//                  (never a duplicate close, never a duplicate comment).
+//
 // Usage:
 //   node tools/review-watch/lifecycle-gate.mjs merge-ready --repo OWNER/REPO --pr 50 --issue 151
 //   node tools/review-watch/lifecycle-gate.mjs merge-ready --repo OWNER/REPO --pr 50 --issue none
 //   node tools/review-watch/lifecycle-gate.mjs post-audit --repo OWNER/REPO --audit-issue 160 [--recover true]
+//   node tools/review-watch/lifecycle-gate.mjs close-audit --repo OWNER/REPO --audit-issue 160 [--dry-run true]
 //
-// Exit codes: 0 = MERGE_READY / MERGE_READY_NO_WORK_ISSUE / OK / READY_TO_CLOSE (safe to
-// proceed), 2 = BLOCKED_CLOSING_REFERENCE / PREMATURE_CLOSURE (must not merge / must not treat
-// as accepted), 1 = operational error.
+// Exit codes: 0 = MERGE_READY / MERGE_READY_NO_WORK_ISSUE / OK / READY_TO_CLOSE /
+// ALREADY_TERMINAL / CLOSE_READY / CLOSED / SUPERSEDED_CLOSE_READY / SUPERSEDED_CLOSED /
+// NOT_TERMINAL_YET (safe to proceed), 2 = BLOCKED_CLOSING_REFERENCE / PREMATURE_CLOSURE (must
+// not merge / must not treat as accepted), 1 = operational error.
 //
 // Tests: node --test tools/review-watch/lifecycle-gate.test.mjs
 
@@ -528,6 +563,49 @@ async function findStage2ReportEvidence(
   };
 }
 
+// Pure orchestration over already-parsed fields (throws only if `ghApiImpl` throws — callers
+// catch and wrap as an operational error the same way every other gh-calling function in this
+// file does). Computes whether an audit issue's own recorded verdict is backed CLEAN by a
+// completed Stage 2 audit report — the exact evidence contract `checkPostAudit`'s no-work-issue
+// branch already applied before this extraction, now shared verbatim with `checkCloseAudit`
+// (both its own-verdict evaluation and its candidate-successor re-evaluation) so "is this
+// audit's own verdict backed CLEAN" has exactly one implementation, per issue #407's explicit
+// instruction not to reimplement or relax this machinery. Deliberately takes no work-issue
+// argument at all: this decision never depends on any gated work issue's own open/closed state
+// (issue #407 Shared Contract item 3 / the #380/#384 fix).
+async function evaluateBackedCleanVerdict(
+  { repo, auditIssue, bot, rawVerdict, mergeCommit, requestedChecklist, reviewedHeadCommit },
+  ghApiImpl,
+) {
+  let verdict = rawVerdict;
+  let reportEvidence = null;
+  if (rawVerdict === "CLEAN") {
+    reportEvidence = await findStage2ReportEvidence(
+      { repo, auditIssue, bot, mergeCommit, requestedChecklist, reviewedHeadCommit },
+      ghApiImpl,
+    );
+    if (!reportEvidence.backed || reportEvidence.verdict !== "CLEAN") verdict = null;
+  }
+  return { rawVerdict, verdict, backedClean: verdict === "CLEAN", reportEvidence };
+}
+
+// Pure orchestration wrapper around evaluateBackedCleanVerdict for a candidate audit issue's own
+// body text — used by checkCloseAudit for both the primary audit issue and every later-created
+// candidate successor it considers for supersession. Parses the four fields fresh from `body`
+// (mergeCommit/reviewedHeadCommit/requestedChecklist/rawVerdict), since checkCloseAudit
+// evaluates a different issue's body on each call, unlike checkPostAudit's single already-parsed
+// audit issue.
+async function evaluateAuditCloseReadiness(repo, auditIssueNumber, body, { ghApiImpl, bot }) {
+  const rawVerdict = parseStage2Verdict(body ?? "");
+  const mergeCommit = parseMergeCommitRef(body ?? "");
+  const reviewedHeadCommit = parseReviewedHeadCommitRef(body ?? "");
+  const requestedChecklist = parseVerificationChecklistRef(body ?? "");
+  return evaluateBackedCleanVerdict(
+    { repo, auditIssue: auditIssueNumber, bot, rawVerdict, mergeCommit, requestedChecklist, reviewedHeadCommit },
+    ghApiImpl,
+  );
+}
+
 // `ghIssueViewImpl` and `ghApiImpl` are injected so tests can drive this end-to-end without
 // touching the real network or `gh` CLI.
 export async function checkPostAudit(
@@ -571,31 +649,27 @@ export async function checkPostAudit(
   // preserving here, so the legacy-compatibility fallback below never applies). An unbacked
   // CLEAN just reports OK; nothing is fetched, reopened, or closed.
   if (noWorkIssue) {
-    let verdict = rawVerdict;
-    let reportEvidence = null;
-    if (rawVerdict === "CLEAN") {
-      try {
-        reportEvidence = await findStage2ReportEvidence(
-          { repo, auditIssue, bot, mergeCommit, requestedChecklist, reviewedHeadCommit },
-          ghApiImpl,
-        );
-      } catch (err) {
-        return {
-          exitCode: 1,
-          message: `gh api call failed while verifying the CLEAN verdict on ${repo}#${auditIssue}: ${err.message}`,
-        };
-      }
-      if (!reportEvidence.backed || reportEvidence.verdict !== "CLEAN") verdict = null;
+    let evaluated;
+    try {
+      evaluated = await evaluateBackedCleanVerdict(
+        { repo, auditIssue, bot, rawVerdict, mergeCommit, requestedChecklist, reviewedHeadCommit },
+        ghApiImpl,
+      );
+    } catch (err) {
+      return {
+        exitCode: 1,
+        message: `gh api call failed while verifying the CLEAN verdict on ${repo}#${auditIssue}: ${err.message}`,
+      };
     }
     return {
       exitCode: 0,
-      state: verdict === "CLEAN" ? "ACCEPTED_NO_WORK_ISSUE" : "OK",
+      state: evaluated.verdict === "CLEAN" ? "ACCEPTED_NO_WORK_ISSUE" : "OK",
       workIssue: null,
       auditIssue: Number(auditIssue),
-      verdict,
-      rawVerdict,
+      verdict: evaluated.verdict,
+      rawVerdict: evaluated.rawVerdict,
       workIssueState: null,
-      ...(reportEvidence ? { reportEvidence } : {}),
+      ...(evaluated.reportEvidence ? { reportEvidence: evaluated.reportEvidence } : {}),
     };
   }
 
@@ -737,6 +811,234 @@ export async function recoverPrematureClosure(
   return { exitCode: 0, recovered: true, commentPosted: true, workIssue, auditIssue };
 }
 
+// Pure. Builds the explanatory comment posted on a real (non-dry-run) `CLOSED` run — this
+// audit's own verdict is backed CLEAN, independent of the gated work issue's state (the
+// #380/#384 fix). Names the backing evidence (the matched completed-report comment URL) so a
+// fresh reader never has to re-derive why this audit issue was closed.
+function ownCleanCloseComment({ repo, auditIssue, reportEvidence }) {
+  const evidenceRef = reportEvidence?.matchedCommentUrl ?? `this issue's own comment thread (audit issue ${repo}#${auditIssue})`;
+  return (
+    `Closed by \`tools/review-watch/lifecycle-gate.mjs close-audit\`: this audit issue's own recorded verdict is ` +
+    `backed CLEAN by a completed Stage 2 audit report (${evidenceRef}). Per docs/bounded-review-cycle.md, a CLEAN ` +
+    `Stage 2 disposition on this audit issue is terminal regardless of the gated work issue's own open/closed ` +
+    `state — a Stage 2 audit's verdict is not fully consumed until the audit artifact itself reaches truthful ` +
+    `durable terminal state (issue #407, the #380/#384 fix).`
+  );
+}
+
+// Pure. Builds the explanatory comment posted on a real (non-dry-run) `SUPERSEDED_CLOSED` run —
+// this audit's own verdict is not backed CLEAN, but a distinct, later-created audit issue naming
+// the same work issue independently resolves to CLOSE_READY/CLOSED. Modeled on the real,
+// founder-authored precedent that closed issue #396 by hand ("Superseded by the correction chain
+// terminating in Stage 2 audit #406 (CLEAN). See control issue #306's closing state for the full
+// chain.") — naming the specific superseding issue and its own backing evidence, never merely
+// "a later audit exists."
+function supersededCloseComment({ repo, supersededBy, reportEvidence }) {
+  const evidenceRef = reportEvidence?.matchedCommentUrl ?? `its own completed Stage 2 audit report (audit issue ${repo}#${supersededBy})`;
+  return (
+    `Closed by \`tools/review-watch/lifecycle-gate.mjs close-audit\`: this audit issue's own verdict is not backed ` +
+    `CLEAN, but a distinct, later-created audit issue naming the same work issue — #${supersededBy} — ` +
+    `independently resolves to CLOSE_READY/CLOSED under this same evidence contract (backed by ${evidenceRef}), ` +
+    `not merely by existing, being numbered later, or sharing a similar title. Superseded by that correction ` +
+    `chain; see #${supersededBy} for its own closing evidence (issue #407, the #396→#406 correction-chain fix).`
+  );
+}
+
+// `ghCloseImpl` and `ghCommentImpl` are injected so tests can drive this without touching the
+// real network or `gh` CLI, and are kept as two independently-failing steps — close first, then
+// comment — mirroring recoverPrematureClosure's own precedent above, but in the opposite order:
+// closing is the primary, idempotency-observable state change here (unlike recovery, where
+// reopening is), so a rerun after a successful close sees ALREADY_TERMINAL immediately and never
+// re-attempts either step — never a duplicate close, and never a duplicate explanatory comment,
+// even if the comment step itself fails and is never automatically retried.
+async function performCloseAudit(kind, { repo, auditIssue, body }, { ghCloseImpl, ghCommentImpl }) {
+  try {
+    await ghCloseImpl({ repo, auditIssue });
+  } catch (err) {
+    return { exitCode: 1, message: `gh issue close failed for ${repo}#${auditIssue}: ${err.message}` };
+  }
+
+  let commentPosted = true;
+  let commentError = null;
+  try {
+    await ghCommentImpl({ repo, auditIssue, body });
+  } catch (err) {
+    commentPosted = false;
+    commentError = err.message;
+  }
+
+  return {
+    exitCode: 0,
+    state: kind,
+    auditIssue,
+    commentPosted,
+    ...(commentError
+      ? {
+          commentError,
+          message:
+            `Closed ${repo}#${auditIssue}, but could not post the durable explanation comment: ${commentError}. ` +
+            `The issue is closed; a follow-up should post the explanation by hand (rerunning close-audit will not ` +
+            `retry this step on its own, since the issue now reads as ALREADY_TERMINAL).`,
+        }
+      : {}),
+  };
+}
+
+// Deterministic, idempotent audit-issue terminalization predicate and close-out command (issue
+// #407) — see this file's module comment for the full state vocabulary and rationale.
+// `ghIssueViewImpl`, `ghApiImpl`, `ghIssueListImpl`, `ghCloseImpl`, and `ghCommentImpl` are all
+// injected so tests can drive this end-to-end without touching the real network or `gh` CLI.
+//
+// Deliberately never fetches the gated work issue at all (contrast checkPostAudit's normal
+// branch, which must): this audit's own terminal state never depends on the work issue's
+// open/closed state (the #380/#384 fix — Shared Contract item 3), so there is nothing to look
+// up there.
+export async function checkCloseAudit(
+  args,
+  {
+    ghIssueViewImpl = defaultGhIssueView,
+    ghApiImpl = defaultGhApi,
+    ghIssueListImpl = defaultGhIssueList,
+    ghCloseImpl = defaultGhCloseAuditIssue,
+    ghCommentImpl = defaultGhCloseAuditComment,
+    bot = DEFAULT_BOT,
+  } = {},
+) {
+  const { repo, "audit-issue": auditIssue } = args;
+  if (!repo || !auditIssue) {
+    return { exitCode: 1, message: "Missing required args: --repo and --audit-issue are both required." };
+  }
+  const dryRun = args["dry-run"] === "true" || args["dry-run"] === "1";
+  const auditIssueNumber = Number(auditIssue);
+
+  let auditData;
+  try {
+    auditData = await ghIssueViewImpl({ repo, number: auditIssue });
+  } catch (err) {
+    return { exitCode: 1, message: `gh issue view failed for ${repo}#${auditIssue}: ${err.message}` };
+  }
+
+  // Safe no-op regardless of --dry-run: an already-closed audit issue is already terminal, so
+  // there is nothing to compute or mutate. Checked before any evidence evaluation so a rerun
+  // against a just-closed issue never re-derives (or re-posts) anything.
+  if (auditData.state === "CLOSED") {
+    return { exitCode: 0, state: "ALREADY_TERMINAL", auditIssue: auditIssueNumber };
+  }
+
+  let own;
+  try {
+    own = await evaluateAuditCloseReadiness(repo, auditIssueNumber, auditData.body ?? "", { ghApiImpl, bot });
+  } catch (err) {
+    return { exitCode: 1, message: `gh api call failed while evaluating audit issue ${repo}#${auditIssue}: ${err.message}` };
+  }
+
+  // (a) This audit's own verdict is backed CLEAN — close regardless of the gated work issue's
+  // state (the #380/#384 fix). No supersession search is needed or performed.
+  if (own.backedClean) {
+    if (dryRun) {
+      return { exitCode: 0, state: "CLOSE_READY", auditIssue: auditIssueNumber, reportEvidence: own.reportEvidence };
+    }
+    return performCloseAudit(
+      "CLOSED",
+      { repo, auditIssue: auditIssueNumber, body: ownCleanCloseComment({ repo, auditIssue: auditIssueNumber, reportEvidence: own.reportEvidence }) },
+      { ghCloseImpl, ghCommentImpl },
+    );
+  }
+
+  // (b) Not backed CLEAN on its own — look for a distinct, later-created successor audit issue
+  // naming the same Work issue that independently resolves to CLOSE_READY/CLOSED (the
+  // #396→#406 correction-chain fix). Requires a real, non-"none" Work issue reference: with no
+  // work issue (or an unparseable field), there is no shared key to search successors against.
+  const workIssueRef = parseWorkIssueRef(auditData.body ?? "");
+  if (workIssueRef === null || workIssueRef === "none") {
+    return {
+      exitCode: 0,
+      state: "NOT_TERMINAL_YET",
+      auditIssue: auditIssueNumber,
+      rawVerdict: own.rawVerdict,
+      reason:
+        workIssueRef === null
+          ? "audit issue has no valid Work issue field, so no supersession search is possible"
+          : `audit issue declares no gated work issue (Work issue: none), so no supersession search applies` +
+            (own.reportEvidence ? ` (${own.reportEvidence.reason})` : ""),
+    };
+  }
+
+  let candidates;
+  try {
+    candidates = await ghIssueListImpl({ repo });
+  } catch (err) {
+    return { exitCode: 1, message: `gh issue list failed for ${repo}: ${err.message}` };
+  }
+
+  const auditCreatedMs = new Date(auditData.createdAt ?? 0).getTime();
+  // Sorted oldest-created-first so that, when more than one later candidate independently
+  // qualifies (a correction chain longer than two issues), the earliest qualifying successor is
+  // found first — deterministic regardless of gh issue list's own return order.
+  const sortedCandidates = [...candidates].sort(
+    (a, b) => new Date(a.createdAt ?? 0).getTime() - new Date(b.createdAt ?? 0).getTime(),
+  );
+
+  let supersededBy = null;
+  for (const candidate of sortedCandidates) {
+    if (Number(candidate.number) === auditIssueNumber) continue;
+    const candidateCreatedMs = new Date(candidate.createdAt ?? 0).getTime();
+    if (!(candidateCreatedMs > auditCreatedMs)) continue;
+    const candidateWorkIssueRef = parseWorkIssueRef(candidate.body ?? "");
+    if (candidateWorkIssueRef !== workIssueRef) continue;
+
+    let candidateOwn;
+    try {
+      candidateOwn = await evaluateAuditCloseReadiness(repo, Number(candidate.number), candidate.body ?? "", { ghApiImpl, bot });
+    } catch (err) {
+      return {
+        exitCode: 1,
+        message: `gh api call failed while evaluating candidate successor audit issue ${repo}#${candidate.number}: ${err.message}`,
+      };
+    }
+    if (candidateOwn.backedClean) {
+      supersededBy = { number: Number(candidate.number), reportEvidence: candidateOwn.reportEvidence };
+      break;
+    }
+  }
+
+  if (supersededBy) {
+    if (dryRun) {
+      return {
+        exitCode: 0,
+        state: "SUPERSEDED_CLOSE_READY",
+        auditIssue: auditIssueNumber,
+        supersededBy: supersededBy.number,
+        reportEvidence: supersededBy.reportEvidence,
+      };
+    }
+    return performCloseAudit(
+      "SUPERSEDED_CLOSED",
+      {
+        repo,
+        auditIssue: auditIssueNumber,
+        body: supersededCloseComment({ repo, supersededBy: supersededBy.number, reportEvidence: supersededBy.reportEvidence }),
+      },
+      { ghCloseImpl, ghCommentImpl },
+    );
+  }
+
+  // (c) Neither this audit's own evidence nor any later successor's backs a close — this audit
+  // correctly stays open. A normal, non-error result, not a failure.
+  return {
+    exitCode: 0,
+    state: "NOT_TERMINAL_YET",
+    auditIssue: auditIssueNumber,
+    rawVerdict: own.rawVerdict,
+    reason:
+      own.rawVerdict === "PENDING"
+        ? "verdict is PENDING and no qualifying later successor audit was found"
+        : own.reportEvidence
+          ? `${own.reportEvidence.reason}, and no qualifying later successor audit was found`
+          : "no qualifying later successor audit was found",
+  };
+}
+
 function defaultGhPrView({ repo, number }) {
   const raw = execFileSync(
     "gh",
@@ -747,7 +1049,11 @@ function defaultGhPrView({ repo, number }) {
 }
 
 function defaultGhIssueView({ repo, number }) {
-  const raw = execFileSync("gh", ["issue", "view", String(number), "--repo", repo, "--json", "body,state"], {
+  // `createdAt` is fetched unconditionally (not only for close-audit's callers) — a harmless
+  // extra field for merge-ready/post-audit, and what checkCloseAudit needs to compare this
+  // audit issue's own creation time against a candidate successor's (Shared Contract item 6:
+  // "created after," never issue-number comparison).
+  const raw = execFileSync("gh", ["issue", "view", String(number), "--repo", repo, "--json", "body,state,createdAt"], {
     encoding: "utf8",
   });
   return JSON.parse(raw);
@@ -768,6 +1074,34 @@ function defaultGhComment({ repo, workIssue, auditIssue }) {
     `verdict on its audit issue #${auditIssue}. Per docs/bounded-review-cycle.md, merge != acceptance — ` +
     `only a CLEAN Stage 2 disposition may close a review-worthy implementation issue.`;
   execFileSync("gh", ["issue", "comment", String(workIssue), "--repo", repo, "--body", body], { encoding: "utf8" });
+}
+
+// Candidate-discovery only (Shared Contract item 7): the "[Audit]" title prefix enumerates
+// candidate successor issues for checkCloseAudit's supersession search. The literal title text
+// never itself authorizes a close — every candidate found this way is still independently
+// re-evaluated through evaluateAuditCloseReadiness against its own structured fields.
+function defaultGhIssueList({ repo }) {
+  const raw = execFileSync(
+    "gh",
+    [
+      "issue", "list",
+      "--repo", repo,
+      "--search", "[Audit] in:title",
+      "--state", "all",
+      "--json", "number,title,body,state,createdAt",
+      "--limit", "200",
+    ],
+    { encoding: "utf8" },
+  );
+  return JSON.parse(raw);
+}
+
+function defaultGhCloseAuditIssue({ repo, auditIssue }) {
+  execFileSync("gh", ["issue", "close", String(auditIssue), "--repo", repo], { encoding: "utf8" });
+}
+
+function defaultGhCloseAuditComment({ repo, auditIssue, body }) {
+  execFileSync("gh", ["issue", "comment", String(auditIssue), "--repo", repo, "--body", body], { encoding: "utf8" });
 }
 
 async function main() {
@@ -806,7 +1140,19 @@ async function main() {
     return;
   }
 
-  console.error(`Unknown subcommand: ${subcommand ?? "(none)"}. Use "merge-ready" or "post-audit".`);
+  if (subcommand === "close-audit") {
+    const result = await checkCloseAudit(args);
+    if (result.exitCode === 1) {
+      console.error(result.message);
+      process.exit(1);
+      return;
+    }
+    console.log(JSON.stringify(result));
+    process.exit(result.exitCode);
+    return;
+  }
+
+  console.error(`Unknown subcommand: ${subcommand ?? "(none)"}. Use "merge-ready", "post-audit", or "close-audit".`);
   process.exit(1);
 }
 

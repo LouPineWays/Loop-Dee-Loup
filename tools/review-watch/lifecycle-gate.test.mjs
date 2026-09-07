@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
+  checkCloseAudit,
   checkMergeReady,
   checkPostAudit,
   findClosingKeywordMatch,
@@ -1194,4 +1195,328 @@ test("parseArgs: reads flags including a hyphenated flag name", () => {
   assert.equal(args.repo, "owner/repo");
   assert.equal(args["audit-issue"], "160");
   assert.equal(args.recover, "true");
+});
+
+// -- checkCloseAudit (issue #407) --------------------------------------------------------
+// Deterministic, idempotent audit-issue terminalization predicate and close-out command,
+// correcting #380/#384 (a CLEAN, fully-consumed audit could still sit open indefinitely,
+// since post-audit above only ever closes the *work* issue) and the #396->#406
+// correction-chain gap (a superseded NOT CLEAN predecessor had no mechanical route to
+// terminal state even once its successor reached CLEAN). Six fixture-driven regression
+// classes, per 407-A's own Worker Unit Contract: open-CLEAN/open-work, open-CLEAN/closed-work,
+// correction-chain supersession, active-PENDING negative control, invalid/incomplete-report
+// negative control, and idempotent rerun on an already-closed audit.
+
+function closeAuditBody({ workIssue = "#306", commit = MERGE_COMMIT, verdict = "PENDING", checklist = "1. Confirm A.\n2. Confirm B." }) {
+  return (
+    `### Work issue\n\n${workIssue}\n\n### Exact merge commit\n\n${commit}\n\n` +
+    `### Verification checklist\n\n${checklist}\n\n### Verdict\n\n${verdict}\n`
+  );
+}
+
+// A ghApiImpl that dispatches a distinct completed/incomplete thread per audit-issue number —
+// findStage2ReportEvidence's endpoint path is `repos/<repo>/issues/<auditIssue>/comments`, so
+// this is what lets a multi-issue correction-chain fixture give each audit issue its own
+// evidence independently.
+function ghApiForThreads(threadsByAuditIssue) {
+  return async (path) => {
+    for (const [number, thread] of Object.entries(threadsByAuditIssue)) {
+      if (path.includes(`/issues/${number}/comments`)) return thread;
+    }
+    return [];
+  };
+}
+
+// -- Class 1/2: this audit's own verdict is backed CLEAN, closed regardless of the (never even
+// fetched) gated work issue's state — the #380/#384 fix itself.
+
+test("checkCloseAudit: CLOSE_READY (dry-run) / CLOSED (real run) — backed CLEAN, work issue field names a presumed-open issue", async () => {
+  let issueViewCalls = 0;
+  const ghIssueViewImpl = async ({ number }) => {
+    issueViewCalls++;
+    assert.equal(number, 160, "checkCloseAudit must never fetch the gated work issue at all — only the audit issue itself");
+    return { body: closeAuditBody({ workIssue: "#151", verdict: "CLEAN" }), state: "OPEN", createdAt: "2026-09-05T00:00:00Z" };
+  };
+  const ghApiImpl = withCompletedAuditReport();
+
+  const dryRunResult = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 160, "dry-run": "true" },
+    { ghIssueViewImpl, ghApiImpl },
+  );
+  assert.equal(dryRunResult.exitCode, 0);
+  assert.equal(dryRunResult.state, "CLOSE_READY");
+  assert.equal(dryRunResult.auditIssue, 160);
+
+  const closeCalls = [];
+  const commentCalls = [];
+  const realResult = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl,
+      ghApiImpl,
+      ghCloseImpl: async (a) => closeCalls.push(a),
+      ghCommentImpl: async (a) => commentCalls.push(a),
+    },
+  );
+  assert.equal(realResult.exitCode, 0);
+  assert.equal(realResult.state, "CLOSED");
+  assert.equal(realResult.commentPosted, true);
+  assert.equal(closeCalls.length, 1);
+  assert.deepEqual(closeCalls[0], { repo: "owner/repo", auditIssue: 160 });
+  assert.equal(commentCalls.length, 1);
+  assert.match(commentCalls[0].body, /backed CLEAN/);
+  assert.equal(issueViewCalls, 2, "one gh issue view per checkCloseAudit call — never a second one for the work issue");
+});
+
+test("checkCloseAudit: CLOSE_READY (dry-run) / CLOSED (real run) — backed CLEAN, work issue field names a presumed-closed issue (the exact #380/#384 shape: identical outcome either way, since work-issue state is never consulted)", async () => {
+  const ghIssueViewImpl = async () => ({
+    body: closeAuditBody({ workIssue: "#999", verdict: "CLEAN" }),
+    state: "OPEN",
+    createdAt: "2026-09-05T00:00:00Z",
+  });
+  const ghApiImpl = withCompletedAuditReport();
+
+  const dryRunResult = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 161, "dry-run": "true" },
+    { ghIssueViewImpl, ghApiImpl },
+  );
+  assert.equal(dryRunResult.state, "CLOSE_READY");
+
+  const closeCalls = [];
+  const realResult = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 161 },
+    { ghIssueViewImpl, ghApiImpl, ghCloseImpl: async (a) => closeCalls.push(a), ghCommentImpl: async () => {} },
+  );
+  assert.equal(realResult.state, "CLOSED");
+  assert.equal(closeCalls.length, 1, "closes identically regardless of the (unfetched) work issue's presumed open/closed state");
+});
+
+// -- Class 3: correction-chain supersession (#396->#406) ---------------------------------
+
+function chainAuditFixture({ workIssue, commit = MERGE_COMMIT, verdict, createdAt }) {
+  return { body: closeAuditBody({ workIssue, commit, verdict }), state: "OPEN", createdAt };
+}
+
+test("checkCloseAudit: SUPERSEDED_CLOSE_READY (dry-run) / SUPERSEDED_CLOSED (real run) — a NOT CLEAN predecessor is superseded by a distinct, later CLOSE_READY successor naming the same work issue, across a 5-issue correction chain shaped like #396->#400->#402->#404->#406", async () => {
+  const workIssue = "#306";
+  const chain = {
+    396: chainAuditFixture({ workIssue, verdict: "NOT CLEAN", createdAt: "2026-09-05T09:59:55Z" }),
+    400: chainAuditFixture({ workIssue, verdict: "NOT CLEAN", createdAt: "2026-09-05T11:00:00Z" }),
+    402: chainAuditFixture({ workIssue, verdict: "NOT CLEAN", createdAt: "2026-09-05T12:00:00Z" }),
+    404: chainAuditFixture({ workIssue, verdict: "NOT CLEAN", createdAt: "2026-09-05T13:00:00Z" }),
+    406: chainAuditFixture({ workIssue, verdict: "CLEAN", createdAt: "2026-09-05T14:00:00Z" }),
+  };
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+  const ghApiImpl = ghApiForThreads({ 406: completedAuditThread({ verdict: "CLEAN" }) });
+
+  const dryRunResult = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 396, "dry-run": "true" },
+    { ghIssueViewImpl, ghIssueListImpl, ghApiImpl },
+  );
+  assert.equal(dryRunResult.exitCode, 0);
+  assert.equal(dryRunResult.state, "SUPERSEDED_CLOSE_READY");
+  assert.equal(dryRunResult.supersededBy, 406);
+
+  const closeCalls = [];
+  const commentCalls = [];
+  const realResult = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 396 },
+    {
+      ghIssueViewImpl,
+      ghIssueListImpl,
+      ghApiImpl,
+      ghCloseImpl: async (a) => closeCalls.push(a),
+      ghCommentImpl: async (a) => commentCalls.push(a),
+    },
+  );
+  assert.equal(realResult.exitCode, 0);
+  assert.equal(realResult.state, "SUPERSEDED_CLOSED");
+  assert.equal(closeCalls.length, 1);
+  assert.deepEqual(closeCalls[0], { repo: "owner/repo", auditIssue: 396 });
+  assert.equal(commentCalls.length, 1);
+  assert.match(commentCalls[0].body, /#406/);
+  assert.match(commentCalls[0].body, /CLOSE_READY\/CLOSED/);
+});
+
+test("checkCloseAudit: a later CLOSE_READY audit naming a DIFFERENT work issue never supersedes (fail-closed supersession evidence rule)", async () => {
+  const chain = {
+    500: chainAuditFixture({ workIssue: "#306", verdict: "NOT CLEAN", createdAt: "2026-09-05T09:00:00Z" }),
+    501: chainAuditFixture({ workIssue: "#999", verdict: "CLEAN", createdAt: "2026-09-05T10:00:00Z" }),
+  };
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+  const ghApiImpl = ghApiForThreads({ 501: completedAuditThread({ verdict: "CLEAN" }) });
+
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 500, "dry-run": "true" },
+    { ghIssueViewImpl, ghIssueListImpl, ghApiImpl },
+  );
+  assert.equal(result.state, "NOT_TERMINAL_YET", "a CLOSE_READY audit for an unrelated work issue must never supersede this one");
+});
+
+test("checkCloseAudit: an earlier (not later-created) CLOSE_READY audit naming the same work issue never supersedes (createdAt comparison, not issue-number order)", async () => {
+  const chain = {
+    600: chainAuditFixture({ workIssue: "#306", verdict: "CLEAN", createdAt: "2026-09-01T00:00:00Z" }), // earlier, backed CLEAN
+    601: chainAuditFixture({ workIssue: "#306", verdict: "NOT CLEAN", createdAt: "2026-09-05T00:00:00Z" }), // the audit under test
+  };
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+  const ghApiImpl = ghApiForThreads({ 600: completedAuditThread({ verdict: "CLEAN" }) });
+
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 601, "dry-run": "true" },
+    { ghIssueViewImpl, ghIssueListImpl, ghApiImpl },
+  );
+  assert.equal(result.state, "NOT_TERMINAL_YET", "an earlier CLOSE_READY audit is not a later successor and must never supersede");
+});
+
+// -- Class 4: active-PENDING negative control ---------------------------------------------
+
+test("checkCloseAudit: NOT_TERMINAL_YET — active PENDING verdict, no successor exists (negative control)", async () => {
+  const ghIssueViewImpl = async () => ({
+    body: closeAuditBody({ workIssue: "#306", verdict: "PENDING" }),
+    state: "OPEN",
+    createdAt: "2026-09-05T09:00:00Z",
+  });
+  const ghIssueListImpl = async () => [];
+  const result = await checkCloseAudit({ repo: "owner/repo", "audit-issue": 160 }, { ghIssueViewImpl, ghIssueListImpl });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "NOT_TERMINAL_YET");
+  assert.equal(result.rawVerdict, "PENDING");
+});
+
+// -- Class 5: invalid/incomplete-report negative control -----------------------------------
+
+test("checkCloseAudit: NOT_TERMINAL_YET — CLEAN dropdown unbacked by a completed Stage 2 report (the #229 kickoff shape), no successor exists (negative control)", async () => {
+  const ghIssueViewImpl = async () => ({
+    body: closeAuditBody({ workIssue: "#306", verdict: "CLEAN" }),
+    state: "OPEN",
+    createdAt: "2026-09-05T09:00:00Z",
+  });
+  const ghApiImpl = withKickoffOnly();
+  const ghIssueListImpl = async () => [];
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    { ghIssueViewImpl, ghApiImpl, ghIssueListImpl },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "NOT_TERMINAL_YET");
+  assert.equal(result.rawVerdict, "CLEAN");
+});
+
+// -- Class 6: idempotent rerun on an already-closed audit -----------------------------------
+
+test("checkCloseAudit: ALREADY_TERMINAL — a safe no-op on an already-closed audit issue, even without --dry-run (idempotent rerun, no mutation attempted)", async () => {
+  let apiCalls = 0;
+  let listCalls = 0;
+  let closeCalls = 0;
+  let commentCalls = 0;
+  const ghIssueViewImpl = async () => ({
+    body: closeAuditBody({ workIssue: "#306", verdict: "CLEAN" }),
+    state: "CLOSED",
+    createdAt: "2026-09-05T09:00:00Z",
+  });
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl,
+      ghApiImpl: async () => {
+        apiCalls++;
+        return [];
+      },
+      ghIssueListImpl: async () => {
+        listCalls++;
+        return [];
+      },
+      ghCloseImpl: async () => {
+        closeCalls++;
+      },
+      ghCommentImpl: async () => {
+        commentCalls++;
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "ALREADY_TERMINAL");
+  assert.equal(result.auditIssue, 160);
+  assert.equal(apiCalls, 0, "no evidence evaluation is needed for an already-terminal audit");
+  assert.equal(listCalls, 0, "no supersession search is needed for an already-terminal audit");
+  assert.equal(closeCalls, 0, "must never attempt to close an already-closed issue");
+  assert.equal(commentCalls, 0, "must never post a duplicate explanatory comment");
+});
+
+test("checkCloseAudit: ALREADY_TERMINAL is reported identically with --dry-run true (no mutation impls are even reachable)", async () => {
+  const ghIssueViewImpl = async () => ({ body: closeAuditBody({ verdict: "CLEAN" }), state: "CLOSED", createdAt: "2026-09-05T09:00:00Z" });
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 160, "dry-run": "true" },
+    { ghIssueViewImpl },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "ALREADY_TERMINAL");
+});
+
+// -- Operational errors --------------------------------------------------------------------
+
+test("checkCloseAudit: exits 1 when required args are missing", async () => {
+  const result = await checkCloseAudit({});
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /Missing required args/);
+});
+
+test("checkCloseAudit: exits 1 when gh issue view fails", async () => {
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    { ghIssueViewImpl: async () => { throw new Error("not found"); } },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /gh issue view failed/);
+});
+
+test("checkCloseAudit: a close-call failure is reported as an operational error and never followed by a comment attempt", async () => {
+  let commentCalls = 0;
+  const ghIssueViewImpl = async () => ({
+    body: closeAuditBody({ workIssue: "#306", verdict: "CLEAN" }),
+    state: "OPEN",
+    createdAt: "2026-09-05T00:00:00Z",
+  });
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl,
+      ghApiImpl: withCompletedAuditReport(),
+      ghCloseImpl: async () => {
+        throw new Error("insufficient permission");
+      },
+      ghCommentImpl: async () => {
+        commentCalls++;
+      },
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /gh issue close failed/);
+  assert.equal(commentCalls, 0, "must not attempt the explanatory comment when closing itself failed");
+});
+
+test("checkCloseAudit: a comment-post failure after a successful close still reports the close (never a failed exit), naming the comment failure", async () => {
+  const ghIssueViewImpl = async () => ({
+    body: closeAuditBody({ workIssue: "#306", verdict: "CLEAN" }),
+    state: "OPEN",
+    createdAt: "2026-09-05T00:00:00Z",
+  });
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl,
+      ghApiImpl: withCompletedAuditReport(),
+      ghCloseImpl: async () => {},
+      ghCommentImpl: async () => {
+        throw new Error("transient network error");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0, "the issue is genuinely closed; this must not be reported as a blocked failure");
+  assert.equal(result.state, "CLOSED");
+  assert.equal(result.commentPosted, false);
+  assert.match(result.message, /could not post the durable explanation comment/);
 });
