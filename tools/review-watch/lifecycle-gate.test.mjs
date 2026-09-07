@@ -18,6 +18,7 @@ import {
   checkCloseWorkIssue,
   checkMergeReady,
   checkPostAudit,
+  checkRecordVerdict,
   findClosingKeywordMatch,
   isNoWorkIssueSentinel,
   normalizeIssueNumber,
@@ -31,6 +32,7 @@ import {
   parseVerificationChecklistRef,
   parseWorkIssueRef,
   recoverPrematureClosure,
+  replaceVerdictField,
 } from "./lifecycle-gate.mjs";
 import { triggerCommentBody } from "./trigger.mjs";
 
@@ -615,6 +617,7 @@ test("checkPostAudit: OK — work issue open, verdict PENDING (verification #8)"
     {
       ghIssueViewImpl: async ({ number }) =>
         number === 160 ? { body: auditBody({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: async () => [], // no trigger, no response — genuinely still waiting (issue #439)
     },
   );
   assert.equal(result.exitCode, 0);
@@ -1074,6 +1077,7 @@ test("checkPostAudit: OK — no work issue, verdict PENDING; no implementation i
         issueViewCalls++;
         return number === 160 ? { body: noWorkIssueAuditBody({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" };
       },
+      ghApiImpl: async () => [], // no trigger, no response — genuinely still waiting (issue #439)
     },
   );
   assert.equal(result.exitCode, 0);
@@ -1135,9 +1139,227 @@ test("checkPostAudit: the audit issue and work issue are read as distinct issues
         seenNumbers.push(number);
         return number === 160 ? { body: auditBody({ verdict: "PENDING" }), state: "OPEN" } : { body: "irrelevant", state: "OPEN" };
       },
+      ghApiImpl: async () => [], // no trigger, no response — never touch the real network here
     },
   );
   assert.deepEqual(seenNumbers, [160, 151], "must read the audit issue (160) and the distinct work issue (151) it names");
+});
+
+// -- checkPostAudit: REPORT_READY_TO_RECORD (issue #439, the live #408/#436 gap) -------------
+// A completed report already exists on the thread (of either verdict) but the durable Verdict
+// field is still PENDING/malformed. Must report the new REPORT_READY_TO_RECORD state instead of
+// the generic OK/PENDING fallthrough — never inferred as "no completed response has landed."
+
+test("checkPostAudit: REPORT_READY_TO_RECORD — work issue open, Verdict PENDING, a completed CLEAN report already exists (verification #1)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "REPORT_READY_TO_RECORD", "a completed report must not be mistaken for 'no response yet'");
+  assert.equal(result.rawVerdict, "PENDING");
+  assert.equal(result.workIssue, 151);
+  assert.equal(result.reportEvidence.verdict, "CLEAN");
+});
+
+test("checkPostAudit: REPORT_READY_TO_RECORD — work issue open, Verdict PENDING, a completed NOT CLEAN report already exists (verification #2)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport({ verdict: "NOT CLEAN" }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "REPORT_READY_TO_RECORD");
+  assert.equal(result.reportEvidence.verdict, "NOT CLEAN");
+});
+
+test("checkPostAudit: REPORT_READY_TO_RECORD — malformed/missing Verdict field (parses to null) is treated the same as PENDING", async () => {
+  const body = `### Work issue\n\n#151\n\n### Exact merge commit\n\n${MERGE_COMMIT}\n`; // no "### Verdict" heading at all
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) => (number === 160 ? { body, state: "OPEN" } : { body: "", state: "OPEN" }),
+      ghApiImpl: withCompletedAuditReport(),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "REPORT_READY_TO_RECORD");
+  assert.equal(result.rawVerdict, null);
+});
+
+test("checkPostAudit: REPORT_READY_TO_RECORD — the explicit no-work-issue state also detects unrecorded completed evidence", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async () => ({ body: noWorkIssueAuditBody({ verdict: "PENDING" }), state: "OPEN" }),
+      ghApiImpl: withCompletedAuditReport(),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "REPORT_READY_TO_RECORD");
+  assert.equal(result.workIssue, null);
+});
+
+test("checkPostAudit: PENDING + no response at all stays true NO_ACTION_YET-shaped OK, not REPORT_READY_TO_RECORD (verification #3)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK");
+  assert.equal(result.rawVerdict, "PENDING");
+});
+
+test("checkPostAudit: PENDING + only a kickoff/progress-only response stays OK, not promoted (verification #4)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withKickoffOnly(),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "a kickoff/acknowledgement alone must not authorize promotion");
+  assert.equal(result.rawVerdict, "PENDING");
+});
+
+test("checkPostAudit: PENDING + a completed-looking response addressing the wrong merge commit fails closed, not promoted (verification #5)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport({ commit: "deadbeef00000000000000000000000000000000" }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "a wrong-commit response must never be promoted");
+});
+
+test("checkPostAudit: PENDING + a completed-looking response whose checklist walk-through is shorter than requested fails closed, not promoted (verification #5)", async () => {
+  const requestedChecklist = ["1. Confirm A.", "2. Confirm B.", "3. Confirm C."].join("\n");
+  const truncatedThread = () => {
+    const body = [
+      `CLEAN — Stage 2 audit of the merge commit \`${MERGE_COMMIT}\`.`,
+      "",
+      "### Verification checklist",
+      "",
+      "1. Confirmed A — CONFIRMED",
+      "",
+      "Verdict: CLEAN",
+    ].join("\n");
+    return [
+      { id: 1, body: triggerCommentBody(), created_at: "2026-08-20T00:00:00Z" },
+      { id: 2, user: { login: "chatgpt-codex-connector[bot]" }, body, created_at: "2026-08-20T00:05:00Z" },
+    ];
+  };
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160
+          ? { body: auditBodyWithChecklist({ verdict: "PENDING", checklist: requestedChecklist }), state: "OPEN" }
+          : { body: "", state: "OPEN" },
+      ghApiImpl: async (path) => (path.includes("/issues/") ? truncatedThread() : []),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "an incomplete checklist walk-through must never be promoted");
+});
+
+test("checkPostAudit: a settled NOT CLEAN dropdown is unaffected by this fix — its existing branch is never re-checked for report evidence", async () => {
+  let apiCalls = 0;
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "NOT CLEAN" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: async (path) => {
+        apiCalls++;
+        return path.includes("/issues/") ? completedAuditThread({ verdict: "CLEAN" }) : [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK");
+  assert.equal(result.rawVerdict, "NOT CLEAN");
+  assert.equal(apiCalls, 0, "a settled NOT CLEAN dropdown's existing (unmodified) branch never fetches report evidence at all");
+});
+
+test("checkPostAudit: PREMATURE_CLOSURE still fires unchanged for a closed work issue with an unrecorded PENDING verdict, even when a completed report exists (this fix narrows only the open-work-issue OK fallthrough)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "CLOSED" },
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "PREMATURE_CLOSURE");
+});
+
+// -- checkPostAudit: reproduces the live #436 evidence (issue #439's required fixture) --------
+// Real audit #436's completed comment 5571784678 (frozen into fixtures/issue-436-comment.txt),
+// checklist (fixtures/issue-436-checklist.txt), and Stage 1 review disposition
+// (fixtures/issue-436-review-disposition.txt), replayed against the audit issue body's Verdict
+// field projected back to PENDING — its actual pre-promotion state when this defect was
+// observed (control #408, work issue #407, exact merge commit
+// 8fe3ddc42141d383740dde786da13b79022e1acd).
+
+const ISSUE_436_MERGE_COMMIT = "8fe3ddc42141d383740dde786da13b79022e1acd";
+
+function issue436AuditBody({ verdict = "PENDING" } = {}) {
+  return (
+    `### Work issue\n\n#407\n\n### Exact merge commit\n\n\`${ISSUE_436_MERGE_COMMIT}\`\n\n` +
+    `### Stage 1 inline review disposition\n\n${readFixture("issue-436-review-disposition.txt")}\n\n` +
+    `### Verification checklist\n\n${readFixture("issue-436-checklist.txt")}\n\n` +
+    `### Findings\n\nPending — awaiting Stage 2 audit response.\n\n### Verdict\n\n${verdict}\n`
+  );
+}
+
+function issue436Thread() {
+  return [
+    { id: 1, body: triggerCommentBody(), created_at: "2026-09-07T14:01:34Z" },
+    {
+      id: 2,
+      user: { login: "chatgpt-codex-connector[bot]" },
+      body: readFixture("issue-436-comment.txt"),
+      created_at: "2026-09-07T14:04:07Z",
+    },
+  ];
+}
+
+test("checkPostAudit: reproduces the live #408/#436 regression — a genuinely completed CLEAN report at PENDING resolves to REPORT_READY_TO_RECORD, not NO_ACTION_YET-shaped OK", async () => {
+  const result = await checkPostAudit(
+    { repo: "LouPineWays/Loop-Dee-Loup", "audit-issue": 436 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 436 ? { body: issue436AuditBody({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: async (path) => (path.includes("/issues/") ? issue436Thread() : []),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(
+    result.state,
+    "REPORT_READY_TO_RECORD",
+    "the real #436 completed CLEAN report must be mechanically recognized before durable promotion, never described as absent",
+  );
+  assert.equal(result.workIssue, 407);
+  assert.equal(result.rawVerdict, "PENDING");
+  assert.equal(result.reportEvidence.verdict, "CLEAN");
 });
 
 // -- recoverPrematureClosure ---------------------------------------------------------------
@@ -1197,6 +1419,230 @@ test("parseArgs: reads flags including a hyphenated flag name", () => {
   assert.equal(args.repo, "owner/repo");
   assert.equal(args["audit-issue"], "160");
   assert.equal(args.recover, "true");
+});
+
+// -- replaceVerdictField (issue #439) ----------------------------------------------------
+
+test("replaceVerdictField: replaces the first non-blank line under the LAST matching '### Verdict' heading, the same anchor parseFormField reads", () => {
+  const body = "### Work issue\n\n#151\n\n### Verdict\n\nPENDING\n\n### Next authorized action\n\nPending audit.\n";
+  const updated = replaceVerdictField(body, "CLEAN");
+  assert.equal(parseStage2Verdict(updated), "CLEAN");
+  assert.match(updated, /### Work issue\n\n#151/, "every other field must be preserved verbatim");
+  assert.match(updated, /### Next authorized action\n\nPending audit\./);
+});
+
+test("replaceVerdictField: anchors to the LAST heading, not an earlier quoted example (mirrors parseFormField's own anchor)", () => {
+  const body = ["### Findings", "", "### Verdict", "", "CLEAN", "", "### Verdict", "", "PENDING"].join("\n");
+  const updated = replaceVerdictField(body, "NOT CLEAN");
+  assert.equal(parseStage2Verdict(updated), "NOT CLEAN");
+});
+
+test("replaceVerdictField: returns null when no '### Verdict' heading exists", () => {
+  assert.equal(replaceVerdictField("no verdict field here", "CLEAN"), null);
+});
+
+test("replaceVerdictField: returns null when the heading exists but no non-blank value line follows it", () => {
+  assert.equal(replaceVerdictField("### Verdict\n\n### Next authorized action\n\nNone\n", "CLEAN"), null);
+});
+
+// -- checkRecordVerdict (issue #439) ------------------------------------------------------
+// The deterministic, idempotent, fail-closed-on-conflict promotion command
+// REPORT_READY_TO_RECORD authorizes. Reuses checkPostAudit internally for evidence, then
+// re-reads the audit issue fresh immediately before mutating it.
+
+test("checkRecordVerdict: exits 1 when required args are missing", async () => {
+  const result = await checkRecordVerdict({});
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /Missing required args/);
+});
+
+test("checkRecordVerdict: RECORDED — promotes a completed CLEAN report over a PENDING dropdown, posting one explanatory comment", async () => {
+  const auditBodyPending = auditBodyWithCommit({ verdict: "PENDING" });
+  const editCalls = [];
+  const commentCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyPending, state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async (a) => commentCalls.push(a),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "RECORDED");
+  assert.equal(result.verdict, "CLEAN");
+  assert.equal(editCalls.length, 1);
+  assert.equal(editCalls[0].repo, "owner/repo");
+  assert.equal(editCalls[0].auditIssue, 160);
+  assert.equal(parseStage2Verdict(editCalls[0].body), "CLEAN", "the mutated body must carry the promoted verdict where the parser itself reads it");
+  assert.equal(commentCalls.length, 1);
+  assert.match(commentCalls[0].verdict, /CLEAN/);
+  assert.equal(result.commentPosted, true);
+});
+
+test("checkRecordVerdict: RECORDED — promotes a completed NOT CLEAN report over a PENDING dropdown", async () => {
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport({ verdict: "NOT CLEAN" }),
+      ghEditImpl: async () => {},
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "RECORDED");
+  assert.equal(result.verdict, "NOT CLEAN");
+});
+
+test("checkRecordVerdict: no completed report exists yet — passes checkPostAudit's own OK result through unchanged, no mutation attempted", async () => {
+  const editCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: async () => [],
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "checkPostAudit's own vocabulary is passed through verbatim rather than an invented state");
+  assert.equal(editCalls.length, 0);
+});
+
+test("checkRecordVerdict: idempotent rerun after a prior RECORDED — reaches the existing post-audit transition (READY_TO_CLOSE) without a duplicate mutation (verification #6)", async () => {
+  const editCalls = [];
+  const commentCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      // The durable field is already the settled, evidence-backed CLEAN — as it would be
+      // immediately after a prior successful RECORDED run.
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "CLEAN" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async (a) => commentCalls.push(a),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "READY_TO_CLOSE", "a settled, evidence-backed verdict reaches checkPostAudit's own existing path exactly as if set by hand");
+  assert.equal(editCalls.length, 0, "never a duplicate mutation");
+  assert.equal(commentCalls.length, 0, "never a duplicate comment");
+});
+
+test("checkRecordVerdict: ALREADY_RECORDED — the fresh re-read immediately before mutating already shows the evidence-backed verdict recorded (closes the race window)", async () => {
+  let issueViewCalls = 0;
+  const editCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number !== 160) return { body: "", state: "OPEN" };
+        issueViewCalls++;
+        // First read (inside checkPostAudit) sees PENDING; the second, fresh re-read
+        // (immediately before mutating) sees CLEAN already recorded — simulating a
+        // concurrent recording between the two reads.
+        return { body: auditBodyWithCommit({ verdict: issueViewCalls === 1 ? "PENDING" : "CLEAN" }), state: "OPEN" };
+      },
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "ALREADY_RECORDED");
+  assert.equal(result.verdict, "CLEAN");
+  assert.equal(editCalls.length, 0, "an already-matching durable field must never be re-mutated");
+});
+
+test("checkRecordVerdict: CONFLICTING_VERDICT — the fresh re-read shows a different, already-settled verdict than the evidence found; fails closed, never overwritten (verification #7)", async () => {
+  let issueViewCalls = 0;
+  const editCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number !== 160) return { body: "", state: "OPEN" };
+        issueViewCalls++;
+        // First read sees PENDING (so checkPostAudit finds CLEAN evidence and reports
+        // REPORT_READY_TO_RECORD); the fresh re-read sees NOT CLEAN already recorded by some
+        // other means — a genuine conflict that must never be silently overwritten.
+        return { body: auditBodyWithCommit({ verdict: issueViewCalls === 1 ? "PENDING" : "NOT CLEAN" }), state: "OPEN" };
+      },
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "CONFLICTING_VERDICT");
+  assert.equal(result.recordedVerdict, "NOT CLEAN");
+  assert.equal(result.evidenceVerdict, "CLEAN");
+  assert.equal(editCalls.length, 0, "a conflicting already-recorded verdict must never be silently overwritten");
+  assert.match(result.message, /never silently overwritten/);
+});
+
+test("checkRecordVerdict: a gh issue edit failure is a plain operational error, not a fabricated RECORDED", async () => {
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditImpl: async () => {
+        throw new Error("insufficient permission");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /gh issue edit failed/);
+});
+
+test("checkRecordVerdict: a comment-post failure after a successful edit still reports RECORDED, naming the comment error", async () => {
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditImpl: async () => {},
+      ghCommentImpl: async () => {
+        throw new Error("transient network error");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0, "the field is genuinely recorded; this must not be reported as a blocked failure");
+  assert.equal(result.state, "RECORDED");
+  assert.equal(result.commentPosted, false);
+  assert.match(result.message, /could not post the durable explanation comment/);
+});
+
+// -- checkRecordVerdict: reproduces the live #436 evidence end to end -----------------------
+
+test("checkRecordVerdict: promotes the real #436 completed CLEAN report over its actual pre-promotion PENDING state", async () => {
+  const editCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "LouPineWays/Loop-Dee-Loup", "audit-issue": 436 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 436 ? { body: issue436AuditBody({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: async (path) => (path.includes("/issues/") ? issue436Thread() : []),
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "RECORDED");
+  assert.equal(result.verdict, "CLEAN");
+  assert.equal(editCalls.length, 1);
+  assert.equal(parseStage2Verdict(editCalls[0].body), "CLEAN");
+  assert.equal(parseWorkIssueRef(editCalls[0].body), 407, "every other field, including Work issue, must survive the mutation unchanged");
 });
 
 // -- checkCloseAudit (issue #407) --------------------------------------------------------

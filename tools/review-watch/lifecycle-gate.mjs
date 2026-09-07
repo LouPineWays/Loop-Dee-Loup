@@ -102,17 +102,65 @@
 //                  and closes first, then posts one explanatory comment naming the backing Stage
 //                  2 audit issue (same close-then-comment ordering as `close-audit`).
 //
+//   record-verdict — issue #439's fix for a distinct lifecycle-seam gap the live #408/#436
+//                  cycle exposed after PR #435 merged: Codex posted one fully completed Stage 2
+//                  report (comment 5571784678, exact merge commit
+//                  8fe3ddc42141d383740dde786da13b79022e1acd), but the audit issue's own durable
+//                  `Verdict` field still read `PENDING` — nobody/nothing had promoted it yet —
+//                  and `checkPostAudit` (before this fix) only ever fetched report evidence
+//                  when the dropdown already said `CLEAN`, so a still-`PENDING` dropdown fell
+//                  straight to the generic `OK`/`rawVerdict: "PENDING"` result, indistinguishable
+//                  from true "nobody has responded yet." The composed
+//                  `next-review-transition-gate.mjs` then reported `NO_ACTION_YET`, and the
+//                  controlling session described a fully completed report as "no genuine
+//                  completed response has landed yet." `checkPostAudit` now also fetches report
+//                  evidence (via the same `findStage2ReportEvidence`, never a second parser)
+//                  whenever the durable `Verdict` field is `PENDING` or missing/malformed, and
+//                  reports the new `REPORT_READY_TO_RECORD` state — carrying the audit issue
+//                  number, current `rawVerdict`, and the evidence found (for either verdict,
+//                  `CLEAN` or `NOT CLEAN`) — instead of falling through to generic `OK`. This
+//                  narrows the fix to exactly that gap: a settled `CLEAN`/`NOT CLEAN` dropdown
+//                  still resolves through its own existing (unmodified) branches, and a closed
+//                  work issue with no backing evidence still reports `PREMATURE_CLOSURE`
+//                  unchanged — `REPORT_READY_TO_RECORD` only replaces the generic-`OK` fallthrough
+//                  for an *open* work issue (or the no-work-issue state) whose verdict is not yet
+//                  recorded.
+//
+//                  `record-verdict` is the deterministic promotion command `REPORT_READY_TO_RECORD`
+//                  authorizes: it reuses `checkPostAudit` internally (never re-adjudicating finding
+//                  substance) to find the evidence, then re-reads the audit issue fresh
+//                  immediately before mutating it — closing the race window between that read and
+//                  the evidence check, and giving genuine meaning to its own idempotent-rerun
+//                  states. `RECORDED` (the durable `Verdict` field, previously `PENDING`/malformed,
+//                  is now set to the evidence-backed verdict, plus one explanatory comment naming
+//                  the backing evidence — never a rewritten copy of the report's own finding
+//                  content, per issue #439's Shared Contract); `ALREADY_RECORDED` (the fresh
+//                  re-read already shows the evidence-backed verdict recorded — a safe no-op,
+//                  never a duplicate mutation or comment); `CONFLICTING_VERDICT` (exit 2 — the
+//                  fresh re-read shows a *different*, already-settled verdict than the evidence
+//                  found; never silently overwritten, mirroring `PREMATURE_CLOSURE`'s fail-closed
+//                  refusal). When `checkPostAudit` itself does not report `REPORT_READY_TO_RECORD`
+//                  (no completed report exists yet, or the field is already a settled value its
+//                  own existing branches already evaluated), `record-verdict` passes that result
+//                  through verbatim rather than inventing a state this file's vocabulary already
+//                  covers — this is also what makes a rerun *after* a successful `RECORDED`
+//                  idempotent: the now-settled verdict reaches checkPostAudit's own existing
+//                  `READY_TO_CLOSE`/`ACCEPTED_NO_WORK_ISSUE`/`OK` path exactly as if a human had
+//                  set the field by hand.
+//
 // Usage:
 //   node tools/review-watch/lifecycle-gate.mjs merge-ready --repo OWNER/REPO --pr 50 --issue 151
 //   node tools/review-watch/lifecycle-gate.mjs merge-ready --repo OWNER/REPO --pr 50 --issue none
 //   node tools/review-watch/lifecycle-gate.mjs post-audit --repo OWNER/REPO --audit-issue 160 [--recover true]
+//   node tools/review-watch/lifecycle-gate.mjs record-verdict --repo OWNER/REPO --audit-issue 160
 //   node tools/review-watch/lifecycle-gate.mjs close-audit --repo OWNER/REPO --audit-issue 160 [--dry-run true]
 //   node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo OWNER/REPO --work-issue 151 --audit-issue 160
 //
 // Exit codes: 0 = MERGE_READY / MERGE_READY_NO_WORK_ISSUE / OK / READY_TO_CLOSE /
-// ALREADY_TERMINAL / CLOSE_READY / CLOSED / SUPERSEDED_CLOSE_READY / SUPERSEDED_CLOSED /
-// NOT_TERMINAL_YET (safe to proceed), 2 = BLOCKED_CLOSING_REFERENCE / PREMATURE_CLOSURE (must
-// not merge / must not treat as accepted), 1 = operational error.
+// REPORT_READY_TO_RECORD / RECORDED / ALREADY_RECORDED / ALREADY_TERMINAL / CLOSE_READY / CLOSED /
+// SUPERSEDED_CLOSE_READY / SUPERSEDED_CLOSED / NOT_TERMINAL_YET (safe to proceed),
+// 2 = BLOCKED_CLOSING_REFERENCE / PREMATURE_CLOSURE / CONFLICTING_VERDICT (must not merge / must
+// not treat as accepted / must not silently overwrite), 1 = operational error.
 //
 // Tests: node --test tools/review-watch/lifecycle-gate.test.mjs
 
@@ -673,6 +721,38 @@ export async function checkPostAudit(
         message: `gh api call failed while verifying the CLEAN verdict on ${repo}#${auditIssue}: ${err.message}`,
       };
     }
+
+    // Issue #439: about to fall through to generic OK — the durable Verdict field is not a
+    // settled CLEAN (evaluated.verdict !== "CLEAN"; a settled NOT CLEAN keeps its existing,
+    // unmodified OK result below). Before reporting that, check whether a completed report
+    // already exists for a still-PENDING/malformed field — the live #408/#436 gap, where a
+    // fully completed CLEAN report sat unrecorded while this branch reported plain OK and a
+    // controller concluded "no completed response has landed."
+    if (evaluated.verdict !== "CLEAN" && (rawVerdict === "PENDING" || rawVerdict === null)) {
+      let reportEvidence;
+      try {
+        reportEvidence = await findStage2ReportEvidence(
+          { repo, auditIssue, bot, mergeCommit, requestedChecklist, reviewedHeadCommit },
+          ghApiImpl,
+        );
+      } catch (err) {
+        return {
+          exitCode: 1,
+          message: `gh api call failed while checking for completed Stage 2 report evidence on ${repo}#${auditIssue}: ${err.message}`,
+        };
+      }
+      if (reportEvidence.backed) {
+        return {
+          exitCode: 0,
+          state: "REPORT_READY_TO_RECORD",
+          workIssue: null,
+          auditIssue: Number(auditIssue),
+          rawVerdict,
+          reportEvidence,
+        };
+      }
+    }
+
     return {
       exitCode: 0,
       state: evaluated.verdict === "CLEAN" ? "ACCEPTED_NO_WORK_ISSUE" : "OK",
@@ -768,6 +848,41 @@ export async function checkPostAudit(
     };
   }
 
+  // Issue #439: reached only when neither PREMATURE_CLOSURE nor READY_TO_CLOSE fired above —
+  // i.e. the work issue is still open and `verdict` is not the settled CLEAN a completed report
+  // already backed (rawVerdict === "CLEAN" only reaches this point when unbacked, in which case
+  // `reportEvidence` is already set above and this is a genuine non-completed-report case, not
+  // silently re-checked a second way). Narrowly re-checks only the PENDING/malformed case — a
+  // settled NOT CLEAN keeps falling through to the unmodified generic OK below unchanged, per
+  // the Shared Contract's "existing (unmodified) branches" instruction — for the same
+  // live #408/#436 gap the no-work-issue branch above closes: a completed report may already
+  // exist on the thread even though the durable field was never fetched for it, because
+  // rawVerdict !== "CLEAN" never triggered the block above.
+  if (!isClosed && reportEvidence === null && (rawVerdict === "PENDING" || rawVerdict === null)) {
+    let pendingReportEvidence;
+    try {
+      pendingReportEvidence = await findStage2ReportEvidence(
+        { repo, auditIssue, bot, mergeCommit, requestedChecklist, reviewedHeadCommit },
+        ghApiImpl,
+      );
+    } catch (err) {
+      return {
+        exitCode: 1,
+        message: `gh api call failed while checking for completed Stage 2 report evidence on ${repo}#${auditIssue}: ${err.message}`,
+      };
+    }
+    if (pendingReportEvidence.backed) {
+      return {
+        exitCode: 0,
+        state: "REPORT_READY_TO_RECORD",
+        workIssue: workIssueNumber,
+        auditIssue: Number(auditIssue),
+        rawVerdict,
+        reportEvidence: pendingReportEvidence,
+      };
+    }
+  }
+
   return {
     exitCode: 0,
     state: "OK",
@@ -777,6 +892,187 @@ export async function checkPostAudit(
     rawVerdict,
     workIssueState: workIssueData.state,
     ...(reportEvidence ? { reportEvidence } : {}),
+  };
+}
+
+// Pure. Replaces the audit-control-issue template's rendered "### Verdict" dropdown value in
+// `body` with `newVerdict` ("CLEAN" or "NOT CLEAN"). Anchors to the LAST matching "### Verdict"
+// heading and rewrites only the first non-blank line beneath it — the exact same anchor and
+// value line parseFormField/parseStage2Verdict themselves read (deliberately duplicating that
+// anchor logic narrowly rather than sharing a combined read/write helper, so this stays a small,
+// auditable diff against the existing read path): if the mutation ever wrote a different line
+// than the parser reads, the two would silently disagree and every downstream consumer of
+// parseStage2Verdict would see a value record-verdict never actually wrote. Returns null when no
+// "### Verdict" heading, or no non-blank value line beneath it, is found — checkRecordVerdict
+// then fails closed as an operational error rather than guessing where to write.
+export function replaceVerdictField(body, newVerdict) {
+  const lines = (body ?? "").split("\n");
+  const heading = "### Verdict";
+  let headingIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim() === heading) {
+      headingIdx = i;
+      break;
+    }
+  }
+  if (headingIdx === -1) return null;
+  for (let i = headingIdx + 1; i < lines.length; i++) {
+    if (lines[i].trim().startsWith("### ")) break;
+    if (lines[i].trim() === "") continue;
+    lines[i] = newVerdict;
+    return lines.join("\n");
+  }
+  return null;
+}
+
+// Pure. Builds the explanatory comment posted on a real `RECORDED` run — names the recorded
+// verdict and the backing evidence comment so a fresh reader never has to re-derive why the
+// durable Verdict field changed. Deliberately never restates or summarizes the report's own
+// finding content (issue #439's Shared Contract: "never a rewritten or summarized copy of the
+// report's actual finding content") — only the mechanically-established evidence pointer
+// (verdict + matched comment permalink), the same "post one explanatory comment naming the
+// backing evidence" convention close-audit/close-work-issue already use above.
+function recordedVerdictComment({ repo, auditIssue, verdict, reportEvidence }) {
+  const evidenceRef = reportEvidence?.matchedCommentUrl ?? `this issue's own comment thread (audit issue ${repo}#${auditIssue})`;
+  return (
+    `Recorded by \`tools/review-watch/lifecycle-gate.mjs record-verdict\`: this audit issue's durable \`Verdict\` ` +
+    `field is now set to ${verdict}, backed by a completed Stage 2 audit report (${evidenceRef}). Per ` +
+    `docs/bounded-review-cycle.md, this promotion never adjudicates finding substance — it only promotes the ` +
+    `report's own already-established structural evidence (merge-commit identity, an explicit verdict, and a ` +
+    `complete verification-checklist walk-through) into this issue's durable state (issue #439).`
+  );
+}
+
+// Deterministic, idempotent, fail-closed-on-conflict verdict-promotion command (issue #439): the
+// mechanism `REPORT_READY_TO_RECORD` (checkPostAudit above) authorizes. Reuses checkPostAudit
+// internally — never a second evidence parser, never re-adjudicating finding substance — to
+// decide whether a completed report already backs a not-yet-recorded verdict, then re-reads the
+// audit issue fresh immediately before mutating it: this closes the race window between the
+// evidence check and the mutation, and is what gives ALREADY_RECORDED/CONFLICTING_VERDICT their
+// own genuine meaning below rather than merely restating checkPostAudit's already-stale read.
+// `ghIssueViewImpl`, `ghApiImpl`, `ghEditImpl`, and `ghCommentImpl` are all injected so tests can
+// drive this end-to-end without touching the real network or `gh` CLI.
+export async function checkRecordVerdict(
+  args,
+  {
+    ghIssueViewImpl = defaultGhIssueView,
+    ghApiImpl = defaultGhApi,
+    ghEditImpl = defaultGhEditAuditVerdict,
+    ghCommentImpl = defaultGhRecordVerdictComment,
+    bot = DEFAULT_BOT,
+    checkPostAuditImpl = checkPostAudit,
+  } = {},
+) {
+  const { repo, "audit-issue": auditIssue } = args;
+  if (!repo || !auditIssue) {
+    return { exitCode: 1, message: "Missing required args: --repo and --audit-issue are both required." };
+  }
+
+  let postAudit;
+  try {
+    postAudit = await checkPostAuditImpl(args, { ghIssueViewImpl, ghApiImpl, bot });
+  } catch (err) {
+    return { exitCode: 1, message: `checkPostAudit threw while evaluating ${repo}#${auditIssue}: ${err.message}` };
+  }
+
+  if (postAudit.exitCode === 1) {
+    // Not this command's own operational error — pass checkPostAudit's message through
+    // unchanged rather than wrapping it, so a caller sees the actual underlying failure.
+    return postAudit;
+  }
+
+  if (postAudit.state !== "REPORT_READY_TO_RECORD") {
+    // Nothing to promote: either no completed report exists yet (checkPostAudit's own existing
+    // OK/PENDING result), or the durable field is already a settled value checkPostAudit's own
+    // existing (unmodified) branches already evaluated on their own terms — a settled CLEAN
+    // backed by evidence reaches READY_TO_CLOSE/ACCEPTED_NO_WORK_ISSUE; a settled CLEAN not
+    // backed, a settled NOT CLEAN, or a PREMATURE_CLOSURE all reach their own existing states.
+    // Passed through verbatim — this is also what makes a rerun *after* a successful RECORDED
+    // idempotent (Shared Contract verification #6): the now-settled verdict reaches
+    // checkPostAudit's own existing path exactly as if a human had set the field by hand, never
+    // inventing a state this file's vocabulary already covers.
+    return postAudit;
+  }
+
+  // REPORT_READY_TO_RECORD: checkPostAudit's own precondition for this state already establishes
+  // that its read of the durable Verdict field was PENDING/malformed and that reportEvidence
+  // backs exactly one verdict (CLEAN or NOT CLEAN). Re-read the audit issue fresh — never trust
+  // the value checkPostAudit read a moment ago for the mutation decision itself.
+  let auditIssueData;
+  try {
+    auditIssueData = await ghIssueViewImpl({ repo, number: auditIssue });
+  } catch (err) {
+    return { exitCode: 1, message: `gh issue view failed for ${repo}#${auditIssue}: ${err.message}` };
+  }
+  const currentRawVerdict = parseStage2Verdict(auditIssueData.body ?? "");
+  const evidenceVerdict = postAudit.reportEvidence.verdict;
+
+  if (currentRawVerdict === evidenceVerdict) {
+    return {
+      exitCode: 0,
+      state: "ALREADY_RECORDED",
+      auditIssue: postAudit.auditIssue,
+      verdict: currentRawVerdict,
+      reportEvidence: postAudit.reportEvidence,
+    };
+  }
+
+  if (currentRawVerdict !== "PENDING" && currentRawVerdict !== null) {
+    return {
+      exitCode: 2,
+      state: "CONFLICTING_VERDICT",
+      auditIssue: postAudit.auditIssue,
+      recordedVerdict: currentRawVerdict,
+      evidenceVerdict,
+      reportEvidence: postAudit.reportEvidence,
+      message:
+        `Refusing to record ${repo}#${auditIssue}'s evidence-backed verdict (${evidenceVerdict}, backed by ` +
+        `${postAudit.reportEvidence.matchedCommentUrl ?? "this issue's own comment thread"}) over its already-` +
+        `recorded, conflicting durable Verdict field (${currentRawVerdict}). This is never silently overwritten; ` +
+        `resolve the conflict by hand.`,
+    };
+  }
+
+  const newBody = replaceVerdictField(auditIssueData.body ?? "", evidenceVerdict);
+  if (newBody === null) {
+    return {
+      exitCode: 1,
+      message: `Could not find a "### Verdict" field to update in audit issue ${repo}#${auditIssue}'s body.`,
+    };
+  }
+
+  try {
+    await ghEditImpl({ repo, auditIssue, body: newBody });
+  } catch (err) {
+    return { exitCode: 1, message: `gh issue edit failed for ${repo}#${auditIssue}: ${err.message}` };
+  }
+
+  let commentPosted = true;
+  let commentError = null;
+  try {
+    await ghCommentImpl({ repo, auditIssue, verdict: evidenceVerdict, reportEvidence: postAudit.reportEvidence });
+  } catch (err) {
+    commentPosted = false;
+    commentError = err.message;
+  }
+
+  return {
+    exitCode: 0,
+    state: "RECORDED",
+    auditIssue: postAudit.auditIssue,
+    verdict: evidenceVerdict,
+    reportEvidence: postAudit.reportEvidence,
+    commentPosted,
+    ...(commentError
+      ? {
+          commentError,
+          message:
+            `Recorded ${repo}#${auditIssue}'s Verdict field as ${evidenceVerdict}, but could not post the ` +
+            `durable explanation comment: ${commentError}. The field is recorded; a follow-up should post the ` +
+            `explanation by hand (rerunning record-verdict will not retry this step on its own, since the issue ` +
+            `now reads as a settled verdict, not REPORT_READY_TO_RECORD).`,
+        }
+      : {}),
   };
 }
 
@@ -1224,6 +1520,24 @@ function defaultGhIssueList({ repo }) {
   return pages.flatMap((page) => normalizeSearchIssuesPage(page));
 }
 
+// `--body-file -` (stdin) rather than `--body <text>`: the rewritten issue body is the audit
+// issue's own full multi-field body text, which can exceed a shell's argv length limit and,
+// unlike `--body`, is never subject to the argv-escaping risk of passing arbitrary Markdown
+// (backticks, `#N` references, etc.) as a single execFileSync argument. `execFileSync`'s
+// `input` option pipes it via stdin directly, with no shell involved.
+function defaultGhEditAuditVerdict({ repo, auditIssue, body }) {
+  execFileSync("gh", ["issue", "edit", String(auditIssue), "--repo", repo, "--body-file", "-"], {
+    encoding: "utf8",
+    input: body,
+    maxBuffer: 20 * 1024 * 1024,
+  });
+}
+
+function defaultGhRecordVerdictComment({ repo, auditIssue, verdict, reportEvidence }) {
+  const body = recordedVerdictComment({ repo, auditIssue, verdict, reportEvidence });
+  execFileSync("gh", ["issue", "comment", String(auditIssue), "--repo", repo, "--body", body], { encoding: "utf8" });
+}
+
 function defaultGhCloseAuditIssue({ repo, auditIssue }) {
   execFileSync("gh", ["issue", "close", String(auditIssue), "--repo", repo], { encoding: "utf8" });
 }
@@ -1277,6 +1591,18 @@ async function main() {
     return;
   }
 
+  if (subcommand === "record-verdict") {
+    const result = await checkRecordVerdict(args);
+    if (result.exitCode === 1) {
+      console.error(result.message);
+      process.exit(1);
+      return;
+    }
+    console.log(JSON.stringify(result));
+    process.exit(result.exitCode);
+    return;
+  }
+
   if (subcommand === "close-audit") {
     const result = await checkCloseAudit(args);
     if (result.exitCode === 1) {
@@ -1302,7 +1628,7 @@ async function main() {
   }
 
   console.error(
-    `Unknown subcommand: ${subcommand ?? "(none)"}. Use "merge-ready", "post-audit", "close-audit", or "close-work-issue".`,
+    `Unknown subcommand: ${subcommand ?? "(none)"}. Use "merge-ready", "post-audit", "record-verdict", "close-audit", or "close-work-issue".`,
   );
   process.exit(1);
 }

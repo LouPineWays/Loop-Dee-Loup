@@ -355,6 +355,34 @@ test("resolvePostMergeVerdict: OK with verdict CLEAN but workIssueState still OP
   assert.equal(v.state, "NO_ACTION_YET");
 });
 
+// -- REPORT_READY_TO_RECORD -> STAGE2_REPORT_READY_TO_RECORD (issue #439, the live #408/#436
+// gap) -----------------------------------------------------------------------------------------
+
+test("resolvePostMergeVerdict: REPORT_READY_TO_RECORD -> STAGE2_REPORT_READY_TO_RECORD, carrying the exact record-verdict nextCommand", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("REPORT_READY_TO_RECORD", { rawVerdict: "PENDING", reportEvidence: { verdict: "CLEAN" } }) },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 436 },
+  );
+  assert.equal(v.state, "STAGE2_REPORT_READY_TO_RECORD");
+  assert.equal(v.stopAfter, true);
+  assert.equal(
+    v.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs record-verdict --repo LouPineWays/Loop-Dee-Loup --audit-issue 436",
+  );
+});
+
+test("resolvePostMergeVerdict: REPORT_READY_TO_RECORD with a NOT CLEAN-backed report also maps to STAGE2_REPORT_READY_TO_RECORD (promotion is verdict-agnostic; correction routing happens after a fresh gate re-run)", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("REPORT_READY_TO_RECORD", { rawVerdict: null, reportEvidence: { verdict: "NOT CLEAN" } }) },
+    { repo: "owner/repo", auditIssue: 160 },
+  );
+  assert.equal(v.state, "STAGE2_REPORT_READY_TO_RECORD");
+  assert.equal(
+    v.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs record-verdict --repo owner/repo --audit-issue 160",
+  );
+});
+
 test("resolvePostMergeVerdict: PREMATURE_CLOSURE -> AMBIGUOUS (a recoverable-but-abnormal state this read-only gate does not resolve on its own)", () => {
   const v = resolvePostMergeVerdict({ postAudit: postAudit("PREMATURE_CLOSURE", { verdict: null, rawVerdict: null }) });
   assert.equal(v.state, "AMBIGUOUS");
@@ -433,6 +461,22 @@ test("runNextReviewTransitionGate: direct --audit-issue mode resolves without an
   assert.equal(issueReadCalls, 0);
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "STAGE2_CLOSE_READY");
+});
+
+test("runNextReviewTransitionGate: direct --audit-issue mode resolves REPORT_READY_TO_RECORD to STAGE2_REPORT_READY_TO_RECORD, exit 0, with the exact record-verdict nextCommand (issue #439)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", auditIssue: "436" },
+    {
+      checkPostAuditImpl: async (args) => {
+        assert.equal(args["audit-issue"], "436");
+        return { exitCode: 0, state: "REPORT_READY_TO_RECORD", rawVerdict: "PENDING", reportEvidence: { verdict: "CLEAN" } };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_REPORT_READY_TO_RECORD");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.nextCommand, "node tools/review-watch/lifecycle-gate.mjs record-verdict --repo o/r --audit-issue 436");
 });
 
 test("runNextReviewTransitionGate: --audit-issue takes precedence over --control-issue when both are given", async () => {
