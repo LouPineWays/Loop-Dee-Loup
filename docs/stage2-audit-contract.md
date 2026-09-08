@@ -86,19 +86,49 @@ Verdict: CLEAN
 
 ### NOT CLEAN
 
-Same skeleton, with two differences:
+Copy this skeleton exactly, the same way as CLEAN above. It differs from the CLEAN skeleton in
+**three** places, not two — do not copy CLEAN's all-zero severity table into a NOT CLEAN report:
 
+- the severity table's counts reflect your actual findings, not all zero;
 - `## Findings` contains one entry per root cause (deduplicated), each with exact evidence
   (file/line, command output, or quoted text), consequence, and smallest correction;
-- the final line is exactly:
+- the final line is exactly `Verdict: NOT CLEAN`.
 
-```text
+```markdown
+# Stage 2 Audit Report
+
+Exact merge commit: `<full-sha>`
+
+## Severity
+
+| Severity | Count |
+| --- | ---: |
+| P0 | 0 |
+| P1 | 1 |
+| P2 | 0 |
+| P3 | 0 |
+
+## Findings
+
+1. **<root cause>** — <exact evidence: file/line, command output, or quoted text>. Consequence:
+   <what breaks>. Smallest correction: <what to change>.
+
+## Verification
+
+1. PASS — <check 1 result>
+2. FAIL — <check 2 result>
+...
+
+## Founder judgment
+
+Not required.
+
 Verdict: NOT CLEAN
 ```
 
-The `Verdict:` label line is the canonical, parser-safe verdict declaration. Use it verbatim —
-`Verdict:` at the start of its own line, followed by exactly `CLEAN` or `NOT CLEAN` — as the last
-line of your response.
+The `Verdict:` label line is the canonical, parser-safe verdict declaration in both skeletons. Use
+it verbatim — `Verdict:` at the start of its own line, followed by exactly `CLEAN` or `NOT CLEAN`
+— as the last line of your response.
 
 Number every `## Verification` item to match the audit Issue's own `Verification checklist`
 field, in the same order (see § 4). State a result for every item — `PASS`, `FAIL`, or `BLOCKED`

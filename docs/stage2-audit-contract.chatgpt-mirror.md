@@ -65,17 +65,48 @@ Verdict: CLEAN
 
 ### NOT CLEAN
 
-Same skeleton, with `## Findings` containing one entry per root cause (evidence, consequence,
-smallest correction) and the final line exactly:
+Copy this skeleton exactly, the same way as CLEAN above. It differs from CLEAN in **three**
+places, not two — do not copy CLEAN's all-zero severity table into a NOT CLEAN report: the
+severity table's counts reflect actual findings, `## Findings` contains one entry per root cause
+(evidence, consequence, smallest correction), and the final line is exactly `Verdict: NOT CLEAN`.
 
-```text
+```markdown
+# Stage 2 Audit Report
+
+Exact merge commit: `<full-sha>`
+
+## Severity
+
+| Severity | Count |
+| --- | ---: |
+| P0 | 0 |
+| P1 | 1 |
+| P2 | 0 |
+| P3 | 0 |
+
+## Findings
+
+1. **<root cause>** — <exact evidence: file/line, command output, or quoted text>. Consequence:
+   <what breaks>. Smallest correction: <what to change>.
+
+## Verification
+
+1. PASS — <check 1 result>
+2. FAIL — <check 2 result>
+...
+
+## Founder judgment
+
+Not required.
+
 Verdict: NOT CLEAN
 ```
 
 The `Verdict:` label line — `Verdict:` at the start of its own line, followed by exactly `CLEAN`
-or `NOT CLEAN` — is the canonical, parser-safe verdict declaration. Every `## Verification` item
-must be numbered to match the audit Issue's own `Verification checklist` field, in the same
-order, with an explicit result (`PASS`/`FAIL`/`BLOCKED` or equivalent) for every item.
+or `NOT CLEAN` — is the canonical, parser-safe verdict declaration in both skeletons. Every
+`## Verification` item must be numbered to match the audit Issue's own `Verification checklist`
+field, in the same order, with an explicit result (`PASS`/`FAIL`/`BLOCKED` or equivalent) for
+every item.
 
 ## Verdict semantics
 
@@ -118,7 +149,11 @@ When constructing an `audit-control-issue` in GitHub from this project, supply:
   trigger only on `pull_request`.
 
 Leave `Findings` as `Pending — awaiting Stage 2 audit response.` and `Verdict` as `PENDING` at
-creation — the audit response fills those in per the canonical skeleton above.
+creation. The auditor's response (posted per the canonical skeleton above) supplies Stage 2 report
+evidence only — it is a comment, not an Issue-field edit. The auditor does not edit the audit
+Issue's durable lifecycle fields; the controlling repository session later promotes `Verdict` from
+that response using repository-authorized tooling. `Findings` can remain `Pending` — current
+lifecycle tooling promotes only `Verdict` deterministically.
 
 ## Mirror-refresh obligation
 

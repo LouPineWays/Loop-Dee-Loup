@@ -67,6 +67,7 @@ export const MANAGED_ITEMS = [
   { kind: "file", src: "docs/bounded-review-cycle.md", dest: "docs/bounded-review-cycle.md" },
   { kind: "file", src: "docs/decision-forms.md", dest: "docs/decision-forms.md" },
   { kind: "file", src: "docs/consumer-contract.md", dest: "docs/consumer-contract.md" },
+  { kind: "file", src: "docs/stage2-audit-contract.md", dest: "docs/stage2-audit-contract.md" },
   { kind: "dir", src: ".github/ISSUE_TEMPLATE", dest: ".github/ISSUE_TEMPLATE" },
 ];
 
