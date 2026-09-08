@@ -668,6 +668,34 @@ test("run: installs .github/ISSUE_TEMPLATE content required by the installed bou
   assert.ok(manifest.files.some((f) => f.dest.startsWith(".github/ISSUE_TEMPLATE/")));
 });
 
+// Regression guard for a Stage 1 finding on PR #449 (issue #427): docs/stage2-audit-contract.md
+// is the canonical Stage 2 response-contract authority that .github/ISSUE_TEMPLATE/
+// audit-control-issue.yml and docs/bounded-review-cycle.md both point auditors at by path. Before
+// this fix, MANAGED_ITEMS installed both referencing files but not the contract doc itself, so a
+// consumer's audit Issue and lifecycle docs sent a fresh Stage 2 auditor to a local file that
+// never existed in that repository. Installs this repository's REAL content (not a fixture, whose
+// placeholder text would never contain the reference strings this test looks for) into a
+// disposable consumer-shaped dest, the same way the spend-skill regression test above does, and
+// proves the contract doc lands in the same run as every real file that references it by path —
+// so the reference resolves locally in an actual consumer checkout.
+test("run: installs docs/stage2-audit-contract.md alongside every installed file that references it by path", async (t) => {
+  const dest = tempDir(t);
+
+  const result = await run({ dest, root: REPO_ROOT }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  assert.ok(existsSync(join(dest, "docs", "stage2-audit-contract.md")), "docs/stage2-audit-contract.md must be installed");
+  const manifest = readManifest(dest);
+  assert.ok(manifest.files.some((f) => f.dest === "docs/stage2-audit-contract.md"));
+
+  const referencingDests = [join(dest, "docs", "bounded-review-cycle.md"), join(dest, ".github", "ISSUE_TEMPLATE", "audit-control-issue.yml")];
+  for (const referencingDest of referencingDests) {
+    assert.ok(existsSync(referencingDest), `${referencingDest} must be installed`);
+    const content = readFileSync(referencingDest, "utf8");
+    assert.ok(content.includes("docs/stage2-audit-contract.md"), `${referencingDest} must reference docs/stage2-audit-contract.md`);
+  }
+});
+
 test("run: removes a superseded .ldl/AGENTS.template.md once the consumer's own AGENTS.md is gone and LDL starts managing AGENTS.md directly", async (t) => {
   const root = makeFixtureRoot(t);
   const dest = tempDir(t);
