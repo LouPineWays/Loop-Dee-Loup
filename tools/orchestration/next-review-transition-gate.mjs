@@ -180,7 +180,12 @@ function parseAffirmativeStage1Disposition(raw) {
   return { state: match[1].toLowerCase(), sha: match[2].toLowerCase() };
 }
 
-function stage1DispositionMatchesHead(disposition, head) {
+// Exported so tools/review-watch/stage1-correction-gate.mjs (unit 454-B under #454's own
+// Shared Contract) can reuse this exact case-insensitive prefix comparison for its own
+// "correction-satisfied" disposition shape's head check, rather than re-implementing head
+// comparison a second way. `disposition` only needs a `.sha` field — callers outside this
+// module's own `parseAffirmativeStage1Disposition` may pass any object shaped that way.
+export function stage1DispositionMatchesHead(disposition, head) {
   if (!disposition || typeof head !== "string" || !head.trim()) return false;
   return head.toLowerCase().startsWith(disposition.sha);
 }
