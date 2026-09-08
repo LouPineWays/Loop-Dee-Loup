@@ -66,6 +66,16 @@ The opposite failure mode is just as real and easier to miss: a `gh pr merge` in
 
 Multiple comments produced by one invocation are one round. Fix commits are not another round. A second invocation is another round and is prohibited by default — mechanically enforced by `trigger.mjs`'s cross-head check described in step 3 above, not prose alone.
 
+### Correction-satisfied disposition (step 7's one-round policy, applied to a corrected head)
+
+Step 7's one-round policy is unchanged: a consolidated correction pass (steps 4-6) never triggers a second `@codex review` invocation on the same PR. A corrected head can still reach deterministic Stage 1 satisfaction without a second Codex round. Immediately after committing the consolidated fix — the same point step 6 already expects the control Issue's `Stage 1` field to be updated — the session performing that correction records a distinct disposition bullet on the control Issue:
+
+```
+- **Stage 1:** correction-satisfied at <corrected-head-sha> (reviewed <reviewed-head-sha>)
+```
+
+`<corrected-head-sha>` is the post-correction PR head; `<reviewed-head-sha>` is the frozen head Stage 1 actually reviewed (step 2's frozen head). Writing this bullet does not itself grant merge authority. `tools/orchestration/next-review-transition-gate.mjs` — via `tools/review-watch/stage1-correction-gate.mjs` — independently re-derives the evidence rather than trusting the bullet's prose: it confirms `<reviewed-head-sha>` carried a genuine, findings-bearing Stage 1 response; confirms `<corrected-head-sha>` is a strict, non-diverged descendant of `<reviewed-head-sha>` with real intervening commits (`gh api repos/<owner>/<repo>/compare/<reviewed-head>...<corrected-head>` reporting `status: "ahead"`); and confirms `<corrected-head-sha>` matches the head currently being gated. Only when every check passes does the gate return `STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2`, which authorizes merge and Stage 2 the same way `STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2` already does. A malformed or unverifiable bullet, or one whose corrected head does not match the head being gated, never authorizes a merge on its own — it fails closed to `AMBIGUOUS` (or falls through to `NO_ACTION_YET` when the disposition plainly does not apply to the head being gated), never silently to "satisfied."
+
 Once Stage 1 has been requested, the PR body is the durable checkpoint. Make it self-sufficient, run `spend` first if the completed session is worth measuring, and clear or hand off rather than keeping an implementation-heavy session alive through review latency. Use PR event delivery when available; do not pair it with long fallback timers that merely preserve context. When no PR event delivery is available and a disposable worker must poll instead, use `node tools/review-watch/poll.mjs --repo <owner/repo> --kind pr --number <pr> --since <trigger-time>` rather than a hand-rolled loop, for the same early-exit-on-match reason given in Stage 2 step 6.
 
 ## Stage 2: one post-merge issue audit
