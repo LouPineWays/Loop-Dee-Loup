@@ -2,7 +2,7 @@
 
 **Canonical source:** `docs/stage2-audit-contract.md` in `LouPineWays/Loop-Dee-Loup` (GitHub).
 
-**Mirrored revision:** `0ac6bbb37ec2f1913cd19741b1f1ba4b8f04c1ab` — the Loop-Dee-Loup commit that
+**Mirrored revision:** `53738381cb45ba004239347c155fcf6bbd0aeeb9` — the Loop-Dee-Loup commit that
 introduced this content. If this snapshot and the live repository file ever disagree, **the
 repository file wins**. This file is a versioned reference snapshot for the founder's
 **Loop-Dee-Loup Idea Intake** ChatGPT project, not an independently maintained specification.
