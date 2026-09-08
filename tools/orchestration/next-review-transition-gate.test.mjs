@@ -256,7 +256,7 @@ test("resolvePreMergeVerdict: carries the given context through on every verdict
 // -- resolvePostMergeVerdict -----------------------------------------------------------------
 
 function postAudit(state, overrides = {}) {
-  return { exitCode: state === "PREMATURE_CLOSURE" ? 2 : 0, state, ...overrides };
+  return { exitCode: state === "PREMATURE_CLOSURE" || state === "RESPONSE_UNUSABLE" ? 2 : 0, state, ...overrides };
 }
 
 test("resolvePostMergeVerdict: READY_TO_CLOSE -> STAGE2_CLOSE_READY", () => {
@@ -383,6 +383,34 @@ test("resolvePostMergeVerdict: REPORT_READY_TO_RECORD with a NOT CLEAN-backed re
   );
 });
 
+// -- RESPONSE_UNUSABLE -> STAGE2_RESPONSE_UNUSABLE (issue #447, live reproductions #446 and
+// #380's first round) -------------------------------------------------------------------------
+
+test("resolvePostMergeVerdict: RESPONSE_UNUSABLE -> STAGE2_RESPONSE_UNUSABLE, a distinct fail-closed stop, never ordinary NO_ACTION_YET and never generic AMBIGUOUS", () => {
+  const v = resolvePostMergeVerdict(
+    {
+      postAudit: postAudit("RESPONSE_UNUSABLE", {
+        rawVerdict: "PENDING",
+        workIssue: 439,
+        reportEvidence: { backed: false, hasGenuineResponse: true, genuineResponsesSeen: 1 },
+      }),
+    },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 446 },
+  );
+  assert.equal(v.state, "STAGE2_RESPONSE_UNUSABLE");
+  assert.equal(v.stopAfter, true);
+  assert.equal(v.postAudit.reportEvidence.hasGenuineResponse, true, "the exact genuine-response evidence must reach the composed verdict, not be summarized away");
+});
+
+test("resolvePostMergeVerdict: RESPONSE_UNUSABLE carries no nextCommand — it authorizes a bounded recovery/founder-interrupt stop, never an automatic mutation", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("RESPONSE_UNUSABLE", { rawVerdict: "PENDING", workIssue: 374 }) },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 380 },
+  );
+  assert.equal(v.state, "STAGE2_RESPONSE_UNUSABLE");
+  assert.equal("nextCommand" in v, false, "unlike STAGE2_CLOSE_READY/STAGE2_REPORT_READY_TO_RECORD, this state must never carry an automatic next mutation");
+});
+
 test("resolvePostMergeVerdict: PREMATURE_CLOSURE -> AMBIGUOUS (a recoverable-but-abnormal state this read-only gate does not resolve on its own)", () => {
   const v = resolvePostMergeVerdict({ postAudit: postAudit("PREMATURE_CLOSURE", { verdict: null, rawVerdict: null }) });
   assert.equal(v.state, "AMBIGUOUS");
@@ -477,6 +505,27 @@ test("runNextReviewTransitionGate: direct --audit-issue mode resolves REPORT_REA
   assert.equal(result.state, "STAGE2_REPORT_READY_TO_RECORD");
   assert.equal(result.stopAfter, true);
   assert.equal(result.nextCommand, "node tools/review-watch/lifecycle-gate.mjs record-verdict --repo o/r --audit-issue 436");
+});
+
+test("runNextReviewTransitionGate: direct --audit-issue mode resolves RESPONSE_UNUSABLE to STAGE2_RESPONSE_UNUSABLE, exit 4, a distinct fail-closed stop (issue #447)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: "446" },
+    {
+      checkPostAuditImpl: async (args) => {
+        assert.equal(args["audit-issue"], "446");
+        return {
+          exitCode: 2,
+          state: "RESPONSE_UNUSABLE",
+          rawVerdict: "PENDING",
+          workIssue: 439,
+          reportEvidence: { backed: false, hasGenuineResponse: true, genuineResponsesSeen: 1 },
+        };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "STAGE2_RESPONSE_UNUSABLE");
+  assert.equal(result.stopAfter, true);
 });
 
 test("runNextReviewTransitionGate: --audit-issue takes precedence over --control-issue when both are given", async () => {

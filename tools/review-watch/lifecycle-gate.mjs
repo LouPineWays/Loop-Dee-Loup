@@ -162,18 +162,85 @@
 //   node tools/review-watch/lifecycle-gate.mjs close-audit --repo OWNER/REPO --audit-issue 160 [--dry-run true]
 //   node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo OWNER/REPO --work-issue 151 --audit-issue 160
 //
+//   post-audit RESPONSE_UNUSABLE — issue #447 (live reproductions #446 and #380's first round):
+//                  a genuine, provenance-valid `chatgpt-codex-connector[bot]` response has landed
+//                  post-trigger, but none of the genuine bot response(s) on the thread satisfy
+//                  isCompletedStage2AuditReport's completed-report contract (missing/wrong commit,
+//                  no explicit verdict, or no verification-results content) — durable Verdict stays
+//                  PENDING/malformed. Before this fix, `checkPostAudit` only ever distinguished
+//                  "a completed report exists" (REPORT_READY_TO_RECORD) from "not yet" (generic
+//                  OK/PENDING), so a genuinely landed-but-unusable response was silently
+//                  indistinguishable from true "still waiting for the reviewer" — the composed
+//                  `next-review-transition-gate.mjs` then reported ordinary `NO_ACTION_YET`, and a
+//                  controller could poll indefinitely or conclude "no response has landed" even
+//                  though one had (#446: a genuine terse `chatgpt-codex-connector[bot]` CLEAN reply
+//                  landed alongside an unrelated detailed non-bot report under `LouPineWays`
+//                  provenance, which is correctly never treated as assurance evidence — only bot-
+//                  authored comments are ever candidates at all, findAllMatches' own login filter).
+//                  `findStage2ReportEvidence` now classifies every candidate bot comment as
+//                  genuine (genuine-response.mjs's `isGenuineResponse`, the same classifier
+//                  isCompletedStage2AuditReport already requires internally) or not, and reports
+//                  `hasGenuineResponse`/`genuineResponsesSeen`/`genuineResponses` alongside its
+//                  existing `backed`/`responsesSeen`.
+//
+//                  Stage 1 review finding on this PR's first revision (accepted): a genuine
+//                  response that satisfies *none* of the three completed-report signals at all —
+//                  the exact issue #229 kickoff shape, "Starting #178." plus a task link, which
+//                  genuine-response.mjs correctly classifies as genuine but which never mentions a
+//                  commit, a verdict, or any verification content — was being reported as
+//                  RESPONSE_UNUSABLE too, turning an ordinary Stage 2 kickoff/progress
+//                  acknowledgement into a founder interrupt. `isGenuineResponse` itself is
+//                  deliberately left unchanged (stage2-report.mjs's own module comment already
+//                  documents why "Starting #N." must stay genuine for Stage 1's shared meaning);
+//                  the narrower distinction lives here instead, scoped to Stage 2's own evidence
+//                  contract. `findStage2ReportEvidence` now additionally computes, per genuine
+//                  candidate, whether it is *progress-only* — none of the three signals
+//                  (bodyReferencesCommit, extractResponseVerdict, hasVerificationEvidence, the same
+//                  primitives isCompletedStage2AuditReport itself checks) present at all — and
+//                  reports the narrower `hasUnusableGenuineResponse` (true only when at least one
+//                  genuine response is *substantive*: it shows at least one report signal, just not
+//                  a complete set) alongside the unchanged, honestly-named `hasGenuineResponse`
+//                  (true whenever *any* genuine response landed, progress-only or not).
+//                  `checkPostAudit` reports `RESPONSE_UNUSABLE` — instead of falling through to the
+//                  generic OK/PENDING result — exactly when `hasUnusableGenuineResponse: true` but
+//                  none is complete (`backed: false`), scoped to the same PENDING/malformed-Verdict
+//                  precondition REPORT_READY_TO_RECORD already uses (a settled CLEAN/NOT CLEAN
+//                  dropdown keeps its own existing, unmodified branches unchanged). A pure kickoff
+//                  (only progress-only genuine responses, or none at all) now falls through to the
+//                  ordinary OK/PENDING result exactly as if no response had landed — the bounded
+//                  Stage 2 follow-up (poll.mjs --since) stays open to observe a later report, per
+//                  the existing #229/#230 acknowledgement-tolerance contract. This never accepts a
+//                  structurally complete-looking non-bot report as assurance (it is never even a
+//                  candidate), never automatically retriggers or coaches the reviewer (issue #259's
+//                  anti-coaching authority — this only reports a state, it performs no mutation),
+//                  and never weakens #439/#440's own completed-report-promotion path: a later
+//                  genuine, complete bot response on the same thread is still found and still
+//                  promotes normally the next time this gate runs (no genuine substantive response
+//                  landed yet, by contrast, still reports the true-wait generic OK/PENDING result
+//                  unchanged — see `resolvePostMergeVerdict` in next-review-transition-gate.mjs for
+//                  the composed `STAGE2_RESPONSE_UNUSABLE` fail-closed transition this state
+//                  authorizes).
+//
 // Exit codes: 0 = MERGE_READY / MERGE_READY_NO_WORK_ISSUE / OK / READY_TO_CLOSE /
 // REPORT_READY_TO_RECORD / RECORDED / ALREADY_RECORDED / ALREADY_TERMINAL / CLOSE_READY / CLOSED /
 // SUPERSEDED_CLOSE_READY / SUPERSEDED_CLOSED / NOT_TERMINAL_YET (safe to proceed),
-// 2 = BLOCKED_CLOSING_REFERENCE / PREMATURE_CLOSURE / CONFLICTING_VERDICT (must not merge / must
-// not treat as accepted / must not silently overwrite), 1 = operational error.
+// 2 = BLOCKED_CLOSING_REFERENCE / PREMATURE_CLOSURE / CONFLICTING_VERDICT / RESPONSE_UNUSABLE
+// (must not merge / must not treat as accepted / must not silently overwrite / must not be
+// treated as ordinary waiting — a genuine response landed and needs a bounded recovery decision),
+// 1 = operational error.
 //
 // Tests: node --test tools/review-watch/lifecycle-gate.test.mjs
 
 import { execFileSync } from "node:child_process";
 import { endpointsFor, findAllMatches } from "./poll.mjs";
 import { findExistingTrigger, findCommentById } from "./trigger.mjs";
-import { isCompletedStage2AuditReport } from "./stage2-report.mjs";
+import {
+  isCompletedStage2AuditReport,
+  bodyReferencesCommit,
+  extractResponseVerdict,
+  hasVerificationEvidence,
+} from "./stage2-report.mjs";
+import { isGenuineResponse } from "./genuine-response.mjs";
 
 const DEFAULT_BOT = "chatgpt-codex-connector[bot]";
 
@@ -582,15 +649,44 @@ async function findStage2ReportEvidence(
   const comments = await ghApiImpl(commentsPath);
   const trigger = findExistingTrigger(comments, {});
   if (!trigger) {
-    return { backed: false, verdict: null, responsesSeen: 0, reason: "no @codex review trigger found on the audit issue thread" };
+    return {
+      backed: false,
+      verdict: null,
+      responsesSeen: 0,
+      hasGenuineResponse: false,
+      hasUnusableGenuineResponse: false,
+      genuineResponsesSeen: 0,
+      genuineResponses: [],
+      reason: "no @codex review trigger found on the audit issue thread",
+    };
   }
 
   const sinceMs = new Date(trigger.created_at).getTime();
   const candidates = findAllMatches(comments, { bot, sinceMs, endpointName: "issue-comments" });
   const cutoffMs = legacyCutoff ? new Date(legacyCutoff).getTime() : null;
+  // issue #447: `genuine` is computed independently of `strict`/`relaxed` completeness below —
+  // isCompletedStage2AuditReport already requires isGenuineResponse internally as its own
+  // precondition (a BLOCKED/refused/setup-prompt reply can never be "complete"), but this module
+  // needs the genuine/non-genuine distinction on its own, regardless of completeness, to tell "no
+  // genuine response has landed at all" (state A — ordinary waiting) apart from "a genuine
+  // response landed but isn't a completed report" (state C — RESPONSE_UNUSABLE below). Evaluated
+  // once against the full comment body, the same text isCompletedStage2AuditReport itself checks.
   const reports = candidates.map((match) => {
     const full = findCommentById(comments, match.id);
     const body = full?.body ?? "";
+    const genuine = isGenuineResponse(body);
+    // issue #447 Stage 1 correction: a genuine response satisfying *none* of the three
+    // completed-report signals — no commit reference, no explicit verdict, no verification-
+    // results content — is a progress-only acknowledgement (the #229 "Starting #178." kickoff
+    // shape), not a substantive-but-incomplete report. Computed directly from the same three pure
+    // primitives isCompletedStage2AuditReport itself checks, independent of the strict/relaxed
+    // completeness branch below and of `requestedChecklist` (a checklist-count shortfall is a
+    // substantive-but-truncated report, never progress-only).
+    const progressOnly =
+      genuine &&
+      !bodyReferencesCommit(body, mergeCommit) &&
+      extractResponseVerdict(body) === null &&
+      !hasVerificationEvidence(body);
     const strict = isCompletedStage2AuditReport(body, {
       mergeCommit,
       requireVerificationEvidence: true,
@@ -599,18 +695,28 @@ async function findStage2ReportEvidence(
     });
     const isPreCutoff = cutoffMs !== null && new Date(match.created_at).getTime() < cutoffMs;
     if (strict.complete || !isPreCutoff) {
-      return { id: match.id, url: match.url, legacyCompatible: false, ...strict };
+      return { id: match.id, url: match.url, legacyCompatible: false, genuine, progressOnly, ...strict };
     }
     const relaxed = isCompletedStage2AuditReport(body, { mergeCommit, requireVerificationEvidence: false, reviewedHeadCommit });
-    return { id: match.id, url: match.url, legacyCompatible: relaxed.complete, ...relaxed };
+    return { id: match.id, url: match.url, legacyCompatible: relaxed.complete, genuine, progressOnly, ...relaxed };
   });
 
   const completed = reports.filter((r) => r.complete);
+  const genuineReports = reports.filter((r) => r.genuine);
+  // issue #447 Stage 1 correction: only a *substantive* genuine response (at least one
+  // completed-report signal present, just not a complete set) makes RESPONSE_UNUSABLE apply — a
+  // thread carrying only progress-only genuine responses (or none at all) must stay ordinary
+  // waiting, per the #229 regression fixture the founder's correction direction required.
+  const substantiveGenuineReports = genuineReports.filter((r) => !r.progressOnly);
   if (completed.length === 0) {
     return {
       backed: false,
       verdict: null,
       responsesSeen: reports.length,
+      hasGenuineResponse: genuineReports.length > 0,
+      hasUnusableGenuineResponse: substantiveGenuineReports.length > 0,
+      genuineResponsesSeen: genuineReports.length,
+      genuineResponses: substantiveGenuineReports.map((r) => ({ id: r.id, url: r.url, reasons: r.reasons })),
       reason:
         reports.length === 0
           ? "no post-trigger bot response found on the audit issue thread"
@@ -624,6 +730,8 @@ async function findStage2ReportEvidence(
     backed: true,
     verdict: latest.verdict,
     responsesSeen: reports.length,
+    hasGenuineResponse: true,
+    genuineResponsesSeen: genuineReports.length,
     matchedCommentUrl: latest.url,
     legacyCompatible: latest.legacyCompatible,
   };
@@ -757,6 +865,30 @@ export async function checkPostAudit(
           reportEvidence,
         };
       }
+      // Issue #447 (Stage 1 correction): a *substantive* genuine bot response has landed
+      // (hasUnusableGenuineResponse) but none is a completed report (backed: false) — this is
+      // state C, not state A (true "still waiting"). A progress-only response alone (the #229
+      // kickoff shape; hasGenuineResponse true but hasUnusableGenuineResponse false) does not
+      // reach here — it falls through to the ordinary OK/PENDING result below, exactly like no
+      // response at all, so a kickoff/progress acknowledgement never becomes a founder interrupt.
+      // Reporting generic OK for a *substantive* unusable response would be indistinguishable from
+      // no response having landed at all, letting a controller poll indefinitely or claim "nothing
+      // has landed yet" for a response that already did (the #446/#380 reproductions).
+      if (reportEvidence.hasUnusableGenuineResponse) {
+        return {
+          exitCode: 2,
+          state: "RESPONSE_UNUSABLE",
+          workIssue: null,
+          auditIssue: Number(auditIssue),
+          rawVerdict,
+          reportEvidence,
+          message:
+            `Audit issue ${repo}#${auditIssue} has a genuine post-trigger response from ${bot}, but it is not a ` +
+            `completed Stage 2 audit report under the current evidence contract (${reportEvidence.reason}). This ` +
+            `must not be treated as ordinary waiting, and it must not automatically retrigger or coach the ` +
+            `reviewer (issue #259). A bounded recovery/founder-interrupt decision is required.`,
+        };
+      }
     }
 
     return {
@@ -885,6 +1017,27 @@ export async function checkPostAudit(
         auditIssue: Number(auditIssue),
         rawVerdict,
         reportEvidence: pendingReportEvidence,
+      };
+    }
+    // Issue #447 (Stage 1 correction): same state-C distinction as the no-work-issue branch above
+    // — a *substantive* genuine bot response landed but none is a completed report; a progress-
+    // only response alone (hasUnusableGenuineResponse false) falls through to ordinary OK/PENDING
+    // below instead, unchanged from true waiting. The work issue stays open either way (no
+    // PREMATURE_CLOSURE risk here, since isClosed is false in this branch), but the caller must
+    // not read a substantive unusable response as ordinary waiting.
+    if (pendingReportEvidence.hasUnusableGenuineResponse) {
+      return {
+        exitCode: 2,
+        state: "RESPONSE_UNUSABLE",
+        workIssue: workIssueNumber,
+        auditIssue: Number(auditIssue),
+        rawVerdict,
+        reportEvidence: pendingReportEvidence,
+        message:
+          `Audit issue ${repo}#${auditIssue} has a genuine post-trigger response from ${bot}, but it is not a ` +
+          `completed Stage 2 audit report under the current evidence contract (${pendingReportEvidence.reason}). ` +
+          `This must not be treated as ordinary waiting, and it must not automatically retrigger or coach the ` +
+          `reviewer (issue #259). A bounded recovery/founder-interrupt decision is required.`,
       };
     }
   }

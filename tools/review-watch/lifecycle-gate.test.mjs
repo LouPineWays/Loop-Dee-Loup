@@ -86,6 +86,28 @@ function kickoffOnlyThread({ triggerTime = "2026-08-20T00:00:00Z", responseTime 
   ];
 }
 
+// A genuine response that is *substantive but incomplete* — unlike kickoffOnlyThread above, it
+// states an explicit verdict and references the merge commit (two of the three completed-report
+// signals), but shows no verification-results content — the same shape as the real #446/#380
+// terse bot replies. Used for tests that need RESPONSE_UNUSABLE to still apply once a genuine
+// response is more than a bare progress/kickoff acknowledgement (issue #447's Stage 1 correction:
+// the founder-required distinction between "progress-only" and "substantive but unusable").
+function substantiveIncompleteThread({
+  triggerTime = "2026-08-20T00:00:00Z",
+  responseTime = "2026-08-20T00:00:42Z",
+  commit = MERGE_COMMIT,
+} = {}) {
+  return [
+    { id: 1, body: triggerCommentBody(), created_at: triggerTime },
+    {
+      id: 2,
+      user: { login: "chatgpt-codex-connector[bot]" },
+      body: `CLEAN — audited merge commit \`${commit}\`; no actionable findings. Next: None.`,
+      created_at: responseTime,
+    },
+  ];
+}
+
 function auditBodyWithCommit({ workIssue = 151, verdict = "PENDING", commit = MERGE_COMMIT }) {
   return `### Work issue\n\n#${workIssue}\n\n### Exact merge commit\n\n${commit}\n\n### Verdict\n\n${verdict}\n`;
 }
@@ -549,6 +571,13 @@ function withCompletedAuditReport(opts) {
 // response, but not a completed audit report — for the audit issue's issue-comments endpoint.
 function withKickoffOnly() {
   return async (path) => (path.includes("/issues/") ? kickoffOnlyThread() : []);
+}
+
+// A ghApiImpl that returns only the substantive-but-incomplete reply above — a genuine response
+// that shows at least one completed-report signal, just not a complete set — for the audit
+// issue's issue-comments endpoint.
+function withSubstantiveIncomplete() {
+  return async (path) => (path.includes("/issues/") ? substantiveIncompleteThread() : []);
 }
 
 // A response that otherwise looks like a completed Stage 2 audit report (issue #230's evidence
@@ -1221,7 +1250,7 @@ test("checkPostAudit: PENDING + no response at all stays true NO_ACTION_YET-shap
   assert.equal(result.rawVerdict, "PENDING");
 });
 
-test("checkPostAudit: PENDING + only a kickoff/progress-only response stays OK, not promoted (verification #4)", async () => {
+test("checkPostAudit: PENDING + only the exact #229 kickoff/progress-only response stays ordinary waiting, not RESPONSE_UNUSABLE (issue #447 Stage 1 correction; founder-required regression)", async () => {
   const result = await checkPostAudit(
     { repo: "owner/repo", "audit-issue": 160 },
     {
@@ -1231,11 +1260,61 @@ test("checkPostAudit: PENDING + only a kickoff/progress-only response stays OK, 
     },
   );
   assert.equal(result.exitCode, 0);
-  assert.equal(result.state, "OK", "a kickoff/acknowledgement alone must not authorize promotion");
+  assert.equal(
+    result.state,
+    "OK",
+    "a bare kickoff/progress acknowledgement (the #229 shape) must remain ordinary waiting so the bounded follow-up stays open, not a founder interrupt",
+  );
   assert.equal(result.rawVerdict, "PENDING");
 });
 
-test("checkPostAudit: PENDING + a completed-looking response addressing the wrong merge commit fails closed, not promoted (verification #5)", async () => {
+test("checkPostAudit: RESPONSE_UNUSABLE — PENDING + a genuine substantive-but-incomplete response is not promoted, and is no longer mistaken for ordinary waiting (issue #447; verification #4/#5)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withSubstantiveIncomplete(),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(
+    result.state,
+    "RESPONSE_UNUSABLE",
+    "a genuine response that states a verdict and cites the commit but shows no verification content must not authorize promotion, and must not be reported as ordinary waiting either (issue #447)",
+  );
+  assert.equal(result.rawVerdict, "PENDING");
+  assert.equal(result.reportEvidence.hasGenuineResponse, true);
+  assert.equal(result.reportEvidence.hasUnusableGenuineResponse, true);
+  assert.equal(result.reportEvidence.backed, false);
+});
+
+test("checkPostAudit: RESPONSE_UNUSABLE — a #229-shaped kickoff followed by a later genuine, non-progress, substantive-but-incomplete reply still resolves RESPONSE_UNUSABLE (issue #447 Stage 1 correction; founder-required regression)", async () => {
+  const ghApiImpl = async (path) => {
+    if (!path.includes("/issues/")) return [];
+    const [trigger, kickoffResponse] = kickoffOnlyThread();
+    const [, substantiveResponse] = substantiveIncompleteThread({ responseTime: "2026-08-20T00:05:00Z" });
+    return [trigger, kickoffResponse, { ...substantiveResponse, id: 3 }];
+  };
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl,
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(
+    result.state,
+    "RESPONSE_UNUSABLE",
+    "a progress-only kickoff followed by a genuine substantive-but-incomplete reply must still resolve RESPONSE_UNUSABLE — progress-only tolerance never masks a real unusable response later on the same thread",
+  );
+  assert.equal(result.reportEvidence.genuineResponsesSeen, 2, "both the kickoff and the substantive reply are genuine candidates");
+  assert.equal(result.reportEvidence.hasUnusableGenuineResponse, true);
+});
+
+test("checkPostAudit: RESPONSE_UNUSABLE — PENDING + a completed-looking response addressing the wrong merge commit is not promoted, and is no longer mistaken for ordinary waiting (issue #447; verification #5)", async () => {
   const result = await checkPostAudit(
     { repo: "owner/repo", "audit-issue": 160 },
     {
@@ -1244,11 +1323,12 @@ test("checkPostAudit: PENDING + a completed-looking response addressing the wron
       ghApiImpl: withCompletedAuditReport({ commit: "deadbeef00000000000000000000000000000000" }),
     },
   );
-  assert.equal(result.exitCode, 0);
-  assert.equal(result.state, "OK", "a wrong-commit response must never be promoted");
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "RESPONSE_UNUSABLE", "a wrong-commit response must never be promoted, but must still surface as a distinct unusable-response state");
+  assert.equal(result.reportEvidence.hasGenuineResponse, true);
 });
 
-test("checkPostAudit: PENDING + a completed-looking response whose checklist walk-through is shorter than requested fails closed, not promoted (verification #5)", async () => {
+test("checkPostAudit: RESPONSE_UNUSABLE — PENDING + a completed-looking response whose checklist walk-through is shorter than requested is not promoted, and is no longer mistaken for ordinary waiting (issue #447; verification #5)", async () => {
   const requestedChecklist = ["1. Confirm A.", "2. Confirm B.", "3. Confirm C."].join("\n");
   const truncatedThread = () => {
     const body = [
@@ -1275,8 +1355,9 @@ test("checkPostAudit: PENDING + a completed-looking response whose checklist wal
       ghApiImpl: async (path) => (path.includes("/issues/") ? truncatedThread() : []),
     },
   );
-  assert.equal(result.exitCode, 0);
-  assert.equal(result.state, "OK", "an incomplete checklist walk-through must never be promoted");
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "RESPONSE_UNUSABLE", "an incomplete checklist walk-through must never be promoted, but must still surface as a distinct unusable-response state");
+  assert.equal(result.workIssue, 151);
 });
 
 test("checkPostAudit: a settled NOT CLEAN dropdown is unaffected by this fix — its existing branch is never re-checked for report evidence", async () => {
@@ -1359,6 +1440,204 @@ test("checkPostAudit: reproduces the live #408/#436 regression — a genuinely c
   );
   assert.equal(result.workIssue, 407);
   assert.equal(result.rawVerdict, "PENDING");
+  assert.equal(result.reportEvidence.verdict, "CLEAN");
+});
+
+// -- checkPostAudit: RESPONSE_UNUSABLE (issue #447) -----------------------------------------
+// State C: a genuine, provenance-valid bot response has landed post-trigger, but none of the
+// genuine bot response(s) on the thread is a completed Stage 2 audit report — distinct from
+// state A (no genuine response at all, ordinary NO_ACTION_YET-shaped OK, unchanged) and state B
+// (a completed report exists, REPORT_READY_TO_RECORD, unchanged). Must not be reported as
+// ordinary waiting, must never accept a structurally complete-looking non-bot report as
+// assurance, and must never itself retrigger or mutate anything.
+
+const ISSUE_446_MERGE_COMMIT = "816646bc0183fbd4035b71cde57c9955de52648c";
+
+function issue446AuditBody({ verdict = "PENDING" } = {}) {
+  return `### Work issue\n\n#439\n\n### Exact merge commit\n\n\`${ISSUE_446_MERGE_COMMIT}\`\n\n### Verdict\n\n${verdict}\n`;
+}
+
+// Real live #446 thread (2026-09-08): the trigger, a detailed structurally-complete-looking
+// report posted under non-bot `LouPineWays` provenance (never a candidate at all — only
+// bot-authored comments are ever considered), and the actual genuine
+// `chatgpt-codex-connector[bot]` reply, which is too terse (no verification-results content) to
+// satisfy the completed-report contract.
+function issue446Thread() {
+  return [
+    { id: 1, body: triggerCommentBody(), created_at: "2026-09-08T10:54:09Z" },
+    { id: 2, user: { login: "LouPineWays" }, body: readFixture("issue-446-nonbot-report.txt"), created_at: "2026-09-08T10:56:48Z" },
+    {
+      id: 3,
+      user: { login: "chatgpt-codex-connector[bot]" },
+      body: readFixture("issue-446-comment.txt"),
+      created_at: "2026-09-08T10:57:07Z",
+    },
+  ];
+}
+
+test("checkPostAudit: reproduces live #446 — a genuine terse bot CLEAN reply alongside a detailed non-bot report resolves to RESPONSE_UNUSABLE, never accepting the non-bot report as assurance", async () => {
+  const result = await checkPostAudit(
+    { repo: "LouPineWays/Loop-Dee-Loup", "audit-issue": 446 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 446 ? { body: issue446AuditBody({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: async (path) => (path.includes("/issues/") ? issue446Thread() : []),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(
+    result.state,
+    "RESPONSE_UNUSABLE",
+    "the real #446 terse genuine bot reply must not be reported as ordinary NO_ACTION_YET-shaped waiting",
+  );
+  assert.equal(result.workIssue, 439);
+  assert.equal(result.rawVerdict, "PENDING");
+  assert.equal(result.reportEvidence.backed, false, "the non-bot LouPineWays report must never back a CLEAN closure");
+  assert.equal(result.reportEvidence.hasGenuineResponse, true);
+  assert.equal(
+    result.reportEvidence.hasUnusableGenuineResponse,
+    true,
+    "the terse CLEAN reply states a verdict and cites the commit — it is substantive, not a bare kickoff, so it still triggers RESPONSE_UNUSABLE",
+  );
+  assert.equal(result.reportEvidence.genuineResponsesSeen, 1, "the LouPineWays comment is never even a candidate — only the bot reply is");
+});
+
+const ISSUE_380_MERGE_COMMIT = "3947b0e03be816a483d8cc7117241f86f13b081c";
+
+function issue380AuditBody({ verdict = "PENDING" } = {}) {
+  return `### Work issue\n\n#374\n\n### Exact merge commit\n\n${ISSUE_380_MERGE_COMMIT}\n\n### Verdict\n\n${verdict}\n`;
+}
+
+// Real live #380 first round (2026-09-04, before the re-trigger that produced its eventual
+// complete round-2 report): same split-provenance shape as #446 — a detailed non-bot report
+// followed by a genuine bot reply that is complete-looking (references the merge commit, states
+// an explicit verdict) but shows no verification-results content, so it fails the completed-
+// report contract's third signal.
+function issue380Round1Thread() {
+  return [
+    { id: 1, body: triggerCommentBody(), created_at: "2026-09-04T14:17:12Z" },
+    { id: 2, user: { login: "LouPineWays" }, body: "Stage 2 audit report — detailed non-bot findings.", created_at: "2026-09-04T14:19:20Z" },
+    {
+      id: 3,
+      user: { login: "chatgpt-codex-connector[bot]" },
+      body: readFixture("issue-380-round1-comment.txt"),
+      created_at: "2026-09-04T14:19:56Z",
+    },
+  ];
+}
+
+test("checkPostAudit: reproduces live #380's first round — the same split-provenance/incomplete-response classification as #446 applies without special-casing issue numbers", async () => {
+  const result = await checkPostAudit(
+    { repo: "LouPineWays/Loop-Dee-Loup", "audit-issue": 380 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 380 ? { body: issue380AuditBody({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: async (path) => (path.includes("/issues/") ? issue380Round1Thread() : []),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "RESPONSE_UNUSABLE");
+  assert.equal(result.workIssue, 374);
+  assert.equal(result.reportEvidence.hasGenuineResponse, true);
+  assert.equal(result.reportEvidence.hasUnusableGenuineResponse, true);
+  assert.equal(result.reportEvidence.backed, false);
+});
+
+test("checkPostAudit: the explicit no-work-issue state stays ordinary waiting for a bare #229 kickoff, not RESPONSE_UNUSABLE (issue #447 Stage 1 correction)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async () => ({ body: noWorkIssueAuditBody({ verdict: "PENDING" }), state: "OPEN" }),
+      ghApiImpl: withKickoffOnly(),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK");
+  assert.equal(result.workIssue, null);
+});
+
+test("checkPostAudit: RESPONSE_UNUSABLE — the explicit no-work-issue state also distinguishes a genuine substantive-but-unusable response from true waiting", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async () => ({ body: noWorkIssueAuditBody({ verdict: "PENDING" }), state: "OPEN" }),
+      ghApiImpl: withSubstantiveIncomplete(),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "RESPONSE_UNUSABLE");
+  assert.equal(result.workIssue, null);
+  assert.equal(result.reportEvidence.hasGenuineResponse, true);
+  assert.equal(result.reportEvidence.hasUnusableGenuineResponse, true);
+});
+
+test("checkPostAudit: a non-genuine-only response (BLOCKED) stays true state-A waiting, never RESPONSE_UNUSABLE", async () => {
+  const blockedOnlyThread = () => [
+    { id: 1, body: triggerCommentBody(), created_at: "2026-08-20T00:00:00Z" },
+    {
+      id: 2,
+      user: { login: "chatgpt-codex-connector[bot]" },
+      body: "BLOCKED — sandboxed environment cannot reach the merge commit.",
+      created_at: "2026-08-20T00:00:30Z",
+    },
+  ];
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: async (path) => (path.includes("/issues/") ? blockedOnlyThread() : []),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "a BLOCKED-only reply is not a genuine response, so this remains true waiting (issue #259's retry authority), not RESPONSE_UNUSABLE");
+  assert.equal(result.rawVerdict, "PENDING");
+});
+
+test("checkPostAudit: idempotent — re-evaluating RESPONSE_UNUSABLE against unchanged durable evidence reports the same state with no mutation performed", async () => {
+  const ghApiImpl = withSubstantiveIncomplete();
+  const ghIssueViewImpl = async ({ number }) =>
+    number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" };
+  const first = await checkPostAudit({ repo: "owner/repo", "audit-issue": 160 }, { ghIssueViewImpl, ghApiImpl });
+  const second = await checkPostAudit({ repo: "owner/repo", "audit-issue": 160 }, { ghIssueViewImpl, ghApiImpl });
+  assert.equal(first.state, "RESPONSE_UNUSABLE");
+  assert.equal(second.state, "RESPONSE_UNUSABLE");
+  assert.deepEqual(first.reportEvidence, second.reportEvidence, "unchanged durable evidence must resolve to the same result every time");
+});
+
+test("checkPostAudit: idempotent — re-evaluating a bare #229 kickoff against unchanged durable evidence stays ordinary waiting every time, no mutation, retrigger, or poll side effect", async () => {
+  const ghApiImpl = withKickoffOnly();
+  const ghIssueViewImpl = async ({ number }) =>
+    number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" };
+  const first = await checkPostAudit({ repo: "owner/repo", "audit-issue": 160 }, { ghIssueViewImpl, ghApiImpl });
+  const second = await checkPostAudit({ repo: "owner/repo", "audit-issue": 160 }, { ghIssueViewImpl, ghApiImpl });
+  assert.equal(first.state, "OK");
+  assert.equal(second.state, "OK");
+  assert.equal(first.rawVerdict, "PENDING");
+  assert.equal(second.rawVerdict, "PENDING");
+});
+
+test("checkPostAudit: late recovery — once a genuine complete bot report lands after the unusable one, the very next evaluation reports REPORT_READY_TO_RECORD instead", async () => {
+  const withLateCompleteReport = async (path) => {
+    if (!path.includes("/issues/")) return [];
+    const [trigger, kickoffResponse] = kickoffOnlyThread();
+    const [, completeResponse] = completedAuditThread({ responseTime: "2026-08-20T00:10:00Z", commit: MERGE_COMMIT });
+    return [trigger, kickoffResponse, { ...completeResponse, id: 3 }];
+  };
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withLateCompleteReport,
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(
+    result.state,
+    "REPORT_READY_TO_RECORD",
+    "recovery from RESPONSE_UNUSABLE resumes automatically once a genuine complete report lands, with no special-cased recovery transition",
+  );
   assert.equal(result.reportEvidence.verdict, "CLEAN");
 });
 

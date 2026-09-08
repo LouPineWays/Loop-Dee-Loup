@@ -70,6 +70,20 @@
 //       table exactly as if a human had set the field by hand)
 //     - lifecycle-gate post-audit OK with any other rawVerdict (no
 //       completed report backing a verdict yet)                            -> NO_ACTION_YET
+//     - lifecycle-gate post-audit RESPONSE_UNUSABLE (issue #447, live reproductions #446 and
+//       #380's first round: a genuine, provenance-valid bot response landed post-trigger, but
+//       none satisfies the completed-report contract — e.g. #446's terse genuine
+//       `chatgpt-codex-connector[bot]` CLEAN reply, alongside an unrelated detailed non-bot
+//       report under `LouPineWays` provenance that is never treated as assurance evidence) ->
+//       STAGE2_RESPONSE_UNUSABLE, a distinct deterministic fail-closed stop — never ordinary
+//       NO_ACTION_YET (which would read as "still waiting," licensing indefinite polling) and
+//       never AMBIGUOUS (which means "this gate does not recognize the state," not "a known
+//       state that requires a bounded recovery decision"). Carries `postAudit.reportEvidence`
+//       (including `genuineResponses`, the exact response reference(s)) so a fresh controller
+//       can act without repository archaeology. Idempotent: unchanged durable evidence
+//       re-resolves to the same verdict; a later genuine, complete bot response resolves
+//       normally through REPORT_READY_TO_RECORD/STAGE2_CLOSE_READY/STAGE2_CORRECTION_REQUIRED
+//       above on the very next invocation, with no special "recovery" transition of its own.
 //     - anything else (PREMATURE_CLOSURE, an operational error, or a state
 //       this gate does not recognize)                                      -> AMBIGUOUS
 //
@@ -353,6 +367,35 @@ export function resolvePostMergeVerdict({ postAudit }, context = {}) {
     };
   }
 
+  if (postAudit.state === "RESPONSE_UNUSABLE") {
+    // Issue #447 (live reproductions #446 and #380's first round): lifecycle-gate.mjs's
+    // checkPostAudit already distinguishes "no genuine reviewer response yet" (state A, falls
+    // through to the ordinary NO_ACTION_YET branch below via its own unmodified OK result) from
+    // "a genuine reviewer response landed, but none is a provenance-valid completed Stage 2
+    // report" (state C, RESPONSE_UNUSABLE) -- this branch is what keeps state C from ever being
+    // reported as ordinary waiting at the composed-gate level, the actual failure a controller
+    // observed: a genuine response had landed, yet next-review-transition-gate.mjs still returned
+    // plain NO_ACTION_YET, indistinguishable from a controller merely needing to poll again.
+    // STAGE2_RESPONSE_UNUSABLE is a distinct, deterministic, fail-closed state (never AMBIGUOUS's
+    // "this gate does not recognize the state" fallback, and never a silent recovery) -- it names
+    // the audit issue and the exact genuine-but-unusable response reference(s)
+    // (postAudit.reportEvidence.genuineResponses) so a fresh controller can act without broad
+    // repository archaeology. It never accepts a structurally complete-looking non-bot report as
+    // assurance (lifecycle-gate.mjs's findAllMatches only ever considers bot-authored comments as
+    // candidates at all -- a detailed `LouPineWays`-authored report, #446's own reproduction, is
+    // never even in reportEvidence.genuineResponses), and it never authorizes an automatic second
+    // Stage 2 trigger or reviewer coaching (issue #259's anti-coaching authority is unchanged --
+    // this state only reports; it performs no mutation of its own). Re-running this gate against
+    // the same durable evidence deterministically reproduces the same STAGE2_RESPONSE_UNUSABLE
+    // result (no retrigger, no poll, no issue creation -- idempotent per this Issue's own
+    // acceptance criteria); once a later genuine, complete bot response lands on the same thread,
+    // lifecycle-gate.mjs's own findStage2ReportEvidence finds it and checkPostAudit reports
+    // REPORT_READY_TO_RECORD/READY_TO_CLOSE/STAGE2_CORRECTION_REQUIRED normally on the very next
+    // invocation -- recovery resumes automatically from durable state, with no special-cased
+    // "unusable -> normal" transition logic of its own.
+    return { state: "STAGE2_RESPONSE_UNUSABLE", stopAfter: true, ...context, postAudit };
+  }
+
   if (postAudit.state === "OK") {
     // Stage 1 review finding on PR #435: the motivating resume case -- the work issue is
     // already closed, but its backed-CLEAN audit was never consumed -- never reaches
@@ -404,8 +447,12 @@ export function resolvePostMergeVerdict({ postAudit }, context = {}) {
 // action, the same "authorizes proceeding" bucket as STAGE2_CLOSE_READY, never an error or an
 // outstanding correction); 3 for a verdict that names a concrete, non-blocking corrective
 // action required before the happy path can proceed (STAGE1_CORRECTION_REQUIRED,
-// STAGE2_CORRECTION_REQUIRED); 4 for AMBIGUOUS (mirrors BLOCKED's exit 4 -- a positive "stop,
-// do not improvise" signal); 1 for a genuine operational error (missing/invalid arguments, or
+// STAGE2_CORRECTION_REQUIRED); 4 for AMBIGUOUS and STAGE2_RESPONSE_UNUSABLE (both mirror
+// BLOCKED's exit 4 -- a positive "stop, do not improvise" signal; issue #447:
+// STAGE2_RESPONSE_UNUSABLE is a distinct, deterministic, *recognized* fail-closed state, never
+// AMBIGUOUS's own "this gate does not recognize the state" meaning -- it shares AMBIGUOUS's exit
+// code only because both require the same bounded recovery/founder-interrupt stop, not because
+// they are the same condition); 1 for a genuine operational error (missing/invalid arguments, or
 // an underlying `gh` read that itself failed before any verdict could be computed at all).
 function exitCodeFor(state) {
   switch (state) {
@@ -418,6 +465,7 @@ function exitCodeFor(state) {
     case "STAGE2_CORRECTION_REQUIRED":
       return 3;
     case "AMBIGUOUS":
+    case "STAGE2_RESPONSE_UNUSABLE":
       return 4;
     default:
       return 4;
