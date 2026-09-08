@@ -1437,12 +1437,40 @@ test("replaceVerdictField: anchors to the LAST heading, not an earlier quoted ex
   assert.equal(parseStage2Verdict(updated), "NOT CLEAN");
 });
 
-test("replaceVerdictField: returns null when no '### Verdict' heading exists", () => {
-  assert.equal(replaceVerdictField("no verdict field here", "CLEAN"), null);
+// Stage 1 review finding on this PR: an earlier revision returned null for both cases below,
+// which made record-verdict exit 1 on a REPORT_READY_TO_RECORD state it could never fulfill,
+// permanently blocking a genuinely completed audit. Both must now deterministically repair the
+// field instead of failing closed.
+
+test("replaceVerdictField: repairs a missing '### Verdict' heading by appending a fresh section, preserving every existing section verbatim", () => {
+  const body = "### Work issue\n\n#151\n\n### Exact merge commit\n\nabc123\n";
+  const updated = replaceVerdictField(body, "CLEAN");
+  assert.notEqual(updated, null, "a missing heading must be repaired, not failed closed");
+  assert.equal(parseStage2Verdict(updated), "CLEAN", "must round-trip through the same parser record-verdict itself uses");
+  assert.match(updated, /### Work issue\n\n#151/, "every existing section must be preserved verbatim");
+  assert.match(updated, /### Exact merge commit\n\nabc123/, "every existing section must be preserved verbatim");
 });
 
-test("replaceVerdictField: returns null when the heading exists but no non-blank value line follows it", () => {
-  assert.equal(replaceVerdictField("### Verdict\n\n### Next authorized action\n\nNone\n", "CLEAN"), null);
+test("replaceVerdictField: repairs a missing '### Verdict' heading against an empty body", () => {
+  const updated = replaceVerdictField("", "NOT CLEAN");
+  assert.notEqual(updated, null);
+  assert.equal(parseStage2Verdict(updated), "NOT CLEAN");
+});
+
+test("replaceVerdictField: repairs an empty '### Verdict' field (heading present, no non-blank value line before the next heading) by inserting the value, preserving neighboring sections", () => {
+  const body = "### Work issue\n\n#151\n\n### Verdict\n\n### Next authorized action\n\nPending audit.\n";
+  const updated = replaceVerdictField(body, "CLEAN");
+  assert.notEqual(updated, null, "an empty rendered field must be repaired, not failed closed");
+  assert.equal(parseStage2Verdict(updated), "CLEAN");
+  assert.match(updated, /### Work issue\n\n#151/, "every other field must be preserved verbatim");
+  assert.match(updated, /### Next authorized action\n\nPending audit\./, "every other field must be preserved verbatim");
+});
+
+test("replaceVerdictField: repairs an empty '### Verdict' field at the very end of the body (heading present, nothing but blank lines follow)", () => {
+  const updated = replaceVerdictField("### Findings\n\nPending\n\n### Verdict\n\n", "NOT CLEAN");
+  assert.notEqual(updated, null);
+  assert.equal(parseStage2Verdict(updated), "NOT CLEAN");
+  assert.match(updated, /### Findings\n\nPending/, "the neighboring section must be preserved verbatim");
 });
 
 // -- checkRecordVerdict (issue #439) ------------------------------------------------------
@@ -1496,6 +1524,55 @@ test("checkRecordVerdict: RECORDED — promotes a completed NOT CLEAN report ove
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "RECORDED");
   assert.equal(result.verdict, "NOT CLEAN");
+});
+
+// Stage 1 review finding on this PR: a completed report whose audit issue has no '### Verdict'
+// heading at all, or has the heading with no value, previously made record-verdict exit 1 (via
+// replaceVerdictField returning null) even though checkPostAudit had just reported
+// REPORT_READY_TO_RECORD for exactly this body — permanently blocking a genuinely completed
+// audit. Both must now promote successfully.
+
+test("checkRecordVerdict: RECORDED — repairs a completely missing '### Verdict' heading rather than exiting 1", async () => {
+  const bodyMissingVerdict = `### Work issue\n\n#151\n\n### Exact merge commit\n\n${MERGE_COMMIT}\n`;
+  const editCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: bodyMissingVerdict, state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "RECORDED");
+  assert.equal(result.verdict, "CLEAN");
+  assert.equal(editCalls.length, 1);
+  assert.equal(parseStage2Verdict(editCalls[0].body), "CLEAN", "the repaired body must round-trip through the same parser");
+  assert.equal(parseWorkIssueRef(editCalls[0].body), 151, "the pre-existing Work issue field must be preserved");
+});
+
+test("checkRecordVerdict: RECORDED — repairs an empty '### Verdict' field (heading present, no value) rather than exiting 1", async () => {
+  const bodyEmptyVerdict =
+    `### Work issue\n\n#151\n\n### Exact merge commit\n\n${MERGE_COMMIT}\n\n### Verdict\n\n### Next authorized action\n\nPending audit.\n`;
+  const editCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: bodyEmptyVerdict, state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport({ verdict: "NOT CLEAN" }),
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "RECORDED");
+  assert.equal(result.verdict, "NOT CLEAN");
+  assert.equal(editCalls.length, 1);
+  assert.equal(parseStage2Verdict(editCalls[0].body), "NOT CLEAN");
+  assert.match(editCalls[0].body, /### Next authorized action\n\nPending audit\./, "the neighboring field must be preserved");
 });
 
 test("checkRecordVerdict: no completed report exists yet — passes checkPostAudit's own OK result through unchanged, no mutation attempted", async () => {
@@ -1586,6 +1663,128 @@ test("checkRecordVerdict: CONFLICTING_VERDICT — the fresh re-read shows a diff
   assert.equal(result.evidenceVerdict, "CLEAN");
   assert.equal(editCalls.length, 0, "a conflicting already-recorded verdict must never be silently overwritten");
   assert.match(result.message, /never silently overwritten/);
+});
+
+// Stage 1 review finding on this PR: the fresh issue-body re-read alone does not close the race
+// Codex identified, because postAudit.reportEvidence can already be stale by the time the
+// mutation step runs — a newer completed report may land on the thread in between. These tests
+// mock checkPostAuditImpl directly to hand back exactly that stale evidence, so the only way
+// each test can pass is if checkRecordVerdict re-evaluates findStage2ReportEvidence itself
+// against the fresh body (via the real, un-mocked ghApiImpl) rather than trusting the evidence
+// checkPostAudit already computed a moment earlier.
+
+test("checkRecordVerdict: revalidates report evidence before writing — a newer completed report with the opposite verdict lands between the evidence check and the mutation, and the newer one is recorded, not the stale one", async () => {
+  const editCalls = [];
+  const commentCalls = [];
+  const staleReportEvidence = {
+    backed: true,
+    verdict: "NOT CLEAN",
+    responsesSeen: 1,
+    matchedCommentUrl: "https://github.com/owner/repo/issues/160#issuecomment-1",
+    legacyCompatible: false,
+  };
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      // Mocked to hand back exactly the stale evidence checkPostAudit would have computed a
+      // moment before a newer completed report landed on the thread.
+      checkPostAuditImpl: async () => ({
+        exitCode: 0,
+        state: "REPORT_READY_TO_RECORD",
+        workIssue: 151,
+        auditIssue: 160,
+        rawVerdict: "PENDING",
+        reportEvidence: staleReportEvidence,
+      }),
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      // The revalidation step's own findStage2ReportEvidence call — the real, un-mocked
+      // ghApiImpl — sees a newer completed report with the opposite verdict (CLEAN), the
+      // authoritative one per findStage2ReportEvidence's own "latest complete response wins"
+      // contract.
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async (a) => commentCalls.push(a),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "RECORDED");
+  assert.equal(
+    result.verdict,
+    "CLEAN",
+    "the newer, authoritative report's verdict must be recorded, never the stale one checkPostAudit computed a moment earlier",
+  );
+  assert.equal(editCalls.length, 1);
+  assert.equal(parseStage2Verdict(editCalls[0].body), "CLEAN");
+  assert.equal(commentCalls.length, 1);
+  assert.match(commentCalls[0].verdict, /CLEAN/);
+});
+
+test("checkRecordVerdict: CONFLICTING_VERDICT compares against the freshly-revalidated authoritative report, not checkPostAudit's stale evidence", async () => {
+  const editCalls = [];
+  const staleReportEvidence = {
+    backed: true,
+    verdict: "NOT CLEAN",
+    responsesSeen: 1,
+    matchedCommentUrl: "https://github.com/owner/repo/issues/160#issuecomment-1",
+    legacyCompatible: false,
+  };
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      checkPostAuditImpl: async () => ({
+        exitCode: 0,
+        state: "REPORT_READY_TO_RECORD",
+        workIssue: 151,
+        auditIssue: 160,
+        rawVerdict: "PENDING",
+        reportEvidence: staleReportEvidence,
+      }),
+      // The fresh re-read shows NOT CLEAN already recorded (e.g. by a concurrent invocation
+      // that itself recorded the once-current stale evidence) — a genuine conflict against the
+      // newer, authoritative CLEAN report the revalidation step below finds.
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "NOT CLEAN" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "CONFLICTING_VERDICT");
+  assert.equal(result.recordedVerdict, "NOT CLEAN");
+  assert.equal(
+    result.evidenceVerdict,
+    "CLEAN",
+    "must compare against the freshly-revalidated report, not the stale evidence checkPostAudit computed a moment earlier",
+  );
+  assert.equal(editCalls.length, 0);
+});
+
+test("checkRecordVerdict: fails closed as an operational error when revalidation no longer finds any completed report backing a verdict", async () => {
+  const editCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      checkPostAuditImpl: async () => ({
+        exitCode: 0,
+        state: "REPORT_READY_TO_RECORD",
+        workIssue: 151,
+        auditIssue: 160,
+        rawVerdict: "PENDING",
+        reportEvidence: { backed: true, verdict: "CLEAN", responsesSeen: 1, matchedCommentUrl: "https://x", legacyCompatible: false },
+      }),
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      // Revalidation finds nothing backing any verdict on the thread.
+      ghApiImpl: async () => [],
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /Revalidation found no completed Stage 2 report/);
+  assert.equal(editCalls.length, 0);
 });
 
 test("checkRecordVerdict: a gh issue edit failure is a plain operational error, not a fabricated RECORDED", async () => {

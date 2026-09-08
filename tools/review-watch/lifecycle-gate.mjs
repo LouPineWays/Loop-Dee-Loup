@@ -129,16 +129,22 @@
 //                  `record-verdict` is the deterministic promotion command `REPORT_READY_TO_RECORD`
 //                  authorizes: it reuses `checkPostAudit` internally (never re-adjudicating finding
 //                  substance) to find the evidence, then re-reads the audit issue fresh
-//                  immediately before mutating it — closing the race window between that read and
-//                  the evidence check, and giving genuine meaning to its own idempotent-rerun
-//                  states. `RECORDED` (the durable `Verdict` field, previously `PENDING`/malformed,
-//                  is now set to the evidence-backed verdict, plus one explanatory comment naming
-//                  the backing evidence — never a rewritten copy of the report's own finding
-//                  content, per issue #439's Shared Contract); `ALREADY_RECORDED` (the fresh
-//                  re-read already shows the evidence-backed verdict recorded — a safe no-op,
-//                  never a duplicate mutation or comment); `CONFLICTING_VERDICT` (exit 2 — the
-//                  fresh re-read shows a *different*, already-settled verdict than the evidence
-//                  found; never silently overwritten, mirroring `PREMATURE_CLOSURE`'s fail-closed
+//                  immediately before mutating it and revalidates the report evidence itself
+//                  against that fresh body (via the same `findStage2ReportEvidence`, never a
+//                  second parser) — closing both the race window between that read and the
+//                  evidence check (Stage 1 review finding on this PR: the body re-read alone did
+//                  not close the race, since a newer completed report could still land between
+//                  `checkPostAudit`'s evidence lookup and the mutation, leaving the *latest*
+//                  qualifying report's own verdict unused) — and giving genuine meaning to its own
+//                  idempotent-rerun states. `RECORDED` (the durable `Verdict` field, previously
+//                  `PENDING`/malformed, is now set to the freshly-revalidated evidence-backed
+//                  verdict, plus one explanatory comment naming the backing evidence — never a
+//                  rewritten copy of the report's own finding content, per issue #439's Shared
+//                  Contract); `ALREADY_RECORDED` (the fresh re-read already shows the
+//                  evidence-backed verdict recorded — a safe no-op, never a duplicate mutation or
+//                  comment); `CONFLICTING_VERDICT` (exit 2 — the fresh re-read shows a
+//                  *different*, already-settled verdict than the freshly-revalidated evidence;
+//                  never silently overwritten, mirroring `PREMATURE_CLOSURE`'s fail-closed
 //                  refusal). When `checkPostAudit` itself does not report `REPORT_READY_TO_RECORD`
 //                  (no completed report exists yet, or the field is already a settled value its
 //                  own existing branches already evaluated), `record-verdict` passes that result
@@ -902,11 +908,32 @@ export async function checkPostAudit(
 // anchor logic narrowly rather than sharing a combined read/write helper, so this stays a small,
 // auditable diff against the existing read path): if the mutation ever wrote a different line
 // than the parser reads, the two would silently disagree and every downstream consumer of
-// parseStage2Verdict would see a value record-verdict never actually wrote. Returns null when no
-// "### Verdict" heading, or no non-blank value line beneath it, is found — checkRecordVerdict
-// then fails closed as an operational error rather than guessing where to write.
+// parseStage2Verdict would see a value record-verdict never actually wrote.
+//
+// Stage 1 review finding on this PR: an earlier revision returned null whenever the heading was
+// missing, or present with no non-blank value line beneath it, making the record-verdict command
+// REPORT_READY_TO_RECORD itself authorizes exit 1 and leaving a genuinely completed audit
+// permanently blocked. Both cases are now deterministically repaired instead of failing closed,
+// since both are the exact structural gap this promotion mechanism exists to fix, not evidence
+// of a genuinely unusable body:
+//   - Heading present, no non-blank value line before the next "### " heading or end of body
+//     (an empty rendered field, e.g. a stripped/edited dropdown value): insert `newVerdict` as a
+//     new line immediately after the heading. parseFormField skips blank lines and returns the
+//     first non-blank one it finds, so this round-trips through parseStage2Verdict() exactly the
+//     same way the ordinary overwrite path does, and every other section is untouched.
+//   - Heading missing entirely: append a fresh "### Verdict" section after the existing body
+//     content, preserving every existing section byte-for-byte rather than guessing where the
+//     audit-control-issue template's own field order would have placed it in this specific body.
+//     Appending after everything else means no later "### " heading follows it, so
+//     parseFormField's own "read to the next heading or end of body" rule finds `newVerdict`
+//     directly beneath it.
+// This still fails closed (returns null) only for a `body` so unstructured that neither repair
+// applies is not a real failure mode of either branch above — both branches always produce a
+// result — so this function no longer returns null in practice; the guard remains in
+// checkRecordVerdict as defense in depth rather than an expected path.
 export function replaceVerdictField(body, newVerdict) {
-  const lines = (body ?? "").split("\n");
+  const src = body ?? "";
+  const lines = src.split("\n");
   const heading = "### Verdict";
   let headingIdx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -915,14 +942,25 @@ export function replaceVerdictField(body, newVerdict) {
       break;
     }
   }
-  if (headingIdx === -1) return null;
+
+  if (headingIdx === -1) {
+    const trimmedTail = src.replace(/\s+$/, "");
+    const separator = trimmedTail === "" ? "" : "\n\n";
+    return `${trimmedTail}${separator}### Verdict\n\n${newVerdict}\n`;
+  }
+
   for (let i = headingIdx + 1; i < lines.length; i++) {
     if (lines[i].trim().startsWith("### ")) break;
     if (lines[i].trim() === "") continue;
     lines[i] = newVerdict;
     return lines.join("\n");
   }
-  return null;
+
+  // Heading present but its field is empty (only blank lines, or the next "### " heading,
+  // immediately follow it): insert the value directly beneath the heading rather than failing
+  // closed — the field genuinely exists in the template's rendered structure, it is just unset.
+  lines.splice(headingIdx + 1, 0, newVerdict);
+  return lines.join("\n");
 }
 
 // Pure. Builds the explanatory comment posted on a real `RECORDED` run — names the recorded
@@ -996,8 +1034,9 @@ export async function checkRecordVerdict(
 
   // REPORT_READY_TO_RECORD: checkPostAudit's own precondition for this state already establishes
   // that its read of the durable Verdict field was PENDING/malformed and that reportEvidence
-  // backs exactly one verdict (CLEAN or NOT CLEAN). Re-read the audit issue fresh — never trust
-  // the value checkPostAudit read a moment ago for the mutation decision itself.
+  // backs exactly one verdict (CLEAN or NOT CLEAN) — but that read is already a moment stale by
+  // the time this command mutates anything. Re-read the audit issue fresh — never trust the
+  // value checkPostAudit read a moment ago for the mutation decision itself.
   let auditIssueData;
   try {
     auditIssueData = await ghIssueViewImpl({ repo, number: auditIssue });
@@ -1005,7 +1044,51 @@ export async function checkRecordVerdict(
     return { exitCode: 1, message: `gh issue view failed for ${repo}#${auditIssue}: ${err.message}` };
   }
   const currentRawVerdict = parseStage2Verdict(auditIssueData.body ?? "");
-  const evidenceVerdict = postAudit.reportEvidence.verdict;
+
+  // Stage 1 review finding on this PR: the fresh issue-body read alone does not close the race
+  // Codex identified, because postAudit.reportEvidence can already be stale by the time this
+  // command reaches the mutation step — a newer completed report may have landed on the thread
+  // in between. Re-evaluate the report evidence itself against the freshly-read body, through
+  // the exact same findStage2ReportEvidence path checkPostAudit used (never a second parser or
+  // new adjudication logic), so the *latest* qualifying completed report is what gets recorded,
+  // never a report that was merely the latest one a moment ago.
+  const freshMergeCommit = parseMergeCommitRef(auditIssueData.body ?? "");
+  const freshReviewedHeadCommit = parseReviewedHeadCommitRef(auditIssueData.body ?? "");
+  const freshRequestedChecklist = parseVerificationChecklistRef(auditIssueData.body ?? "");
+  let freshReportEvidence;
+  try {
+    freshReportEvidence = await findStage2ReportEvidence(
+      {
+        repo,
+        auditIssue,
+        bot,
+        mergeCommit: freshMergeCommit,
+        requestedChecklist: freshRequestedChecklist,
+        reviewedHeadCommit: freshReviewedHeadCommit,
+      },
+      ghApiImpl,
+    );
+  } catch (err) {
+    return {
+      exitCode: 1,
+      message: `gh api call failed while revalidating Stage 2 report evidence for ${repo}#${auditIssue}: ${err.message}`,
+    };
+  }
+
+  if (!freshReportEvidence.backed) {
+    // The completed report that made checkPostAudit report REPORT_READY_TO_RECORD a moment ago
+    // no longer validates against a fresh re-check (e.g. the thread changed underneath this
+    // invocation). Fail closed as an operational condition to retry rather than recording a
+    // verdict this fresh revalidation itself could not re-establish.
+    return {
+      exitCode: 1,
+      message:
+        `Revalidation found no completed Stage 2 report backing a verdict for ${repo}#${auditIssue} even ` +
+        `though checkPostAudit reported REPORT_READY_TO_RECORD a moment earlier (${freshReportEvidence.reason}). ` +
+        `Re-run record-verdict; if this persists, the audit issue thread changed underneath this invocation.`,
+    };
+  }
+  const evidenceVerdict = freshReportEvidence.verdict;
 
   if (currentRawVerdict === evidenceVerdict) {
     return {
@@ -1013,7 +1096,7 @@ export async function checkRecordVerdict(
       state: "ALREADY_RECORDED",
       auditIssue: postAudit.auditIssue,
       verdict: currentRawVerdict,
-      reportEvidence: postAudit.reportEvidence,
+      reportEvidence: freshReportEvidence,
     };
   }
 
@@ -1024,10 +1107,10 @@ export async function checkRecordVerdict(
       auditIssue: postAudit.auditIssue,
       recordedVerdict: currentRawVerdict,
       evidenceVerdict,
-      reportEvidence: postAudit.reportEvidence,
+      reportEvidence: freshReportEvidence,
       message:
         `Refusing to record ${repo}#${auditIssue}'s evidence-backed verdict (${evidenceVerdict}, backed by ` +
-        `${postAudit.reportEvidence.matchedCommentUrl ?? "this issue's own comment thread"}) over its already-` +
+        `${freshReportEvidence.matchedCommentUrl ?? "this issue's own comment thread"}) over its already-` +
         `recorded, conflicting durable Verdict field (${currentRawVerdict}). This is never silently overwritten; ` +
         `resolve the conflict by hand.`,
     };
@@ -1050,7 +1133,7 @@ export async function checkRecordVerdict(
   let commentPosted = true;
   let commentError = null;
   try {
-    await ghCommentImpl({ repo, auditIssue, verdict: evidenceVerdict, reportEvidence: postAudit.reportEvidence });
+    await ghCommentImpl({ repo, auditIssue, verdict: evidenceVerdict, reportEvidence: freshReportEvidence });
   } catch (err) {
     commentPosted = false;
     commentError = err.message;
@@ -1061,7 +1144,7 @@ export async function checkRecordVerdict(
     state: "RECORDED",
     auditIssue: postAudit.auditIssue,
     verdict: evidenceVerdict,
-    reportEvidence: postAudit.reportEvidence,
+    reportEvidence: freshReportEvidence,
     commentPosted,
     ...(commentError
       ? {
