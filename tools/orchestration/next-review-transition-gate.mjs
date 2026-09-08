@@ -59,6 +59,15 @@
 //       branch, never `READY_TO_CLOSE`, since that branch requires the work issue to still be
 //       open — it previously fell through to `NO_ACTION_YET` below instead)
 //     - lifecycle-gate post-audit OK with rawVerdict "NOT CLEAN"           -> STAGE2_CORRECTION_REQUIRED
+//     - lifecycle-gate post-audit REPORT_READY_TO_RECORD (issue #439: a completed Stage 2
+//       report already exists on the thread, of either verdict, but the audit issue's own
+//       durable Verdict field is still PENDING/malformed — the live #408/#436 gap, where a
+//       fully completed CLEAN report sat unrecorded and a controller reported "no completed
+//       response has landed") -> STAGE2_REPORT_READY_TO_RECORD, carrying `nextCommand` (the
+//       exact real `lifecycle-gate.mjs record-verdict` invocation that deterministically
+//       promotes the already-established evidence into the durable field, then stops — a
+//       fresh gate invocation afterward resolves the now-recorded verdict through this same
+//       table exactly as if a human had set the field by hand)
 //     - lifecycle-gate post-audit OK with any other rawVerdict (no
 //       completed report backing a verdict yet)                            -> NO_ACTION_YET
 //     - anything else (PREMATURE_CLOSURE, an operational error, or a state
@@ -326,6 +335,24 @@ export function resolvePostMergeVerdict({ postAudit }, context = {}) {
     return { state: "STAGE2_CLOSE_READY", stopAfter: true, ...context, postAudit, nextCommand };
   }
 
+  if (postAudit.state === "REPORT_READY_TO_RECORD") {
+    // Issue #439 (the live #408/#436 gap): a completed Stage 2 report already exists on the
+    // thread — of either verdict — but the audit issue's own durable Verdict field is still
+    // PENDING/malformed. `nextCommand` names the exact real (non-dry-run) promotion invocation;
+    // per this verdict's own contract (mirroring STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2's
+    // "perform the action, then stop" precedent), a controller runs it once and stops — it does
+    // not chain straight into re-resolving this gate in the same step. A fresh invocation
+    // afterward resolves the now-recorded verdict through STAGE2_CLOSE_READY/
+    // STAGE2_CORRECTION_REQUIRED/NO_ACTION_YET below exactly as if a human had set the field.
+    return {
+      state: "STAGE2_REPORT_READY_TO_RECORD",
+      stopAfter: true,
+      ...context,
+      postAudit,
+      nextCommand: `node tools/review-watch/lifecycle-gate.mjs record-verdict --repo ${context.repo} --audit-issue ${context.auditIssue}`,
+    };
+  }
+
   if (postAudit.state === "OK") {
     // Stage 1 review finding on PR #435: the motivating resume case -- the work issue is
     // already closed, but its backed-CLEAN audit was never consumed -- never reaches
@@ -372,17 +399,20 @@ export function resolvePostMergeVerdict({ postAudit }, context = {}) {
 // Exit-code scheme (this script's own; no prior convention already fixed it, so it mirrors
 // ready-dispatch-gate.mjs's READY/BLOCKED/NOT_READY/ERROR split as closely as this verdict
 // set allows): 0 for a verdict that authorizes proceeding or explicitly says "wait, nothing
-// to do" (NO_ACTION_YET, STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2, STAGE2_CLOSE_READY); 3
-// for a verdict that names a concrete, non-blocking corrective action required before the
-// happy path can proceed (STAGE1_CORRECTION_REQUIRED, STAGE2_CORRECTION_REQUIRED); 4 for
-// AMBIGUOUS (mirrors BLOCKED's exit 4 -- a positive "stop, do not improvise" signal); 1 for
-// a genuine operational error (missing/invalid arguments, or an underlying `gh` read that
-// itself failed before any verdict could be computed at all).
+// to do" (NO_ACTION_YET, STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2, STAGE2_CLOSE_READY,
+// STAGE2_REPORT_READY_TO_RECORD -- issue #439: this names a required, non-blocking promotion
+// action, the same "authorizes proceeding" bucket as STAGE2_CLOSE_READY, never an error or an
+// outstanding correction); 3 for a verdict that names a concrete, non-blocking corrective
+// action required before the happy path can proceed (STAGE1_CORRECTION_REQUIRED,
+// STAGE2_CORRECTION_REQUIRED); 4 for AMBIGUOUS (mirrors BLOCKED's exit 4 -- a positive "stop,
+// do not improvise" signal); 1 for a genuine operational error (missing/invalid arguments, or
+// an underlying `gh` read that itself failed before any verdict could be computed at all).
 function exitCodeFor(state) {
   switch (state) {
     case "NO_ACTION_YET":
     case "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2":
     case "STAGE2_CLOSE_READY":
+    case "STAGE2_REPORT_READY_TO_RECORD":
       return 0;
     case "STAGE1_CORRECTION_REQUIRED":
     case "STAGE2_CORRECTION_REQUIRED":

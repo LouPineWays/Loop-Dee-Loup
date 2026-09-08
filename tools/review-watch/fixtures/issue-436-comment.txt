@@ -1,0 +1,71 @@
+## Stage 2 Audit Report
+
+**Exact merge commit audited:** `8fe3ddc42141d383740dde786da13b79022e1acd`
+
+### Severity Summary
+
+| Severity | Count |
+|---|---:|
+| P0 | 0 |
+| P1 | 0 |
+| P2 | 0 |
+| P3 | 0 |
+
+### Actionable Findings
+
+None. I found no correctness, safety, lifecycle-routing, documentation, or regression issue requiring a correction.
+
+## Verification Checklist
+
+1. **PASS — deterministic work-issue and audit-issue closure ordering.**
+   `READY_TO_CLOSE` constructs a chained command that runs `close-work-issue` before `close-audit` when `postAudit.workIssue` is a finite number. `ACCEPTED_NO_WORK_ISSUE` retains the audit-only command because no work issue exists. The focused tests assert both exact command strings.
+
+2. **PASS — `checkCloseWorkIssue` idempotence and partial-success reporting.**
+   An already-closed work issue returns `ALREADY_TERMINAL` before either mutation. For an open issue, the implementation awaits closure before attempting the explanatory comment. A failed close is an error, while a comment failure after successful closure returns `exitCode: 0`, state `CLOSED`, `commentPosted: false`, and the comment error.
+   Tests cover successful close/comment calls, the mutation-free already-terminal path, and comment failure after closure.
+
+3. **PASS — already-consumed CLEAN audits route correctly.**
+   `OK` with a backed `verdict: "CLEAN"` and `workIssueState: "CLOSED"` returns `STAGE2_CLOSE_READY` with only `close-audit`; it does not re-close the work issue. `CLEAN` with `workIssueState: "OPEN"` does not satisfy that branch and remains `NO_ACTION_YET`.
+
+4. **PASS — closed canonical Audit Issues retain deterministic routing.**
+   `checkReadyDispatch` evaluates and returns `AUDIT_ISSUE_DETECTED` before its generic non-open-state guard. Thus a closed canonical Audit Issue returns exit 9 and routes to `next-review-transition-gate.mjs`, while a closed ordinary control issue continues to reach `NOT_READY`.
+   The closed-Audit regression test verifies exit 9, issue identity, and the exact next command.
+
+5. **PASS — successor-audit discovery uses paginated Search API results.**
+   `defaultGhIssueList` invokes `gh api search/issues -X GET`, supplies the audit-title/repository query and `per_page=100`, and uses `--paginate --slurp`. Its normalizer filters objects carrying `pull_request` and maps REST fields into the uppercase-state/camel-case shape consumed by `checkCloseAudit`.
+   Tests cover field mapping, open/closed normalization, PR filtering, and empty/missing item arrays.
+   The remaining 1,000-result ceiling is explicitly identified as GitHub Search's platform limit rather than an accidental client-side truncation.
+
+6. **PASS — leading whitespace is tolerated without semantic broadening.**
+   Both classifiers apply only `.trim()` before testing their existing fixed preamble patterns. The change therefore removes insignificant outer whitespace but does not inspect or adjudicate finding content.
+   Tests reproduce the leading-newline findings response and also cover whitespace around the fixed clean-pass response.
+
+7. **PASS — governing documentation matches the mechanism.**
+   `AGENTS.md` directs `STAGE2_CLOSE_READY` callers to execute the verdict's complete `nextCommand`, explicitly distinguishing audit-only closure from chained work-then-audit closure.
+   The bounded-review documentation likewise defines the exact chained commands, idempotence, and the requirement that work-issue closure occurs only after CLEAN Stage 2 evidence.
+   Both requested structural checks passed.
+
+8. **PASS — no surrounding regression detected.**
+   The complete orchestration and review-watch suite passed at the exact merge commit: **744 tests passed, 0 failed, 0 skipped, 0 cancelled**. The audited diff also passed `git diff --check`.
+
+9. **PASS — skipping a second inline Stage 1 round was reasonable; founder judgment is not required.**
+   The correction's mutation surface is adequately isolated through injected collaborators and focused behavioral tests: closure, comment ordering, idempotence, and partial failure are covered directly.
+   Search-result normalization and PR filtering are also directly tested, while the production command uses argument-array `execFileSync` rather than a shell string.
+   Combined with the full 744-test pass and the repository's established one-inline-round boundary described in the audit contract, the risk is sufficiently controlled without another same-PR invocation.
+
+## Founder Judgment
+
+**Not required.** No unresolved product, policy, security, irreversible-action, or lifecycle ambiguity was found.
+
+## Checks Performed
+
+- ✅ `git rev-parse HEAD`
+- ✅ `git diff --check bdb4627..8fe3ddc`
+- ✅ `node --test tools/review-watch/ tools/orchestration/`
+- ✅ `node tools/check-startup-budget.mjs`
+- ✅ `node tools/check-control-plane-paths.mjs`
+- ✅ `git status --short --branch` — remained clean; the read-only boundary was preserved.
+
+# CLEAN
+
+ [View task →](https://chatgpt.com/s/cd_6a9ec3c734508191bab30084314c3094)
