@@ -1,0 +1,12 @@
+{
+  "exitCode": 0,
+  "state": "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
+  "stopAfter": true,
+  "repo": "LouPineWays/Loop-Dee-Loup",
+  "pr": 424,
+  "head": "7f3dfb275254c4f0b2f516f377993c4afb0f685d",
+  "issue": 423,
+  "controlIssue": 423,
+  "reviewedHead": "95d9d45c367ad5efe0449afbb4d56d7ea30fb6b8",
+  "correctedHead": "7f3dfb275254c4f0b2f516f377993c4afb0f685d"
+}
