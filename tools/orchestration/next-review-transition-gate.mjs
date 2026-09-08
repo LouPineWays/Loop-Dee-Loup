@@ -13,10 +13,15 @@
 // same gap for a control Issue whose Lifecycle is already one of the five post-PR states
 // (EXECUTING, VERIFYING, REVIEW, AUDIT, CORRECTION).
 //
-// This composes — it does not reimplement — three already-shipped checks:
+// This composes — it does not reimplement — four already-shipped checks:
 //   - tools/review-watch/stage1-gate.mjs's `run` (Stage 1 trigger/response evidence)
 //   - tools/review-watch/lifecycle-gate.mjs's `checkMergeReady` (closing-reference evidence)
 //   - tools/review-watch/lifecycle-gate.mjs's `checkPostAudit` (Stage 2 verdict evidence)
+//   - tools/review-watch/stage1-correction-gate.mjs's `checkCorrectionDelta`
+//     (correction-satisfied disposition evidence — issue #454, unit 454-C; only ever invoked
+//     when stage1-gate itself reports NOT_REQUESTED and the control Issue's own "Stage 1"
+//     bullet parses as the new correction-satisfied disposition shape, so the common path
+//     spends no extra `gh` call)
 // and derives exactly one verdict from their own already-computed states — never from a
 // hand-authored control-Issue sub-state field, and never by re-parsing review/audit comment
 // *content* for meaning (that would be re-deriving reviewer judgment, which stage1-gate.mjs
@@ -29,7 +34,27 @@
 // Verdict derivation (every verdict below carries a literal `stopAfter: true` field):
 //
 //   Pre-merge phase (a settled "PR" reference, no settled "Stage 2"/Audit reference yet):
-//     - stage1-gate NOT_REQUESTED                       -> NO_ACTION_YET
+//     - stage1-gate NOT_REQUESTED, and no correction-satisfied disposition parses (or none is
+//       present at all)                                  -> NO_ACTION_YET
+//     - stage1-gate NOT_REQUESTED, and the control Issue's "Stage 1" bullet parses as a
+//       correction-satisfied disposition (`- **Stage 1:** correction-satisfied at
+//       <corrected-head-sha> (reviewed <reviewed-head-sha>)`, issue #454) whose evidence
+//       tools/review-watch/stage1-correction-gate.mjs's `checkCorrectionDelta` independently
+//       re-derives (unit 454-C), and
+//         CORRECTION_SATISFIED, lifecycle-gate merge-ready MERGE_READY(*)  -> STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2
+//           (same effect as STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2 — merge, open/trigger
+//           Stage 2, then stop — kept as a distinct verdict string purely for durable
+//           auditability of which path authorized the merge)
+//         CORRECTION_SATISFIED, lifecycle-gate merge-ready BLOCKED_CLOSING_REFERENCE -> STAGE1_CORRECTION_REQUIRED
+//         CORRECTION_SATISFIED, any other lifecycle-gate merge-ready state -> AMBIGUOUS
+//           (unrecognized combination — falls through to the same bottom-of-function fallback
+//           as every other unrecognized combination in this table)
+//         NOT_SATISFIED (reviewed head lacks findings-provenance, or the corrected head is not
+//           a strict, non-diverged descendant of the reviewed head)        -> AMBIGUOUS
+//         HEAD_MISMATCH (the disposition names a different head than the one currently being
+//           gated — a stale or superseded disposition)                    -> NO_ACTION_YET,
+//           same as no disposition being present at all
+//         an operational error from checkCorrectionDelta itself           -> AMBIGUOUS
 //     - stage1-gate PENDING with findings-bearing unbound genuine matches -> AMBIGUOUS
 //     - stage1-gate PENDING otherwise                   -> NO_ACTION_YET
 //     - stage1-gate EXEMPT, and
@@ -130,6 +155,12 @@ import {
 import { run as stage1Run } from "../review-watch/stage1-gate.mjs";
 import { checkMergeReady, checkPostAudit } from "../review-watch/lifecycle-gate.mjs";
 import { isCleanStage1Response } from "../review-watch/consumer-sync-gate.mjs";
+// Issue #454, unit 454-C: stage1-correction-gate.mjs itself imports `stage1DispositionMatchesHead`
+// from this module (see that export's own comment below), so this is a deliberate circular
+// import between the two modules. Both directions only reference the other's bindings from
+// inside function bodies (never at module-top-level), so ESM's live-binding semantics resolve
+// this safely regardless of which module is loaded first.
+import { checkCorrectionDelta, parseCorrectionSatisfiedDisposition } from "../review-watch/stage1-correction-gate.mjs";
 
 // Pure. Reads one optional "- **Label:** value" control-Issue bullet that is expected to
 // hold either the explicit "none" sentinel or exactly one "#N" issue reference (the same
@@ -212,7 +243,7 @@ function hasFindingsStage1Response(stage1) {
   );
 }
 
-export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition = null }, context = {}) {
+export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition = null, correctionDelta = null }, context = {}) {
   if (!hasTrustworthyExitCode(stage1) || !hasTrustworthyExitCode(mergeReady)) {
     return {
       state: "AMBIGUOUS",
@@ -247,7 +278,55 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
     context.head,
   );
   if (stage1.state === "NOT_REQUESTED") {
-    return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
+    // Issue #454, unit 454-C: a correction-satisfied disposition only ever matters once
+    // stage1-gate itself reports NOT_REQUESTED at the current head (the reviewed head's own
+    // findings-bearing response was already consumed at an earlier head, and no fresh Stage 1
+    // trigger exists at this new one). `correctionDelta` is `null` whenever the "Stage 1"
+    // bullet didn't parse as this new shape at all -- exactly preserving today's behavior
+    // (plain NO_ACTION_YET) when this bullet shape is absent.
+    if (correctionDelta && (!hasTrustworthyExitCode(correctionDelta) || correctionDelta.exitCode === 1)) {
+      return {
+        state: "AMBIGUOUS",
+        stopAfter: true,
+        ...context,
+        stage1,
+        mergeReady,
+        reason:
+          "tools/review-watch/stage1-correction-gate.mjs's checkCorrectionDelta returned output without a " +
+          `trustworthy exitCode (or reported an operational error): ${correctionDelta && correctionDelta.message}`,
+      };
+    }
+    if (correctionDelta && correctionDelta.state === "CORRECTION_SATISFIED") {
+      if (isMergeReadyState(mergeReady.state)) {
+        return {
+          state: "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
+          stopAfter: true,
+          ...context,
+          reviewedHead: correctionDelta.reviewedHead,
+          correctedHead: correctionDelta.correctedHead,
+        };
+      }
+      if (mergeReady.state === "BLOCKED_CLOSING_REFERENCE") {
+        return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context };
+      }
+      // Any other lifecycle-gate merge-ready state for an otherwise-satisfied correction
+      // delta: fall through past this whole NOT_REQUESTED block to the function's existing
+      // bottom-of-function AMBIGUOUS (unrecognized combination) -- never NO_ACTION_YET here.
+    } else if (correctionDelta && correctionDelta.state === "NOT_SATISFIED") {
+      return {
+        state: "AMBIGUOUS",
+        stopAfter: true,
+        ...context,
+        stage1,
+        mergeReady,
+        reason: correctionDelta.reason,
+      };
+    } else {
+      // correctionDelta is falsy (no correction-satisfied disposition parsed at all), or its
+      // state is HEAD_MISMATCH (a stale/superseded disposition that doesn't name the head
+      // currently being gated) -- same plain NO_ACTION_YET as no disposition present at all.
+      return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
+    }
   }
   if (stage1.state === "PENDING") {
     if (hasFindingsStage1Response(stage1)) {
@@ -447,22 +526,27 @@ export function resolvePostMergeVerdict({ postAudit }, context = {}) {
 // Exit-code scheme (this script's own; no prior convention already fixed it, so it mirrors
 // ready-dispatch-gate.mjs's READY/BLOCKED/NOT_READY/ERROR split as closely as this verdict
 // set allows): 0 for a verdict that authorizes proceeding or explicitly says "wait, nothing
-// to do" (NO_ACTION_YET, STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2, STAGE2_CLOSE_READY,
-// STAGE2_REPORT_READY_TO_RECORD -- issue #439: this names a required, non-blocking promotion
-// action, the same "authorizes proceeding" bucket as STAGE2_CLOSE_READY, never an error or an
-// outstanding correction); 3 for a verdict that names a concrete, non-blocking corrective
-// action required before the happy path can proceed (STAGE1_CORRECTION_REQUIRED,
-// STAGE2_CORRECTION_REQUIRED); 4 for AMBIGUOUS and STAGE2_RESPONSE_UNUSABLE (both mirror
-// BLOCKED's exit 4 -- a positive "stop, do not improvise" signal; issue #447:
-// STAGE2_RESPONSE_UNUSABLE is a distinct, deterministic, *recognized* fail-closed state, never
-// AMBIGUOUS's own "this gate does not recognize the state" meaning -- it shares AMBIGUOUS's exit
-// code only because both require the same bounded recovery/founder-interrupt stop, not because
-// they are the same condition); 1 for a genuine operational error (missing/invalid arguments, or
-// an underlying `gh` read that itself failed before any verdict could be computed at all).
+// to do" (NO_ACTION_YET, STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2,
+// STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 -- issue #454, unit 454-C: same "merge and
+// trigger Stage 2, then stop" bucket as STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2, kept as a
+// distinct verdict string purely for durable auditability of which path authorized the merge --
+// STAGE2_CLOSE_READY, STAGE2_REPORT_READY_TO_RECORD -- issue #439: this names a required,
+// non-blocking promotion action, the same "authorizes proceeding" bucket as STAGE2_CLOSE_READY,
+// never an error or an outstanding correction); 3 for a verdict that names a concrete,
+// non-blocking corrective action required before the happy path can proceed
+// (STAGE1_CORRECTION_REQUIRED, STAGE2_CORRECTION_REQUIRED); 4 for AMBIGUOUS and
+// STAGE2_RESPONSE_UNUSABLE (both mirror BLOCKED's exit 4 -- a positive "stop, do not improvise"
+// signal; issue #447: STAGE2_RESPONSE_UNUSABLE is a distinct, deterministic, *recognized*
+// fail-closed state, never AMBIGUOUS's own "this gate does not recognize the state" meaning -- it
+// shares AMBIGUOUS's exit code only because both require the same bounded recovery/founder-
+// interrupt stop, not because they are the same condition); 1 for a genuine operational error
+// (missing/invalid arguments, or an underlying `gh` read that itself failed before any verdict
+// could be computed at all).
 function exitCodeFor(state) {
   switch (state) {
     case "NO_ACTION_YET":
     case "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2":
+    case "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2":
     case "STAGE2_CLOSE_READY":
     case "STAGE2_REPORT_READY_TO_RECORD":
       return 0;
@@ -477,7 +561,10 @@ function exitCodeFor(state) {
   }
 }
 
-async function resolvePreMerge({ repo, pr, head, issue, stage1Disposition = null, controlIssue }, { stage1RunImpl, checkMergeReadyImpl }) {
+async function resolvePreMerge(
+  { repo, pr, head, issue, stage1Disposition = null, controlIssue },
+  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
+) {
   let stage1;
   try {
     stage1 = await stage1RunImpl({ repo, number: pr, head });
@@ -492,8 +579,30 @@ async function resolvePreMerge({ repo, pr, head, issue, stage1Disposition = null
     mergeReady = { exitCode: 1, message: `lifecycle-gate merge-ready threw: ${err.message}` };
   }
 
+  // Issue #454, unit 454-C: only ever attempted when stage1-gate itself reports NOT_REQUESTED
+  // at the current head -- no new `gh` call on the common path where this new disposition shape
+  // is absent (parseCorrectionSatisfiedDisposition is pure and returns `null` for every other
+  // shape, including an absent bullet, without ever calling checkCorrectionDeltaImpl).
+  let correctionDelta = null;
+  if (stage1.state === "NOT_REQUESTED") {
+    const parsed = parseCorrectionSatisfiedDisposition(stage1Disposition);
+    if (parsed) {
+      try {
+        correctionDelta = await checkCorrectionDeltaImpl({
+          repo,
+          pr,
+          reviewedHead: parsed.reviewedHead,
+          correctedHead: parsed.correctedHead,
+          gatedHead: head,
+        });
+      } catch (err) {
+        correctionDelta = { exitCode: 1, message: `stage1-correction-gate threw: ${err.message}` };
+      }
+    }
+  }
+
   const context = { repo, pr, head, issue, ...(controlIssue != null ? { controlIssue } : {}) };
-  const verdict = resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition }, context);
+  const verdict = resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition, correctionDelta }, context);
   return { exitCode: exitCodeFor(verdict.state), ...verdict };
 }
 
@@ -525,11 +634,11 @@ function defaultGhPrHead({ repo, number }) {
 }
 
 // The whole composed gate, wired for tests: every I/O dependency (control-Issue read, PR
-// head read, and the three composed check functions themselves) is injectable, defaulting
-// to the real `gh` CLI / real stage1-gate.mjs / real lifecycle-gate.mjs in main(). Direct-
-// reference mode (`auditIssue`, or `pr`+`head`) takes precedence over control-Issue mode when
-// both are supplied, mirroring format-unit-dispatch-prompt.mjs's own explicit-fields-first
-// convention.
+// head read, and the four composed check functions themselves) is injectable, defaulting
+// to the real `gh` CLI / real stage1-gate.mjs / real lifecycle-gate.mjs / real
+// stage1-correction-gate.mjs in main(). Direct-reference mode (`auditIssue`, or `pr`+`head`)
+// takes precedence over control-Issue mode when both are supplied, mirroring
+// format-unit-dispatch-prompt.mjs's own explicit-fields-first convention.
 export async function runNextReviewTransitionGate(
   args,
   {
@@ -539,6 +648,7 @@ export async function runNextReviewTransitionGate(
     stage1RunImpl = stage1Run,
     checkMergeReadyImpl = checkMergeReady,
     checkPostAuditImpl = checkPostAudit,
+    checkCorrectionDeltaImpl = checkCorrectionDelta,
   } = {},
 ) {
   let repo = args.repo;
@@ -575,7 +685,7 @@ export async function runNextReviewTransitionGate(
     }
     return resolvePreMerge(
       { repo, pr: args.pr, head: args.head, issue: args.issue, controlIssue: null },
-      { stage1RunImpl, checkMergeReadyImpl },
+      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
     );
   }
 
@@ -657,7 +767,7 @@ export async function runNextReviewTransitionGate(
 
     return resolvePreMerge(
       { repo, pr: prRef.issue, head, issue: executionRef.issue, stage1Disposition, controlIssue: controlIssueNumber },
-      { stage1RunImpl, checkMergeReadyImpl },
+      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
     );
   }
   if (prRef.kind === "invalid") {
