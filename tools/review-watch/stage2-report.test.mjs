@@ -1397,3 +1397,129 @@ test("extractResponseVerdict (PR #429): ordinary matched-length fences (the pre-
 test("extractResponseVerdict (PR #429): issue #421's accepted bare standalone '# CLEAN' fixture still resolves to CLEAN, unaffected by either fix", () => {
   assert.equal(extractResponseVerdict(ISSUE_421_COMMENT), "CLEAN");
 });
+
+// -- Issue #427: the literal canonical Stage 2 skeleton from docs/stage2-audit-contract.md § 2 is
+// mechanically accepted as a completed report, both CLEAN and NOT CLEAN, exactly as written there
+// (not a paraphrase) — the acceptance criterion that the canonical producer format and the parser
+// stay aligned. Keep this text byte-identical to that document's § 2 skeleton; if the document's
+// skeleton changes, update both together rather than letting them drift.
+// -----------------------------------------------------------------------------------------------
+
+const CANONICAL_COMMIT = "b281dbd5e7590b8ac2992753cd875f5e6472d556";
+const CANONICAL_CHECKLIST = "1. First check.\n2. Second check.";
+
+const CANONICAL_CLEAN_SKELETON = `# Stage 2 Audit Report
+
+Exact merge commit: \`${CANONICAL_COMMIT}\`
+
+## Severity
+
+| Severity | Count |
+| --- | ---: |
+| P0 | 0 |
+| P1 | 0 |
+| P2 | 0 |
+| P3 | 0 |
+
+## Findings
+
+None.
+
+## Verification
+
+1. PASS — First check result.
+2. PASS — Second check result.
+
+## Founder judgment
+
+Not required.
+
+Verdict: CLEAN`;
+
+const CANONICAL_NOT_CLEAN_SKELETON = `# Stage 2 Audit Report
+
+Exact merge commit: \`${CANONICAL_COMMIT}\`
+
+## Severity
+
+| Severity | Count |
+| --- | ---: |
+| P0 | 0 |
+| P1 | 1 |
+| P2 | 0 |
+| P3 | 0 |
+
+## Findings
+
+1. **Root cause** — evidence (file.mjs:10, quoted text). Consequence: describes what breaks.
+   Smallest correction: describes the fix.
+
+## Verification
+
+1. PASS — First check result.
+2. FAIL — Second check found the finding above.
+
+## Founder judgment
+
+Not required.
+
+Verdict: NOT CLEAN`;
+
+test("isCompletedStage2AuditReport: the literal canonical CLEAN skeleton (docs/stage2-audit-contract.md § 2) is accepted as a completed CLEAN report", () => {
+  const result = isCompletedStage2AuditReport(CANONICAL_CLEAN_SKELETON, {
+    mergeCommit: CANONICAL_COMMIT,
+    requestedChecklist: CANONICAL_CHECKLIST,
+  });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "CLEAN");
+  assert.deepEqual(result.reasons, []);
+});
+
+test("isCompletedStage2AuditReport: the literal canonical NOT CLEAN skeleton (docs/stage2-audit-contract.md § 2) is accepted as a completed NOT CLEAN report", () => {
+  const result = isCompletedStage2AuditReport(CANONICAL_NOT_CLEAN_SKELETON, {
+    mergeCommit: CANONICAL_COMMIT,
+    requestedChecklist: CANONICAL_CHECKLIST,
+  });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "NOT CLEAN");
+  assert.deepEqual(result.reasons, []);
+});
+
+test("isCompletedStage2AuditReport: the canonical skeleton against the wrong merge commit fails closed (wrong-target invalid-response example, § 6.3)", () => {
+  const wrongCommit = "1234567890abcdef1234567890abcdef12345678";
+  const result = isCompletedStage2AuditReport(CANONICAL_CLEAN_SKELETON, {
+    mergeCommit: wrongCommit,
+    requestedChecklist: CANONICAL_CHECKLIST,
+  });
+  assert.equal(result.complete, false);
+  assert.equal(result.verdict, null);
+});
+
+test("isCompletedStage2AuditReport: a findings-only response with no merge commit, checklist, or verdict fails closed (invalid-response example § 6.1)", () => {
+  const body = "There is a bug in foo.mjs that needs fixing.";
+  const result = isCompletedStage2AuditReport(body, { mergeCommit: CANONICAL_COMMIT, requestedChecklist: CANONICAL_CHECKLIST });
+  assert.equal(result.complete, false);
+  assert.equal(result.verdict, null);
+  assert.ok(result.reasons.length >= 2);
+});
+
+test("isCompletedStage2AuditReport: a bare 'CLEAN' with no commit restatement or verification content fails closed (invalid-response example § 6.2)", () => {
+  const result = isCompletedStage2AuditReport("CLEAN", { mergeCommit: CANONICAL_COMMIT, requestedChecklist: CANONICAL_CHECKLIST });
+  assert.equal(result.complete, false);
+  assert.equal(result.verdict, null);
+});
+
+test("isCompletedStage2AuditReport: the canonical skeleton truncated to one of two requested checklist items fails closed as incomplete (§ 4)", () => {
+  const truncated = CANONICAL_CLEAN_SKELETON.replace("2. PASS — Second check result.\n\n", "");
+  const result = isCompletedStage2AuditReport(truncated, {
+    mergeCommit: CANONICAL_COMMIT,
+    requestedChecklist: CANONICAL_CHECKLIST,
+  });
+  assert.equal(result.complete, false);
+  assert.ok(result.reasons.some((r) => r.includes("incomplete")));
+});
+
+test("extractResponseVerdict: two contradictory genuine verdict declarations in the same response fail closed to no verdict (invalid-response example § 6.4)", () => {
+  const body = ["CLEAN — looks fine.", "", "Verdict: NOT CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), null);
+});

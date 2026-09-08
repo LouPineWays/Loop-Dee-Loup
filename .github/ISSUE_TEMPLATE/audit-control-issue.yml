@@ -5,7 +5,11 @@ labels: []
 body:
   - type: markdown
     attributes:
-      value: "This issue is a read-only control boundary. Modify nothing in the target repository from this issue. See docs/bounded-review-cycle.md Stage 2."
+      value: >-
+        This issue is a read-only control boundary. Modify nothing in the target repository from
+        this issue. Your role, allowed/prohibited actions, exact required response shape, and
+        verdict semantics are defined in one place: **docs/stage2-audit-contract.md** — read it in
+        full before auditing. docs/bounded-review-cycle.md Stage 2 covers lifecycle/procedure only.
   - type: input
     id: merged_pr
     attributes:
@@ -96,29 +100,17 @@ body:
       required: true
   - type: markdown
     attributes:
-      value: |
-        **Required findings structure:** the audit response comment must replace "Pending" below
-        with: (0) a restatement of the exact merge commit named above; (1) a severity table with
-        a count per severity (e.g. Critical/High/Medium/Low or P0-P3); (2) one entry per finding,
-        deduplicated by root cause, each with exact evidence (file/line, command output, or
-        quoted text), consequence, and smallest correction; (3) a verification-performed
-        checklist that works through every item in the Verification checklist field above,
-        numbered the same way, and states its result (including an explicit "unable to
-        verify"/"blocked" result where applicable — never silently omitted); (4) whether founder
-        judgment is required for any finding; (5) an explicit `CLEAN` or `NOT CLEAN` verdict,
-        either as a leading status line ("CLEAN — ...") or a labelled "Verdict: CLEAN"/"Verdict:
-        NOT CLEAN" line. A report that nothing material remains is a successful audit — state it
-        in this full structure rather than a bare "looks fine." `tools/review-watch/lifecycle-
-        gate.mjs`'s post-audit check parses the response comment itself for the merge commit,
-        the verdict, and the verification-checklist walk-through (issue #230) — a response
-        missing any of these three cannot back a CLEAN closure, even once this issue's own
-        Verdict dropdown below is set to CLEAN by hand. Item (0)'s merge-commit restatement stays
-        mandatory even on a change where a control-plane-workflow checklist item legitimately
-        asks to be checked against the PR's frozen reviewed head instead (see the Verification
-        checklist instructions above) — citing only that reviewed head, with no separate
-        restatement of the actual merge commit, does not satisfy item (0) and will not back a
-        CLEAN closure (issue #335, audit #334: this exact omission left an otherwise-complete
-        response mechanically unbacked).
+      value: >-
+        **Required response format:** replace "Pending" below with your completed audit report,
+        in the exact shape defined by **docs/stage2-audit-contract.md** — read that document for
+        the canonical CLEAN/NOT CLEAN skeleton, verdict semantics, and invalid-response examples.
+        At minimum your response must restate the exact merge commit named above (the reviewed
+        head alone does not satisfy this — issue #335, audit #334), walk through every item in
+        the Verification checklist field below with a stated result, and end with an explicit
+        `Verdict: CLEAN` or `Verdict: NOT CLEAN` line. `tools/review-watch/stage2-report.mjs`
+        mechanically requires all three before this issue's Verdict dropdown can be promoted from
+        a response — see docs/stage2-audit-contract.md § 7 for why this file is the single
+        authority for response format, not this template.
   - type: textarea
     id: findings
     attributes:
