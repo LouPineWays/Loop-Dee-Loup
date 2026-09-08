@@ -162,11 +162,49 @@
 //   node tools/review-watch/lifecycle-gate.mjs close-audit --repo OWNER/REPO --audit-issue 160 [--dry-run true]
 //   node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo OWNER/REPO --work-issue 151 --audit-issue 160
 //
+//   post-audit RESPONSE_UNUSABLE — issue #447 (live reproductions #446 and #380's first round):
+//                  a genuine, provenance-valid `chatgpt-codex-connector[bot]` response has landed
+//                  post-trigger, but none of the genuine bot response(s) on the thread satisfy
+//                  isCompletedStage2AuditReport's completed-report contract (missing/wrong commit,
+//                  no explicit verdict, or no verification-results content) — durable Verdict stays
+//                  PENDING/malformed. Before this fix, `checkPostAudit` only ever distinguished
+//                  "a completed report exists" (REPORT_READY_TO_RECORD) from "not yet" (generic
+//                  OK/PENDING), so a genuinely landed-but-unusable response was silently
+//                  indistinguishable from true "still waiting for the reviewer" — the composed
+//                  `next-review-transition-gate.mjs` then reported ordinary `NO_ACTION_YET`, and a
+//                  controller could poll indefinitely or conclude "no response has landed" even
+//                  though one had (#446: a genuine terse `chatgpt-codex-connector[bot]` CLEAN reply
+//                  landed alongside an unrelated detailed non-bot report under `LouPineWays`
+//                  provenance, which is correctly never treated as assurance evidence — only bot-
+//                  authored comments are ever candidates at all, findAllMatches' own login filter).
+//                  `findStage2ReportEvidence` now classifies every candidate bot comment as
+//                  genuine (genuine-response.mjs's `isGenuineResponse`, the same classifier
+//                  isCompletedStage2AuditReport already requires internally) or not, and reports
+//                  `hasGenuineResponse`/`genuineResponsesSeen`/`genuineResponses` alongside its
+//                  existing `backed`/`responsesSeen`. `checkPostAudit` reports `RESPONSE_UNUSABLE`
+//                  — instead of falling through to the generic OK/PENDING result — exactly when a
+//                  genuine response has landed (`hasGenuineResponse: true`) but none is complete
+//                  (`backed: false`), scoped to the same PENDING/malformed-Verdict precondition
+//                  REPORT_READY_TO_RECORD already uses (a settled CLEAN/NOT CLEAN dropdown keeps
+//                  its own existing, unmodified branches unchanged). This never accepts a
+//                  structurally complete-looking non-bot report as assurance (it is never even a
+//                  candidate), never automatically retriggers or coaches the reviewer (issue #259's
+//                  anti-coaching authority — this only reports a state, it performs no mutation),
+//                  and never weakens #439/#440's own completed-report-promotion path: a later
+//                  genuine, complete bot response on the same thread is still found and still
+//                  promotes normally the next time this gate runs (no genuine response landed yet,
+//                  by contrast, still reports the true-wait generic OK/PENDING result unchanged —
+//                  see `resolvePostMergeVerdict` in next-review-transition-gate.mjs for the
+//                  composed `STAGE2_RESPONSE_UNUSABLE` fail-closed transition this state
+//                  authorizes).
+//
 // Exit codes: 0 = MERGE_READY / MERGE_READY_NO_WORK_ISSUE / OK / READY_TO_CLOSE /
 // REPORT_READY_TO_RECORD / RECORDED / ALREADY_RECORDED / ALREADY_TERMINAL / CLOSE_READY / CLOSED /
 // SUPERSEDED_CLOSE_READY / SUPERSEDED_CLOSED / NOT_TERMINAL_YET (safe to proceed),
-// 2 = BLOCKED_CLOSING_REFERENCE / PREMATURE_CLOSURE / CONFLICTING_VERDICT (must not merge / must
-// not treat as accepted / must not silently overwrite), 1 = operational error.
+// 2 = BLOCKED_CLOSING_REFERENCE / PREMATURE_CLOSURE / CONFLICTING_VERDICT / RESPONSE_UNUSABLE
+// (must not merge / must not treat as accepted / must not silently overwrite / must not be
+// treated as ordinary waiting — a genuine response landed and needs a bounded recovery decision),
+// 1 = operational error.
 //
 // Tests: node --test tools/review-watch/lifecycle-gate.test.mjs
 
@@ -174,6 +212,7 @@ import { execFileSync } from "node:child_process";
 import { endpointsFor, findAllMatches } from "./poll.mjs";
 import { findExistingTrigger, findCommentById } from "./trigger.mjs";
 import { isCompletedStage2AuditReport } from "./stage2-report.mjs";
+import { isGenuineResponse } from "./genuine-response.mjs";
 
 const DEFAULT_BOT = "chatgpt-codex-connector[bot]";
 
@@ -582,15 +621,31 @@ async function findStage2ReportEvidence(
   const comments = await ghApiImpl(commentsPath);
   const trigger = findExistingTrigger(comments, {});
   if (!trigger) {
-    return { backed: false, verdict: null, responsesSeen: 0, reason: "no @codex review trigger found on the audit issue thread" };
+    return {
+      backed: false,
+      verdict: null,
+      responsesSeen: 0,
+      hasGenuineResponse: false,
+      genuineResponsesSeen: 0,
+      genuineResponses: [],
+      reason: "no @codex review trigger found on the audit issue thread",
+    };
   }
 
   const sinceMs = new Date(trigger.created_at).getTime();
   const candidates = findAllMatches(comments, { bot, sinceMs, endpointName: "issue-comments" });
   const cutoffMs = legacyCutoff ? new Date(legacyCutoff).getTime() : null;
+  // issue #447: `genuine` is computed independently of `strict`/`relaxed` completeness below —
+  // isCompletedStage2AuditReport already requires isGenuineResponse internally as its own
+  // precondition (a BLOCKED/refused/setup-prompt reply can never be "complete"), but this module
+  // needs the genuine/non-genuine distinction on its own, regardless of completeness, to tell "no
+  // genuine response has landed at all" (state A — ordinary waiting) apart from "a genuine
+  // response landed but isn't a completed report" (state C — RESPONSE_UNUSABLE below). Evaluated
+  // once against the full comment body, the same text isCompletedStage2AuditReport itself checks.
   const reports = candidates.map((match) => {
     const full = findCommentById(comments, match.id);
     const body = full?.body ?? "";
+    const genuine = isGenuineResponse(body);
     const strict = isCompletedStage2AuditReport(body, {
       mergeCommit,
       requireVerificationEvidence: true,
@@ -599,18 +654,22 @@ async function findStage2ReportEvidence(
     });
     const isPreCutoff = cutoffMs !== null && new Date(match.created_at).getTime() < cutoffMs;
     if (strict.complete || !isPreCutoff) {
-      return { id: match.id, url: match.url, legacyCompatible: false, ...strict };
+      return { id: match.id, url: match.url, legacyCompatible: false, genuine, ...strict };
     }
     const relaxed = isCompletedStage2AuditReport(body, { mergeCommit, requireVerificationEvidence: false, reviewedHeadCommit });
-    return { id: match.id, url: match.url, legacyCompatible: relaxed.complete, ...relaxed };
+    return { id: match.id, url: match.url, legacyCompatible: relaxed.complete, genuine, ...relaxed };
   });
 
   const completed = reports.filter((r) => r.complete);
+  const genuineReports = reports.filter((r) => r.genuine);
   if (completed.length === 0) {
     return {
       backed: false,
       verdict: null,
       responsesSeen: reports.length,
+      hasGenuineResponse: genuineReports.length > 0,
+      genuineResponsesSeen: genuineReports.length,
+      genuineResponses: genuineReports.map((r) => ({ id: r.id, url: r.url, reasons: r.reasons })),
       reason:
         reports.length === 0
           ? "no post-trigger bot response found on the audit issue thread"
@@ -624,6 +683,8 @@ async function findStage2ReportEvidence(
     backed: true,
     verdict: latest.verdict,
     responsesSeen: reports.length,
+    hasGenuineResponse: true,
+    genuineResponsesSeen: genuineReports.length,
     matchedCommentUrl: latest.url,
     legacyCompatible: latest.legacyCompatible,
   };
@@ -757,6 +818,26 @@ export async function checkPostAudit(
           reportEvidence,
         };
       }
+      // Issue #447: a genuine bot response has landed (hasGenuineResponse) but none is a
+      // completed report (backed: false) — this is state C, not state A (true "still waiting").
+      // Reporting generic OK here would be indistinguishable from no response having landed at
+      // all, letting a controller poll indefinitely or claim "nothing has landed yet" for a
+      // response that already did (the #446/#380 reproductions).
+      if (reportEvidence.hasGenuineResponse) {
+        return {
+          exitCode: 2,
+          state: "RESPONSE_UNUSABLE",
+          workIssue: null,
+          auditIssue: Number(auditIssue),
+          rawVerdict,
+          reportEvidence,
+          message:
+            `Audit issue ${repo}#${auditIssue} has a genuine post-trigger response from ${bot}, but it is not a ` +
+            `completed Stage 2 audit report under the current evidence contract (${reportEvidence.reason}). This ` +
+            `must not be treated as ordinary waiting, and it must not automatically retrigger or coach the ` +
+            `reviewer (issue #259). A bounded recovery/founder-interrupt decision is required.`,
+        };
+      }
     }
 
     return {
@@ -885,6 +966,25 @@ export async function checkPostAudit(
         auditIssue: Number(auditIssue),
         rawVerdict,
         reportEvidence: pendingReportEvidence,
+      };
+    }
+    // Issue #447: same state-C distinction as the no-work-issue branch above — a genuine bot
+    // response landed but none is a completed report. The work issue stays open either way (no
+    // PREMATURE_CLOSURE risk here, since isClosed is false in this branch), but the caller must
+    // not read this as ordinary waiting.
+    if (pendingReportEvidence.hasGenuineResponse) {
+      return {
+        exitCode: 2,
+        state: "RESPONSE_UNUSABLE",
+        workIssue: workIssueNumber,
+        auditIssue: Number(auditIssue),
+        rawVerdict,
+        reportEvidence: pendingReportEvidence,
+        message:
+          `Audit issue ${repo}#${auditIssue} has a genuine post-trigger response from ${bot}, but it is not a ` +
+          `completed Stage 2 audit report under the current evidence contract (${pendingReportEvidence.reason}). ` +
+          `This must not be treated as ordinary waiting, and it must not automatically retrigger or coach the ` +
+          `reviewer (issue #259). A bounded recovery/founder-interrupt decision is required.`,
       };
     }
   }
