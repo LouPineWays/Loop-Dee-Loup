@@ -1,19 +1,19 @@
 {
   "scenario": "3 -- unrelated change negative control",
-  "narrative": "A correction-satisfied disposition names reviewed=aaaaaaa1111111111111111111111111111111a, corrected=bbbbbbb2222222222222222222222222222222b. An unrelated commit is then pushed, making the PR's real gated head ccccccc3333333333333333333333333333333c (never named by the disposition). Expect the old disposition to NOT authorize the new head.",
+  "narrative": "A correction-satisfied disposition names reviewed=aaaaaaa11111111111111111111111111111111a, corrected=bbbbbbb22222222222222222222222222222222b. An unrelated commit is then pushed, making the PR's real gated head ccccccc33333333333333333333333333333333c (never named by the disposition). Expect the old disposition to NOT authorize the new head.",
   "correctionDelta": {
     "exitCode": 2,
     "state": "HEAD_MISMATCH",
-    "reviewedHead": "aaaaaaa1111111111111111111111111111111a",
-    "correctedHead": "bbbbbbb2222222222222222222222222222222b",
-    "gatedHead": "ccccccc3333333333333333333333333333333c"
+    "reviewedHead": "aaaaaaa11111111111111111111111111111111a",
+    "correctedHead": "bbbbbbb22222222222222222222222222222222b",
+    "gatedHead": "ccccccc33333333333333333333333333333333c"
   },
   "composedVerdict": {
     "state": "NO_ACTION_YET",
     "stopAfter": true,
     "repo": "o/r",
     "pr": 1,
-    "head": "ccccccc3333333333333333333333333333333c",
+    "head": "ccccccc33333333333333333333333333333333c",
     "issue": 1,
     "stage1": {
       "exitCode": 2,

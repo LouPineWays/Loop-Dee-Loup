@@ -6,11 +6,11 @@
     "stopAfter": true,
     "repo": "o/r",
     "pr": 1,
-    "head": "bbbbbbb2222222222222222222222222222222b",
+    "head": "bbbbbbb22222222222222222222222222222222b",
     "issue": 1,
     "controlIssue": 1,
-    "reviewedHead": "aaaaaaa1111111111111111111111111111111a",
-    "correctedHead": "bbbbbbb2222222222222222222222222222222b"
+    "reviewedHead": "aaaaaaa11111111111111111111111111111111a",
+    "correctedHead": "bbbbbbb22222222222222222222222222222222b"
   },
   "expectation": "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2, exitCode 0",
   "passed": true

@@ -5,16 +5,16 @@
       "correctionDelta": {
         "exitCode": 2,
         "state": "NOT_SATISFIED",
-        "reviewedHead": "aaaaaaa1111111111111111111111111111111a",
-        "correctedHead": "bbbbbbb2222222222222222222222222222222b",
-        "reason": "reviewed head aaaaaaa1111111111111111111111111111111a's Stage 1 result is \"NOT_REQUESTED\", not RESPONSE_RECEIVED — a correction-satisfied disposition requires a genuine, findings-bearing Stage 1 response to already exist at the reviewed head."
+        "reviewedHead": "aaaaaaa11111111111111111111111111111111a",
+        "correctedHead": "bbbbbbb22222222222222222222222222222222b",
+        "reason": "reviewed head aaaaaaa11111111111111111111111111111111a's Stage 1 result is \"NOT_REQUESTED\", not RESPONSE_RECEIVED — a correction-satisfied disposition requires a genuine, findings-bearing Stage 1 response to already exist at the reviewed head."
       },
       "composedVerdict": {
         "state": "AMBIGUOUS",
         "stopAfter": true,
         "repo": "o/r",
         "pr": 1,
-        "head": "bbbbbbb2222222222222222222222222222222b",
+        "head": "bbbbbbb22222222222222222222222222222222b",
         "issue": 1,
         "stage1": {
           "exitCode": 2,
@@ -24,20 +24,20 @@
           "exitCode": 0,
           "state": "MERGE_READY"
         },
-        "reason": "reviewed head aaaaaaa1111111111111111111111111111111a's Stage 1 result is \"NOT_REQUESTED\", not RESPONSE_RECEIVED — a correction-satisfied disposition requires a genuine, findings-bearing Stage 1 response to already exist at the reviewed head."
+        "reason": "reviewed head aaaaaaa11111111111111111111111111111111a's Stage 1 result is \"NOT_REQUESTED\", not RESPONSE_RECEIVED — a correction-satisfied disposition requires a genuine, findings-bearing Stage 1 response to already exist at the reviewed head."
       },
       "expectation": "correctionDelta.state === NOT_SATISFIED; composed verdict === AMBIGUOUS",
       "passed": true
     },
     "b_malformed_disposition_bullet_never_parses": {
-      "malformedDisposition": "correction-satisfied at bbbbbbb2222222222222222222222222222222b reviewed aaaaaaa1111111111111111111111111111111a",
+      "malformedDisposition": "correction-satisfied at bbbbbbb22222222222222222222222222222222b reviewed aaaaaaa11111111111111111111111111111111a",
       "composedVerdict": {
-        "exitCode": 0,
-        "state": "NO_ACTION_YET",
+        "exitCode": 4,
+        "state": "AMBIGUOUS",
         "stopAfter": true,
         "repo": "o/r",
         "pr": 1,
-        "head": "bbbbbbb2222222222222222222222222222222b",
+        "head": "bbbbbbb22222222222222222222222222222222b",
         "issue": 1,
         "controlIssue": 1,
         "stage1": {
@@ -47,9 +47,10 @@
         "mergeReady": {
           "exitCode": 0,
           "state": "MERGE_READY"
-        }
+        },
+        "reason": "control Issue \"Stage 1\" bullet \"correction-satisfied at bbbbbbb22222222222222222222222222222222b reviewed aaaaaaa11111111111111111111111111111111a\" looks like a correction-satisfied disposition but does not match the required shape \"correction-satisfied at <corrected-head-sha> (reviewed <reviewed-head-sha>)\""
       },
-      "expectation": "parseCorrectionSatisfiedDisposition returns null, checkCorrectionDeltaImpl is never invoked, and the composed gate falls back to plain NO_ACTION_YET (identical to no disposition present at all)",
+      "expectation": "parseCorrectionSatisfiedDisposition returns null, checkCorrectionDeltaImpl is never invoked, and the composed gate fails closed to AMBIGUOUS (PR #459 Stage 1 correction: a bullet that looks like this disposition shape but does not match it must not silently resolve identically to no disposition being present at all)",
       "passed": true
     }
   }

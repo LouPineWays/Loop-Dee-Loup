@@ -8,17 +8,26 @@
     "fail": 1,
     "note": "The 1 failure is tools/review-watch/stage2-report.test.mjs's top-level module-load assertion against docs/stage2-audit-contract.md's canonical-skeleton fences -- confirmed present at this exact pre-454 commit in an isolated worktree, so it pre-dates and is unrelated to any 454 unit's work."
   },
-  "after": {
-    "commit": "3750d27 (454-A/B/C's shipped tip)",
+  "after454BC": {
+    "commit": "3750d27 (454-A/B/C's shipped tip, before the PR #459 Stage 1 correction pass)",
     "tests": 704,
     "pass": 703,
     "fail": 1,
-    "note": "Same single pre-existing failure as the baseline (stage2-report.test.mjs), reproduced identically -- not introduced or worsened by 454-B/454-C."
+    "note": "Same single pre-existing failure as the baseline (stage2-report.test.mjs), reproduced identically -- not introduced or worsened by 454-B/454-C. Superseded as a description of the merged code by afterCorrection below, but kept as an accurate historical record of this exact commit."
+  },
+  "afterCorrection": {
+    "commit": "0a13af0 (PR #459 Stage 1 correction pass) / exact merge commit ddfcfa037c33c33634a88cf65d8fe841af38bdf6 -- identical tree, confirmed via `git diff ddfcfa037c33c33634a88cf65d8fe841af38bdf6 0a13af04735f3fc83e0c6ef6da7b98f186a24c03` reporting no differences",
+    "tests": 719,
+    "pass": 718,
+    "fail": 1,
+    "note": "Regenerated as part of the Stage 2 audit #466 correction (issue #454): the audit's own P2 finding reported this scenario's committed counts (704/703/1) as stale relative to the corrected, merged implementation. This is the count that actually describes the shipped code -- the same single pre-existing stage2-report.test.mjs failure as before454 and after454BC, independently reconfirmed at this exact commit (same assertion, same location, `0 !== 2` against docs/stage2-audit-contract.md's canonical-skeleton fences). Note: the Stage 2 audit response itself cited a different figure (857 tests, 857 passes, 0 failures) for this same command at this same commit; that figure could not be reproduced -- two independent `node --test tools/review-watch/*.test.mjs tools/orchestration/*.test.mjs` runs against this exact merge commit's tree both produced 719/718/1, matching the count the PR #459 correction commit's own message already recorded at authorship time. The corrected numbers below use this independently-reproduced 719/718/1 count, not the audit's own unreproduced 857/857/0 figure."
   },
   "delta": {
-    "newTests": 43,
+    "newTestsFrom454BC": 43,
+    "newTestsFromCorrectionPass": 15,
+    "totalNewTests": 58,
     "newTestsAllPassing": true,
     "priorTestsBroken": 0
   },
-  "conclusion": "454-B (tools/review-watch/stage1-correction-gate.mjs, 26 new tests per its own test file) and 454-C's wiring into tools/orchestration/next-review-transition-gate.mjs together add 43 net new passing tests (704 - 661) to the combined tools/review-watch + tools/orchestration suite, with zero regressions: the sole failing test both before and after is the identical, already-existing tools/review-watch/stage2-report.test.mjs module-load assertion against docs/stage2-audit-contract.md, verified to fail identically at commit 149d8a1 (main, before any 454 commit) in an isolated git worktree -- a pre-existing defect outside this plan's scope, not a regression this unit introduced or is responsible for fixing."
+  "conclusion": "454-B (tools/review-watch/stage1-correction-gate.mjs, 26 new tests per its own test file) and 454-C's wiring into tools/orchestration/next-review-transition-gate.mjs together added 43 net new passing tests (704 - 661) to the combined tools/review-watch + tools/orchestration suite at commit 3750d27, with zero regressions. The subsequent PR #459 Stage 1 correction pass (0a13af0) added 15 further net new passing tests (719 - 704), also with zero regressions, bringing the exact merge commit's total to 719 tests / 718 pass / 1 fail. The sole failing test at every point in this history is the identical, already-existing tools/review-watch/stage2-report.test.mjs module-load assertion against docs/stage2-audit-contract.md -- verified to fail identically at commit 149d8a1 (main, before any 454 commit), at 3750d27, and at the exact merge commit ddfcfa037c33c33634a88cf65d8fe841af38bdf6 -- a pre-existing defect outside this plan's scope, not a regression any 454 unit or the PR #459 correction pass introduced or is responsible for fixing."
 }
