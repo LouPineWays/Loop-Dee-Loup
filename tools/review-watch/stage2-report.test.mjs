@@ -1288,11 +1288,23 @@ test("countVerificationWalkthroughItems (Stage 2 audit #488): a bold '**Testing*
 });
 
 test("countVerificationWalkthroughItems (Stage 2 audit #488): a genuine command-log bullet with trailing whitespace after the closing backtick is still recognized as command-log content", () => {
-  const body = ["1. one", "2. two", "", "### Checks", "", "- ✅ `npm test`   ", "- ✅ `npm run lint`"].join("\n");
+  // Uses a content-gated "### Testing" label (not "### Checks", which is excluded on label alone
+  // regardless of content — Stage 1 review finding P2 on PR #489: the prior version of this test
+  // used "### Checks" and so never actually exercised COMMAND_LOG_BULLET_CONTENT_PATTERN at all).
+  const body = ["1. one", "2. two", "", "### Testing", "", "- ✅ `npm test`   ", "- ✅ `npm run lint`"].join("\n");
   assert.equal(
     countVerificationWalkthroughItems(body),
     2,
     "trailing whitespace after the closing backtick must not defeat command-log recognition — the bullet is still a bare command",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding P1 on PR #489): a command-log bullet ending in ordinary punctuation with no em dash is still recognized as command-log content", () => {
+  const body = ["1. one", "2. two", "", "### Testing", "", "- ✅ `npm test`.", "- ✅ `npm run lint`."].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    2,
+    "a bare command followed only by terminal punctuation (no words) must still be recognized as command-log content, not promoted into a checklist candidate",
   );
 });
 

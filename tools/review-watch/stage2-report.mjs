@@ -467,12 +467,19 @@ function isTestOnlyWord(word) {
 // "* ✅ `node --test tools/review-watch tools/orchestration` — 779 passed, 0 failed." (issue #480,
 // comment 5609327800) and the same "`command` — result" shape in the real issue #330, #334, #380,
 // #381, and #436 fixtures. None of those annotations is a free-standing prose sentence continuing
-// straight off the closing backtick the way the bug case is. The pattern below therefore accepts
-// the backtick-quoted command as the whole remaining line (optional trailing whitespace only), or
-// followed by an em-dash-introduced annotation — but not by arbitrary prose glued directly onto
-// the closing backtick, which is what actually distinguishes a literal command log from a genuine
-// checklist item that happens to open with an inline-code span.
-const COMMAND_LOG_BULLET_CONTENT_PATTERN = new RegExp("^[-*+]\\s*" + CHECKLIST_STATUS_MARKER + "\\s+`[^`\\n]+`(?:\\s*$|\\s+—)");
+// straight off the closing backtick the way the bug case is.
+// Stage 1 review finding (P1) on PR #489 correcting this: a command bullet ending in ordinary
+// punctuation with no em dash at all — "- ✅ `npm test`." — is also real command-log shape (bare
+// command plus terminal punctuation, no words), and must stay recognized; only trailing *prose*
+// (letters/words) glued directly onto the closing backtick is the actual bug signature. The
+// pattern below therefore accepts the backtick-quoted command as the whole remaining line
+// (optional trailing whitespace only), an em-dash-introduced annotation, or trailing punctuation
+// only (no letters) — but never arbitrary prose glued directly onto the closing backtick, which is
+// what actually distinguishes a literal command log from a genuine checklist item that happens to
+// open with an inline-code span.
+const COMMAND_LOG_BULLET_CONTENT_PATTERN = new RegExp(
+  "^[-*+]\\s*" + CHECKLIST_STATUS_MARKER + "\\s+`[^`\\n]+`(?:\\s*$|\\s+—|\\s*[.,;:!?]+\\s*$)",
+);
 
 // Pure. Stage 1 review finding 2 on PR #485 (correcting issue #481): whether the lines in
 // `lines[start, end)` — a candidate command-log section's own content, excluding its opening
