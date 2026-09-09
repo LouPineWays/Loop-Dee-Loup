@@ -1187,6 +1187,60 @@ test("isCompletedStage2AuditReport (issue #481): reproduces the real #480 NOT CL
   assert.deepEqual(result.reasons, []);
 });
 
+// -- Stage 1 review findings on PR #485 (correcting issue #481): the "tests"/"testing" alias
+// introduced for #480 was giving section-label text too much semantic authority — a fenced
+// example of the label could mask real content, and any "Tests"/"Testing"-labelled section was
+// excluded solely on its label, even a genuine PASS/FAIL walk-through that merely used that word.
+
+test("countVerificationWalkthroughItems (Stage 1 finding 1 on PR #485): a standalone '**Testing**' label quoted inside a fenced example cannot mask a real numbered checklist that follows it", () => {
+  const body = [
+    "An example of the label shape referenced above:",
+    "```",
+    "**Testing**",
+    "```",
+    "",
+    "1. **PASS** — first item.",
+    "2. **PASS** — second item.",
+    "3. **PASS** — third item.",
+  ].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    3,
+    "the fenced '**Testing**' label must not open a section that then masks the real, unfenced numbered checklist for the rest of the document",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 2 on PR #485): a genuine numbered PASS/FAIL walk-through under a '### Testing' heading is still counted, not excluded merely for the label", () => {
+  const body = ["### Testing", "", "1. **PASS** — first item.", "2. **PASS** — second item.", "3. **PASS** — third item."].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    3,
+    "a '### Testing' heading over prose PASS/FAIL items (no command-log bullets) must not be treated as a literal command log",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 2 on PR #485): a genuine numbered PASS/FAIL walk-through under a standalone bold '**Tests**' label is still counted, not excluded merely for the label", () => {
+  const body = ["**Tests**", "", "1. **PASS** — first item.", "2. **PASS** — second item.", "3. **PASS** — third item."].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    3,
+    "a bold '**Tests**' label over prose PASS/FAIL items (no command-log bullets) must not be treated as a literal command log",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 2 on PR #485): the real #480 fixture's '**Testing**' section — genuine command-log bullets — is still excluded as a command log", () => {
+  assert.equal(
+    countVerificationWalkthroughItems(ISSUE_480_COMMENT),
+    8,
+    "the #480 fixture's '**Testing**' section bullets are all backtick-quoted commands and must remain excluded as a command log",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 2 on PR #485): the established '### Checks' behavior is unchanged — still excluded on label alone with no content gate", () => {
+  const body = ["1. one", "2. two", "", "### Checks", "", "- ✅ `cmd a`", "- ✅ `cmd b`", "- ✅ `cmd c`"].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 2, "the 2-item numbered run must still win, not the 3-item '### Checks' section");
+});
+
 // -- Stage 1 review findings on this PR: masking a "### Checks" section must not itself turn an
 // unrelated earlier numbered *findings* list, or a nested subheading inside "### Checks", into
 // counted walk-through evidence.

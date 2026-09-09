@@ -400,7 +400,11 @@ const COMMAND_LOG_WORD_PATTERN_SOURCE = "(?:checks?|tests?|testing)";
 // bullet asserts a checklist item was verified" from "this bullet records that a command was
 // run." Matches "Checks", "Checks:", "Checks performed", "### **Checks**", "### Testing", etc. —
 // the heading text alone, not exact punctuation/emphasis around it.
-const CHECKS_SECTION_HEADING_PATTERN = new RegExp(`^#{1,6}\\s*\\*{0,2}\\s*${COMMAND_LOG_WORD_PATTERN_SOURCE}\\b`, "i");
+// Captures the matched word itself (group 1) so callers can tell a "Checks" heading — excluded
+// on label alone, per issue #381's established behavior — apart from a "Tests"/"Testing" heading,
+// which Stage 1 review finding 2 on PR #485 (correcting issue #481) requires further content
+// confirmation for; see isTestOnlyWord and spanLooksLikeCommandLog below.
+const CHECKS_SECTION_HEADING_PATTERN = new RegExp(`^#{1,6}\\s*\\*{0,2}\\s*(${COMMAND_LOG_WORD_PATTERN_SOURCE})\\b`, "i");
 
 // A line consisting of nothing but a bold-only label — "**Testing**", "**Checks:**" — no heading
 // marker and no trailing content on the same line. Issue #481's genuine response used exactly
@@ -436,22 +440,75 @@ const FINDINGS_SECTION_HEADING_PATTERN = /^#{1,6}\s*\*{0,2}\s*findings?\b/i;
 // subheading that didn't itself say "checks" incorrectly closed the section early, exposing its
 // remaining bullets to being counted as checklist items again. Lines before the first matching
 // heading are never inside a section.
-function computeHeadingSectionMask(lines, startPattern) {
+// Stage 1 review finding 2 on PR #485 (correcting issue #481): matches a standalone label word —
+// "Checks"/"Check" only, not "Tests"/"Testing" — that this module has excluded on label alone
+// since issue #381, before #481 ever introduced the "tests"/"testing" alias. Used by
+// requireCommandLogContent below to leave that established "### Checks" (and bold "**Checks**")
+// behavior exactly as it was, while gating only the new alias words on actual content shape.
+const CHECKS_ONLY_WORD_PATTERN = /^checks?$/i;
+function isTestOnlyWord(word) {
+  return !CHECKS_ONLY_WORD_PATTERN.test((word ?? "").trim());
+}
+
+// A command-log bullet's own observed content shape (issue #480, comment 5609327800): a top-level
+// marker-bullet item whose text, immediately after the status glyph, *is* a backtick-quoted
+// command — "* ✅ `node --test ...`" — not prose that merely happens to mention one. A genuine
+// PASS/FAIL verification walk-through item is prose ("- ✅ Confirmed the fix works."), never a
+// bare command quoted as the entire remaining line content.
+const COMMAND_LOG_BULLET_CONTENT_PATTERN = new RegExp("^[-*+]\\s*" + CHECKLIST_STATUS_MARKER + "\\s+`");
+
+// Pure. Stage 1 review finding 2 on PR #485 (correcting issue #481): whether the lines in
+// `lines[start, end)` — a candidate command-log section's own content, excluding its opening
+// label/heading line — actually look like a literal command log rather than a genuine
+// PASS/FAIL walk-through that merely happens to sit under a "Tests"/"Testing" label. Requires at
+// least one top-level marker-bullet line in the span, and every such line to carry the
+// command-log bullet shape (COMMAND_LOG_BULLET_CONTENT_PATTERN) — a mixed or prose-only span is
+// not a command log and must not be excluded from checklist-walkthrough candidacy merely for
+// carrying a "Tests"/"Testing" label. A span with no marker-bullet lines at all is likewise not a
+// command log (nothing to log).
+function spanLooksLikeCommandLog(lines, start, end) {
+  let sawMarkerBullet = false;
+  for (let i = start; i < end; i++) {
+    if (!CHECKLIST_MARKER_ITEM_LINE_PATTERN.test(lines[i])) continue;
+    sawMarkerBullet = true;
+    if (!COMMAND_LOG_BULLET_CONTENT_PATTERN.test(lines[i])) return false;
+  }
+  return sawMarkerBullet;
+}
+
+// `options.requireCommandLogContent`: when true, a section opened by a "Tests"/"Testing" word
+// (isTestOnlyWord) is only actually included in the mask when its own content looks like a
+// command log (spanLooksLikeCommandLog); a "Checks" word keeps the unconditional, label-only
+// inclusion issue #381 established. Defaults to false (unconditional inclusion, the pre-#485
+// behavior) for callers with no word-level distinction to make, e.g. FINDINGS_SECTION_HEADING_PATTERN.
+function computeHeadingSectionMask(lines, startPattern, options = {}) {
+  const requireCommandLogContent = options.requireCommandLogContent === true;
   const mask = new Array(lines.length).fill(false);
-  let sectionLevel = null;
+  let section = null; // { level, start, word }
+  const closeSection = (endExclusive) => {
+    if (!section) return;
+    const include = !requireCommandLogContent || !isTestOnlyWord(section.word) || spanLooksLikeCommandLog(lines, section.start + 1, endExclusive);
+    if (include) {
+      for (let k = section.start; k < endExclusive; k++) mask[k] = true;
+    }
+    section = null;
+  };
   for (let i = 0; i < lines.length; i++) {
     const headingMatch = HEADING_LEVEL_PATTERN.exec(lines[i]);
     if (headingMatch) {
       const level = headingMatch[1].length;
-      if (sectionLevel !== null && level <= sectionLevel) {
-        sectionLevel = null;
+      if (section && level <= section.level) {
+        closeSection(i);
       }
-      if (sectionLevel === null && startPattern.test(lines[i])) {
-        sectionLevel = level;
+      if (!section) {
+        const startMatch = startPattern.exec(lines[i]);
+        if (startMatch) {
+          section = { level, start: i, word: startMatch[1] };
+        }
       }
     }
-    mask[i] = sectionLevel !== null;
   }
+  closeSection(lines.length);
   return mask;
 }
 
@@ -466,18 +523,49 @@ function computeHeadingSectionMask(lines, startPattern) {
 // #481: this is the bold-label counterpart to computeHeadingSectionMask, needed because a genuine
 // response labelled its literal command-log section "**Testing**" — a standalone bold paragraph,
 // not a heading — which computeHeadingSectionMask can never see at all.
-function computeBoldLabelSectionMask(lines, wordPattern) {
+// Stage 1 review finding 1 on PR #485 (correcting issue #481): a standalone bold label quoted
+// inside a fenced code example (e.g. an outer fence illustrating what a "**Testing**" label looks
+// like) must never open or close a real section — mirrors the fenced-code awareness
+// computeFencedCodeBlockMask already gives verdict extraction (extractResponseVerdict), reusing
+// that same primitive rather than a second Markdown parser. A fenced line is skipped entirely for
+// label/heading detection purposes; it does not itself open, close, or reopen a section. Content
+// that legitimately falls inside an already-open (validly, non-fenced-opened) section is still
+// covered by that section's own mask fill, whether or not it happens to sit inside a fence —
+// unchanged from this function's pre-existing behavior, since fenced-content-within-a-section was
+// never the reported defect.
+//
+// `options.requireCommandLogContent`: see computeHeadingSectionMask's own comment — same
+// "Checks" (label-only) vs. "Tests"/"Testing" (content-gated) distinction, Stage 1 review
+// finding 2 on this PR.
+function computeBoldLabelSectionMask(lines, wordPattern, options = {}) {
+  const requireCommandLogContent = options.requireCommandLogContent === true;
+  const fencedMask = computeFencedCodeBlockMask(lines);
   const mask = new Array(lines.length).fill(false);
-  let inSection = false;
+  let section = null; // { start, word }
+  const closeSection = (endExclusive) => {
+    if (!section) return;
+    const include = !requireCommandLogContent || !isTestOnlyWord(section.word) || spanLooksLikeCommandLog(lines, section.start + 1, endExclusive);
+    if (include) {
+      for (let k = section.start; k < endExclusive; k++) mask[k] = true;
+    }
+    section = null;
+  };
   for (let i = 0; i < lines.length; i++) {
+    if (fencedMask[i]) continue;
     const boldMatch = BOLD_LABEL_LINE_PATTERN.exec(lines[i].trim());
     if (boldMatch) {
-      inSection = wordPattern.test(boldMatch[1].trim());
-    } else if (HEADING_LEVEL_PATTERN.test(lines[i])) {
-      inSection = false;
+      closeSection(i);
+      const label = boldMatch[1].trim();
+      if (wordPattern.test(label)) {
+        section = { start: i, word: label };
+      }
+      continue;
     }
-    mask[i] = inSection;
+    if (HEADING_LEVEL_PATTERN.test(lines[i])) {
+      closeSection(i);
+    }
   }
+  closeSection(lines.length);
   return mask;
 }
 
@@ -491,9 +579,9 @@ function computeBoldLabelSectionMask(lines, wordPattern) {
 // reuses the identical per-item status-marker glyphs a real checklist item uses, and a findings
 // list reuses the identical numbered-list shape a real walk-through uses.
 function computeExcludedSectionMask(lines) {
-  const checksMask = computeHeadingSectionMask(lines, CHECKS_SECTION_HEADING_PATTERN);
+  const checksMask = computeHeadingSectionMask(lines, CHECKS_SECTION_HEADING_PATTERN, { requireCommandLogContent: true });
   const findingsMask = computeHeadingSectionMask(lines, FINDINGS_SECTION_HEADING_PATTERN);
-  const boldChecksMask = computeBoldLabelSectionMask(lines, COMMAND_LOG_BOLD_LABEL_PATTERN);
+  const boldChecksMask = computeBoldLabelSectionMask(lines, COMMAND_LOG_BOLD_LABEL_PATTERN, { requireCommandLogContent: true });
   return lines.map((_, i) => checksMask[i] || findingsMask[i] || boldChecksMask[i]);
 }
 
