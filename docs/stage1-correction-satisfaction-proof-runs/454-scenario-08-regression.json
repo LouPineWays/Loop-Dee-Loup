@@ -1,39 +1,46 @@
 {
   "scenario": "8 -- regression",
   "command": "node --test tools/review-watch/*.test.mjs tools/orchestration/*.test.mjs",
+  "rootCauseCorrection": {
+    "foundBy": "Stage 2 audit #468 (P2 finding) on PR #467's own merge commit 46313229fe951353788b9f5954a9f8a72e39d36c",
+    "priorWrongCounts": "454-D's original run (661/660/1, 704/703/1, 719/718/1) and PR #467's own correction/re-verification (719/718/1, claimed reproducible in both bash and PowerShell, 857/857/0 claimed unreproducible) were both wrong in the same way.",
+    "cause": "Every prior reproduction ran on a Windows checkout with `core.autocrlf=true`, which rewrites this repository's LF-stored files to CRLF on checkout. tools/review-watch/stage2-report.test.mjs extracts two ```markdown fenced examples from docs/stage2-audit-contract.md § 2 with a \\n-anchored regex (extractCanonicalSkeletonFence) at module load time. Against a CRLF checkout that regex matches zero fences instead of two, the module throws synchronously during import, and Node's test runner reports the entire 139-test file as one failing test instead of running any of its individual tests -- silently dropping 138 real tests and reporting a false single failure. This is not a shell-portability issue (PR #467's conclusion) and not a pre-existing, unrelated defect (454-D's conclusion) -- it is a local git line-ending configuration artifact that happened to reproduce identically across two separate investigations because both ran on the same machine.",
+    "verification": "git cat-file -p <commit>:docs/stage2-audit-contract.md (reading the stored blob directly, unaffected by working-tree checkout settings) is 216-for-216 LF-only (0 CRLF) at every commit checked. `git -c core.autocrlf=false worktree add` against the same commits produces CRLF-free checkouts (confirmed byte-for-byte via a Node byte scan). Against those LF-correct checkouts, node --test reports 857/857/0 uniformly: glob-based bash, explicit-file-enumeration bash, and explicit-file-enumeration PowerShell all agree, at both the PR #459 merge commit and the PR #467 merge commit."
+  },
+  "shellPortabilityNote": "The glob-based command (`tools/review-watch/*.test.mjs tools/orchestration/*.test.mjs`) is genuinely shell-dependent, independent of the line-ending issue above: a POSIX shell (bash) expands the glob into 14 explicit filenames before node ever sees it; PowerShell does not expand it for a native executable, so the identical literal command fails outright there (`Could not find '...\\*.test.mjs'`, this Node version does not fall back to broader test discovery). This finding (from PR #467's correction) remains valid and is retained; only the *counts* PR #467 attributed to it were wrong -- once line endings are correct, both the glob form (in bash) and the explicit-enumeration form (in either shell) report the identical 857/857/0.",
   "before": {
     "commit": "149d8a1 (main tip immediately before 454-A/B/C's three commits on feature/454-stage1-correction-satisfied)",
-    "tests": 661,
-    "pass": 660,
-    "fail": 1,
-    "note": "The 1 failure is tools/review-watch/stage2-report.test.mjs's top-level module-load assertion against docs/stage2-audit-contract.md's canonical-skeleton fences -- confirmed present at this exact pre-454 commit in an isolated worktree, so it pre-dates and is unrelated to any 454 unit's work."
+    "tests": 799,
+    "pass": 799,
+    "fail": 0,
+    "note": "Corrected by this record's second correction (Stage 2 audit #468). Re-derived via `git -c core.autocrlf=false worktree add` (LF-correct checkout) + explicit-enumeration `node --test`, Node v20.19.4, Windows. Previously recorded as 661/660/1 -- wrong, per rootCauseCorrection above."
   },
   "after454BC": {
     "commit": "3750d27 (454-A/B/C's shipped tip, before the PR #459 Stage 1 correction pass)",
-    "tests": 704,
-    "pass": 703,
-    "fail": 1,
-    "note": "Same single pre-existing failure as the baseline (stage2-report.test.mjs), reproduced identically -- not introduced or worsened by 454-B/454-C. Superseded as a description of the merged code by afterCorrection below, but kept as an accurate historical record of this exact commit."
+    "tests": 842,
+    "pass": 842,
+    "fail": 0,
+    "note": "Corrected by this record's second correction (Stage 2 audit #468). Re-derived the same way as `before` above. Previously recorded as 704/703/1 -- wrong, per rootCauseCorrection above. Superseded as a description of the merged code by afterCorrection below, but kept as an accurate historical record of this exact commit."
   },
   "afterCorrection": {
     "commit": "0a13af0 (PR #459 Stage 1 correction pass) / exact merge commit ddfcfa037c33c33634a88cf65d8fe841af38bdf6 -- identical tree, confirmed via `git diff ddfcfa037c33c33634a88cf65d8fe841af38bdf6 0a13af04735f3fc83e0c6ef6da7b98f186a24c03` reporting no differences",
-    "tests": 719,
-    "pass": 718,
-    "fail": 1,
-    "note": "Regenerated as part of the Stage 2 audit #466 correction (issue #454): the audit's own P2 finding reported this scenario's committed counts (704/703/1) as stale relative to the corrected, merged implementation. This is the count that actually describes the shipped code -- the same single pre-existing stage2-report.test.mjs failure as before454 and after454BC, independently reconfirmed at this exact commit (same assertion, same location, `0 !== 2` against docs/stage2-audit-contract.md's canonical-skeleton fences). Note: the Stage 2 audit response itself cited a different figure (857 tests, 857 passes, 0 failures) for this same command at this same commit; that figure could not be reproduced -- two independent `node --test tools/review-watch/*.test.mjs tools/orchestration/*.test.mjs` runs against this exact merge commit's tree both produced 719/718/1, matching the count the PR #459 correction commit's own message already recorded at authorship time. The corrected numbers below use this independently-reproduced 719/718/1 count, not the audit's own unreproduced 857/857/0 figure."
+    "tests": 857,
+    "pass": 857,
+    "fail": 0,
+    "note": "Corrected by this record's second correction (Stage 2 audit #468), which found the prior 719/718/1 entry here wrong -- see rootCauseCorrection above. This matches the Stage 2 audit's own cited figure (857 tests, 857 passes, 0 failures), which was correct both times it was reported (audit #466 and audit #468)."
   },
-  "afterCorrectionDeterministicControl": {
-    "commit": "ddfcfa037c33c33634a88cf65d8fe841af38bdf6, isolated `git worktree add --detach`, re-verified as part of Stage 2 audit #466's own correction cycle (PR #467, in response to a Stage 1 review finding disputing the 719/718/1 count above)",
-    "command": "node --test <all 14 tools/review-watch/*.test.mjs and tools/orchestration/*.test.mjs files, enumerated explicitly by name rather than via shell glob expansion>",
-    "executionContext": {
-      "node": "v20.19.4",
-      "platform": "win32 (Windows 11)",
-      "shellsRun": ["bash (Git Bash / MSYS bash.exe)", "PowerShell 7"]
-    },
-    "tests": 719,
-    "pass": 718,
-    "fail": 1,
-    "note": "Root cause of the disputed count: the originally-documented command is shell-dependent, not ambiguous in what it counts. `tools/review-watch/*.test.mjs tools/orchestration/*.test.mjs` is expanded into the same 14 explicit filenames by a POSIX shell (bash) before node ever sees it; a non-POSIX shell (PowerShell) does not expand it for a native executable, so the identical literal command fails outright there ('Could not find ...*.test.mjs') rather than falling back to broader test discovery on this Node version. Replacing the glob with the same 14 files enumerated explicitly removes the shell-dependence: run against an isolated worktree at the exact merge commit in both bash and PowerShell, both produced the identical 719/718/1 result, matching the original glob-based bash run and the PR #459 correction commit's own recorded count. The Stage 2 audit's cited 857/857/0 could not be reproduced by the glob-based run, either explicit-enumeration run, or the original correction commit's own count -- four independent data points all agreeing on 719/718/1, none on 857/857/0."
+  "afterPR467Correction": {
+    "commit": "20d0e87c3556c3e073a8a75ce61e0e2f8de0d70d (PR #467's own correction commit) / exact merge commit 46313229fe951353788b9f5954a9f8a72e39d36c",
+    "tests": 857,
+    "pass": 857,
+    "fail": 0,
+    "note": "PR #467 changed only docs/proof-run artifacts, no test files, so the count is unchanged from afterCorrection above. Re-verified directly at this merge commit via LF-correct worktree, matching Stage 2 audit #468's own cited figure."
+  },
+  "executionContext": {
+    "node": "v20.19.4",
+    "platform": "win32 (Windows 11)",
+    "shellsRun": ["bash (Git Bash / MSYS bash.exe)", "PowerShell 7"],
+    "checkoutMethod": "git -c core.autocrlf=false worktree add --detach <path> <commit> (LF-preserving; default core.autocrlf=true checkouts on this machine reproduce a false 138-test/1-failure undercount -- see rootCauseCorrection)"
   },
   "delta": {
     "newTestsFrom454BC": 43,
@@ -42,5 +49,5 @@
     "newTestsAllPassing": true,
     "priorTestsBroken": 0
   },
-  "conclusion": "454-B (tools/review-watch/stage1-correction-gate.mjs, 26 new tests per its own test file) and 454-C's wiring into tools/orchestration/next-review-transition-gate.mjs together added 43 net new passing tests (704 - 661) to the combined tools/review-watch + tools/orchestration suite at commit 3750d27, with zero regressions. The subsequent PR #459 Stage 1 correction pass (0a13af0) added 15 further net new passing tests (719 - 704), also with zero regressions, bringing the exact merge commit's total to 719 tests / 718 pass / 1 fail. The sole failing test at every point in this history is the identical, already-existing tools/review-watch/stage2-report.test.mjs module-load assertion against docs/stage2-audit-contract.md -- verified to fail identically at commit 149d8a1 (main, before any 454 commit), at 3750d27, and at the exact merge commit ddfcfa037c33c33634a88cf65d8fe841af38bdf6 -- a pre-existing defect outside this plan's scope, not a regression any 454 unit or the PR #459 correction pass introduced or is responsible for fixing."
+  "conclusion": "454-B (tools/review-watch/stage1-correction-gate.mjs, 26 new tests per its own test file) and 454-C's wiring into tools/orchestration/next-review-transition-gate.mjs together added 43 net new passing tests (842 - 799) to the combined tools/review-watch + tools/orchestration suite at commit 3750d27, with zero regressions. The subsequent PR #459 Stage 1 correction pass (0a13af0) added 15 further net new passing tests (857 - 842), also with zero regressions, bringing the exact merge commit's total to 857 tests / 857 pass / 0 fail. PR #467's own correction (20d0e87 / merge 46313229) touched no test files and reproduces the identical 857/857/0. There is no pre-existing test-suite failure at any point in this history once checked out with correct (LF) line endings -- the previously-recorded single failure at every data point (149d8a1, 3750d27, and the PR #459/#467 merge commits) was a `core.autocrlf=true` checkout artifact, not a real defect in any shipped code, per rootCauseCorrection above."
 }
