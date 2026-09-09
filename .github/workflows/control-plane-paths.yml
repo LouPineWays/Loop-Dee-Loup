@@ -13,9 +13,11 @@ on:
       - ".github/ISSUE_TEMPLATE/**"
       - ".github/workflows/**"
       - ".claude/**"
+      - ".gitattributes"
       - "tools/check-control-plane-paths.mjs"
       - "tools/check-startup-budget.mjs"
       - "tools/check-priority-labels.mjs"
+      - "tools/check-eol-policy.test.mjs"
       - "tools/local-worker/**"
       - "tools/review-watch/**"
       - "tools/telemetry/**"
@@ -43,6 +45,9 @@ jobs:
 
       - name: Verify startup-context budget
         run: node tools/check-startup-budget.mjs
+
+      - name: EOL policy regression guard
+        run: node --test tools/check-eol-policy.test.mjs
 
       - name: Local-worker adapter tests
         run: node --test tools/local-worker/adapter.test.mjs

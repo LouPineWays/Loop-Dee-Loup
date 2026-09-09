@@ -166,3 +166,54 @@ No exception was invoked. The repository-level `.gitattributes` policy alone est
 the required invariant for the demonstrated path (verification items 1-3 above); neither
 `tools/review-watch/stage2-report.mjs`'s `extractCanonicalSkeletonFence` nor any other
 parser was modified.
+
+## Stage 1 correction (unit 470-B, PR #473)
+
+Codex's Stage 1 review of PR #473 (head `bd67220`) found the above proof-run record
+incomplete in one respect: items 1-3 only exercise **fresh** worktrees created after
+`.gitattributes` already existed. An **existing** `core.autocrlf=true` clone that
+already had `docs/stage2-audit-contract.md` checked out with CRLF bytes before this
+policy landed does not get those bytes rewritten merely because `.gitattributes` was
+added — Git only reapplies text attributes when a file is actually re-checked-out, not
+when the policy changes underneath an unchanged blob. This is real, unfixable-at-`.gitattributes`-level Git
+behavior, not a proof-run gap.
+
+**Live reproduction (no synthetic worktree needed):** this repository's own working
+copy on `fix/470-eol-policy` is itself such an existing clone (`core.autocrlf=true`,
+confirmed via `git config core.autocrlf`). Byte-level check of the actual working-tree
+file: `docs/stage2-audit-contract.md` — CRLF pairs: 216, bare LF: 216 (i.e. entirely
+CRLF, matching the pre-policy defect exactly). Running
+`node --test tools/review-watch/stage2-report.test.mjs` against this real state
+reproduced the exact `0 !== 2` module-load failure the finding describes (`extractCanonicalSkeletonFence`
+found 0 fenced blocks instead of 2, because its regex required a literal `\n`
+immediately around the fence markers).
+
+**Fix:** rather than a migration mechanism that rewrites already-materialized
+working-tree files (disproportionate churn, and unenforceable for clones this
+repository does not control), narrowly hardened the exact demonstrated
+fixture-extraction boundary: `tools/review-watch/stage2-report.test.mjs` now reads
+`docs/stage2-audit-contract.md` and immediately normalizes `\r\n` to `\n` before the
+fence-matching regex runs. This is scoped to the one read site the reproduction
+implicates; `tools/review-watch/stage2-report.mjs` (production parsing of GitHub API
+comment bodies, which are always LF-normalized by GitHub) was not touched, and no
+general newline-normalization framework was introduced.
+
+**Verification:** re-ran `node --test tools/review-watch/stage2-report.test.mjs`
+against this same real CRLF working tree after the fix: **139/139 pass, 0 fail**
+(confirmed causally, not coincidentally, by stashing the fix and reproducing the
+failure again, then restoring it). Re-ran the broader suite
+(`tools/review-watch/*.test.mjs tools/orchestration/*.test.mjs`): **857/857 pass, 0
+fail** — unchanged from the pre-correction baseline. Re-ran
+`node --test tools/check-eol-policy.test.mjs`: 7/7 pass. Re-ran
+`node tools/check-control-plane-paths.mjs` and `node tools/check-startup-budget.mjs`:
+both OK.
+
+**CI-wiring finding:** `tools/check-eol-policy.test.mjs` existed but was not invoked
+by any checked-in workflow, and `.github/workflows/control-plane-paths.yml`'s `paths:`
+trigger did not cover `.gitattributes` or the guard file itself — a future PR
+narrowing or removing the EOL policy would trigger no CI check. Fixed by adding
+`.gitattributes` and `tools/check-eol-policy.test.mjs` to that workflow's `paths:`
+list and adding an `EOL policy regression guard` step
+(`node --test tools/check-eol-policy.test.mjs`) to its existing job, alongside the
+other cheap deterministic control-plane checks it already runs — no new CI
+subsystem.

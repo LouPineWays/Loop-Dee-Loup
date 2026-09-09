@@ -1410,7 +1410,14 @@ test("extractResponseVerdict (PR #429): issue #421's accepted bare standalone '#
 // -----------------------------------------------------------------------------------------------
 
 const STAGE2_CONTRACT_DOC_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "docs", "stage2-audit-contract.md");
-const STAGE2_CONTRACT_DOC = readFileSync(STAGE2_CONTRACT_DOC_PATH, "utf8");
+// Normalize CRLF to LF at the point of read: an existing `core.autocrlf=true` clone can retain
+// CRLF working-tree bytes for this file even after `.gitattributes` (issue #470) declares
+// `eol=lf`, because Git only reapplies text attributes when a file is actually re-checked-out,
+// not merely because the policy changed underneath an unchanged blob. Without this, the
+// LF-anchored fence regex below fails to match on such a clone (0 fences found instead of 2),
+// collapsing this entire file's tests into a single module-load failure -- see
+// docs/eol-policy-proof-runs.md for the reproduction.
+const STAGE2_CONTRACT_DOC = readFileSync(STAGE2_CONTRACT_DOC_PATH, "utf8").replace(/\r\n/g, "\n");
 
 // Pulls the Nth (0-based) ```markdown fenced block out of docs/stage2-audit-contract.md § 2
 // ("## 2. Canonical response skeleton"): index 0 is the CLEAN skeleton, index 1 is NOT CLEAN.
