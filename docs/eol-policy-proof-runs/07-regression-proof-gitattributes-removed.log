@@ -1,0 +1,78 @@
+TAP version 13
+# Subtest: `.gitattributes` exists and declares a repository-wide LF policy
+not ok 1 - `.gitattributes` exists and declares a repository-wide LF policy
+  ---
+  duration_ms: 1.8288
+  location: 'C:\\Loop-Dee-Loup\\tools\\check-eol-policy.test.mjs:40:1'
+  failureType: 'testCodeFailure'
+  error: '.gitattributes is missing -- the repository EOL policy has been removed'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (file:///C:/Loop-Dee-Loup/tools/check-eol-policy.test.mjs:41:10)
+    Test.runInAsyncScope (node:async_hooks:206:9)
+    Test.run (node:internal/test_runner/test:796:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:526:18)
+    node:internal/test_runner/harness:255:12
+    node:internal/process/task_queues:140:7
+    AsyncResource.runInAsyncScope (node:async_hooks:206:9)
+    AsyncResource.runMicrotask (node:internal/process/task_queues:137:8)
+  ...
+# Subtest: git resolves docs/stage2-audit-contract.md to text=auto, eol=lf regardless of local core.autocrlf
+ok 2 - git resolves docs/stage2-audit-contract.md to text=auto, eol=lf regardless of local core.autocrlf
+  ---
+  duration_ms: 45.8
+  ...
+# Subtest: git resolves tools/review-watch/stage2-report.test.mjs to text=auto, eol=lf regardless of local core.autocrlf
+ok 3 - git resolves tools/review-watch/stage2-report.test.mjs to text=auto, eol=lf regardless of local core.autocrlf
+  ---
+  duration_ms: 42.5959
+  ...
+# Subtest: git resolves AGENTS.md to text=auto, eol=lf regardless of local core.autocrlf
+ok 4 - git resolves AGENTS.md to text=auto, eol=lf regardless of local core.autocrlf
+  ---
+  duration_ms: 42.5067
+  ...
+# Subtest: git resolves .gitattributes to text=auto, eol=lf regardless of local core.autocrlf
+not ok 5 - git resolves .gitattributes to text=auto, eol=lf regardless of local core.autocrlf
+  ---
+  duration_ms: 0.2792
+  location: 'C:\\Loop-Dee-Loup\\tools\\check-eol-policy.test.mjs:51:3'
+  failureType: 'testCodeFailure'
+  error: ".gitattributes no longer exists -- update this regression guard's protected-file list"
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (file:///C:/Loop-Dee-Loup/tools/check-eol-policy.test.mjs:52:12)
+    Test.runInAsyncScope (node:async_hooks:206:9)
+    Test.run (node:internal/test_runner/test:796:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:526:18)
+    Test.postRun (node:internal/test_runner/test:889:19)
+    Test.run (node:internal/test_runner/test:835:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:526:7)
+  ...
+# Subtest: committed docs/stage2-audit-contract.md blob is LF-only (nothing for the checkout policy to fight against)
+ok 6 - committed docs/stage2-audit-contract.md blob is LF-only (nothing for the checkout policy to fight against)
+  ---
+  duration_ms: 43.7105
+  ...
+# Subtest: committed tools/review-watch/stage2-report.test.mjs blob is LF-only
+ok 7 - committed tools/review-watch/stage2-report.test.mjs blob is LF-only
+  ---
+  duration_ms: 45.1441
+  ...
+1..7
+# tests 7
+# suites 0
+# pass 5
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 856.5682

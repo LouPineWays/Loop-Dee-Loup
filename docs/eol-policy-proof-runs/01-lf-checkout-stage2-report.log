@@ -1,0 +1,705 @@
+TAP version 13
+# Subtest: bodyReferencesCommit: matches the exact full SHA
+ok 1 - bodyReferencesCommit: matches the exact full SHA
+  ---
+  duration_ms: 1.0905
+  ...
+# Subtest: bodyReferencesCommit: matches a 7+ char abbreviated prefix in either direction
+ok 2 - bodyReferencesCommit: matches a 7+ char abbreviated prefix in either direction
+  ---
+  duration_ms: 0.1646
+  ...
+# Subtest: bodyReferencesCommit: case-insensitive
+ok 3 - bodyReferencesCommit: case-insensitive
+  ---
+  duration_ms: 0.1193
+  ...
+# Subtest: bodyReferencesCommit: a different commit does not match
+ok 4 - bodyReferencesCommit: a different commit does not match
+  ---
+  duration_ms: 0.1068
+  ...
+# Subtest: bodyReferencesCommit: false when text or mergeCommit is missing/empty
+ok 5 - bodyReferencesCommit: false when text or mergeCommit is missing/empty
+  ---
+  duration_ms: 0.1177
+  ...
+# Subtest: bodyReferencesCommit: a malformed (non-hex, or under 7 chars) mergeCommit never matches
+ok 6 - bodyReferencesCommit: a malformed (non-hex, or under 7 chars) mergeCommit never matches
+  ---
+  duration_ms: 0.0996
+  ...
+# Subtest: isCompletedStage2AuditReport: a response naming only the trusted reviewed head (not the merge commit) is still rejected — reviewedHeadCommit never substitutes for mergeCommit
+ok 7 - isCompletedStage2AuditReport: a response naming only the trusted reviewed head (not the merge commit) is still rejected — reviewedHeadCommit never substitutes for mergeCommit
+  ---
+  duration_ms: 2.7501
+  ...
+# Subtest: isCompletedStage2AuditReport: a response naming an INCORRECT merge commit while also citing the correct reviewedHeadCommit is still rejected (the exact unsafe scenario Stage 1 review caught)
+ok 8 - isCompletedStage2AuditReport: a response naming an INCORRECT merge commit while also citing the correct reviewedHeadCommit is still rejected (the exact unsafe scenario Stage 1 review caught)
+  ---
+  duration_ms: 0.7238
+  ...
+# Subtest: isCompletedStage2AuditReport: a response naming the exact merge commit still passes regardless of whether reviewedHeadCommit is also given
+ok 9 - isCompletedStage2AuditReport: a response naming the exact merge commit still passes regardless of whether reviewedHeadCommit is also given
+  ---
+  duration_ms: 0.3362
+  ...
+# Subtest: isCompletedStage2AuditReport: a response naming an unrelated SHA (matching neither mergeCommit nor reviewedHeadCommit) is rejected with the generic reason
+ok 10 - isCompletedStage2AuditReport: a response naming an unrelated SHA (matching neither mergeCommit nor reviewedHeadCommit) is rejected with the generic reason
+  ---
+  duration_ms: 0.2795
+  ...
+# Subtest: isCompletedStage2AuditReport: malformed/missing trusted target metadata (reviewedHeadCommit null) behaves exactly like the pre-\#335 merge-commit-only check
+ok 11 - isCompletedStage2AuditReport: malformed/missing trusted target metadata (reviewedHeadCommit null) behaves exactly like the pre-\#335 merge-commit-only check
+  ---
+  duration_ms: 0.2342
+  ...
+# Subtest: isCompletedStage2AuditReport: the \#330 shape (an incidental short merge-prefix inside an unrelated git-log command) still passes on the merge-commit signal alone, unaffected by reviewedHeadCommit being present or absent
+ok 12 - isCompletedStage2AuditReport: the \#330 shape (an incidental short merge-prefix inside an unrelated git-log command) still passes on the merge-commit signal alone, unaffected by reviewedHeadCommit being present or absent
+  ---
+  duration_ms: 0.2134
+  ...
+# Subtest: bodyReferencesCommit: issue \#334's real response never restates the merge commit itself
+ok 13 - bodyReferencesCommit: issue \#334's real response never restates the merge commit itself
+  ---
+  duration_ms: 0.1214
+  ...
+# Subtest: bodyReferencesCommit: issue \#334's real response does reference its trusted frozen reviewed head
+ok 14 - bodyReferencesCommit: issue \#334's real response does reference its trusted frozen reviewed head
+  ---
+  duration_ms: 0.1683
+  ...
+# Subtest: isCompletedStage2AuditReport: issue \#334's real response stays correctly unbacked — target identity fails (no merge-commit citation, and reviewedHeadCommit is diagnostic-only) and checklist completeness independently fails (11 requested, 4 shown)
+ok 15 - isCompletedStage2AuditReport: issue \#334's real response stays correctly unbacked — target identity fails (no merge-commit citation, and reviewedHeadCommit is diagnostic-only) and checklist completeness independently fails (11 requested, 4 shown)
+  ---
+  duration_ms: 0.6617
+  ...
+# Subtest: isCompletedStage2AuditReport: issue \#334's real response without reviewedHeadCommit fails the same way, just with the generic (less specific) target-identity reason
+ok 16 - isCompletedStage2AuditReport: issue \#334's real response without reviewedHeadCommit fails the same way, just with the generic (less specific) target-identity reason
+  ---
+  duration_ms: 0.2977
+  ...
+# Subtest: extractResponseVerdict: a leading 'CLEAN — ...' status line (issue \#95's observed shape)
+ok 17 - extractResponseVerdict: a leading 'CLEAN — ...' status line (issue \#95's observed shape)
+  ---
+  duration_ms: 0.1425
+  ...
+# Subtest: extractResponseVerdict: a leading 'NOT CLEAN — ...' status line
+ok 18 - extractResponseVerdict: a leading 'NOT CLEAN — ...' status line
+  ---
+  duration_ms: 0.2197
+  ...
+# Subtest: extractResponseVerdict: a leading status line wrapped in Markdown presentation
+ok 19 - extractResponseVerdict: a leading status line wrapped in Markdown presentation
+  ---
+  duration_ms: 0.2069
+  ...
+# Subtest: extractResponseVerdict: a 'Verdict' labelled value on the same line
+ok 20 - extractResponseVerdict: a 'Verdict' labelled value on the same line
+  ---
+  duration_ms: 0.1819
+  ...
+# Subtest: extractResponseVerdict: a 'Verdict' heading with the value on the next non-blank line
+ok 21 - extractResponseVerdict: a 'Verdict' heading with the value on the next non-blank line
+  ---
+  duration_ms: 0.1138
+  ...
+# Subtest: extractResponseVerdict: null when no verdict token is present
+ok 22 - extractResponseVerdict: null when no verdict token is present
+  ---
+  duration_ms: 0.1032
+  ...
+# Subtest: extractResponseVerdict: an unrelated later mention of CLEAN/NOT CLEAN with no label or leading position is not read as the verdict
+ok 23 - extractResponseVerdict: an unrelated later mention of CLEAN/NOT CLEAN with no label or leading position is not read as the verdict
+  ---
+  duration_ms: 0.096
+  ...
+# Subtest: extractResponseVerdict: findings prose that merely contains the word 'verdict' does not short-circuit before the real labelled verdict (Stage 1 review finding on PR \#231)
+ok 24 - extractResponseVerdict: findings prose that merely contains the word 'verdict' does not short-circuit before the real labelled verdict (Stage 1 review finding on PR \#231)
+  ---
+  duration_ms: 0.1669
+  ...
+# Subtest: extractResponseVerdict: a prose sentence that merely opens with the bare word 'Verdict' (no colon, more text on the same line) is not read as a label (issue \#268 finding 1)
+ok 25 - extractResponseVerdict: a prose sentence that merely opens with the bare word 'Verdict' (no colon, more text on the same line) is not read as a label (issue \#268 finding 1)
+  ---
+  duration_ms: 0.1116
+  ...
+# Subtest: extractResponseVerdict: a bare prose sentence opening with 'Verdict' and no real label anywhere returns null (issue \#268 finding 1)
+ok 26 - extractResponseVerdict: a bare prose sentence opening with 'Verdict' and no real label anywhere returns null (issue \#268 finding 1)
+  ---
+  duration_ms: 0.0907
+  ...
+# Subtest: extractResponseVerdict: a combined 'Stage 2 Audit Verdict: **CLEAN**' heading (issue \#259's observed shape)
+ok 27 - extractResponseVerdict: a combined 'Stage 2 Audit Verdict: **CLEAN**' heading (issue \#259's observed shape)
+  ---
+  duration_ms: 0.0969
+  ...
+# Subtest: extractResponseVerdict: a combined 'Stage 2 Audit — NOT CLEAN' heading (issue \#278's observed shape)
+ok 28 - extractResponseVerdict: a combined 'Stage 2 Audit — NOT CLEAN' heading (issue \#278's observed shape)
+  ---
+  duration_ms: 0.0971
+  ...
+# Subtest: extractResponseVerdict: a genuine sentence that merely mentions 'Stage 2 Audit' later in a sentence, not as the line's own opening, is not read as a verdict declaration
+ok 29 - extractResponseVerdict: a genuine sentence that merely mentions 'Stage 2 Audit' later in a sentence, not as the line's own opening, is not read as a verdict declaration
+  ---
+  duration_ms: 0.0877
+  ...
+# Subtest: extractResponseVerdict: a 'Stage 2 Audit' heading merely naming its topic, with no declaring separator before the token, is not read as a verdict (Stage 1 review finding on PR \#279)
+ok 30 - extractResponseVerdict: a 'Stage 2 Audit' heading merely naming its topic, with no declaring separator before the token, is not read as a verdict (Stage 1 review finding on PR \#279)
+  ---
+  duration_ms: 0.0933
+  ...
+# Subtest: extractResponseVerdict: a 'Stage 2 Audit' heading mentioning both tokens without a declaring separator falls through to a real Verdict line, never picks the wrong (first) token (Stage 1 review finding on PR \#279)
+ok 31 - extractResponseVerdict: a 'Stage 2 Audit' heading mentioning both tokens without a declaring separator falls through to a real Verdict line, never picks the wrong (first) token (Stage 1 review finding on PR \#279)
+  ---
+  duration_ms: 0.117
+  ...
+# Subtest: extractResponseVerdict: the same ambiguous heading with no real verdict line anywhere else extracts nothing, rather than guessing
+ok 32 - extractResponseVerdict: the same ambiguous heading with no real verdict line anywhere else extracts nothing, rather than guessing
+  ---
+  duration_ms: 0.1531
+  ...
+# Subtest: extractResponseVerdict: a bare '\# CLEAN' heading appearing well after the start of the body, with no 'Stage 2 Audit' prefix (issue \#422's observed shape)
+ok 33 - extractResponseVerdict: a bare '\# CLEAN' heading appearing well after the start of the body, with no 'Stage 2 Audit' prefix (issue \#422's observed shape)
+  ---
+  duration_ms: 0.1548
+  ...
+# Subtest: extractResponseVerdict: a bare 'NOT CLEAN' standalone heading, not at the start of the body
+ok 34 - extractResponseVerdict: a bare 'NOT CLEAN' standalone heading, not at the start of the body
+  ---
+  duration_ms: 0.1117
+  ...
+# Subtest: extractResponseVerdict: a standalone verdict heading tolerates bold emphasis and trailing punctuation
+ok 35 - extractResponseVerdict: a standalone verdict heading tolerates bold emphasis and trailing punctuation
+  ---
+  duration_ms: 0.0942
+  ...
+# Subtest: extractResponseVerdict: a heading merely discussing CLEAN/NOT CLEAN as its topic is not read as a standalone verdict heading (must not regress the issue \#268/\#278 false-positive guard)
+ok 36 - extractResponseVerdict: a heading merely discussing CLEAN/NOT CLEAN as its topic is not read as a standalone verdict heading (must not regress the issue \#268/\#278 false-positive guard)
+  ---
+  duration_ms: 0.109
+  ...
+# Subtest: extractResponseVerdict: reproduces issue \#421's real genuine CLEAN Stage 2 response body — a standalone '\# CLEAN' heading after '\#\#\# Founder Judgment', not at the start of the body
+ok 37 - extractResponseVerdict: reproduces issue \#421's real genuine CLEAN Stage 2 response body — a standalone '\# CLEAN' heading after '\#\#\# Founder Judgment', not at the start of the body
+  ---
+  duration_ms: 0.1107
+  ...
+# Subtest: extractResponseVerdict: a fenced '\# CLEAN' example inside verification evidence is not read as the verdict; the real trailing 'Verdict' / 'NOT CLEAN' field is
+ok 38 - extractResponseVerdict: a fenced '\# CLEAN' example inside verification evidence is not read as the verdict; the real trailing 'Verdict' / 'NOT CLEAN' field is
+  ---
+  duration_ms: 0.1287
+  ...
+# Subtest: extractResponseVerdict: a fenced 'CLEAN' example with no real verdict declaration anywhere else extracts nothing, rather than the fenced example
+ok 39 - extractResponseVerdict: a fenced 'CLEAN' example with no real verdict declaration anywhere else extracts nothing, rather than the fenced example
+  ---
+  duration_ms: 0.1936
+  ...
+# Subtest: extractResponseVerdict: a tilde-fenced verdict example is excluded the same way as a backtick-fenced one
+ok 40 - extractResponseVerdict: a tilde-fenced verdict example is excluded the same way as a backtick-fenced one
+  ---
+  duration_ms: 0.0994
+  ...
+# Subtest: extractResponseVerdict: two genuinely conflicting standalone verdict declarations outside any fence fail closed to null rather than silently resolving to the first one found
+ok 41 - extractResponseVerdict: two genuinely conflicting standalone verdict declarations outside any fence fail closed to null rather than silently resolving to the first one found
+  ---
+  duration_ms: 0.0916
+  ...
+# Subtest: extractResponseVerdict: issue \#421's real response is unaffected by fenced-example exclusion (no fences present, must still resolve to CLEAN)
+ok 42 - extractResponseVerdict: issue \#421's real response is unaffected by fenced-example exclusion (no fences present, must still resolve to CLEAN)
+  ---
+  duration_ms: 0.1012
+  ...
+# Subtest: countNumberedItems: counts each top-level numbered line
+ok 43 - countNumberedItems: counts each top-level numbered line
+  ---
+  duration_ms: 0.2296
+  ...
+# Subtest: countNumberedItems: zero for missing/empty text
+ok 44 - countNumberedItems: zero for missing/empty text
+  ---
+  duration_ms: 0.0824
+  ...
+# Subtest: countVerificationWalkthroughItems: counts only the last freshly-restarted-at-1 numbered run, not numbered findings entries earlier in the body (Stage 1 review finding on this PR)
+ok 45 - countVerificationWalkthroughItems: counts only the last freshly-restarted-at-1 numbered run, not numbered findings entries earlier in the body (Stage 1 review finding on this PR)
+  ---
+  duration_ms: 0.1102
+  ...
+# Subtest: countVerificationWalkthroughItems: a checklist truncated after item 1 is not padded out by earlier numbered findings entries
+ok 46 - countVerificationWalkthroughItems: a checklist truncated after item 1 is not padded out by earlier numbered findings entries
+  ---
+  duration_ms: 0.0943
+  ...
+# Subtest: countVerificationWalkthroughItems: a single numbered list with no earlier findings still counts normally
+ok 47 - countVerificationWalkthroughItems: a single numbered list with no earlier findings still counts normally
+  ---
+  duration_ms: 0.08
+  ...
+# Subtest: countVerificationWalkthroughItems: zero for missing/empty text or text with no numbered items
+ok 48 - countVerificationWalkthroughItems: zero for missing/empty text or text with no numbered items
+  ---
+  duration_ms: 0.0928
+  ...
+# Subtest: hasVerificationEvidence: true with a 'verif...' mention and a numbered item
+ok 49 - hasVerificationEvidence: true with a 'verif...' mention and a numbered item
+  ---
+  duration_ms: 0.2035
+  ...
+# Subtest: hasVerificationEvidence: false with only a mention, no numbered item
+ok 50 - hasVerificationEvidence: false with only a mention, no numbered item
+  ---
+  duration_ms: 0.1039
+  ...
+# Subtest: hasVerificationEvidence: false with only a numbered item, no verification mention
+ok 51 - hasVerificationEvidence: false with only a numbered item, no verification mention
+  ---
+  duration_ms: 0.082
+  ...
+# Subtest: hasVerificationEvidence: false for empty/undefined
+ok 52 - hasVerificationEvidence: false for empty/undefined
+  ---
+  duration_ms: 0.096
+  ...
+# Subtest: hasCompleteVerificationEvidence: false when the response's checklist is shorter than what was requested (issue \#268 finding 2)
+ok 53 - hasCompleteVerificationEvidence: false when the response's checklist is shorter than what was requested (issue \#268 finding 2)
+  ---
+  duration_ms: 0.144
+  ...
+# Subtest: hasCompleteVerificationEvidence: true when the response's checklist meets or exceeds the requested count
+ok 54 - hasCompleteVerificationEvidence: true when the response's checklist meets or exceeds the requested count
+  ---
+  duration_ms: 0.1001
+  ...
+# Subtest: hasCompleteVerificationEvidence: false when a truncated checklist is padded out by earlier numbered findings entries (Stage 1 review finding on this PR)
+ok 55 - hasCompleteVerificationEvidence: false when a truncated checklist is padded out by earlier numbered findings entries (Stage 1 review finding on this PR)
+  ---
+  duration_ms: 0.1158
+  ...
+# Subtest: hasCompleteVerificationEvidence: falls back to presence-only when no requested checklist is given
+ok 56 - hasCompleteVerificationEvidence: falls back to presence-only when no requested checklist is given
+  ---
+  duration_ms: 0.0956
+  ...
+# Subtest: isCompletedStage2AuditReport: reproduces the exact \#229 kickoff-and-task-link reply as incomplete (issue \#230's reproduced defect)
+ok 57 - isCompletedStage2AuditReport: reproduces the exact \#229 kickoff-and-task-link reply as incomplete (issue \#230's reproduced defect)
+  ---
+  duration_ms: 0.1602
+  ...
+# Subtest: isCompletedStage2AuditReport: a valid completed report is accepted
+ok 58 - isCompletedStage2AuditReport: a valid completed report is accepted
+  ---
+  duration_ms: 0.5051
+  ...
+# Subtest: isCompletedStage2AuditReport: accepts the leading-status-line shape as well as the labelled shape
+ok 59 - isCompletedStage2AuditReport: accepts the leading-status-line shape as well as the labelled shape
+  ---
+  duration_ms: 0.1827
+  ...
+# Subtest: isCompletedStage2AuditReport: accepts a full realistic report opening with the observed '\#\# Stage 2 Audit Verdict: **CLEAN**' heading (issue \#259)
+ok 60 - isCompletedStage2AuditReport: accepts a full realistic report opening with the observed '\#\# Stage 2 Audit Verdict: **CLEAN**' heading (issue \#259)
+  ---
+  duration_ms: 0.1534
+  ...
+# Subtest: isCompletedStage2AuditReport: accepts a full realistic report opening with the observed '\#\# Stage 2 Audit — NOT CLEAN' heading (issue \#278)
+ok 61 - isCompletedStage2AuditReport: accepts a full realistic report opening with the observed '\#\# Stage 2 Audit — NOT CLEAN' heading (issue \#278)
+  ---
+  duration_ms: 0.1474
+  ...
+# Subtest: isCompletedStage2AuditReport: a report addressing the wrong commit is rejected
+ok 62 - isCompletedStage2AuditReport: a report addressing the wrong commit is rejected
+  ---
+  duration_ms: 0.1595
+  ...
+# Subtest: isCompletedStage2AuditReport: an empty body is rejected
+ok 63 - isCompletedStage2AuditReport: an empty body is rejected
+  ---
+  duration_ms: 0.5121
+  ...
+# Subtest: isCompletedStage2AuditReport: evaluates evidence beyond the first 200 characters (the commit/verdict/checklist all fall well past it)
+ok 64 - isCompletedStage2AuditReport: evaluates evidence beyond the first 200 characters (the commit/verdict/checklist all fall well past it)
+  ---
+  duration_ms: 0.1719
+  ...
+# Subtest: isCompletedStage2AuditReport: a BLOCKED reply is rejected the same way as any other non-genuine response
+ok 65 - isCompletedStage2AuditReport: a BLOCKED reply is rejected the same way as any other non-genuine response
+  ---
+  duration_ms: 0.0987
+  ...
+# Subtest: isCompletedStage2AuditReport: a self-referential permission-refusal reply is rejected
+ok 66 - isCompletedStage2AuditReport: a self-referential permission-refusal reply is rejected
+  ---
+  duration_ms: 1.1884
+  ...
+# Subtest: isCompletedStage2AuditReport: reports every failed signal when multiple are missing
+ok 67 - isCompletedStage2AuditReport: reports every failed signal when multiple are missing
+  ---
+  duration_ms: 0.1086
+  ...
+# Subtest: isCompletedStage2AuditReport: a fenced '\# CLEAN' example in evidence never authorizes CLEAN over the report's actual NOT CLEAN verdict
+ok 68 - isCompletedStage2AuditReport: a fenced '\# CLEAN' example in evidence never authorizes CLEAN over the report's actual NOT CLEAN verdict
+  ---
+  duration_ms: 0.1711
+  ...
+# Subtest: isCompletedStage2AuditReport: a NOT CLEAN report is not misread as CLEAN via a findings sentence that merely mentions the word 'verdict' (Stage 1 review finding on PR \#231)
+ok 69 - isCompletedStage2AuditReport: a NOT CLEAN report is not misread as CLEAN via a findings sentence that merely mentions the word 'verdict' (Stage 1 review finding on PR \#231)
+  ---
+  duration_ms: 0.1376
+  ...
+# Subtest: isCompletedStage2AuditReport: a refusal disclosed past the first 200 characters is still rejected (Stage 1 review finding on PR \#231)
+ok 70 - isCompletedStage2AuditReport: a refusal disclosed past the first 200 characters is still rejected (Stage 1 review finding on PR \#231)
+  ---
+  duration_ms: 0.5315
+  ...
+# Subtest: isCompletedStage2AuditReport: requireVerificationEvidence: false accepts a terse legacy-shaped CLEAN response with no checklist
+ok 71 - isCompletedStage2AuditReport: requireVerificationEvidence: false accepts a terse legacy-shaped CLEAN response with no checklist
+  ---
+  duration_ms: 0.1362
+  ...
+# Subtest: isCompletedStage2AuditReport: requireVerificationEvidence: false still requires the correct commit and an explicit verdict
+ok 72 - isCompletedStage2AuditReport: requireVerificationEvidence: false still requires the correct commit and an explicit verdict
+  ---
+  duration_ms: 0.1317
+  ...
+# Subtest: isCompletedStage2AuditReport: a checklist walk-through truncated partway through the requested items is rejected
+ok 73 - isCompletedStage2AuditReport: a checklist walk-through truncated partway through the requested items is rejected
+  ---
+  duration_ms: 0.1714
+  ...
+# Subtest: isCompletedStage2AuditReport: a truncated checklist is not accepted merely because earlier numbered findings entries pad the total count (Stage 1 review finding on this PR)
+ok 74 - isCompletedStage2AuditReport: a truncated checklist is not accepted merely because earlier numbered findings entries pad the total count (Stage 1 review finding on this PR)
+  ---
+  duration_ms: 0.1636
+  ...
+# Subtest: isCompletedStage2AuditReport: a checklist walk-through meeting the requested item count is accepted
+ok 75 - isCompletedStage2AuditReport: a checklist walk-through meeting the requested item count is accepted
+  ---
+  duration_ms: 0.1707
+  ...
+# Subtest: isCompletedStage2AuditReport: requireVerificationEvidence: false ignores requestedChecklist completeness entirely
+ok 76 - isCompletedStage2AuditReport: requireVerificationEvidence: false ignores requestedChecklist completeness entirely
+  ---
+  duration_ms: 0.1249
+  ...
+# Subtest: hasVerificationEvidence: true for a status-marker bullet checklist ('- ✅ ...') with no numbering
+ok 77 - hasVerificationEvidence: true for a status-marker bullet checklist ('- ✅ ...') with no numbering
+  ---
+  duration_ms: 0.153
+  ...
+# Subtest: countVerificationWalkthroughItems: counts the trailing contiguous run of status-marker bullet lines when there is no numbered walk-through
+ok 78 - countVerificationWalkthroughItems: counts the trailing contiguous run of status-marker bullet lines when there is no numbered walk-through
+  ---
+  duration_ms: 0.1439
+  ...
+# Subtest: countVerificationWalkthroughItems: an earlier unrelated bulleted line breaks the trailing marker run, isolating it from the checklist section (mirrors the numbered-run isolation test above)
+ok 79 - countVerificationWalkthroughItems: an earlier unrelated bulleted line breaks the trailing marker run, isolating it from the checklist section (mirrors the numbered-run isolation test above)
+  ---
+  duration_ms: 0.0933
+  ...
+# Subtest: countVerificationWalkthroughItems: prefers a numbered walk-through over an unrelated marker-bullet list elsewhere in the body
+ok 80 - countVerificationWalkthroughItems: prefers a numbered walk-through over an unrelated marker-bullet list elsewhere in the body
+  ---
+  duration_ms: 0.0859
+  ...
+# Subtest: countVerificationWalkthroughItems: reproduces issue \#330's real response — 7 status-marker bullet items, matching its 7-item requested checklist
+ok 81 - countVerificationWalkthroughItems: reproduces issue \#330's real response — 7 status-marker bullet items, matching its 7-item requested checklist
+  ---
+  duration_ms: 0.091
+  ...
+# Subtest: hasCompleteVerificationEvidence: issue \#330's real response satisfies its real 7-item requested checklist via the status-marker bullet shape
+ok 82 - hasCompleteVerificationEvidence: issue \#330's real response satisfies its real 7-item requested checklist via the status-marker bullet shape
+  ---
+  duration_ms: 0.1008
+  ...
+# Subtest: isCompletedStage2AuditReport: reproduces issue \#330's real genuine CLEAN Stage 2 response as complete — content-complete but previously misclassified as incomplete for lacking a numbered checklist walk-through
+ok 83 - isCompletedStage2AuditReport: reproduces issue \#330's real genuine CLEAN Stage 2 response as complete — content-complete but previously misclassified as incomplete for lacking a numbered checklist walk-through
+  ---
+  duration_ms: 0.1781
+  ...
+# Subtest: isCompletedStage2AuditReport: issue \#330's real response, given a deliberately wrong mergeCommit, is correctly rejected despite intentionally citing the correct reviewedHeadCommit (proves the fix does not reopen the unsafe \#335 scenario)
+ok 84 - isCompletedStage2AuditReport: issue \#330's real response, given a deliberately wrong mergeCommit, is correctly rejected despite intentionally citing the correct reviewedHeadCommit (proves the fix does not reopen the unsafe \#335 scenario)
+  ---
+  duration_ms: 0.1715
+  ...
+# Subtest: hasVerificationEvidence: true for a numbered status-marker checklist ('1. ✅ ...') that never uses the word 'verif...'
+ok 85 - hasVerificationEvidence: true for a numbered status-marker checklist ('1. ✅ ...') that never uses the word 'verif...'
+  ---
+  duration_ms: 0.0785
+  ...
+# Subtest: hasVerificationEvidence: a bare numbered list with no status-marker glyph still requires a 'verif...' mention (unchanged behavior)
+ok 86 - hasVerificationEvidence: a bare numbered list with no status-marker glyph still requires a 'verif...' mention (unchanged behavior)
+  ---
+  duration_ms: 0.0839
+  ...
+# Subtest: countVerificationWalkthroughItems: reproduces issue \#353's real response — 5 numbered status-marker items, matching its 5-item requested checklist
+ok 87 - countVerificationWalkthroughItems: reproduces issue \#353's real response — 5 numbered status-marker items, matching its 5-item requested checklist
+  ---
+  duration_ms: 0.0905
+  ...
+# Subtest: hasCompleteVerificationEvidence: issue \#353's real response satisfies its real 5-item requested checklist via the numbered status-marker shape, despite never using the word 'verif...'
+ok 88 - hasCompleteVerificationEvidence: issue \#353's real response satisfies its real 5-item requested checklist via the numbered status-marker shape, despite never using the word 'verif...'
+  ---
+  duration_ms: 0.0853
+  ...
+# Subtest: isCompletedStage2AuditReport: reproduces issue \#353's real genuine CLEAN Stage 2 response as complete — content-complete but previously misclassified as showing no verification-results content at all
+ok 89 - isCompletedStage2AuditReport: reproduces issue \#353's real genuine CLEAN Stage 2 response as complete — content-complete but previously misclassified as showing no verification-results content at all
+  ---
+  duration_ms: 0.1546
+  ...
+# Subtest: isCompletedStage2AuditReport: a numbered status-marker checklist truncated partway through the requested items is still rejected (issue \#268 finding 2 applies equally to the numbered-marker shape)
+ok 90 - isCompletedStage2AuditReport: a numbered status-marker checklist truncated partway through the requested items is still rejected (issue \#268 finding 2 applies equally to the numbered-marker shape)
+  ---
+  duration_ms: 0.1593
+  ...
+# Subtest: hasVerificationEvidence: a numbered run with a marker on only its first item is NOT evidence — every item in the selected run must carry the glyph, not merely one line anywhere (Stage 1 finding 1, PR \#354)
+ok 91 - hasVerificationEvidence: a numbered run with a marker on only its first item is NOT evidence — every item in the selected run must carry the glyph, not merely one line anywhere (Stage 1 finding 1, PR \#354)
+  ---
+  duration_ms: 0.0897
+  ...
+# Subtest: hasVerificationEvidence: a lone unrelated status bullet in findings prose is NOT evidence without a 'verif...' mention — the bulleted marker shape keeps its original word-mention requirement (Stage 1 finding 2, PR \#354)
+ok 92 - hasVerificationEvidence: a lone unrelated status bullet in findings prose is NOT evidence without a 'verif...' mention — the bulleted marker shape keeps its original word-mention requirement (Stage 1 finding 2, PR \#354)
+  ---
+  duration_ms: 0.0775
+  ...
+# Subtest: hasVerificationEvidence: a numbered run where every item carries a marker is still accepted (the intended \#353 fix keeps working after the Stage 1 correction)
+ok 93 - hasVerificationEvidence: a numbered run where every item carries a marker is still accepted (the intended \#353 fix keeps working after the Stage 1 correction)
+  ---
+  duration_ms: 0.0764
+  ...
+# Subtest: isCompletedStage2AuditReport: the mixed-marker adversarial run from Stage 1 finding 1 does not back a CLEAN verdict even against a matching-length requested checklist
+ok 94 - isCompletedStage2AuditReport: the mixed-marker adversarial run from Stage 1 finding 1 does not back a CLEAN verdict even against a matching-length requested checklist
+  ---
+  duration_ms: 0.1148
+  ...
+# Subtest: isCompletedStage2AuditReport: the lone-bullet-in-prose adversarial input from Stage 1 finding 2 does not back a CLEAN verdict against a single-item requested checklist
+ok 95 - isCompletedStage2AuditReport: the lone-bullet-in-prose adversarial input from Stage 1 finding 2 does not back a CLEAN verdict against a single-item requested checklist
+  ---
+  duration_ms: 0.2001
+  ...
+# Subtest: isCompletedStage2AuditReport: a status-marker checklist truncated partway through the requested items is still rejected (issue \#268 finding 2 applies equally to the marker-bullet shape)
+ok 96 - isCompletedStage2AuditReport: a status-marker checklist truncated partway through the requested items is still rejected (issue \#268 finding 2 applies equally to the marker-bullet shape)
+  ---
+  duration_ms: 0.1543
+  ...
+# Subtest: countVerificationWalkthroughItems (Stage 1 finding 1): a short numbered findings list must not outrank a complete, later marker-bullet checklist
+ok 97 - countVerificationWalkthroughItems (Stage 1 finding 1): a short numbered findings list must not outrank a complete, later marker-bullet checklist
+  ---
+  duration_ms: 0.1117
+  ...
+# Subtest: countVerificationWalkthroughItems (Stage 1 finding 1): a numbered findings list must not pad out an incomplete, later marker-bullet checklist
+ok 98 - countVerificationWalkthroughItems (Stage 1 finding 1): a numbered findings list must not pad out an incomplete, later marker-bullet checklist
+  ---
+  duration_ms: 0.1286
+  ...
+# Subtest: countVerificationWalkthroughItems (Stage 1 finding 2): an indented sub-bullet nested under one checklist item is not counted as its own additional top-level item
+ok 99 - countVerificationWalkthroughItems (Stage 1 finding 2): an indented sub-bullet nested under one checklist item is not counted as its own additional top-level item
+  ---
+  duration_ms: 0.1125
+  ...
+# Subtest: countVerificationWalkthroughItems (Stage 1 finding 3): an indented continuation line under a checklist item does not break the walk-through run
+ok 100 - countVerificationWalkthroughItems (Stage 1 finding 3): an indented continuation line under a checklist item does not break the walk-through run
+  ---
+  duration_ms: 0.1641
+  ...
+# Subtest: countVerificationWalkthroughItems (Stage 1 finding 4): a trailing 'Founder judgment required' warning bullet does not shrink or replace a complete marker checklist
+ok 101 - countVerificationWalkthroughItems (Stage 1 finding 4): a trailing 'Founder judgment required' warning bullet does not shrink or replace a complete marker checklist
+  ---
+  duration_ms: 0.1032
+  ...
+# Subtest: countVerificationWalkthroughItems (Stage 1 finding 4): a lone 'Founder judgment required' warning bullet is never accepted as evidence that verification was performed
+ok 102 - countVerificationWalkthroughItems (Stage 1 finding 4): a lone 'Founder judgment required' warning bullet is never accepted as evidence that verification was performed
+  ---
+  duration_ms: 0.0925
+  ...
+# Subtest: countVerificationWalkthroughItems (issue \#381): a complete numbered walk-through is not undercounted by a later, unrelated 'Checks' section of fewer status-marker command bullets
+ok 103 - countVerificationWalkthroughItems (issue \#381): a complete numbered walk-through is not undercounted by a later, unrelated 'Checks' section of fewer status-marker command bullets
+  ---
+  duration_ms: 0.0915
+  ...
+# Subtest: hasCompleteVerificationEvidence (issue \#381): the synthetic reproduction satisfies its matching 6-item requested checklist
+ok 104 - hasCompleteVerificationEvidence (issue \#381): the synthetic reproduction satisfies its matching 6-item requested checklist
+  ---
+  duration_ms: 0.1004
+  ...
+# Subtest: countVerificationWalkthroughItems (issue \#381): a 'Checks' heading at any level, with optional emphasis/colon, is still recognized as a literal-command-log section
+ok 105 - countVerificationWalkthroughItems (issue \#381): a 'Checks' heading at any level, with optional emphasis/colon, is still recognized as a literal-command-log section
+  ---
+  duration_ms: 0.0846
+  ...
+# Subtest: countVerificationWalkthroughItems (issue \#381): a genuine marker-bullet checklist NOT under a 'Checks' heading still wins the later-run tie-break unaffected (issue \#330's Stage 1 finding 1 must not regress)
+ok 106 - countVerificationWalkthroughItems (issue \#381): a genuine marker-bullet checklist NOT under a 'Checks' heading still wins the later-run tie-break unaffected (issue \#330's Stage 1 finding 1 must not regress)
+  ---
+  duration_ms: 0.083
+  ...
+# Subtest: countVerificationWalkthroughItems (issue \#381): reproduces the real \#380/\#381 response — the correct 6-item numbered walk-through, not the 5-item 'Checks' section
+ok 107 - countVerificationWalkthroughItems (issue \#381): reproduces the real \#380/\#381 response — the correct 6-item numbered walk-through, not the 5-item 'Checks' section
+  ---
+  duration_ms: 0.0977
+  ...
+# Subtest: hasCompleteVerificationEvidence (issue \#381): the real response satisfies its real 6-item requested checklist
+ok 108 - hasCompleteVerificationEvidence (issue \#381): the real response satisfies its real 6-item requested checklist
+  ---
+  duration_ms: 0.1099
+  ...
+# Subtest: isCompletedStage2AuditReport (issue \#381): reproduces the real \#380 CLEAN Stage 2 response as complete — previously misclassified as incomplete (5 of 6) due to the later 'Checks' section
+ok 109 - isCompletedStage2AuditReport (issue \#381): reproduces the real \#380 CLEAN Stage 2 response as complete — previously misclassified as incomplete (5 of 6) due to the later 'Checks' section
+  ---
+  duration_ms: 0.2165
+  ...
+# Subtest: countVerificationWalkthroughItems (Stage 1 finding P1 on this PR): numbered findings with no separate walk-through are not counted merely because a trailing 'Checks' log is masked out
+ok 110 - countVerificationWalkthroughItems (Stage 1 finding P1 on this PR): numbered findings with no separate walk-through are not counted merely because a trailing 'Checks' log is masked out
+  ---
+  duration_ms: 0.0972
+  ...
+# Subtest: countVerificationWalkthroughItems (Stage 1 finding P1 on this PR): a genuine walk-through with no 'Findings' heading is still counted normally when a 'Checks' log follows it (must not regress)
+ok 111 - countVerificationWalkthroughItems (Stage 1 finding P1 on this PR): a genuine walk-through with no 'Findings' heading is still counted normally when a 'Checks' log follows it (must not regress)
+  ---
+  duration_ms: 0.0935
+  ...
+# Subtest: countVerificationWalkthroughItems (Stage 1 finding P2 on this PR): a nested subheading inside a 'Checks' section does not end the masked section early
+ok 112 - countVerificationWalkthroughItems (Stage 1 finding P2 on this PR): a nested subheading inside a 'Checks' section does not end the masked section early
+  ---
+  duration_ms: 0.0868
+  ...
+# Subtest: isCompletedStage2AuditReport: reproduces issue \#421's real genuine CLEAN Stage 2 response as complete — previously misclassified as having no explicit CLEAN/NOT CLEAN verdict because the '\# CLEAN' heading matched none of the three previously-recognized shapes
+ok 113 - isCompletedStage2AuditReport: reproduces issue \#421's real genuine CLEAN Stage 2 response as complete — previously misclassified as having no explicit CLEAN/NOT CLEAN verdict because the '\# CLEAN' heading matched none of the three previously-recognized shapes
+  ---
+  duration_ms: 0.2964
+  ...
+# Subtest: isCompletedStage2AuditReport: issue \#421's real response, given a deliberately wrong mergeCommit, is correctly rejected despite the genuine standalone '\# CLEAN' verdict heading
+ok 114 - isCompletedStage2AuditReport: issue \#421's real response, given a deliberately wrong mergeCommit, is correctly rejected despite the genuine standalone '\# CLEAN' verdict heading
+  ---
+  duration_ms: 0.2856
+  ...
+# Subtest: extractResponseVerdict (audit \#426, matrix item 1): a backtick-fenced '\#\# Stage 2 Audit — CLEAN' example with no genuine declaration anywhere else extracts nothing
+ok 115 - extractResponseVerdict (audit \#426, matrix item 1): a backtick-fenced '\#\# Stage 2 Audit — CLEAN' example with no genuine declaration anywhere else extracts nothing
+  ---
+  duration_ms: 0.0911
+  ...
+# Subtest: extractResponseVerdict (audit \#426, matrix item 2): the same fenced combined-heading example alongside a genuine non-fenced 'Verdict: NOT CLEAN' resolves to the genuine verdict, not the fenced example
+ok 116 - extractResponseVerdict (audit \#426, matrix item 2): the same fenced combined-heading example alongside a genuine non-fenced 'Verdict: NOT CLEAN' resolves to the genuine verdict, not the fenced example
+  ---
+  duration_ms: 0.0863
+  ...
+# Subtest: extractResponseVerdict (audit \#426, matrix item 3): a tilde-fenced combined heading is excluded as evidence the same way a backtick-fenced one is
+ok 117 - extractResponseVerdict (audit \#426, matrix item 3): a tilde-fenced combined heading is excluded as evidence the same way a backtick-fenced one is
+  ---
+  duration_ms: 0.09
+  ...
+# Subtest: extractResponseVerdict (audit \#426, matrix item 4): two genuine, non-fenced, conflicting combined headings fail closed to null rather than resolving to whichever appeared first
+ok 118 - extractResponseVerdict (audit \#426, matrix item 4): two genuine, non-fenced, conflicting combined headings fail closed to null rather than resolving to whichever appeared first
+  ---
+  duration_ms: 0.0812
+  ...
+# Subtest: extractResponseVerdict (audit \#426, matrix item 5): repeated genuine combined headings that agree resolve to the agreed verdict
+ok 119 - extractResponseVerdict (audit \#426, matrix item 5): repeated genuine combined headings that agree resolve to the agreed verdict
+  ---
+  duration_ms: 0.0816
+  ...
+# Subtest: extractResponseVerdict (audit \#426, matrix item 6): issue \#421's accepted bare standalone '\# CLEAN' fixture still resolves to CLEAN, unaffected by the combined-heading fix
+ok 120 - extractResponseVerdict (audit \#426, matrix item 6): issue \#421's accepted bare standalone '\# CLEAN' fixture still resolves to CLEAN, unaffected by the combined-heading fix
+  ---
+  duration_ms: 0.0885
+  ...
+# Subtest: extractResponseVerdict (audit \#426): a fenced combined heading and a fenced standalone heading in the same body, with a genuine non-fenced label elsewhere, both stay excluded
+ok 121 - extractResponseVerdict (audit \#426): a fenced combined heading and a fenced standalone heading in the same body, with a genuine non-fenced label elsewhere, both stay excluded
+  ---
+  duration_ms: 0.0809
+  ...
+# Subtest: isCompletedStage2AuditReport (audit \#426, matrix item 8): a completed-report evaluation fails closed to no verdict when the only apparent verdict is fenced combined-heading evidence
+ok 122 - isCompletedStage2AuditReport (audit \#426, matrix item 8): a completed-report evaluation fails closed to no verdict when the only apparent verdict is fenced combined-heading evidence
+  ---
+  duration_ms: 0.1449
+  ...
+# Subtest: isCompletedStage2AuditReport (audit \#426): a fenced combined-heading example never overrides the report's actual genuine NOT CLEAN verdict
+ok 123 - isCompletedStage2AuditReport (audit \#426): a fenced combined-heading example never overrides the report's actual genuine NOT CLEAN verdict
+  ---
+  duration_ms: 0.1283
+  ...
+# Subtest: extractResponseVerdict (PR \#429 finding P1): a four-space-indented combined heading example, with no genuine declaration elsewhere, extracts nothing
+ok 124 - extractResponseVerdict (PR \#429 finding P1): a four-space-indented combined heading example, with no genuine declaration elsewhere, extracts nothing
+  ---
+  duration_ms: 0.083
+  ...
+# Subtest: extractResponseVerdict (PR \#429 finding P1): a tab-indented standalone heading example, with no genuine declaration elsewhere, extracts nothing
+ok 125 - extractResponseVerdict (PR \#429 finding P1): a tab-indented standalone heading example, with no genuine declaration elsewhere, extracts nothing
+  ---
+  duration_ms: 0.0856
+  ...
+# Subtest: extractResponseVerdict (PR \#429 finding P1): an indented combined-heading example alongside a genuine non-indented 'Verdict: NOT CLEAN' resolves to the genuine verdict
+ok 126 - extractResponseVerdict (PR \#429 finding P1): an indented combined-heading example alongside a genuine non-indented 'Verdict: NOT CLEAN' resolves to the genuine verdict
+  ---
+  duration_ms: 0.0867
+  ...
+# Subtest: extractResponseVerdict (PR \#429 finding P2): a literal shorter fence-looking line quoted inside an outer longer fence does not prematurely close the mask, so a genuine unfenced declaration after the real closing fence is still recognized
+ok 127 - extractResponseVerdict (PR \#429 finding P2): a literal shorter fence-looking line quoted inside an outer longer fence does not prematurely close the mask, so a genuine unfenced declaration after the real closing fence is still recognized
+  ---
+  duration_ms: 0.0934
+  ...
+# Subtest: extractResponseVerdict (PR \#429 finding P2): a same-character but shorter fence-looking line inside an outer fence still masks a combined heading quoted inside it
+ok 128 - extractResponseVerdict (PR \#429 finding P2): a same-character but shorter fence-looking line inside an outer fence still masks a combined heading quoted inside it
+  ---
+  duration_ms: 0.0928
+  ...
+# Subtest: extractResponseVerdict (PR \#429 finding P2): a standalone differently-charactered fence-looking line inside an outer fence does not close it, so a quoted heading between them stays excluded
+ok 129 - extractResponseVerdict (PR \#429 finding P2): a standalone differently-charactered fence-looking line inside an outer fence does not close it, so a quoted heading between them stays excluded
+  ---
+  duration_ms: 0.1091
+  ...
+# Subtest: extractResponseVerdict (PR \#429 finding P2): a longer same-character closer validly closes the fence, so genuine content after it is visible
+ok 130 - extractResponseVerdict (PR \#429 finding P2): a longer same-character closer validly closes the fence, so genuine content after it is visible
+  ---
+  duration_ms: 0.0826
+  ...
+# Subtest: extractResponseVerdict (PR \#429): ordinary matched-length fences (the pre-existing common case) are unaffected by the character/length comparison
+ok 131 - extractResponseVerdict (PR \#429): ordinary matched-length fences (the pre-existing common case) are unaffected by the character/length comparison
+  ---
+  duration_ms: 0.0812
+  ...
+# Subtest: extractResponseVerdict (PR \#429): issue \#421's accepted bare standalone '\# CLEAN' fixture still resolves to CLEAN, unaffected by either fix
+ok 132 - extractResponseVerdict (PR \#429): issue \#421's accepted bare standalone '\# CLEAN' fixture still resolves to CLEAN, unaffected by either fix
+  ---
+  duration_ms: 0.0887
+  ...
+# Subtest: isCompletedStage2AuditReport: the literal canonical CLEAN skeleton (docs/stage2-audit-contract.md § 2) is accepted as a completed CLEAN report
+ok 133 - isCompletedStage2AuditReport: the literal canonical CLEAN skeleton (docs/stage2-audit-contract.md § 2) is accepted as a completed CLEAN report
+  ---
+  duration_ms: 0.1424
+  ...
+# Subtest: isCompletedStage2AuditReport: the literal canonical NOT CLEAN skeleton (docs/stage2-audit-contract.md § 2) is accepted as a completed NOT CLEAN report
+ok 134 - isCompletedStage2AuditReport: the literal canonical NOT CLEAN skeleton (docs/stage2-audit-contract.md § 2) is accepted as a completed NOT CLEAN report
+  ---
+  duration_ms: 0.1459
+  ...
+# Subtest: isCompletedStage2AuditReport: the canonical skeleton against the wrong merge commit fails closed (wrong-target invalid-response example, § 6.3)
+ok 135 - isCompletedStage2AuditReport: the canonical skeleton against the wrong merge commit fails closed (wrong-target invalid-response example, § 6.3)
+  ---
+  duration_ms: 0.138
+  ...
+# Subtest: isCompletedStage2AuditReport: a findings-only response with no merge commit, checklist, or verdict fails closed (invalid-response example § 6.1)
+ok 136 - isCompletedStage2AuditReport: a findings-only response with no merge commit, checklist, or verdict fails closed (invalid-response example § 6.1)
+  ---
+  duration_ms: 0.1185
+  ...
+# Subtest: isCompletedStage2AuditReport: a bare 'CLEAN' with no commit restatement or verification content fails closed (invalid-response example § 6.2)
+ok 137 - isCompletedStage2AuditReport: a bare 'CLEAN' with no commit restatement or verification content fails closed (invalid-response example § 6.2)
+  ---
+  duration_ms: 0.0969
+  ...
+# Subtest: isCompletedStage2AuditReport: the canonical skeleton truncated to one of two requested checklist items fails closed as incomplete (§ 4)
+ok 138 - isCompletedStage2AuditReport: the canonical skeleton truncated to one of two requested checklist items fails closed as incomplete (§ 4)
+  ---
+  duration_ms: 0.1642
+  ...
+# Subtest: extractResponseVerdict: two contradictory genuine verdict declarations in the same response fail closed to no verdict (invalid-response example § 6.4)
+ok 139 - extractResponseVerdict: two contradictory genuine verdict declarations in the same response fail closed to no verdict (invalid-response example § 6.4)
+  ---
+  duration_ms: 0.081
+  ...
+1..139
+# tests 139
+# suites 0
+# pass 139
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 704.4972
