@@ -1,0 +1,33 @@
+# Deterministic line-ending policy (issue #470).
+#
+# Without this file, a checkout's line endings depend on the cloning machine's local
+# `core.autocrlf` setting: with `core.autocrlf=true` (a common Windows default), Git
+# rewrites this repository's LF-stored text files to CRLF on checkout even though the
+# committed blobs never changed. Repository tooling that parses checked-out files with
+# LF-anchored expressions (e.g. tools/review-watch/stage2-report.test.mjs's
+# extractCanonicalSkeletonFence, which extracts fenced examples from
+# docs/stage2-audit-contract.md with a `\n`-anchored regex) then behaves differently
+# purely because of local Git configuration, not because of any real change to
+# repository content -- see docs/eol-policy-proof-runs.md for the reproduction and fix.
+#
+# `text=auto` lets Git's own text/binary heuristic decide what this rule applies to.
+# `eol=lf` forces LF on checkout for whatever it classifies as text, regardless of
+# `core.autocrlf`. Every currently tracked file is text and every committed blob is
+# already LF-only (verified directly via `git cat-file`), so this rule normalizes
+# nothing and does not rewrite any existing committed content.
+* text=auto eol=lf
+
+# Explicit safety net for common binary types that may be added to this repository
+# later: never let Git's text heuristic, this policy, or a future contributor's
+# line-ending tooling touch these. None of these extensions are tracked today.
+*.png -text
+*.jpg -text
+*.jpeg -text
+*.gif -text
+*.ico -text
+*.pdf -text
+*.zip -text
+*.woff -text
+*.woff2 -text
+*.ttf -text
+*.eot -text
