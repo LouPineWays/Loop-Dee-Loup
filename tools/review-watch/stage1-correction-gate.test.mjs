@@ -180,15 +180,23 @@ test("checkCorrectionDelta: NOT_SATISFIED (findings-provenance) — reviewed hea
   assert.match(result.reason, /PENDING/);
 });
 
-test("checkCorrectionDelta: NOT_SATISFIED (findings-provenance) — a genuine response exists only via unboundGenuineMatches", async () => {
+// Stage 1 review finding on this PR: positive correction provenance must come only from
+// stage1.matches (head-bound genuine responses). unboundGenuineMatches are, by
+// stage1-gate.mjs's own contract, responses that could NOT be attributed to the requested
+// head — on a multi-round PR, an unbound findings-bearing response could belong to a
+// different round entirely, and must never be borrowed to prove the named reviewedHead
+// itself received findings.
+test("checkCorrectionDelta: NOT_SATISFIED (findings-provenance) — a genuine response exists only via unboundGenuineMatches, never counted as provenance", async () => {
   const result = await checkCorrectionDelta(
     { repo: "o/r", pr: 435, reviewedHead: REVIEWED, correctedHead: CORRECTED, gatedHead: CORRECTED },
     {
       stage1RunImpl: async () => findingsReceived({ matches: [], unboundGenuineMatches: [{ body_excerpt: FINDINGS_BODY }] }),
-      compareImpl: async () => ({ status: "ahead" }),
+      compareImpl: throwingSpy("compareImpl"),
     },
   );
-  assert.equal(result.state, "CORRECTION_SATISFIED", "an unbound genuine findings-bearing match must still count as findings-provenance");
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "NOT_SATISFIED");
+  assert.match(result.reason, /no findings-bearing/);
 });
 
 for (const status of ["identical", "diverged", "behind"]) {
@@ -257,6 +265,73 @@ test("checkCorrectionDelta: exitCode 1 when compareImpl returns output without a
     { stage1RunImpl: async () => findingsReceived(), compareImpl: async () => ({}) },
   );
   assert.equal(result.exitCode, 1);
+});
+
+// ---------------------------------------------------------------------------
+// checkCorrectionDelta: abbreviated reviewedHead resolution (Stage 1 review finding, PR #459)
+// ---------------------------------------------------------------------------
+
+test("checkCorrectionDelta: an abbreviated (7-char) reviewedHead is resolved to the full SHA before calling stage1RunImpl", async () => {
+  const shortReviewed = REVIEWED.slice(0, 7);
+  let seenHead;
+  const result = await checkCorrectionDelta(
+    { repo: "o/r", pr: 435, reviewedHead: shortReviewed, correctedHead: CORRECTED, gatedHead: CORRECTED },
+    {
+      resolveCommitImpl: async ({ repo, sha }) => {
+        assert.equal(repo, "o/r");
+        assert.equal(sha, shortReviewed);
+        return REVIEWED;
+      },
+      stage1RunImpl: async ({ head }) => {
+        seenHead = head;
+        return findingsReceived();
+      },
+      compareImpl: async () => ({ status: "ahead" }),
+    },
+  );
+  assert.equal(seenHead, REVIEWED, "stage1RunImpl must be called with the resolved full SHA, not the prefix");
+  assert.equal(result.state, "CORRECTION_SATISFIED");
+});
+
+test("checkCorrectionDelta: a full-length (40-char) reviewedHead never calls resolveCommitImpl", async () => {
+  const result = await checkCorrectionDelta(
+    { repo: "o/r", pr: 435, reviewedHead: REVIEWED, correctedHead: CORRECTED, gatedHead: CORRECTED },
+    {
+      resolveCommitImpl: throwingSpy("resolveCommitImpl"),
+      stage1RunImpl: async () => findingsReceived(),
+      compareImpl: async () => ({ status: "ahead" }),
+    },
+  );
+  assert.equal(result.state, "CORRECTION_SATISFIED");
+});
+
+test("checkCorrectionDelta: NOT_SATISFIED when an abbreviated reviewedHead does not resolve to a real commit", async () => {
+  const result = await checkCorrectionDelta(
+    { repo: "o/r", pr: 435, reviewedHead: "0000000", correctedHead: CORRECTED, gatedHead: CORRECTED },
+    {
+      resolveCommitImpl: async () => null,
+      stage1RunImpl: throwingSpy("stage1RunImpl"),
+      compareImpl: throwingSpy("compareImpl"),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "NOT_SATISFIED");
+  assert.match(result.reason, /does not resolve to a real commit/);
+});
+
+test("checkCorrectionDelta: exitCode 1 when resolveCommitImpl throws for an abbreviated reviewedHead", async () => {
+  const result = await checkCorrectionDelta(
+    { repo: "o/r", pr: 435, reviewedHead: "0000000", correctedHead: CORRECTED, gatedHead: CORRECTED },
+    {
+      resolveCommitImpl: async () => {
+        throw new Error("gh api down");
+      },
+      stage1RunImpl: throwingSpy("stage1RunImpl"),
+      compareImpl: throwingSpy("compareImpl"),
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /gh api down/);
 });
 
 test("checkCorrectionDelta: exitCode 1 when required args are missing", async () => {

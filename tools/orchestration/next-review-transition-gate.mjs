@@ -141,6 +141,14 @@
 // directly" per the Shared Contract):
 //   node tools/orchestration/next-review-transition-gate.mjs --pr 376 --head <sha> --issue 375
 //   node tools/orchestration/next-review-transition-gate.mjs --audit-issue 378
+// Stage 1 review finding on PR #459 (P2): control-Issue mode reads a correction-satisfied
+// disposition from the control Issue's own "- **Stage 1:**" bullet, but direct-reference mode
+// had no equivalent input, so a corrected head's NOT_REQUESTED state was only ever resolvable
+// through control-Issue mode even though this checker was already wired in. Pass the same
+// disposition text directly with --stage1-disposition when driving direct-reference mode after
+// a correction:
+//   node tools/orchestration/next-review-transition-gate.mjs --pr 376 --head <corrected-sha> \
+//     --issue 375 --stage1-disposition "correction-satisfied at <corrected-sha> (reviewed <reviewed-sha>)"
 //
 // Tests: node --test tools/orchestration/next-review-transition-gate.test.mjs
 
@@ -160,7 +168,25 @@ import { isCleanStage1Response } from "../review-watch/consumer-sync-gate.mjs";
 // import between the two modules. Both directions only reference the other's bindings from
 // inside function bodies (never at module-top-level), so ESM's live-binding semantics resolve
 // this safely regardless of which module is loaded first.
-import { checkCorrectionDelta, parseCorrectionSatisfiedDisposition } from "../review-watch/stage1-correction-gate.mjs";
+import {
+  checkCorrectionDelta,
+  parseCorrectionSatisfiedDisposition,
+  looksLikeCorrectionSatisfiedDisposition,
+} from "../review-watch/stage1-correction-gate.mjs";
+// Stage 1 review finding on PR #459 (the P1 finding): fold correction evidence into the
+// single documented authoritative pre-merge gate (docs/bounded-review-cycle.md step 8/10)
+// instead of authorizing merge from a private composition that could disagree with it.
+// `combineMergeReadyResult` is merge-ready-gate.mjs's own pure combining logic, reused here
+// (not re-implemented) against the exact same already-computed stage1/mergeReady/
+// correctionDelta this module fetches for its own verdict — so this module's
+// STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 verdict and a fresh run of
+// `merge-ready-gate.mjs --reviewed-head <sha>` against the same evidence can never diverge.
+// Extends this file's own already-documented 2-node cycle with merge-ready-gate.mjs
+// (merge-ready-gate.mjs itself imports checkCorrectionDelta from stage1-correction-gate.mjs,
+// which imports stage1DispositionMatchesHead from this module) into a 3-node cycle; every
+// side only reads the others' bindings from inside function bodies, never at module-top-level,
+// so this remains safe under ESM's live-binding semantics regardless of load order.
+import { combineMergeReadyResult } from "../review-watch/merge-ready-gate.mjs";
 
 // Pure. Reads one optional "- **Label:** value" control-Issue bullet that is expected to
 // hold either the explicit "none" sentinel or exactly one "#N" issue reference (the same
@@ -297,7 +323,16 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
       };
     }
     if (correctionDelta && correctionDelta.state === "CORRECTION_SATISFIED") {
-      if (isMergeReadyState(mergeReady.state)) {
+      // P1 finding on PR #459: do not decide merge authorization from a private
+      // isMergeReadyState(mergeReady.state) check alone -- re-derive it through
+      // merge-ready-gate.mjs's own combineMergeReadyResult, the exact composition
+      // docs/bounded-review-cycle.md step 8/10 requires an executor to run before merging.
+      // This guarantees a conforming executor running `merge-ready-gate.mjs --reviewed-head
+      // <sha>` against the same evidence reaches the same exit-0/BLOCKED outcome this verdict
+      // authorizes -- never a documented gate that stays permanently blocked while this
+      // verdict says merge anyway.
+      const composed = combineMergeReadyResult({ stage1, lifecycle: mergeReady, correctionDelta }, context);
+      if (composed.exitCode === 0) {
         return {
           state: "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
           stopAfter: true,
@@ -306,12 +341,13 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
           correctedHead: correctionDelta.correctedHead,
         };
       }
-      if (mergeReady.state === "BLOCKED_CLOSING_REFERENCE") {
+      if (composed.exitCode === 2 && composed.blockedBy?.length === 1 && composed.blockedBy[0].component === "lifecycle") {
         return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context };
       }
-      // Any other lifecycle-gate merge-ready state for an otherwise-satisfied correction
-      // delta: fall through past this whole NOT_REQUESTED block to the function's existing
-      // bottom-of-function AMBIGUOUS (unrecognized combination) -- never NO_ACTION_YET here.
+      // Any other composed outcome for an otherwise-satisfied correction delta (an
+      // operational error from the composed check itself, or a combination this gate does
+      // not recognize): fall through past this whole NOT_REQUESTED block to the function's
+      // existing bottom-of-function AMBIGUOUS -- never NO_ACTION_YET here.
     } else if (correctionDelta && correctionDelta.state === "NOT_SATISFIED") {
       return {
         state: "AMBIGUOUS",
@@ -321,10 +357,32 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
         mergeReady,
         reason: correctionDelta.reason,
       };
+    } else if (correctionDelta && correctionDelta.state === "HEAD_MISMATCH") {
+      // A stale/superseded disposition that doesn't name the head currently being gated --
+      // same plain NO_ACTION_YET as no disposition present at all.
+      return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
+    } else if (!correctionDelta && looksLikeCorrectionSatisfiedDisposition(stage1Disposition)) {
+      // Stage 1 review finding on PR #459: `parseCorrectionSatisfiedDisposition` returning
+      // `null` collapses "no disposition present at all" and "a disposition that is clearly
+      // attempting this shape but is malformed" into the same outcome, silently emitting
+      // successful-exit NO_ACTION_YET for corrupted durable state instead of failing closed.
+      // docs/bounded-review-cycle.md's own "Correction-satisfied disposition" section (and
+      // the malformed-disposition contract every other affirmative Stage 1 disposition shape
+      // already honors) promises AMBIGUOUS here instead.
+      return {
+        state: "AMBIGUOUS",
+        stopAfter: true,
+        ...context,
+        stage1,
+        mergeReady,
+        reason:
+          `control Issue "Stage 1" bullet ${JSON.stringify(stage1Disposition)} looks like a correction-satisfied ` +
+          'disposition but does not match the required shape "correction-satisfied at <corrected-head-sha> ' +
+          '(reviewed <reviewed-head-sha>)"',
+      };
     } else {
-      // correctionDelta is falsy (no correction-satisfied disposition parsed at all), or its
-      // state is HEAD_MISMATCH (a stale/superseded disposition that doesn't name the head
-      // currently being gated) -- same plain NO_ACTION_YET as no disposition present at all.
+      // correctionDelta is falsy and no correction-satisfied-shaped bullet is present at all
+      // -- plain NO_ACTION_YET, exactly as before this disposition shape existed.
       return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
     }
   }
@@ -684,7 +742,14 @@ export async function runNextReviewTransitionGate(
       };
     }
     return resolvePreMerge(
-      { repo, pr: args.pr, head: args.head, issue: args.issue, controlIssue: null },
+      {
+        repo,
+        pr: args.pr,
+        head: args.head,
+        issue: args.issue,
+        stage1Disposition: args.stage1Disposition ?? null,
+        controlIssue: null,
+      },
       { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
     );
   }
@@ -816,6 +881,7 @@ async function main() {
     head: raw.head,
     issue: raw.issue,
     auditIssue: raw["audit-issue"],
+    stage1Disposition: raw["stage1-disposition"],
   });
   if (result.exitCode === 1) {
     console.error(result.message);

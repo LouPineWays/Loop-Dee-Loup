@@ -232,14 +232,24 @@ test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + BLOCKED_CLO
   assert.equal(v.stopAfter, true);
 });
 
-test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + an unrecognized merge-ready state falls through to the bottom-of-function AMBIGUOUS, never NO_ACTION_YET", () => {
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + an unrecognized-but-exitCode-0 merge-ready state still resolves to STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 (P1 finding on PR #459: authorization is derived from merge-ready-gate.mjs's own combineMergeReadyResult, which -- like the real lifecycle-gate.mjs merge-ready check it composes -- trusts exitCode as authoritative, never a state-string allowlist a real component's exitCode-0 output could fall outside of)", () => {
   const v = resolvePreMergeVerdict({
     stage1: stage1("NOT_REQUESTED"),
     mergeReady: mergeReady("SOMETHING_NEW"),
     correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
   });
+  assert.equal(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + an operational-error mergeReady result falls through to the bottom-of-function AMBIGUOUS, never NO_ACTION_YET or a silent merge authorization", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: { exitCode: 1, state: "OPERATIONAL_ERROR", message: "lifecycle-gate merge-ready threw" },
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
+  });
   assert.equal(v.state, "AMBIGUOUS");
   assert.notEqual(v.state, "NO_ACTION_YET");
+  assert.notEqual(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
 });
 
 test("resolvePreMergeVerdict: NOT_REQUESTED + NOT_SATISFIED -> AMBIGUOUS, carrying the underlying reason", () => {
@@ -560,6 +570,56 @@ test("runNextReviewTransitionGate: direct --pr/--head/--issue mode resolves with
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
   assert.equal(result.stopAfter, true);
+});
+
+test("runNextReviewTransitionGate: direct --pr/--head/--issue mode accepts --stage1-disposition and resolves a correction-satisfied head to STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 (Stage 1 review finding on PR #459)", async () => {
+  let issueReadCalls = 0;
+  let correctionDeltaCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    {
+      repo: "o/r",
+      pr: "376",
+      head: "0009c54b18",
+      issue: "375",
+      stage1Disposition: "correction-satisfied at 0009c54b18 (reviewed 30b36035c9)",
+    },
+    {
+      ghIssueViewImpl: async () => {
+        issueReadCalls++;
+        return { body: "", state: "OPEN" };
+      },
+      stage1RunImpl: async () => stage1("NOT_REQUESTED"),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async (args) => {
+        correctionDeltaCalls++;
+        assert.equal(args.reviewedHead, "30b36035c9");
+        assert.equal(args.correctedHead, "0009c54b18");
+        return { exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: "0009c54b18" };
+      },
+    },
+  );
+  assert.equal(issueReadCalls, 0);
+  assert.equal(correctionDeltaCalls, 1);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("runNextReviewTransitionGate: direct --pr/--head/--issue mode without --stage1-disposition never invokes checkCorrectionDeltaImpl (unchanged default behavior)", async () => {
+  let correctionDeltaCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", pr: "376", head: "sha1", issue: "375" },
+    {
+      ghIssueViewImpl: async () => ({ body: "", state: "OPEN" }),
+      stage1RunImpl: async () => stage1("NOT_REQUESTED"),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => {
+        correctionDeltaCalls++;
+        throw new Error("should never be called when no correction-satisfied disposition is supplied");
+      },
+    },
+  );
+  assert.equal(correctionDeltaCalls, 0);
+  assert.equal(result.state, "NO_ACTION_YET");
 });
 
 test("runNextReviewTransitionGate: direct --pr without --head fails closed with exit 1", async () => {

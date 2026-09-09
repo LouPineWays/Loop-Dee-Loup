@@ -85,6 +85,24 @@ export function parseCorrectionSatisfiedDisposition(raw) {
   return { correctedHead: match[1].toLowerCase(), reviewedHead: match[2].toLowerCase() };
 }
 
+// Lenient sibling of parseCorrectionSatisfiedDisposition, only ever consulted when that strict
+// parse already failed. Stage 1 review finding on PR #459: a "Stage 1" bullet that is clearly
+// attempting this disposition shape (opens with the "correction-satisfied" keyword) but is
+// malformed in some other way -- a missing parenthesis, a non-hex sha, a typo -- must not be
+// treated identically to no disposition being present at all; docs/bounded-review-cycle.md
+// promises it fails closed to AMBIGUOUS instead. This intentionally only checks the leading
+// keyword, not the full shape -- it exists purely to distinguish "absent" (this returns false,
+// same as before) from "present but corrupted" (this returns true), never to itself validate
+// or partially accept a malformed disposition.
+const CORRECTION_SATISFIED_KEYWORD_PATTERN = /^correction-satisfied\b/i;
+
+export function looksLikeCorrectionSatisfiedDisposition(raw) {
+  if (typeof raw !== "string") return false;
+  const text = raw.trim();
+  if (!text) return false;
+  return CORRECTION_SATISFIED_KEYWORD_PATTERN.test(text) && !CORRECTION_SATISFIED_PATTERN.test(text);
+}
+
 // Third independent copy of Codex's own fixed findings-bearing Stage 1 preamble pattern (see
 // `tools/orchestration/next-review-transition-gate.mjs`'s `FINDINGS_PREAMBLE_PATTERN` and
 // `tools/review-watch/consumer-sync-gate.mjs`'s own copy for the same fixed string, plus their
@@ -109,13 +127,20 @@ function stripOuterWhitespace(text) {
   return (text ?? "").trim();
 }
 
-// Pure. `stage1` is stage1-gate.mjs's own result. True only when at least one of its
-// (head-bound or unbound) genuine matches opens with the known findings-bearing preamble —
-// never true for a clean-pass-only or ack-only response.
+// Pure. `stage1` is stage1-gate.mjs's own result. True only when at least one *head-bound*
+// genuine match (stage1.matches — provably tied to the exact reviewedHead being checked,
+// per stage1-gate.mjs's own matchBelongsToHead) opens with the known findings-bearing
+// preamble. Stage 1 review finding on this PR: `stage1.unboundGenuineMatches` are, by
+// stage1-gate.mjs's own contract, responses that could NOT be attributed to the requested
+// head — on a PR with triggers for multiple heads, an unbound findings-bearing response
+// belonging to a *different* round must never be borrowed to prove that reviewedHead itself
+// received findings. Positive correction provenance must come only from stage1.matches;
+// an unbound match is never counted here (unlike next-review-transition-gate.mjs's own copy
+// of this helper, which deliberately does include unbound matches for its own PENDING-state
+// ambiguity check — a different question: "should this gate merely pause and let a human
+// look," not "does this prove the named head was reviewed").
 function hasFindingsStage1Response(stage1) {
-  return [...(stage1.matches ?? []), ...(stage1.unboundGenuineMatches ?? [])].some((m) =>
-    FINDINGS_PREAMBLE_PATTERN.test(stripOuterWhitespace(m.body_excerpt)),
-  );
+  return (stage1.matches ?? []).some((m) => FINDINGS_PREAMBLE_PATTERN.test(stripOuterWhitespace(m.body_excerpt)));
 }
 
 // Async. The default `compareImpl`: runs `gh api repos/<repo>/compare/<base>...<head>` and
@@ -127,12 +152,26 @@ export function defaultCompare({ repo, base, head }) {
   return JSON.parse(raw);
 }
 
+// Async. The default `resolveCommitImpl`: resolves any hex prefix (7-40 chars) to the full
+// 40-character commit SHA via GitHub's own commit-lookup API, which already accepts an
+// abbreviated ref. Returns `null` (never throws) when the ref does not resolve to a real
+// commit — an invalid/typo'd SHA is evidence for NOT_SATISFIED, not an operational error.
+export function defaultResolveCommit({ repo, sha }) {
+  try {
+    const raw = execFileSync("gh", ["api", `repos/${repo}/commits/${sha}`, "--jq", ".sha"], { encoding: "utf8" });
+    const resolved = raw.trim();
+    return resolved || null;
+  } catch {
+    return null;
+  }
+}
+
 // Async. The core decision function. `stage1RunImpl`/`compareImpl` are injected so tests can
 // drive this end-to-end without touching the real network or `gh` CLI. See this module's
 // header comment for the full three-check design and ordering.
 export async function checkCorrectionDelta(
   { repo, pr, reviewedHead, correctedHead, gatedHead },
-  { stage1RunImpl = stage1Run, compareImpl = defaultCompare } = {},
+  { stage1RunImpl = stage1Run, compareImpl = defaultCompare, resolveCommitImpl = defaultResolveCommit } = {},
 ) {
   if (!repo || !pr || !reviewedHead || !correctedHead || !gatedHead) {
     return {
@@ -152,12 +191,39 @@ export async function checkCorrectionDelta(
     return { exitCode: 2, state: "HEAD_MISMATCH", reviewedHead, correctedHead, gatedHead };
   }
 
-  // Check 2: findings-provenance at the reviewed head.
+  // Check 2: findings-provenance at the reviewed head. The documented disposition shape
+  // (parseCorrectionSatisfiedDisposition) accepts a 7-40 character hex prefix for
+  // reviewedHead, but stage1-gate.mjs's own trigger-marker and response-binding logic
+  // (trigger.mjs's headMarker, poll.mjs's matchBelongsToHead) compare against the *exact*
+  // full head SHA the real `@codex review` trigger recorded — never a prefix. Stage 1 review
+  // finding on this PR: an abbreviated reviewedHead therefore always reported NOT_REQUESTED,
+  // permanently rejecting the advertised short form. Resolve any non-full-length prefix to
+  // the full commit SHA first (no extra call for the already-full-length common case).
+  let resolvedReviewedHead = reviewedHead;
+  if (reviewedHead.length !== 40) {
+    let resolved;
+    try {
+      resolved = await resolveCommitImpl({ repo, sha: reviewedHead });
+    } catch (err) {
+      return { exitCode: 1, message: `commit resolution threw for reviewed head ${reviewedHead}: ${err.message}` };
+    }
+    if (!resolved) {
+      return {
+        exitCode: 2,
+        state: "NOT_SATISFIED",
+        reviewedHead,
+        correctedHead,
+        reason: `reviewedHead ${reviewedHead} does not resolve to a real commit in ${repo} — a correction-satisfied disposition requires a real, reviewable commit.`,
+      };
+    }
+    resolvedReviewedHead = resolved.toLowerCase();
+  }
+
   let stage1;
   try {
-    stage1 = await stage1RunImpl({ repo, number: pr, head: reviewedHead });
+    stage1 = await stage1RunImpl({ repo, number: pr, head: resolvedReviewedHead });
   } catch (err) {
-    return { exitCode: 1, message: `stage1-gate threw for reviewed head ${reviewedHead}: ${err.message}` };
+    return { exitCode: 1, message: `stage1-gate threw for reviewed head ${resolvedReviewedHead}: ${err.message}` };
   }
   if (!stage1 || typeof stage1.exitCode !== "number") {
     return {
