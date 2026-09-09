@@ -217,17 +217,27 @@ total and reporting a false "1 failure". Confirmed directly: `git cat-file -p
 <commit>:docs/stage2-audit-contract.md` (reading the stored blob, unaffected by working-tree
 checkout settings) is 216-for-216 LF-only at every commit checked; a `git worktree add` forced
 to `-c core.autocrlf=false` for the same commits produces CRLF-free checkouts, and `node --test`
-against those checkouts reports **857 tests / 857 pass / 0 fail** -- not 719/718/1 -- with zero
-difference between the glob-based command and the explicit-enumeration control, and zero
-difference between bash and PowerShell (all four combinations agree once line endings are
-correct). This was not a shell-portability defect in the counts, as the PR #467 correction
+against those checkouts reports **857 tests / 857 pass / 0 fail** -- not 719/718/1 -- for three
+of the four command/shell combinations tested: glob-based bash, explicit-enumeration bash, and
+explicit-enumeration PowerShell. The fourth combination, glob-based PowerShell, still fails
+outright with `Could not find '...\*.test.mjs'` even against an LF-correct checkout -- that
+failure is unrelated to line endings (PowerShell never expands the literal glob for a native
+executable at all, so it never reaches `node` in a form node can run) and is not "corrected" by
+this change; it is a distinct, still-live shell-portability gap, not folded into the "all agree"
+claim below. This was not a shell-portability defect in the *counts*, as the PR #467 correction
 mistakenly concluded, and not a pre-existing, unrelated test failure, as 454-D's original run
 concluded -- it was a local git configuration artifact reproducing identically across two
 separate investigations because both ran on the same machine. **The glob-vs-explicit-enumeration
-shell-portability finding itself remains valid and is retained below** (PowerShell does not
-expand the literal glob for a native executable and fails outright, `Could not find
-'...\*.test.mjs'`, independent of line-ending handling) -- only the test *counts* attributed to
-it were wrong.
+shell-portability finding itself remains valid and is retained** (PowerShell does not expand the
+literal glob for a native executable and fails outright, independent of line-ending handling) --
+only the test *counts* PR #467 attributed to it were wrong.
+
+**This 857/857/0 result is conditional on an LF checkout, which this repository does not yet
+enforce.** No `.gitattributes` forces `eol=lf` (tracked as issue #470); an ordinary checkout on
+a machine with `core.autocrlf=true` -- the default that produced both this bug and PR #467's own
+misdiagnosis of it -- will still silently reproduce the false `719/718/1` undercount described
+above. "0 fail" below describes the shipped code's actual behavior against this repository's
+canonical (LF) content, not a guarantee for every checkout of it.
 
 Re-deriving all three data points against LF-correct (`-c core.autocrlf=false`) isolated
 worktrees, execution context Node `v20.19.4`, Windows, both bash and PowerShell:
@@ -241,11 +251,17 @@ worktrees, execution context Node `v20.19.4`, Windows, both bash and PowerShell:
 
 **43 net new passing tests from 454-B/454-C alone (799 -> 842), plus 15 further net new passing
 tests from the PR #459 Stage 1 correction pass (842 -> 857), zero prior tests broken at any
-point, zero failures at any point once checked out with correct line endings.** The PR #467
-correction pass changed only this document and its own JSON artifact -- no test files -- so the
-count is unchanged from the exact merge commit it corrects. See
-`stage1-correction-satisfaction-proof-runs/454-scenario-08-regression.json` for the full
-detail, including the CRLF root-cause evidence and per-shell/per-line-ending reproduction
+point, zero failures at any point once checked out with LF line endings** (see the checkout
+caveat above -- this repository does not yet enforce that). PR #467's own correction *commit*
+(`20d0e87`, relative to the already-reviewed `79a26c7`) changed only this document and its own
+JSON artifact -- no test files -- so the test count is unchanged from the exact merge commit it
+corrects. PR #467's full *merged diff* against its parent on `main` is wider (eight files,
+including the constructed-fixtures script and Scenarios 3-5/7's artifacts) because `79a26c7`
+was never independently merged as its own reviewed PR -- see the "Correction" section above and
+this PR's own "Scope note for the auditor." None of those additional files are part of the test
+suite this scenario measures, so the count claim above is unaffected by that wider merge-level
+scope. See `stage1-correction-satisfaction-proof-runs/454-scenario-08-regression.json` for the
+full detail, including the CRLF root-cause evidence and per-shell/per-line-ending reproduction
 matrix.
 
 ## Bugs found in the shipped scripts
@@ -259,7 +275,9 @@ constructed fixtures, with no deviation between expected and actual output. The 
 regression run was not a defect in that file or in `docs/stage2-audit-contract.md` either --
 see Scenario 8 above -- it was a local `core.autocrlf=true` checkout artifact on the machine
 that produced 454-D's original run and, independently, the PR #467 correction's own
-re-verification.
+re-verification -- an artifact this repository does not yet prevent (issue #470: no
+`.gitattributes` enforces LF), so it will keep reproducing on an ordinary `core.autocrlf=true`
+checkout until that is fixed.
 
 ## Verdict
 
