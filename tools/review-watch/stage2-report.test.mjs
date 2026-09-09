@@ -1241,6 +1241,73 @@ test("countVerificationWalkthroughItems (Stage 1 finding 2 on PR #485): the esta
   assert.equal(countVerificationWalkthroughItems(body), 2, "the 2-item numbered run must still win, not the 3-item '### Checks' section");
 });
 
+// -- Stage 2 audit finding on issue #488 (correcting PR #485): COMMAND_LOG_BULLET_CONTENT_PATTERN
+// was anchored only at the opening backtick, so a genuine marker-bullet checklist item that merely
+// *begins* with an inline-code span — "- ✅ `node --test` confirms the regression is fixed." — was
+// wrongly classified as command-log content and could mask a real "Tests"/"Testing" walk-through
+// out of the count. The audit's own probe placed three such prose items after an earlier two-item
+// run and got 2 instead of 3; these tests reproduce that shape under both the heading and bold-
+// label forms and confirm the fix counts the genuine later run.
+
+test("countVerificationWalkthroughItems (Stage 2 audit #488): a '### Testing' section of marker-bullet items that merely begin with inline code is not masked as a command log", () => {
+  const body = [
+    "- ✅ `cmd one` — first note.",
+    "- ✅ `cmd two` — second note.",
+    "",
+    "### Testing",
+    "",
+    "- ✅ `node --test` confirms the regression is fixed.",
+    "- ✅ `node tools/check-startup-budget.mjs` reports OK.",
+    "- ✅ `node tools/check-control-plane-paths.mjs` reports OK.",
+    "",
+    "Verdict: CLEAN",
+  ].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    3,
+    "the later 3-item '### Testing' run is genuine prose (trailing content follows each inline-code span) and must win over the earlier 2-item run, not be masked as a command log",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 2 audit #488): a bold '**Testing**' section of marker-bullet items that merely begin with inline code is not masked as a command log", () => {
+  const body = [
+    "1. **PASS** — setup.",
+    "2. **PASS** — teardown.",
+    "",
+    "**Testing**",
+    "",
+    "- ✅ `npm test` confirms all suites pass.",
+    "- ✅ `npm run lint` confirms no lint errors.",
+    "- ✅ `npm run build` confirms the build succeeds.",
+  ].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    3,
+    "the later 3-item '**Testing**' marker-bullet run is genuine prose and must win over the earlier 2-item numbered run, not be masked as a command log",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 2 audit #488): a genuine command-log bullet with trailing whitespace after the closing backtick is still recognized as command-log content", () => {
+  // Uses a content-gated "### Testing" label (not "### Checks", which is excluded on label alone
+  // regardless of content — Stage 1 review finding P2 on PR #489: the prior version of this test
+  // used "### Checks" and so never actually exercised COMMAND_LOG_BULLET_CONTENT_PATTERN at all).
+  const body = ["1. one", "2. two", "", "### Testing", "", "- ✅ `npm test`   ", "- ✅ `npm run lint`"].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    2,
+    "trailing whitespace after the closing backtick must not defeat command-log recognition — the bullet is still a bare command",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding P1 on PR #489): a command-log bullet ending in ordinary punctuation with no em dash is still recognized as command-log content", () => {
+  const body = ["1. one", "2. two", "", "### Testing", "", "- ✅ `npm test`.", "- ✅ `npm run lint`."].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    2,
+    "a bare command followed only by terminal punctuation (no words) must still be recognized as command-log content, not promoted into a checklist candidate",
+  );
+});
+
 // -- Stage 1 review findings on this PR: masking a "### Checks" section must not itself turn an
 // unrelated earlier numbered *findings* list, or a nested subheading inside "### Checks", into
 // counted walk-through evidence.
