@@ -1,0 +1,24 @@
+{
+  "scenario": "8 -- regression",
+  "command": "node --test tools/review-watch/*.test.mjs tools/orchestration/*.test.mjs",
+  "before": {
+    "commit": "149d8a1 (main tip immediately before 454-A/B/C's three commits on feature/454-stage1-correction-satisfied)",
+    "tests": 661,
+    "pass": 660,
+    "fail": 1,
+    "note": "The 1 failure is tools/review-watch/stage2-report.test.mjs's top-level module-load assertion against docs/stage2-audit-contract.md's canonical-skeleton fences -- confirmed present at this exact pre-454 commit in an isolated worktree, so it pre-dates and is unrelated to any 454 unit's work."
+  },
+  "after": {
+    "commit": "3750d27 (454-A/B/C's shipped tip)",
+    "tests": 704,
+    "pass": 703,
+    "fail": 1,
+    "note": "Same single pre-existing failure as the baseline (stage2-report.test.mjs), reproduced identically -- not introduced or worsened by 454-B/454-C."
+  },
+  "delta": {
+    "newTests": 43,
+    "newTestsAllPassing": true,
+    "priorTestsBroken": 0
+  },
+  "conclusion": "454-B (tools/review-watch/stage1-correction-gate.mjs, 26 new tests per its own test file) and 454-C's wiring into tools/orchestration/next-review-transition-gate.mjs together add 43 net new passing tests (704 - 661) to the combined tools/review-watch + tools/orchestration suite, with zero regressions: the sole failing test both before and after is the identical, already-existing tools/review-watch/stage2-report.test.mjs module-load assertion against docs/stage2-audit-contract.md, verified to fail identically at commit 149d8a1 (main, before any 454 commit) in an isolated git worktree -- a pre-existing defect outside this plan's scope, not a regression this unit introduced or is responsible for fixing."
+}

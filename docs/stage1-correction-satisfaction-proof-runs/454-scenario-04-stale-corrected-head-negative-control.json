@@ -1,0 +1,29 @@
+{
+  "scenario": "4 -- stale corrected-head negative control",
+  "narrative": "A satisfaction record for corrected head bbbbbbb2222222222222222222222222222222b is checked against a later, different gated head ccccccc3333333333333333333333333333333c.",
+  "correctionDelta": {
+    "exitCode": 2,
+    "state": "HEAD_MISMATCH",
+    "reviewedHead": "aaaaaaa1111111111111111111111111111111a",
+    "correctedHead": "bbbbbbb2222222222222222222222222222222b",
+    "gatedHead": "ccccccc3333333333333333333333333333333c"
+  },
+  "composedVerdict": {
+    "state": "NO_ACTION_YET",
+    "stopAfter": true,
+    "repo": "o/r",
+    "pr": 1,
+    "head": "ccccccc3333333333333333333333333333333c",
+    "issue": 1,
+    "stage1": {
+      "exitCode": 2,
+      "state": "NOT_REQUESTED"
+    },
+    "mergeReady": {
+      "exitCode": 0,
+      "state": "MERGE_READY"
+    }
+  },
+  "expectation": "correctionDelta.state === HEAD_MISMATCH; composed verdict === NO_ACTION_YET",
+  "passed": true
+}

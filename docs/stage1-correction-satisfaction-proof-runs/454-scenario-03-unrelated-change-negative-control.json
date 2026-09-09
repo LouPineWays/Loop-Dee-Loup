@@ -1,0 +1,30 @@
+{
+  "scenario": "3 -- unrelated change negative control",
+  "narrative": "A correction-satisfied disposition names reviewed=aaaaaaa1111111111111111111111111111111a, corrected=bbbbbbb2222222222222222222222222222222b. An unrelated commit is then pushed, making the PR's real gated head ccccccc3333333333333333333333333333333c (never named by the disposition). Expect the old disposition to NOT authorize the new head.",
+  "correctionDelta": {
+    "exitCode": 2,
+    "state": "HEAD_MISMATCH",
+    "reviewedHead": "aaaaaaa1111111111111111111111111111111a",
+    "correctedHead": "bbbbbbb2222222222222222222222222222222b",
+    "gatedHead": "ccccccc3333333333333333333333333333333c"
+  },
+  "composedVerdict": {
+    "state": "NO_ACTION_YET",
+    "stopAfter": true,
+    "repo": "o/r",
+    "pr": 1,
+    "head": "ccccccc3333333333333333333333333333333c",
+    "issue": 1,
+    "stage1": {
+      "exitCode": 2,
+      "state": "NOT_REQUESTED"
+    },
+    "mergeReady": {
+      "exitCode": 0,
+      "state": "MERGE_READY"
+    }
+  },
+  "expectation": "correctionDelta.state === HEAD_MISMATCH; composed verdict === NO_ACTION_YET (fails closed, no merge authorization)",
+  "passed": true,
+  "documentedLimitation": "This mechanism's ancestry check (compare status \"ahead\") cannot detect unrelated content BUNDLED into the very same commit the disposition names as \"corrected\" -- only a dishonest or mistaken disposition bullet naming that head could hide such content, and stage1-correction-gate.mjs's own module comment documents this explicitly as a trust boundary (\"not a content-level guarantee that only findings-authorized lines changed\"), not a bug. The protection this scenario actually verifies is the one #454 requires: a stale/prior disposition can never silently extend to cover a head it never named, which is the case a session could hit by accident (unlike a deliberately falsified bullet)."
+}

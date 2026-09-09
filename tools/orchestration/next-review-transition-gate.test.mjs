@@ -1,8 +1,11 @@
 // Tests for tools/orchestration/next-review-transition-gate.mjs -- worker unit 397-B's
-// deterministic post-PR transition gate. Every composed check (stage1-gate.mjs's `run`,
-// lifecycle-gate.mjs's `checkMergeReady`/`checkPostAudit`) is faked via injected
-// stage1RunImpl/checkMergeReadyImpl/checkPostAuditImpl -- never touch the real network or
-// `gh` CLI here, mirroring tools/review-watch/merge-ready-gate.test.mjs's own style.
+// deterministic post-PR transition gate, extended by issue #454 unit 454-C for the
+// "correction-satisfied" Stage 1 disposition. Every composed check (stage1-gate.mjs's `run`,
+// lifecycle-gate.mjs's `checkMergeReady`/`checkPostAudit`, stage1-correction-gate.mjs's
+// `checkCorrectionDelta`) is faked via injected
+// stage1RunImpl/checkMergeReadyImpl/checkPostAuditImpl/checkCorrectionDeltaImpl -- never touch
+// the real network or `gh` CLI here, mirroring tools/review-watch/merge-ready-gate.test.mjs's
+// own style.
 //
 // Run with:
 //   node --test tools/orchestration/next-review-transition-gate.test.mjs
@@ -186,6 +189,117 @@ test("resolvePreMergeVerdict: NOT_REQUESTED + stale/non-head-scoped Stage 1 disp
     { head: "fffffff1234567" },
   );
   assert.equal(v.state, "NO_ACTION_YET");
+});
+
+// -- resolvePreMergeVerdict: correctionDelta (issue #454, unit 454-C) ------------------------
+
+function correctionDelta(state, overrides = {}) {
+  const base =
+    state === "CORRECTION_SATISFIED" || state === "NOT_SATISFIED" || state === "HEAD_MISMATCH"
+      ? { reviewedHead: "reviewed1234567", correctedHead: "corrected1234567" }
+      : {};
+  return { exitCode: state === "CORRECTION_SATISFIED" ? 0 : 2, state, ...base, ...overrides };
+}
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + MERGE_READY -> STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2, carrying reviewedHead/correctedHead", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+  assert.equal(v.stopAfter, true);
+  assert.equal(v.reviewedHead, "reviewed1234567");
+  assert.equal(v.correctedHead, "corrected1234567");
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + MERGE_READY_NO_WORK_ISSUE -> STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY_NO_WORK_ISSUE"),
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + BLOCKED_CLOSING_REFERENCE -> STAGE1_CORRECTION_REQUIRED", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("BLOCKED_CLOSING_REFERENCE"),
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.equal(v.stopAfter, true);
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + an unrecognized-but-exitCode-0 merge-ready state still resolves to STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 (P1 finding on PR #459: authorization is derived from merge-ready-gate.mjs's own combineMergeReadyResult, which -- like the real lifecycle-gate.mjs merge-ready check it composes -- trusts exitCode as authoritative, never a state-string allowlist a real component's exitCode-0 output could fall outside of)", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("SOMETHING_NEW"),
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + an operational-error mergeReady result falls through to the bottom-of-function AMBIGUOUS, never NO_ACTION_YET or a silent merge authorization", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: { exitCode: 1, state: "OPERATIONAL_ERROR", message: "lifecycle-gate merge-ready threw" },
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
+  });
+  assert.equal(v.state, "AMBIGUOUS");
+  assert.notEqual(v.state, "NO_ACTION_YET");
+  assert.notEqual(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + NOT_SATISFIED -> AMBIGUOUS, carrying the underlying reason", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: correctionDelta("NOT_SATISFIED", { reason: "reviewed head has no findings-bearing match" }),
+  });
+  assert.equal(v.state, "AMBIGUOUS");
+  assert.equal(v.stopAfter, true);
+  assert.match(v.reason, /reviewed head has no findings-bearing match/);
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + HEAD_MISMATCH -> NO_ACTION_YET (unchanged from today's behavior with no disposition at all)", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: correctionDelta("HEAD_MISMATCH"),
+  });
+  assert.equal(v.state, "NO_ACTION_YET");
+  assert.equal(v.stopAfter, true);
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + no correction-satisfied-shaped disposition present at all -> NO_ACTION_YET", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: null,
+  });
+  assert.equal(v.state, "NO_ACTION_YET");
+  assert.equal(v.stopAfter, true);
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + an operational error from checkCorrectionDelta -> AMBIGUOUS, never silently treated as a state", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: { exitCode: 1, message: "gh api compare call failed" },
+  });
+  assert.equal(v.state, "AMBIGUOUS");
+  assert.match(v.reason, /checkCorrectionDelta/);
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + malformed correctionDelta (no exitCode) fails closed to AMBIGUOUS", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: { state: "CORRECTION_SATISFIED" },
+  });
+  assert.equal(v.state, "AMBIGUOUS");
 });
 
 test("resolvePreMergeVerdict: RESPONSE_RECEIVED without clean-pass or findings preamble (kickoff/ack shape) -> NO_ACTION_YET", () => {
@@ -458,6 +572,56 @@ test("runNextReviewTransitionGate: direct --pr/--head/--issue mode resolves with
   assert.equal(result.stopAfter, true);
 });
 
+test("runNextReviewTransitionGate: direct --pr/--head/--issue mode accepts --stage1-disposition and resolves a correction-satisfied head to STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 (Stage 1 review finding on PR #459)", async () => {
+  let issueReadCalls = 0;
+  let correctionDeltaCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    {
+      repo: "o/r",
+      pr: "376",
+      head: "0009c54b18",
+      issue: "375",
+      stage1Disposition: "correction-satisfied at 0009c54b18 (reviewed 30b36035c9)",
+    },
+    {
+      ghIssueViewImpl: async () => {
+        issueReadCalls++;
+        return { body: "", state: "OPEN" };
+      },
+      stage1RunImpl: async () => stage1("NOT_REQUESTED"),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async (args) => {
+        correctionDeltaCalls++;
+        assert.equal(args.reviewedHead, "30b36035c9");
+        assert.equal(args.correctedHead, "0009c54b18");
+        return { exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: "0009c54b18" };
+      },
+    },
+  );
+  assert.equal(issueReadCalls, 0);
+  assert.equal(correctionDeltaCalls, 1);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("runNextReviewTransitionGate: direct --pr/--head/--issue mode without --stage1-disposition never invokes checkCorrectionDeltaImpl (unchanged default behavior)", async () => {
+  let correctionDeltaCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", pr: "376", head: "sha1", issue: "375" },
+    {
+      ghIssueViewImpl: async () => ({ body: "", state: "OPEN" }),
+      stage1RunImpl: async () => stage1("NOT_REQUESTED"),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => {
+        correctionDeltaCalls++;
+        throw new Error("should never be called when no correction-satisfied disposition is supplied");
+      },
+    },
+  );
+  assert.equal(correctionDeltaCalls, 0);
+  assert.equal(result.state, "NO_ACTION_YET");
+});
+
 test("runNextReviewTransitionGate: direct --pr without --head fails closed with exit 1", async () => {
   const result = await runNextReviewTransitionGate({ repo: "o/r", pr: "376" });
   assert.equal(result.exitCode, 1);
@@ -637,6 +801,145 @@ test("runNextReviewTransitionGate: Stage 1 satisfied text does not override NOT_
     },
   );
   assert.equal(result.state, "NO_ACTION_YET");
+});
+
+// -- runNextReviewTransitionGate: correction-satisfied disposition (issue #454, unit 454-C) --
+
+const CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #375
+- **Route:** implementation worker
+- **PR:** #376
+- **Stage 1:** correction-satisfied at 0009c54b18 (reviewed 30b36035c9)
+- **Stage 2:** none
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfied Stage 1 disposition and MERGE_READY resolves to STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2, invoking checkCorrectionDeltaImpl with the parsed heads and the live gated head", async () => {
+  let correctionDeltaCallArgs = null;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrHeadImpl: async () => "0009c54b18",
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async (args) => {
+        correctionDeltaCallArgs = args;
+        return { exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: "0009c54b18" };
+      },
+    },
+  );
+  assert.deepEqual(correctionDeltaCallArgs, {
+    repo: "o/r",
+    pr: 376,
+    reviewedHead: "30b36035c9",
+    correctedHead: "0009c54b18",
+    gatedHead: "0009c54b18",
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.reviewedHead, "30b36035c9");
+  assert.equal(result.correctedHead, "0009c54b18");
+});
+
+test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfied disposition but BLOCKED_CLOSING_REFERENCE resolves to STAGE1_CORRECTION_REQUIRED", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrHeadImpl: async () => "0009c54b18",
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 2, state: "BLOCKED_CLOSING_REFERENCE" }),
+      checkCorrectionDeltaImpl: async () => ({ exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: "0009c54b18" }),
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE1_CORRECTION_REQUIRED");
+});
+
+test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfied disposition whose evidence does not check out (NOT_SATISFIED) resolves to AMBIGUOUS", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrHeadImpl: async () => "0009c54b18",
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => ({
+        exitCode: 2,
+        state: "NOT_SATISFIED",
+        reviewedHead: "30b36035c9",
+        correctedHead: "0009c54b18",
+        reason: "compare(30b36035c9...0009c54b18) reported status \"identical\"",
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /compare\(30b36035c9\.\.\.0009c54b18\)/);
+});
+
+test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfied disposition naming a different (stale) head than the live gated head resolves to NO_ACTION_YET (HEAD_MISMATCH)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrHeadImpl: async () => "somesupersededhead",
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => ({
+        exitCode: 2,
+        state: "HEAD_MISMATCH",
+        reviewedHead: "30b36035c9",
+        correctedHead: "0009c54b18",
+        gatedHead: "somesupersededhead",
+      }),
+    },
+  );
+  assert.equal(result.state, "NO_ACTION_YET");
+});
+
+test("runNextReviewTransitionGate: control-Issue mode with no correction-satisfied-shaped Stage 1 disposition at all never invokes checkCorrectionDeltaImpl (no wasted gh call on the common path)", async () => {
+  let correctionDeltaCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE, state: "OPEN" }),
+      ghPrHeadImpl: async () => "livehead123",
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => {
+        correctionDeltaCalls++;
+        throw new Error("should never be called when no correction-satisfied disposition parses");
+      },
+    },
+  );
+  assert.equal(correctionDeltaCalls, 0);
+  assert.equal(result.state, "NO_ACTION_YET");
+});
+
+test("runNextReviewTransitionGate: control-Issue mode never invokes checkCorrectionDeltaImpl when stage1-gate is not NOT_REQUESTED, even if a correction-satisfied disposition is present (a fresh Stage 1 round already applies)", async () => {
+  let correctionDeltaCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrHeadImpl: async () => "0009c54b18",
+      stage1RunImpl: async () => stage1("RESPONSE_RECEIVED"),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => {
+        correctionDeltaCalls++;
+        throw new Error("should never be called when stage1-gate is not NOT_REQUESTED");
+      },
+    },
+  );
+  assert.equal(correctionDeltaCalls, 0);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
 });
 
 test("runNextReviewTransitionGate: control-Issue mode honors an explicit --head, skipping the PR-head read", async () => {

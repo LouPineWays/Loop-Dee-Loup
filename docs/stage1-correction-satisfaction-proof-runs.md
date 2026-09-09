@@ -1,0 +1,203 @@
+# Stage 1 correction-satisfaction proof runs (worker unit 454-D)
+
+Durable record for worker unit 454-D under execution Issue #454, exercising 454-A/B/C's
+shipped mechanism (the `- **Stage 1:** correction-satisfied at <corrected-head> (reviewed
+<reviewed-head>)` disposition shape, `tools/review-watch/stage1-correction-gate.mjs`'s
+`checkCorrectionDelta`, and its wiring into
+`tools/orchestration/next-review-transition-gate.mjs`'s new
+`STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2` verdict) against all 8 scenarios named
+in #454's own "Verification" section.
+
+This record follows the structural/honesty precedent set by
+`docs/execution-planning-proof-runs.md` and `docs/execution-boundary-experiment.md`: each
+scenario below is either demonstrated with linked, reproducible evidence, or explicitly
+marked not-exercised/inconclusive with a stated reason -- never silently declared passing
+without evidence.
+
+## Real historical reproduction material used
+
+Per the Shared Contract on #454 (comment 5592923768, section 5) and this unit's own contract
+(comment 5592938548), two already-merged, already-closed real PRs are used as live
+reproduction material for scenarios 1 and 2. Both are read-only reads of already-merged PRs
+and already-closed control issues -- nothing on PR #435, PR #424, issue #408, or issue #423
+was commented on, edited, or otherwise mutated by this unit.
+
+- **PR #435** (merged 2026-09-07T13:58:50Z) / control Issue #408. Real reviewed head, read
+  directly from the PR's own `@codex review` trigger comment
+  (issuecomment-5570948673's `<!-- ldl-trigger-head:... -->` marker):
+  `30b36035c9725df4ff56c7d688d2db6837a37055`. Real corrected head (`headRefOid` at merge, also
+  independently confirmed via `gh pr view 435`):
+  `0009c54b180aedadfa48e3db6266b8473a1d8d35`.
+- **PR #424** (merged 2026-09-06T20:01:48Z) / control Issue #423. Real reviewed head, read
+  from the PR's own trigger comment (issuecomment-5561328742's marker):
+  `95d9d45c367ad5efe0449afbb4d56d7ea30fb6b8`. Real corrected head (`headRefOid` at merge):
+  `7f3dfb275254c4f0b2f516f377993c4afb0f685d`.
+
+Both PRs' real Codex review responses (`gh api repos/.../pulls/<N>/reviews`) open with the
+exact fixed findings-bearing preamble
+(`### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.`),
+confirmed live via `stage1-gate.mjs` reporting `RESPONSE_RECEIVED` with a `pull-reviews`
+match carrying that preamble for each reviewed head -- see each scenario's own `.log`
+artifact for the full raw output.
+
+## Scenario-by-scenario summary
+
+| # | Scenario | Status | Artifact |
+| - | -------- | ------ | -------- |
+| 1 | #435-class correction pass | **Demonstrated on real, live, already-merged PR #435 evidence** | `stage1-correction-satisfaction-proof-runs/454-scenario-01-435-class-correction-pass.{json,log}` (+ `454-scenario-01-435-class-exercise.mjs`) |
+| 2 | #424-class recurrence | **Demonstrated on real, live, already-merged PR #424 evidence** | `stage1-correction-satisfaction-proof-runs/454-scenario-02-424-class-recurrence.{json,log}` (+ `454-scenario-02-424-class-exercise.mjs`) |
+| 3 | Unrelated change negative control | Demonstrated via constructed fixture (no real occurrence in this repository's history) | `stage1-correction-satisfaction-proof-runs/454-scenario-03-unrelated-change-negative-control.json` |
+| 4 | Stale corrected-head negative control | Demonstrated via constructed fixture | `stage1-correction-satisfaction-proof-runs/454-scenario-04-stale-corrected-head-negative-control.json` |
+| 5 | No-findings + later change negative control | Demonstrated via constructed fixture | `stage1-correction-satisfaction-proof-runs/454-scenario-05-no-findings-later-change-negative-control.json` |
+| 6 | Malformed/missing provenance | Demonstrated via constructed fixture (two independent sub-cases) | `stage1-correction-satisfaction-proof-runs/454-scenario-06-malformed-missing-provenance.json` |
+| 7 | Merge-gate composition | Demonstrated twice: live via scenarios 1/2's real `runNextReviewTransitionGate` runs, plus one fully-synthetic constructed fixture per this unit's own contract | `stage1-correction-satisfaction-proof-runs/454-scenario-07-merge-gate-composition-constructed.json` (+ scenarios 1/2 above) |
+| 8 | Regression | Demonstrated -- full `tools/review-watch/*.test.mjs tools/orchestration/*.test.mjs` suite run before and after 454-B/454-C | `stage1-correction-satisfaction-proof-runs/454-scenario-08-regression.json` |
+
+**All 8 scenarios are demonstrated with linked, reproducible evidence.** Scenarios 1 and 2
+use real, live, already-merged GitHub state; scenarios 3-7 use clearly-labeled constructed
+fixtures (no real historical occurrence of any of these four negative controls, or of a
+second, fully-synthetic merge-gate-composition run, exists in this repository's history);
+scenario 8 is a full before/after regression run of the real automated test suite. None
+silently omitted, none declared passing without evidence.
+
+## Scenario 1: #435-class correction pass (real evidence)
+
+Exact reproducible commands (repository root, branch `feature/454-stage1-correction-satisfied`,
+commit `3750d27`):
+
+```
+node tools/review-watch/stage1-gate.mjs --repo LouPineWays/Loop-Dee-Loup --number 435 --head 30b36035c9725df4ff56c7d688d2db6837a37055
+node tools/review-watch/stage1-correction-gate.mjs --repo LouPineWays/Loop-Dee-Loup --pr 435 --reviewed-head 30b36035c9725df4ff56c7d688d2db6837a37055 --corrected-head 0009c54b180aedadfa48e3db6266b8473a1d8d35
+node tools/review-watch/lifecycle-gate.mjs merge-ready --repo LouPineWays/Loop-Dee-Loup --pr 435 --issue 408
+node docs/stage1-correction-satisfaction-proof-runs/454-scenario-01-435-class-exercise.mjs
+```
+
+Results (full raw output in the `.log` artifact):
+
+- `stage1-gate.mjs` at the real reviewed head: `RESPONSE_RECEIVED`, with a genuine,
+  findings-bearing `pull-reviews` match (the fixed `### 💡 Codex Review` preamble) plus four
+  genuine inline `pull-comments` findings, all bound to that exact head.
+- `stage1-correction-gate.mjs`'s `checkCorrectionDelta`, run against the real reviewed and
+  corrected heads: `CORRECTION_SATISFIED`.
+- `lifecycle-gate.mjs merge-ready` against the real, already-merged PR #435 and its real gated
+  work issue #408: `MERGE_READY`.
+- The full composed `runNextReviewTransitionGate` (real `stage1RunImpl`,
+  `checkMergeReadyImpl`, `checkCorrectionDeltaImpl`, `ghPrHeadImpl` -- only the control-Issue
+  body itself is synthesized, since issue #408's own real durable body predates this
+  mechanism and does not yet carry the new bullet shape): resolves to
+  `STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2`, exit code 0 -- exactly the
+  deterministic authorization #454 exists to add, on the exact PR that originally exposed the
+  gap (the founder's manual bypass of PR #435 in the pre-454 world is the live defect this
+  plan closes).
+
+## Scenario 2: #424-class recurrence (real evidence)
+
+Same exercise, independently, against real PR #424 / control Issue #423 (the earlier
+one-round correction precedent named directly in #454's own problem statement). Exact
+commands and full raw output in
+`454-scenario-02-424-class-recurrence.log` /
+`454-scenario-02-424-class-exercise.mjs`. Result: identical shape --
+`stage1-gate.mjs` reports `RESPONSE_RECEIVED` with a genuine findings-bearing match at the
+real reviewed head `95d9d45c367ad5efe0449afbb4d56d7ea30fb6b8`; `checkCorrectionDelta` reports
+`CORRECTION_SATISFIED` against the real corrected head
+`7f3dfb275254c4f0b2f516f377993c4afb0f685d`; `lifecycle-gate.mjs merge-ready` reports
+`MERGE_READY`; the full composed gate resolves to
+`STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2`.
+
+## Scenarios 3-7: constructed fixtures (no real historical occurrence)
+
+Run via `node docs/stage1-correction-satisfaction-proof-runs/454-constructed-fixtures-exercise.mjs`,
+which is fully network-free (every `stage1RunImpl`/`compareImpl`/`checkMergeReadyImpl`/
+`checkCorrectionDeltaImpl`/`ghIssueViewImpl`/`ghPrHeadImpl` dependency is injected) and writes
+one JSON artifact per scenario. None of scenarios 3-6 has a real occurrence anywhere in this
+repository's history (they are negative controls for shapes the repository's own process
+discipline has never actually produced), and scenario 7's constructed fixture is additional
+to -- not a replacement for -- the real composed-gate evidence already produced live in
+scenarios 1 and 2 above.
+
+- **Scenario 3 (unrelated change negative control):** a disposition names
+  reviewed/corrected heads `A`/`B`; an unrelated commit is then pushed, producing an actual
+  gated head `C` the disposition never named. Result: `HEAD_MISMATCH` ->
+  composed `NO_ACTION_YET` (fails closed; the stale disposition never silently extends to the
+  new head). The artifact also records an honest, explicitly-documented limitation this
+  mechanism does not attempt to close: if a disposition bullet is itself written (by mistake
+  or dishonestly) naming a head that already bundles unrelated content as the "corrected"
+  head, the ancestry-only check (`compare` status `"ahead"`) cannot detect that by content --
+  `stage1-correction-gate.mjs`'s own module comment already states this as a trust boundary,
+  not a bug, matching #454's own non-goal against requiring semantic model review.
+- **Scenario 4 (stale corrected-head negative control):** a satisfaction record for corrected
+  head `A` is checked against a later, unrelated gated head `B`. Result: `HEAD_MISMATCH` ->
+  composed `NO_ACTION_YET`.
+- **Scenario 5 (no-findings + later change negative control):** the reviewed head's real
+  Stage 1 response is a clean pass (no findings); a disposition nonetheless claims
+  correction-satisfied against it. Result: `NOT_SATISFIED` (findings-provenance reason) ->
+  composed `AMBIGUOUS` (fails closed, never silently satisfied).
+- **Scenario 6 (malformed/missing provenance), two independent sub-cases:** (a) the reviewed
+  head has no genuine Stage 1 response at all (`NOT_REQUESTED`) -> `NOT_SATISFIED` -> composed
+  `AMBIGUOUS`; (b) the `- **Stage 1:**` bullet itself does not parse as this disposition shape
+  (missing the required `(reviewed ...)` clause) -> `parseCorrectionSatisfiedDisposition`
+  returns `null`, `checkCorrectionDeltaImpl` is never even invoked (confirmed by a spy that
+  throws if called), and the composed gate falls back to plain `NO_ACTION_YET`, identical to
+  no disposition being present at all.
+- **Scenario 7 (merge-gate composition, constructed):** a fully synthetic run of the complete
+  `runNextReviewTransitionGate` (not the two isolated units) reaches
+  `STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2` with exit code 0, confirming the
+  composition itself -- not just `checkCorrectionDelta` and `resolvePreMergeVerdict` in
+  isolation -- performs the intended transition end to end.
+
+All five constructed-fixture results matched their stated expectation exactly (`"passed":
+true` in every artifact).
+
+## Scenario 8: regression
+
+Full command: `node --test tools/review-watch/*.test.mjs tools/orchestration/*.test.mjs`, run
+in an isolated git worktree at `149d8a1` (`main`'s tip immediately before 454-A/B/C's three
+commits) for the "before" count, and on this branch's tip `3750d27` for the "after" count.
+
+| | Tests | Pass | Fail |
+| - | - | - | - |
+| Before (149d8a1) | 661 | 660 | 1 |
+| After (3750d27) | 704 | 703 | 1 |
+
+**43 net new passing tests, zero prior tests broken.** The single failure present in both
+runs is `tools/review-watch/stage2-report.test.mjs`'s own top-level module-load assertion
+against `docs/stage2-audit-contract.md`'s canonical CLEAN/NOT-CLEAN skeleton fences
+(`extractCanonicalSkeletonFence` expects exactly 2, finds 0) -- confirmed byte-for-byte
+identical at the pre-454 commit in an isolated worktree, so it pre-dates this plan entirely
+and is outside 454-D's scope to fix (neither `docs/stage2-audit-contract.md` nor
+`stage2-report.test.mjs` is touched by any 454 unit). See
+`stage1-correction-satisfaction-proof-runs/454-scenario-08-regression.json` for the full
+before/after detail.
+
+## Bugs found in the shipped scripts
+
+None. 454-B and 454-C's shipped code (`tools/review-watch/stage1-correction-gate.mjs` and its
+wiring into `tools/orchestration/next-review-transition-gate.mjs`) behaved exactly as
+specified by the Shared Contract on every scenario exercised above, on both real historical
+evidence and constructed fixtures, with no deviation between expected and actual output. The
+one test-suite failure discovered during this unit's own regression run
+(`tools/review-watch/stage2-report.test.mjs`) is unrelated to 454's own shipped surfaces --
+confirmed pre-existing on `main` before this plan's first commit -- and is not a finding
+against 454-B/454-C.
+
+## Verdict
+
+**PASS for all 8 named #454 verification scenarios**, 2 of them (1, 2) on real, reproducible,
+live evidence against already-merged PR #435/#424, and the remaining 6 (3-8) on clearly-labeled
+constructed fixtures or a full before/after regression run -- none silently omitted, none
+declared passing without evidence, per the same precedent `docs/execution-planning-proof-runs.md`
+and `docs/execution-boundary-experiment.md` established. The shipped mechanism reproduces, on
+the exact real PR that originally exposed #454's defect (PR #435, previously requiring a
+founder manual bypass per control Issue #408's own history), a deterministic
+`STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2` authorization with no second Codex
+round and no manual bypass; independently reproduces the same result on PR #424's earlier,
+unrelated one-round correction precedent; fails closed on every negative-control shape named
+in #454's own acceptance criteria (an unrelated post-review change, a stale disposition for an
+older head, a clean-pass review with no findings to correct, and two independent malformed-
+provenance shapes); and adds 43 new passing tests with zero regressions to the existing Stage
+1/Stage 2/merge-ready suite. One honest, explicitly-documented limitation is recorded rather
+than silently accepted as a guarantee: the ancestry-only evidence check cannot detect
+unrelated content bundled into the very same commit a disposition bullet names as "corrected"
+-- an already-documented trust boundary in `stage1-correction-gate.mjs`'s own module comment,
+consistent with #454's own non-goal against requiring semantic model review to prove a
+mechanically characterizable correction delta.

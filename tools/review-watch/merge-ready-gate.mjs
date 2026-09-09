@@ -22,7 +22,9 @@
 //
 // Composed exit codes (distinct from either component's own exit codes, so a component
 // result can never be mistaken for the composed one):
-//   0 — PRE_MERGE_READY / PRE_MERGE_READY_NO_WORK_ISSUE: both components succeeded.
+//   0 — PRE_MERGE_READY / PRE_MERGE_READY_NO_WORK_ISSUE (or, with `--reviewed-head`, their
+//       PRE_MERGE_READY_CORRECTION_SATISFIED[/_NO_WORK_ISSUE] counterparts below): both
+//       components succeeded.
 //   2 — BLOCKED: at least one component reported a non-error blocking state (Stage 1
 //       NOT_REQUESTED/PENDING, or lifecycle BLOCKED_CLOSING_REFERENCE). `blockedBy` names
 //       which component(s) and their own state.
@@ -36,7 +38,23 @@
 //   node tools/review-watch/merge-ready-gate.mjs \
 //     --repo OWNER/REPO --pr 50 --head <sha> --issue none
 //
-// The two composed checks remain individually invocable (`stage1-gate.mjs`,
+// Correction-satisfied heads (issue #454, Stage 1 review finding on PR #459): when Stage 1's
+// own leg reports NOT_REQUESTED at `--head` (no fresh trigger exists at a corrected head —
+// see docs/bounded-review-cycle.md's "Correction-satisfied disposition" section), pass
+// `--reviewed-head <frozen-reviewed-sha>` (the head the one-round `@codex review` actually
+// reviewed) so this script — the single documented authoritative pre-merge command
+// (docs/bounded-review-cycle.md step 8/10) — can also succeed for that head instead of
+// permanently blocking it. This composes `stage1-correction-gate.mjs`'s own `checkCorrectionDelta`
+// exactly the way `tools/orchestration/next-review-transition-gate.mjs` already does for its
+// own STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 verdict — the P1 gap this closes is
+// that, before this, that verdict authorized merge without this documented command itself ever
+// being able to agree: a conforming executor following step 10 (which requires this exact
+// script to exit 0) had no way to reach exit 0 for a corrected head, even though the
+// orchestration verdict said merge was authorized. `--reviewed-head` is never attempted, and
+// costs no extra `gh` call, unless Stage 1's own leg is already NOT_REQUESTED — the common
+// (non-correction) path is unchanged.
+//
+// The two base composed checks remain individually invocable (`stage1-gate.mjs`,
 // `lifecycle-gate.mjs merge-ready`) for diagnostics or targeted testing of one half only —
 // neither one's individual success is, on its own, grounds to merge or report a slice
 // complete. Use this script for the actual pre-merge decision.
@@ -45,6 +63,15 @@
 
 import { run as runStage1 } from "./stage1-gate.mjs";
 import { checkMergeReady } from "./lifecycle-gate.mjs";
+// Issue #454, Stage 1 review finding on PR #459: stage1-correction-gate.mjs itself imports
+// `stage1DispositionMatchesHead` from tools/orchestration/next-review-transition-gate.mjs,
+// which (after this change) imports `run` from this module — a 3-node import cycle
+// (this module -> stage1-correction-gate.mjs -> next-review-transition-gate.mjs -> this
+// module). Every usage on all three sides only reads the other module's bindings from inside
+// function bodies, never at module-top-level, so ESM's live-binding semantics resolve this
+// safely regardless of load order — mirrors the 2-node cycle next-review-transition-gate.mjs's
+// own module comment already documents for the same reason.
+import { checkCorrectionDelta } from "./stage1-correction-gate.mjs";
 
 export function parseArgs(argv) {
   const args = {};
@@ -62,10 +89,106 @@ function hasTrustworthyExitCode(result) {
   return result !== null && typeof result === "object" && [0, 1, 2].includes(result.exitCode);
 }
 
-// `stage1RunImpl`/`checkMergeReadyImpl` are injected so tests can drive `run` end-to-end
-// against fakes for both components without touching the real network or `gh` CLI.
-export async function run(args, { stage1RunImpl = runStage1, checkMergeReadyImpl = checkMergeReady } = {}) {
+// Pure. The composed decision itself, factored out of `run` so a caller that has already
+// computed stage1/lifecycle/(optionally) correctionDelta results elsewhere — specifically
+// tools/orchestration/next-review-transition-gate.mjs's own pre-merge resolution — can reuse
+// this *exact* authoritative combining logic instead of re-deriving an equivalent decision a
+// second way (the P1 finding on PR #459: a second, parallel combination could silently
+// diverge from what this documented script itself would report for the same evidence).
+// `correctionDelta` is optional and, when present, is expected to already be
+// stage1-correction-gate.mjs's `checkCorrectionDelta` result for this same reviewed/corrected
+// head pair — this function does not fetch it itself.
+export function combineMergeReadyResult({ stage1, lifecycle, correctionDelta = null }, identifiers = {}) {
+  const correctionSatisfied = !!(
+    correctionDelta &&
+    hasTrustworthyExitCode(correctionDelta) &&
+    correctionDelta.exitCode === 0 &&
+    correctionDelta.state === "CORRECTION_SATISFIED"
+  );
+
+  // A component that returns output this gate cannot trust (a missing/invalid exitCode —
+  // e.g. an injected fake that returns undefined, or a future component bug) must never be
+  // silently treated as passing. This is requirement #2's "a required underlying check
+  // cannot execute or return a trustworthy result" clause.
+  if (!hasTrustworthyExitCode(stage1) || !hasTrustworthyExitCode(lifecycle) || (correctionDelta && !hasTrustworthyExitCode(correctionDelta))) {
+    return {
+      exitCode: 1,
+      state: "MALFORMED_GATE_OUTPUT",
+      ...identifiers,
+      stage1,
+      lifecycle,
+      ...(correctionDelta ? { correctionDelta } : {}),
+      message:
+        "One or both underlying gates returned output without a trustworthy exitCode (0, 1, or 2); " +
+        "the composed pre-merge gate fails closed rather than assuming success.",
+    };
+  }
+
+  // Operational failure in any component dominates: the composed result is untrustworthy,
+  // not merely blocked, so this is reported distinctly from a normal BLOCKED state.
+  if (stage1.exitCode === 1 || lifecycle.exitCode === 1 || (correctionDelta && correctionDelta.exitCode === 1)) {
+    const messages = [];
+    if (stage1.exitCode === 1) messages.push(`stage1-gate: ${stage1.message}`);
+    if (lifecycle.exitCode === 1) messages.push(`lifecycle-gate merge-ready: ${lifecycle.message}`);
+    if (correctionDelta && correctionDelta.exitCode === 1) messages.push(`stage1-correction-gate: ${correctionDelta.message}`);
+    return {
+      exitCode: 1,
+      state: "OPERATIONAL_ERROR",
+      ...identifiers,
+      stage1,
+      lifecycle,
+      ...(correctionDelta ? { correctionDelta } : {}),
+      message: messages.join(" | "),
+    };
+  }
+
+  // Stage 1's leg is only still "blocking" here when a correction-satisfied delta did not
+  // resolve it — a plain NOT_REQUESTED with no reviewed head supplied, or one whose
+  // checkCorrectionDelta evidence itself came back HEAD_MISMATCH/NOT_SATISFIED, keeps
+  // blocking exactly as before this change.
+  const stage1Blocked = stage1.exitCode === 2 && !correctionSatisfied;
+
+  if (stage1Blocked || lifecycle.exitCode === 2) {
+    const blockedBy = [];
+    if (stage1Blocked) blockedBy.push({ component: "stage1", state: stage1.state });
+    if (lifecycle.exitCode === 2) blockedBy.push({ component: "lifecycle", state: lifecycle.state });
+    return {
+      exitCode: 2,
+      state: "BLOCKED",
+      blockedBy,
+      ...identifiers,
+      stage1,
+      lifecycle,
+      ...(correctionDelta ? { correctionDelta } : {}),
+    };
+  }
+
+  const noWorkIssue = lifecycle.state === "MERGE_READY_NO_WORK_ISSUE";
+  return {
+    exitCode: 0,
+    state: correctionSatisfied
+      ? noWorkIssue
+        ? "PRE_MERGE_READY_CORRECTION_SATISFIED_NO_WORK_ISSUE"
+        : "PRE_MERGE_READY_CORRECTION_SATISFIED"
+      : noWorkIssue
+        ? "PRE_MERGE_READY_NO_WORK_ISSUE"
+        : "PRE_MERGE_READY",
+    ...identifiers,
+    stage1,
+    lifecycle,
+    ...(correctionDelta ? { correctionDelta } : {}),
+  };
+}
+
+// `stage1RunImpl`/`checkMergeReadyImpl`/`checkCorrectionDeltaImpl` are injected so tests can
+// drive `run` end-to-end against fakes for every component without touching the real network
+// or `gh` CLI.
+export async function run(
+  args,
+  { stage1RunImpl = runStage1, checkMergeReadyImpl = checkMergeReady, checkCorrectionDeltaImpl = checkCorrectionDelta } = {},
+) {
   const { repo, pr, head, issue } = args;
+  const reviewedHead = args.reviewedHead ?? args["reviewed-head"] ?? null;
   const identifiers = { repo: repo ?? null, pr: pr ?? null, head: head ?? null, issue: issue ?? null };
 
   let stage1;
@@ -82,60 +205,21 @@ export async function run(args, { stage1RunImpl = runStage1, checkMergeReadyImpl
     lifecycle = { exitCode: 1, message: `lifecycle-gate merge-ready threw: ${err.message}` };
   }
 
-  // A component that returns output this gate cannot trust (a missing/invalid exitCode —
-  // e.g. an injected fake that returns undefined, or a future component bug) must never be
-  // silently treated as passing. This is requirement #2's "a required underlying check
-  // cannot execute or return a trustworthy result" clause.
-  if (!hasTrustworthyExitCode(stage1) || !hasTrustworthyExitCode(lifecycle)) {
-    return {
-      exitCode: 1,
-      state: "MALFORMED_GATE_OUTPUT",
-      ...identifiers,
-      stage1,
-      lifecycle,
-      message:
-        "One or both underlying gates returned output without a trustworthy exitCode (0, 1, or 2); " +
-        "the composed pre-merge gate fails closed rather than assuming success.",
-    };
+  // Issue #454, Stage 1 review finding on PR #459 (the P1 finding): only ever attempted when
+  // Stage 1's own leg is already blocked as NOT_REQUESTED at `head` (nothing to correct
+  // otherwise) and the caller supplied `--reviewed-head` — no extra `gh` call on the common
+  // (non-correction) path. Mirrors next-review-transition-gate.mjs's own
+  // parseCorrectionSatisfiedDisposition-gated call to the same checkCorrectionDelta.
+  let correctionDelta = null;
+  if (hasTrustworthyExitCode(stage1) && stage1.exitCode === 2 && stage1.state === "NOT_REQUESTED" && reviewedHead) {
+    try {
+      correctionDelta = await checkCorrectionDeltaImpl({ repo, pr, reviewedHead, correctedHead: head, gatedHead: head });
+    } catch (err) {
+      correctionDelta = { exitCode: 1, message: `stage1-correction-gate threw: ${err.message}` };
+    }
   }
 
-  // Operational failure in either component dominates: the composed result is untrustworthy,
-  // not merely blocked, so this is reported distinctly from a normal BLOCKED state.
-  if (stage1.exitCode === 1 || lifecycle.exitCode === 1) {
-    const messages = [];
-    if (stage1.exitCode === 1) messages.push(`stage1-gate: ${stage1.message}`);
-    if (lifecycle.exitCode === 1) messages.push(`lifecycle-gate merge-ready: ${lifecycle.message}`);
-    return {
-      exitCode: 1,
-      state: "OPERATIONAL_ERROR",
-      ...identifiers,
-      stage1,
-      lifecycle,
-      message: messages.join(" | "),
-    };
-  }
-
-  if (stage1.exitCode === 2 || lifecycle.exitCode === 2) {
-    const blockedBy = [];
-    if (stage1.exitCode === 2) blockedBy.push({ component: "stage1", state: stage1.state });
-    if (lifecycle.exitCode === 2) blockedBy.push({ component: "lifecycle", state: lifecycle.state });
-    return {
-      exitCode: 2,
-      state: "BLOCKED",
-      blockedBy,
-      ...identifiers,
-      stage1,
-      lifecycle,
-    };
-  }
-
-  return {
-    exitCode: 0,
-    state: lifecycle.state === "MERGE_READY_NO_WORK_ISSUE" ? "PRE_MERGE_READY_NO_WORK_ISSUE" : "PRE_MERGE_READY",
-    ...identifiers,
-    stage1,
-    lifecycle,
-  };
+  return combineMergeReadyResult({ stage1, lifecycle, correctionDelta }, identifiers);
 }
 
 async function main() {

@@ -1,0 +1,30 @@
+{
+  "scenario": "5 -- no-findings + later change negative control",
+  "narrative": "Reviewed head aaaaaaa1111111111111111111111111111111a has only a clean-pass Stage 1 response (no findings). A later disposition still claims correction-satisfied against it.",
+  "correctionDelta": {
+    "exitCode": 2,
+    "state": "NOT_SATISFIED",
+    "reviewedHead": "aaaaaaa1111111111111111111111111111111a",
+    "correctedHead": "bbbbbbb2222222222222222222222222222222b",
+    "reason": "reviewed head aaaaaaa1111111111111111111111111111111a has a genuine Stage 1 response, but it carries no findings-bearing match (a clean-pass response can never back a correction-satisfied disposition — there would be nothing to have corrected)."
+  },
+  "composedVerdict": {
+    "state": "AMBIGUOUS",
+    "stopAfter": true,
+    "repo": "o/r",
+    "pr": 1,
+    "head": "bbbbbbb2222222222222222222222222222222b",
+    "issue": 1,
+    "stage1": {
+      "exitCode": 2,
+      "state": "NOT_REQUESTED"
+    },
+    "mergeReady": {
+      "exitCode": 0,
+      "state": "MERGE_READY"
+    },
+    "reason": "reviewed head aaaaaaa1111111111111111111111111111111a has a genuine Stage 1 response, but it carries no findings-bearing match (a clean-pass response can never back a correction-satisfied disposition — there would be nothing to have corrected)."
+  },
+  "expectation": "correctionDelta.state === NOT_SATISFIED (findings-provenance reason); composed verdict === AMBIGUOUS (fails closed, never silently satisfied)",
+  "passed": true
+}

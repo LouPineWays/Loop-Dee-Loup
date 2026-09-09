@@ -1,0 +1,17 @@
+{
+  "scenario": "7 -- merge-gate composition (constructed fixture)",
+  "composedVerdict": {
+    "exitCode": 0,
+    "state": "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
+    "stopAfter": true,
+    "repo": "o/r",
+    "pr": 1,
+    "head": "bbbbbbb2222222222222222222222222222222b",
+    "issue": 1,
+    "controlIssue": 1,
+    "reviewedHead": "aaaaaaa1111111111111111111111111111111a",
+    "correctedHead": "bbbbbbb2222222222222222222222222222222b"
+  },
+  "expectation": "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2, exitCode 0",
+  "passed": true
+}
