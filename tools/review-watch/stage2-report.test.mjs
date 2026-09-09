@@ -732,6 +732,16 @@ const ISSUE_381_COMMIT = "3947b0e03be816a483d8cc7117241f86f13b081c";
 const ISSUE_381_COMMENT = readFixture("issue-381-comment.txt");
 const ISSUE_381_CHECKLIST = readFixture("issue-381-checklist.txt");
 
+// Issue #481: a genuine, complete 8-item numbered "Verification Checklist" walk-through
+// (matching this issue's 8-item requested checklist), followed by a literal command-log section
+// labelled with a standalone bold "**Testing**" paragraph — not a "### Checks" heading — of 5
+// status-marker bullets. Exact real response body (comment 5609327800 on issue #480) and its
+// exact real requested checklist (issue #480's own "Verification checklist" field), not
+// paraphrased reconstructions.
+const ISSUE_480_COMMIT = "816646bc0183fbd4035b71cde57c9955de52648c";
+const ISSUE_480_COMMENT = readFixture("issue-480-comment.txt");
+const ISSUE_480_CHECKLIST = readFixture("issue-480-checklist.txt");
+
 test("hasVerificationEvidence: true for a status-marker bullet checklist ('- ✅ ...') with no numbering", () => {
   assert.equal(hasVerificationEvidence("### Verification\n\n- ✅ Confirmed the fix works."), true);
 });
@@ -1101,6 +1111,79 @@ test("isCompletedStage2AuditReport (issue #381): reproduces the real #380 CLEAN 
   });
   assert.equal(result.complete, true);
   assert.equal(result.verdict, "CLEAN");
+  assert.deepEqual(result.reasons, []);
+});
+
+// -- issue #481: a later literal command-log section labelled with a standalone bold paragraph
+// ("**Testing**") rather than a "### Checks" heading must never outrank a complete, earlier
+// numbered checklist walk-through, the same protection issue #381 already established for the
+// heading shape.
+
+test("countVerificationWalkthroughItems (issue #481): a complete numbered walk-through is not undercounted by a later, unrelated bold '**Testing**' section of fewer status-marker command bullets", () => {
+  const body = [
+    "### Verification Checklist",
+    "",
+    "1. **PASS** — first item.",
+    "2. **PASS** — second item.",
+    "3. **PASS** — third item.",
+    "4. **PASS** — fourth item.",
+    "5. **PASS** — fifth item.",
+    "6. **PASS** — sixth item.",
+    "",
+    "**Testing**",
+    "",
+    "* ✅ `command one`",
+    "* ✅ `command two`",
+    "* ✅ `command three`",
+    "",
+    "Verdict: CLEAN",
+  ].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    6,
+    "the correct, earlier, complete 6-item numbered walk-through must win over the later 3-item bold '**Testing**' section",
+  );
+});
+
+test("countVerificationWalkthroughItems (issue #481): a bold '**Checks**' label (no heading marker) is also recognized as a literal-command-log section", () => {
+  const body = ["1. one", "2. two", "", "**Checks:**", "", "- ✅ `cmd a`", "- ✅ `cmd b`", "- ✅ `cmd c`"].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 2, "the 2-item numbered run must win, not the 3-item bold 'Checks:' section");
+});
+
+test("countVerificationWalkthroughItems (issue #481): a bold label section closes at the next heading, not just the next bold label", () => {
+  const body = ["1. one", "2. two", "", "**Testing**", "", "- ✅ `cmd a`", "", "### Not Testing", "", "- ✅ `cmd b`", "- ✅ `cmd c`"].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    2,
+    "content after the '**Testing**' section's own closing heading must not still be masked as part of it",
+  );
+});
+
+test("countVerificationWalkthroughItems (issue #481): a bold-emphasized run-of-words line that happens to end in a colon is not mistaken for a standalone bold label", () => {
+  const body = ["1. one", "2. two", "", "**Verdict: NOT CLEAN**", "", "- ✅ Confirmed A.", "- ✅ Confirmed B.", "- ✅ Confirmed C."].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    3,
+    "a bold '**Verdict: NOT CLEAN**' line must not be read as a checks/testing label and must not mask the later genuine marker checklist",
+  );
+});
+
+test("countVerificationWalkthroughItems (issue #481): reproduces the real #480 response — the correct 8-item numbered walk-through, not the 5-item bold '**Testing**' section", () => {
+  assert.equal(countVerificationWalkthroughItems(ISSUE_480_COMMENT), 8);
+  assert.equal(countNumberedItems(ISSUE_480_CHECKLIST), 8);
+});
+
+test("hasCompleteVerificationEvidence (issue #481): the real response satisfies its real 8-item requested checklist", () => {
+  assert.equal(hasCompleteVerificationEvidence(ISSUE_480_COMMENT, ISSUE_480_CHECKLIST), true);
+});
+
+test("isCompletedStage2AuditReport (issue #481): reproduces the real #480 NOT CLEAN Stage 2 response as complete — previously misclassified as incomplete (5 of 8) due to the later bold '**Testing**' section", () => {
+  const result = isCompletedStage2AuditReport(ISSUE_480_COMMENT, {
+    mergeCommit: ISSUE_480_COMMIT,
+    requestedChecklist: ISSUE_480_CHECKLIST,
+  });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "NOT CLEAN");
   assert.deepEqual(result.reasons, []);
 });
 

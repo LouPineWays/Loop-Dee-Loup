@@ -384,15 +384,33 @@ function isTopLevelBoundaryLine(line) {
 // can compare heading levels (computeHeadingSectionMask, below).
 const HEADING_LEVEL_PATTERN = /^(#{1,6})\s+\S/;
 
+// The command-log word set shared by both the heading shape (CHECKS_SECTION_HEADING_PATTERN,
+// below) and the bold-label shape (BOLD_LABEL_LINE_PATTERN/computeBoldLabelSectionMask, below).
+// Issue #481: a genuine Stage 2 response (issue #480, comment 5609327800) used a standalone
+// "**Testing**" bold label for the identical literal-command-log concept "### Checks" already
+// covers, rather than the word "Checks" itself — both words name the same "commands actually
+// run" results section, so both are recognized synonyms.
+const COMMAND_LOG_WORD_PATTERN_SOURCE = "(?:checks?|tests?|testing)";
+
 // A heading whose own text names a *literal command log* rather than a checklist walk-through —
 // observed real shape: "### Checks" (issue #381, comment 5541924356), each of whose lines is
 // "- ✅ `<command run>`" — the exact same top-level marker-bullet shape CHECKLIST_MARKER_ITEM_
 // PATTERN matches for a genuine per-item checklist walk-through. The two are structurally
 // indistinguishable by bullet shape alone; the heading is the only signal that separates "this
 // bullet asserts a checklist item was verified" from "this bullet records that a command was
-// run." Matches "Checks", "Checks:", "Checks performed", "### **Checks**", etc. — the heading
-// text alone, not exact punctuation/emphasis around it.
-const CHECKS_SECTION_HEADING_PATTERN = /^#{1,6}\s*\*{0,2}\s*checks?\b/i;
+// run." Matches "Checks", "Checks:", "Checks performed", "### **Checks**", "### Testing", etc. —
+// the heading text alone, not exact punctuation/emphasis around it.
+const CHECKS_SECTION_HEADING_PATTERN = new RegExp(`^#{1,6}\\s*\\*{0,2}\\s*${COMMAND_LOG_WORD_PATTERN_SOURCE}\\b`, "i");
+
+// A line consisting of nothing but a bold-only label — "**Testing**", "**Checks:**" — no heading
+// marker and no trailing content on the same line. Issue #481's genuine response used exactly
+// this shape instead of a "### Checks"-style heading for its literal command-log section, which
+// CHECKS_SECTION_HEADING_PATTERN's heading-only match could never see: the section was never
+// excluded, so its command-log bullets stood in as if they were the real checklist walk-through.
+// Captures the label text (trimmed of an optional trailing colon) for computeBoldLabelSectionMask
+// to test against COMMAND_LOG_WORD_PATTERN_SOURCE, the same way a heading's text is tested.
+const BOLD_LABEL_LINE_PATTERN = /^\*\*\s*([^*\n]+?)\s*:?\s*\*\*\s*$/;
+const COMMAND_LOG_BOLD_LABEL_PATTERN = new RegExp(`^${COMMAND_LOG_WORD_PATTERN_SOURCE}$`, "i");
 
 // A heading whose own text names the response's *findings* section (the required response
 // structure's item (2), one numbered entry per finding — docs/bounded-review-cycle.md) rather
@@ -437,18 +455,46 @@ function computeHeadingSectionMask(lines, startPattern) {
   return mask;
 }
 
+// Pure. For each line index in `lines`, whether that line falls inside a section opened by a
+// standalone bold-only label line (BOLD_LABEL_LINE_PATTERN) whose label text matches
+// `wordPattern` — from that label line down to (but not including) the next Markdown heading at
+// any level, the next standalone bold-only label line (matching or not — a different label
+// always ends the current one, the same way a same-or-shallower heading ends a heading section),
+// or the end of the document. Bold labels carry no heading level to compare the way
+// computeHeadingSectionMask's ATX headings do, so any subsequent heading or bold label
+// unconditionally closes the section rather than only a "same or shallower level" one. Issue
+// #481: this is the bold-label counterpart to computeHeadingSectionMask, needed because a genuine
+// response labelled its literal command-log section "**Testing**" — a standalone bold paragraph,
+// not a heading — which computeHeadingSectionMask can never see at all.
+function computeBoldLabelSectionMask(lines, wordPattern) {
+  const mask = new Array(lines.length).fill(false);
+  let inSection = false;
+  for (let i = 0; i < lines.length; i++) {
+    const boldMatch = BOLD_LABEL_LINE_PATTERN.exec(lines[i].trim());
+    if (boldMatch) {
+      inSection = wordPattern.test(boldMatch[1].trim());
+    } else if (HEADING_LEVEL_PATTERN.test(lines[i])) {
+      inSection = false;
+    }
+    mask[i] = inSection;
+  }
+  return mask;
+}
+
 // Pure. For each line index in `lines`, whether that line falls inside a literal-command-log
-// section (CHECKS_SECTION_HEADING_PATTERN) or a findings section (FINDINGS_SECTION_HEADING_
-// PATTERN) — see each pattern's own comment for why both are excluded from checklist-walk-
-// through candidacy. Issue #381: findNumberedWalkthroughRun and findMarkerWalkthroughRun both
-// use this to exclude those sections' own bullets/numbering from ever being mistaken for the
-// genuine requested-checklist walk-through, even though a command log reuses the identical
-// per-item status-marker glyphs a real checklist item uses, and a findings list reuses the
-// identical numbered-list shape a real walk-through uses.
+// section — a heading (CHECKS_SECTION_HEADING_PATTERN) or a standalone bold label
+// (BOLD_LABEL_LINE_PATTERN + COMMAND_LOG_BOLD_LABEL_PATTERN, issue #481) — or a findings section
+// (FINDINGS_SECTION_HEADING_PATTERN) — see each pattern's own comment for why all three are
+// excluded from checklist-walk-through candidacy. Issue #381: findNumberedWalkthroughRun and
+// findMarkerWalkthroughRun both use this to exclude those sections' own bullets/numbering from
+// ever being mistaken for the genuine requested-checklist walk-through, even though a command log
+// reuses the identical per-item status-marker glyphs a real checklist item uses, and a findings
+// list reuses the identical numbered-list shape a real walk-through uses.
 function computeExcludedSectionMask(lines) {
   const checksMask = computeHeadingSectionMask(lines, CHECKS_SECTION_HEADING_PATTERN);
   const findingsMask = computeHeadingSectionMask(lines, FINDINGS_SECTION_HEADING_PATTERN);
-  return lines.map((_, i) => checksMask[i] || findingsMask[i]);
+  const boldChecksMask = computeBoldLabelSectionMask(lines, COMMAND_LOG_BOLD_LABEL_PATTERN);
+  return lines.map((_, i) => checksMask[i] || findingsMask[i] || boldChecksMask[i]);
 }
 
 // Pure. Counts top-level numbered list lines ("1. ...", "2) ...") in `text`. Used against the
