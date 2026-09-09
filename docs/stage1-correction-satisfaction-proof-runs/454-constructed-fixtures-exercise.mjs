@@ -18,9 +18,18 @@ import { checkCorrectionDelta } from "../../tools/review-watch/stage1-correction
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
-const REVIEWED = "aaaaaaa1111111111111111111111111111111a";
-const CORRECTED = "bbbbbbb2222222222222222222222222222222b";
-const STALE_LATER_HEAD = "ccccccc3333333333333333333333333333333c";
+// Full 40-character hex SHAs are required here (not merely "SHA-shaped"): PR #459's Stage 1
+// correction pass added a `checkCorrectionDelta` step that resolves any reviewedHead shorter
+// than 40 characters to its full SHA via a live `gh api .../commits/<sha>` call before
+// checking Stage 1 (P1 finding, tools/review-watch/stage1-correction-gate.mjs's `resolveCommitImpl`
+// default). These constants were previously 39 characters, one short of that threshold, which
+// silently made every scenario below attempt a real network call against the fictitious "o/r"
+// repo once that fix shipped -- breaking this script's own "no network access" guarantee. Fixed
+// as part of the Stage 2 audit #466 correction (issue #454): regenerating scenario 6 required
+// this script to actually run network-free again.
+const REVIEWED = "aaaaaaa11111111111111111111111111111111a";
+const CORRECTED = "bbbbbbb22222222222222222222222222222222b";
+const STALE_LATER_HEAD = "ccccccc33333333333333333333333333333333c";
 
 const FINDINGS_BODY = "### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.";
 const CLEAN_BODY = "No issues found. Looks good.";
@@ -138,8 +147,12 @@ async function scenario06MalformedProvenance() {
   //  (b) the "- **Stage 1:**" bullet itself does not parse as this disposition shape at all
   //      (e.g. missing the "(reviewed ...)" clause) -- parseCorrectionSatisfiedDisposition
   //      returns null, so correctionDelta is never even computed (no false authorization from
-  //      a malformed bullet); the composed gate must fall back to plain NO_ACTION_YET, exactly
-  //      as if no disposition existed.
+  //      a malformed bullet). Stage 1 review finding on PR #459 (docs/bounded-review-cycle.md's
+  //      "Correction-satisfied disposition" section): a bullet that is clearly attempting this
+  //      shape but is malformed must not collapse into "no disposition present at all" --
+  //      resolvePreMergeVerdict now recognizes it via looksLikeCorrectionSatisfiedDisposition
+  //      and fails closed to AMBIGUOUS instead of the plain NO_ACTION_YET this scenario
+  //      originally recorded before that fix shipped.
   const correctionDeltaA = await checkCorrectionDelta(
     { repo: "o/r", pr: 1, reviewedHead: REVIEWED, correctedHead: CORRECTED, gatedHead: CORRECTED },
     { stage1RunImpl: async () => notRequested(), compareImpl: async () => ({ status: "ahead" }) },
@@ -180,8 +193,10 @@ async function scenario06MalformedProvenance() {
         composedVerdict: verdictB,
         expectation:
           "parseCorrectionSatisfiedDisposition returns null, checkCorrectionDeltaImpl is never invoked, and " +
-          "the composed gate falls back to plain NO_ACTION_YET (identical to no disposition present at all)",
-        passed: verdictB.state === "NO_ACTION_YET",
+          "the composed gate fails closed to AMBIGUOUS (PR #459 Stage 1 correction: a bullet that looks like " +
+          "this disposition shape but does not match it must not silently resolve identically to no " +
+          "disposition being present at all)",
+        passed: verdictB.state === "AMBIGUOUS",
       },
     },
   };
