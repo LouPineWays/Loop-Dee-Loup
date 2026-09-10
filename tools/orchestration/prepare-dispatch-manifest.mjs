@@ -835,7 +835,12 @@ export async function runPrepareDispatchManifest(
     };
   }
 
-  return { exitCode: 0, ok: true, repo: parsed.repo, executionIssue: parsed.executionIssue, entries, body };
+  // `plan` is included here (issue #498 unit 498-B) so a caller that only needs the
+  // computed routing entries -- e.g. ready-dispatch-gate.mjs's probeReplanRequired, checking
+  // for a REPLAN_REQUIRED route before authorizing a fresh Route/Prepare run -- can reuse
+  // this dry-run invocation (no `commentId`/`create`, so nothing is persisted) instead of a
+  // second, separate execution-plan parse purely to read `planIndex.url`.
+  return { exitCode: 0, ok: true, repo: parsed.repo, executionIssue: parsed.executionIssue, plan: parsed.plan, entries, body };
 }
 
 function parseArgs(argv) {

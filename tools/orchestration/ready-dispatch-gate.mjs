@@ -66,11 +66,12 @@
 // Verdicts:
 //   Every verdict that authorizes exactly one bounded next action for the pre-PR pipeline —
 //   READY_TO_DISPATCH, READY_TO_DISPATCH_PLANNING, READY_TO_RUN_DISPATCH_MANIFEST,
-//   READY_TO_DISPATCH_UNITS, READY_TO_DISPATCH_INTEGRATION, READY_TO_PROJECT_PLAN_READY, and
-//   READY_TO_PROJECT_ROUTED — carries a literal `stopAfter: true` field (issue #498 unit
-//   498-A), mirroring the convention `tools/orchestration/next-review-transition-gate.mjs`
-//   already established. This is a mandatory, literal stop only after the authorized
-//   transition's own durable output (and, for the two PROJECT verdicts, the required
+//   READY_TO_DISPATCH_UNITS, READY_TO_DISPATCH_INTEGRATION, READY_TO_PROJECT_PLAN_READY,
+//   READY_TO_PROJECT_ROUTED, and REPLAN_REQUIRED (issue #498 unit 498-B) — carries a literal
+//   `stopAfter: true` field (issue #498 unit 498-A), mirroring the convention
+//   `tools/orchestration/next-review-transition-gate.mjs` already established. This is a
+//   mandatory, literal stop only after the authorized transition's own durable output (and,
+//   for the two PROJECT verdicts, the required
 //   thin-control projection) has already been verified by the gate itself — never license to
 //   continue reasoning past the stop in the same invocation.
 //   AUDIT_ISSUE_DETECTED — issue #407 unit 407-B (Shared Contract item 8), the #432 fix: the
@@ -112,6 +113,27 @@
 //     and stop, never also dispatch a (now-redundant) planning worker or manifest-prep run in
 //     the same breath. See probeExistingPlan's own comment for why this recognition is
 //     necessary rather than merely a nice-to-have.
+//   REPLAN_REQUIRED — issue #498 unit 498-B, closing the #407/#408 and #454/#455 (via #434)
+//     live reproductions: while evaluating `Lifecycle: PLAN_READY` (before authorizing a fresh
+//     Route/Prepare run), `probeReplanRequired` finds that `prepare-dispatch-manifest.mjs`'s
+//     own routing computation (reused as a dry run — no comment is persisted) would resolve
+//     one or more plan units to `route=REPLAN_REQUIRED`. Modeled explicitly on
+//     next-review-transition-gate.mjs's `STAGE2_CORRECTION_REQUIRED` shape: compact and
+//     reference-only, never the diagnosis itself. exit 12. Result carries { controlIssue,
+//     executionIssue, planIndexUrl, replanRequiredUnitIds, reason, route: "planning worker" } —
+//     `reason` is composed only from each failing unit's own mechanically-emitted `note`
+//     field (never re-derived by reading Worker Unit Contract bodies, the Shared Contract
+//     body, or router/parser source), and `route` is always the literal "planning worker"
+//     value, the same capability READY_FOR_PLAN's Route field already requires — a
+//     planning-correction is the same planning capability revisiting its own prior output, not
+//     a new worker role. Dispatch a planning-correction worker by reference only and stop; that
+//     worker reads the plan/unit authority directly, uses #497's deterministic writer/validator
+//     to persist a corrected plan, and returns only a compact reference — the next invocation
+//     of this gate then re-evaluates PLAN_READY exactly as it would for a plan that never hit
+//     REPLAN_REQUIRED (`probeReplanRequired` finding nothing to report), converging on the
+//     identical READY_TO_RUN_DISPATCH_MANIFEST / READY_TO_PROJECT_ROUTED stop boundary 498-A
+//     already establishes. A genuinely ambiguous routing failure still fails closed here —
+//     this verdict never invents a default/fuzzy route on the controller's behalf.
 //   BLOCKED — issue #368: the control Issue was read successfully and its own recorded
 //     fields *explicitly* say the current invocation must not advance — a blocking
 //     lifecycle value (the ad hoc bullet convention's `Lifecycle: BLOCKED`, or the shipped
@@ -1182,6 +1204,63 @@ export async function probeExistingPlan({ repo, executionIssue }, { parseExecuti
   return { alreadyPlanned: true, planIndexUrl };
 }
 
+async function defaultRunPrepareDispatchManifestImpl({ repo, executionIssue }) {
+  const { runPrepareDispatchManifest } = await import("./prepare-dispatch-manifest.mjs");
+  return runPrepareDispatchManifest({ repo, executionIssue });
+}
+
+// Pure async (given injected `runPrepareDispatchManifestImpl`). Issue #498 unit 498-B: probes
+// whether the plan's own units would resolve to route="REPLAN_REQUIRED" -- the exact
+// fail-closed condition `prepare-dispatch-manifest.mjs`'s own persist path (module comment
+// above, its exitCode 3 `REPLAN_REQUIRED` state) already refuses to persist a Dispatch
+// Manifest over -- before a fresh Route/Prepare run is authorized off `Lifecycle: PLAN_READY`.
+// Reuses `runPrepareDispatchManifest` itself as a dry run (no `commentId`/`create`, so nothing
+// is persisted and no comment is written) rather than re-deriving `resolveUnitRoute`'s
+// script/skill/persona/capability-class dispatch tree a second time: the routing computation
+// this performs is byte-for-byte the one the real Route/Prepare invocation would run next, so
+// this can never drift from what `prepare-dispatch-manifest.mjs` itself would decide.
+//
+// Returns { replanRequired: true, planIndexUrl, replanRequiredUnitIds, reason } when one or
+// more units resolve to `REPLAN_REQUIRED` -- `reason` is composed from each such entry's own
+// `note` field (`buildNote`'s exact per-unit escalation reason, e.g. an unresolved capability
+// class), never re-derived or paraphrased. Returns { replanRequired: false } for the ordinary
+// case (every unit routes deterministically -- the expected shape for a genuine PLAN_READY
+// control Issue, and also the expected shape once a planning-correction worker has persisted a
+// corrected plan). Returns { replanRequired: false, operationalError: true, reason } for a
+// real read/network failure -- mirrors probeExistingPlan/verifyRoutedDispatchManifest's own
+// operational-vs-malformed distinction, so a transient failure here is never silently read as
+// "no replan needed" and used to license an unroutable manifest.
+export async function probeReplanRequired(
+  { repo, executionIssue },
+  { runPrepareDispatchManifestImpl = defaultRunPrepareDispatchManifestImpl } = {},
+) {
+  const result = await runPrepareDispatchManifestImpl({ repo, executionIssue });
+  if (!result || result.exitCode === 1) {
+    return {
+      replanRequired: false,
+      operationalError: true,
+      reason:
+        "operational failure computing unit routes while evaluating PLAN_READY for REPLAN_REQUIRED: " +
+        (result?.message ?? "unknown operational failure"),
+    };
+  }
+  if (result.exitCode !== 0) {
+    // exitCode 2 (plan could not be parsed) is not this probe's own concern -- the ordinary
+    // READY_TO_RUN_DISPATCH_MANIFEST path (or verifyRoutedDispatchManifest immediately above
+    // it in checkReadyDispatch) already surfaces a malformed plan as NOT_READY with its own
+    // reason, so this probe stays silent rather than reporting a second, competing diagnosis.
+    return { replanRequired: false };
+  }
+  const replanEntries = (result.entries ?? []).filter((e) => e.route === "REPLAN_REQUIRED");
+  if (replanEntries.length === 0) return { replanRequired: false };
+  return {
+    replanRequired: true,
+    planIndexUrl: result.plan?.planIndex?.url ?? null,
+    replanRequiredUnitIds: replanEntries.map((e) => e.unitId),
+    reason: replanEntries.map((e) => `${e.unitId}: ${e.note}`).join(" | "),
+  };
+}
+
 // `ghIssueViewImpl` is injected so tests can drive this end-to-end without touching the
 // real network or `gh` CLI. This function always starts from one control-Issue read; when
 // lifecycle is ROUTED it then performs deterministic durable manifest verification reads
@@ -1193,11 +1272,28 @@ export async function checkReadyDispatch(
     resolveRepoIdentityImpl = resolveRepoIdentity,
     parseExecutionPlanImpl = defaultParseExecutionPlanImpl,
     ghCommentViewImpl = defaultGhCommentView,
+    // Issue #498 unit 498-B: left un-defaulted here (rather than defaulting straight to
+    // `defaultRunPrepareDispatchManifestImpl`) so the effective default below can thread this
+    // invocation's own `parseExecutionPlanImpl` through to `probeReplanRequired`'s dry-run
+    // routing computation instead of independently defaulting to the real `gh`-backed plan
+    // parser -- a caller/test that has already injected `parseExecutionPlanImpl` (matching
+    // this file's existing convention for verifyRoutedDispatchManifest/probeExistingPlan)
+    // must not have that isolation silently bypassed by a second, uninjected network call
+    // here. An explicit `runPrepareDispatchManifestImpl` still overrides this entirely, for a
+    // test that wants to control the resolved manifest entries directly.
+    runPrepareDispatchManifestImpl,
   } = {},
 ) {
   if (!controlIssue) {
     return { exitCode: 1, message: "Missing required arg: --control-issue is required." };
   }
+
+  const effectiveRunPrepareDispatchManifestImpl =
+    runPrepareDispatchManifestImpl ??
+    (async ({ repo: prepareRepo, executionIssue }) => {
+      const { runPrepareDispatchManifest } = await import("./prepare-dispatch-manifest.mjs");
+      return runPrepareDispatchManifest({ repo: prepareRepo, executionIssue }, { parseExecutionPlanImpl });
+    });
 
   // Repository identity resolution (issue #344): an explicit `repo` is accepted verbatim
   // only as the documented tests/exceptional-invocation override. The normal production
@@ -1269,7 +1365,10 @@ export async function checkReadyDispatch(
   // here since there is no established prior convention this had to match. Issue #498 unit
   // 498-A adds READY_TO_PROJECT_PLAN_READY (10) and READY_TO_PROJECT_ROUTED (11) — the next
   // unused integers after 9 (AUDIT_ISSUE_DETECTED) — for the idempotent-recovery verdicts
-  // below.
+  // below. Unit 498-B adds REPLAN_REQUIRED (12) — the next unused integer after 11 — per the
+  // Shared Contract's own exit-code-discipline requirement: never reuse 3 (NOT_READY) or 4
+  // (BLOCKED), since AGENTS.md's controller contract treats those as license to fall through
+  // to free reasoning, which REPLAN_REQUIRED must never permit.
   const EXIT_CODES_BY_STATUS = {
     READY_TO_DISPATCH_PLANNING: 5,
     READY_TO_RUN_DISPATCH_MANIFEST: 6,
@@ -1277,6 +1376,7 @@ export async function checkReadyDispatch(
     READY_TO_DISPATCH_INTEGRATION: 8,
     READY_TO_PROJECT_PLAN_READY: 10,
     READY_TO_PROJECT_ROUTED: 11,
+    REPLAN_REQUIRED: 12,
   };
 
   // Issue #498 unit 498-A, the 2026-09-10 #500 live-trace fix: before authorizing a fresh
@@ -1347,6 +1447,44 @@ export async function checkReadyDispatch(
         manifestCommentId: manifestProbe.manifestCommentId,
         manifestUrl: manifestProbe.manifestUrl,
         proposedBody,
+      };
+    }
+
+    // Issue #498 unit 498-B: before falling through to the ordinary
+    // READY_TO_RUN_DISPATCH_MANIFEST verdict below (which would authorize the controller to
+    // run `prepare-dispatch-manifest.mjs --create`), check whether that same run would itself
+    // hit route=REPLAN_REQUIRED -- reproductions #407/#408 and #454/#455 both began exactly
+    // there, when the controller received that fail-closed result out-of-band (via the
+    // script's own stderr/exit code) and then read Worker Unit Contract bodies, the Shared
+    // Contract body, and router/parser source to diagnose it by hand instead of dispatching a
+    // planning-correction worker by reference. Surfacing it here, before the controller ever
+    // runs that command itself, means the fail-closed stop is this gate's own compact verdict
+    // from the start, not something the controller discovers only after already reaching for
+    // richer diagnostic context.
+    const replanProbe = await probeReplanRequired(
+      { repo: resolvedRepo, executionIssue: result.executionIssue },
+      { runPrepareDispatchManifestImpl: effectiveRunPrepareDispatchManifestImpl },
+    );
+    if (replanProbe.operationalError) {
+      return {
+        exitCode: 1,
+        message:
+          `Operational failure computing unit routes for ${resolvedRepo}#${result.executionIssue} ` +
+          `while evaluating PLAN_READY for REPLAN_REQUIRED: ${replanProbe.reason}`,
+      };
+    }
+    if (replanProbe.replanRequired) {
+      return {
+        exitCode: EXIT_CODES_BY_STATUS.REPLAN_REQUIRED,
+        state: "REPLAN_REQUIRED",
+        stopAfter: true,
+        controlIssue: Number(controlIssue),
+        repo: resolvedRepo,
+        executionIssue: result.executionIssue,
+        planIndexUrl: replanProbe.planIndexUrl,
+        replanRequiredUnitIds: replanProbe.replanRequiredUnitIds,
+        reason: replanProbe.reason,
+        route: "planning worker",
       };
     }
   }

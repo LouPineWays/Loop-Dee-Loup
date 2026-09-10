@@ -122,6 +122,46 @@ export function formatPlanningWorkerDispatchPrompt({ controlIssue, executionIssu
   );
 }
 
+// Pure. Renders the fixed reference-only "Planning-correction worker dispatch" template for
+// issue #498 unit 498-B's new REPLAN_REQUIRED verdict (`ready-dispatch-gate.mjs`'s
+// `probeReplanRequired`). Modeled on `formatPlanningWorkerDispatchPrompt` above — a
+// planning-correction is the same planning capability revisiting its own prior output, not a
+// new worker role — but additionally carries the reference-scoped fields the REPLAN_REQUIRED
+// verdict itself supplies (`planIndexUrl`, `replanRequiredUnitIds`) so the dispatched worker
+// knows exactly which units to fix without the controller reading Worker Unit Contract bodies,
+// the Shared Contract body, or router/parser source to characterize the failure first
+// (Required behavior 3, #407/#408 and #454/#455's own reproduction). Deliberately omits the
+// verdict's own `reason` text from the prompt itself — that string is for the controller's
+// compact chat/handoff record, not the worker prompt; the dispatched worker reads the
+// authoritative routing failure directly off the Plan Index/unit contracts it is pointed at,
+// exactly as every other dispatch template in this file hands over references rather than
+// restated content. Keeping `reason` out of the template also keeps this prompt's length
+// bounded independent of how verbose a given unit's own escalation note happens to be.
+export function formatPlanningCorrectionWorkerDispatchPrompt({ controlIssue, executionIssue, planIndexUrl, replanRequiredUnitIds }) {
+  if (
+    !isPositiveInteger(controlIssue) ||
+    !isPositiveInteger(executionIssue) ||
+    typeof planIndexUrl !== "string" ||
+    !planIndexUrl.trim() ||
+    !Array.isArray(replanRequiredUnitIds) ||
+    replanRequiredUnitIds.length === 0
+  ) {
+    throw new Error(
+      "formatPlanningCorrectionWorkerDispatchPrompt requires controlIssue and executionIssue to be positive integers, " +
+        "planIndexUrl to be a non-empty string, and replanRequiredUnitIds to be a non-empty array",
+    );
+  }
+  return (
+    `Planning-correction worker dispatch. Execution Issue: #${executionIssue}. Controlling Issue: ` +
+    `#${controlIssue}. Plan Index: ${planIndexUrl}. Unit(s) requiring replan: ${replanRequiredUnitIds.join(", ")}.\n\n` +
+    `Read the Plan Index and named unit(s)' own Worker Unit Contract comments directly from GitHub for the ` +
+    `routing failure — not restated here on purpose. Correct the plan per AGENTS.md and ` +
+    `docs/operating-model.md, using tools/orchestration/format-execution-plan.mjs (#497) to persist the fix. ` +
+    `Return only a compact confirmation and stop — do not prepare the Dispatch Manifest, advance Lifecycle, or ` +
+    `dispatch implementation units in this same invocation.`
+  );
+}
+
 // Pure. Renders the fixed reference-only "Integration/PR worker dispatch" template for
 // #397's new EXECUTION_COMPLETE pre-PR Lifecycle value (ready-dispatch-gate.mjs's
 // READY_TO_DISPATCH_INTEGRATION verdict). Also carries no `route` parameter, for the same
@@ -182,23 +222,64 @@ function readStdinIfPiped() {
 // #397's two new templates are selected by the piped gate result's own `state` field —
 // ready-dispatch-gate.mjs's READY_TO_DISPATCH_PLANNING/READY_TO_DISPATCH_INTEGRATION verdicts
 // — never by a caller re-deciding which template applies. READY_TO_DISPATCH keeps using the
-// original "Implementation worker dispatch" template unchanged. Neither new template takes a
-// `route` field (see each formatter's own comment for why), so the field set piped through
-// differs by kind.
+// original "Implementation worker dispatch" template unchanged. Issue #498 unit 498-B adds
+// REPLAN_REQUIRED, selecting formatPlanningCorrectionWorkerDispatchPrompt the same way. Every
+// non-implementation template takes its own fixed field set (see each formatter's own comment
+// for why), so the fields piped through differ by kind.
 const TEMPLATES_BY_STATE = {
-  READY_TO_DISPATCH: { formatter: formatDispatchPrompt, needsRoute: true },
-  READY_TO_DISPATCH_PLANNING: { formatter: formatPlanningWorkerDispatchPrompt, needsRoute: false },
-  READY_TO_DISPATCH_INTEGRATION: { formatter: formatIntegrationWorkerDispatchPrompt, needsRoute: false },
+  READY_TO_DISPATCH: { formatter: formatDispatchPrompt, fields: ["controlIssue", "executionIssue", "route"] },
+  READY_TO_DISPATCH_PLANNING: { formatter: formatPlanningWorkerDispatchPrompt, fields: ["controlIssue", "executionIssue"] },
+  READY_TO_DISPATCH_INTEGRATION: { formatter: formatIntegrationWorkerDispatchPrompt, fields: ["controlIssue", "executionIssue"] },
+  REPLAN_REQUIRED: {
+    formatter: formatPlanningCorrectionWorkerDispatchPrompt,
+    fields: ["controlIssue", "executionIssue", "planIndexUrl", "replanRequiredUnitIds"],
+  },
 };
 
 // Explicit-fields mode's equivalent of the state-based selection above, for a caller
 // re-rendering a prompt outside a live pipe (e.g. this script's own tests). Defaults to
 // "implementation" so every pre-existing explicit-fields invocation keeps working unchanged.
+// "planning-correction" accepts --plan-index-url and comma-separated --replan-unit-ids in
+// place of --route, matching formatPlanningCorrectionWorkerDispatchPrompt's own field set.
+// CLI flag names differ from the in-memory field names for the two multi-word fields
+// (planIndexUrl -> --plan-index-url, replanRequiredUnitIds -> --replan-unit-ids, parsed as a
+// comma-separated list); every other field's flag is its own camelCase name kebab-cased.
 const FORMATTERS_BY_KIND = {
-  implementation: { formatter: formatDispatchPrompt, needsRoute: true },
-  planning: { formatter: formatPlanningWorkerDispatchPrompt, needsRoute: false },
-  integration: { formatter: formatIntegrationWorkerDispatchPrompt, needsRoute: false },
+  implementation: { formatter: formatDispatchPrompt, fields: ["controlIssue", "executionIssue", "route"] },
+  planning: { formatter: formatPlanningWorkerDispatchPrompt, fields: ["controlIssue", "executionIssue"] },
+  integration: { formatter: formatIntegrationWorkerDispatchPrompt, fields: ["controlIssue", "executionIssue"] },
+  "planning-correction": {
+    formatter: formatPlanningCorrectionWorkerDispatchPrompt,
+    fields: ["controlIssue", "executionIssue", "planIndexUrl", "replanRequiredUnitIds"],
+  },
 };
+
+const CLI_FLAG_BY_FIELD = {
+  controlIssue: "control-issue",
+  executionIssue: "execution-issue",
+  route: "route",
+  planIndexUrl: "plan-index-url",
+  replanRequiredUnitIds: "replan-unit-ids",
+};
+
+// Pure. Reads one field's value out of an explicit-fields `args` map or a piped gate-result
+// JSON object, applying each field's own type coercion (issue numbers to Number,
+// replanRequiredUnitIds to an array — comma-split for the CLI flag, passed through as-is from
+// piped JSON where the gate already emits a real array).
+function readField(field, source, { isCli }) {
+  if (field === "controlIssue" || field === "executionIssue") {
+    const raw = isCli ? source[CLI_FLAG_BY_FIELD[field]] : source[field];
+    return raw != null ? Number(raw) : null;
+  }
+  if (field === "replanRequiredUnitIds") {
+    if (isCli) {
+      const raw = source[CLI_FLAG_BY_FIELD[field]];
+      return raw != null ? raw.split(",").map((s) => s.trim()).filter(Boolean) : null;
+    }
+    return source.replanRequiredUnitIds ?? null;
+  }
+  return isCli ? (source[CLI_FLAG_BY_FIELD[field]] ?? null) : (source[field] ?? null);
+}
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -210,17 +291,14 @@ function main() {
     const entry = FORMATTERS_BY_KIND[kind];
     if (!entry) {
       process.stderr.write(
-        `format-dispatch-prompt.mjs: unknown --kind ${JSON.stringify(kind)} — use "implementation", "planning", or "integration"\n`,
+        `format-dispatch-prompt.mjs: unknown --kind ${JSON.stringify(kind)} — use "implementation", "planning", ` +
+          `"integration", or "planning-correction"\n`,
       );
       process.exit(2);
       return;
     }
     formatter = entry.formatter;
-    fields = {
-      controlIssue: args["control-issue"] != null ? Number(args["control-issue"]) : null,
-      executionIssue: args["execution-issue"] != null ? Number(args["execution-issue"]) : null,
-      ...(entry.needsRoute ? { route: args.route ?? null } : {}),
-    };
+    fields = Object.fromEntries(entry.fields.map((f) => [f, readField(f, args, { isCli: true })]));
   } else {
     const stdin = readStdinIfPiped();
     if (!stdin) {
@@ -248,18 +326,14 @@ function main() {
     if (!entry) {
       process.stderr.write(
         `format-dispatch-prompt.mjs: input state is ${JSON.stringify(parsed.state ?? null)}, not "READY_TO_DISPATCH" ` +
-          `(or "READY_TO_DISPATCH_PLANNING"/"READY_TO_DISPATCH_INTEGRATION") — refusing to format a dispatch prompt ` +
-          "for a non-ready or malformed gate result\n",
+          `(or "READY_TO_DISPATCH_PLANNING"/"READY_TO_DISPATCH_INTEGRATION"/"REPLAN_REQUIRED") — refusing to format a ` +
+          "dispatch prompt for a non-ready or malformed gate result\n",
       );
       process.exit(2);
       return;
     }
     formatter = entry.formatter;
-    fields = {
-      controlIssue: parsed.controlIssue,
-      executionIssue: parsed.executionIssue,
-      ...(entry.needsRoute ? { route: parsed.route } : {}),
-    };
+    fields = Object.fromEntries(entry.fields.map((f) => [f, readField(f, parsed, { isCli: false })]));
   }
 
   let prompt;

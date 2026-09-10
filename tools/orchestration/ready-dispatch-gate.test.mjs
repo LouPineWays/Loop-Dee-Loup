@@ -24,6 +24,7 @@ import {
   resolveRepoIdentity,
   upsertControlBullet,
   probeExistingPlan,
+  probeReplanRequired,
 } from "./ready-dispatch-gate.mjs";
 
 // Issue #311's real body (control Issue for execution Issue #310) — a genuine
@@ -1863,4 +1864,179 @@ test("checkReadyDispatch: PLAN_READY reports ERROR (exit 1), not a false manifes
   assert.equal(result.exitCode, 1);
   assert.notEqual(result.state, "READY_TO_RUN_DISPATCH_MANIFEST");
   assert.match(result.message, /operational failure/i);
+});
+
+// Issue #498 unit 498-B: REPLAN_REQUIRED as a compact, reference-only control breakpoint --
+// closing the #407/#408 and #454/#455 (via #434) live reproductions, where a controller that
+// received prepare-dispatch-manifest.mjs's own fail-closed REPLAN_REQUIRED result out-of-band
+// then read Worker Unit Contract bodies, the Shared Contract body, and router/parser source to
+// diagnose it by hand instead of dispatching a planning-correction worker by reference.
+
+test("probeReplanRequired: replanRequired true with plan index URL, failing unit ids, and a reason composed from each entry's own note", async () => {
+  const result = await probeReplanRequired(
+    { repo: "LouPineWays/Loop-Dee-Loup", executionIssue: 498 },
+    {
+      runPrepareDispatchManifestImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        plan: { planIndex: { url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-100" } },
+        entries: [
+          { unitId: "498-A", route: "REPLAN_REQUIRED", dispatchReady: false, note: "capability class \"bogus\" does not resolve" },
+          { unitId: "498-B", route: "stronger/general worker", dispatchReady: true, note: "no prerequisites" },
+        ],
+      }),
+    },
+  );
+  assert.deepEqual(result, {
+    replanRequired: true,
+    planIndexUrl: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-100",
+    replanRequiredUnitIds: ["498-A"],
+    reason: '498-A: capability class "bogus" does not resolve',
+  });
+});
+
+test("probeReplanRequired: replanRequired false for the ordinary case (every unit routes deterministically)", async () => {
+  const result = await probeReplanRequired(
+    { repo: "LouPineWays/Loop-Dee-Loup", executionIssue: 498 },
+    {
+      runPrepareDispatchManifestImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        plan: { planIndex: { url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-100" } },
+        entries: [{ unitId: "498-A", route: "stronger/general worker", dispatchReady: true, note: "no prerequisites" }],
+      }),
+    },
+  );
+  assert.deepEqual(result, { replanRequired: false });
+});
+
+test("probeReplanRequired: stays silent (replanRequired false) for a malformed/unparseable plan (exitCode 2) -- not this probe's own diagnosis to report", async () => {
+  const result = await probeReplanRequired(
+    { repo: "LouPineWays/Loop-Dee-Loup", executionIssue: 498 },
+    { runPrepareDispatchManifestImpl: async () => ({ exitCode: 2, ok: false, errors: ["fixture: no Plan Index comment"] }) },
+  );
+  assert.deepEqual(result, { replanRequired: false });
+});
+
+test("probeReplanRequired: operationalError true (never silently read as 'no replan needed') when computing routes itself fails", async () => {
+  const result = await probeReplanRequired(
+    { repo: "LouPineWays/Loop-Dee-Loup", executionIssue: 498 },
+    { runPrepareDispatchManifestImpl: async () => ({ exitCode: 1, message: "gh api call failed: network error" }) },
+  );
+  assert.equal(result.replanRequired, false);
+  assert.equal(result.operationalError, true);
+  assert.match(result.reason, /network error/);
+});
+
+const PLAN_READY_BODY_498 =
+  "- **Lifecycle:** PLAN_READY\n- **Execution:** #498\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+
+test("checkReadyDispatch: PLAN_READY with a plan that would route a unit to REPLAN_REQUIRED reports exit 12, state REPLAN_REQUIRED, with compact reference-only fields and route 'planning worker'", async () => {
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 500 },
+    {
+      ghIssueViewImpl: async () => ({ body: PLAN_READY_BODY_498, state: "OPEN" }),
+      // verifyRoutedDispatchManifest's own probe: no Dispatch manifest pointer settled yet --
+      // the ordinary shape for a genuine PLAN_READY control Issue that has not yet reached
+      // Route/Prepare.
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        plan: { planIndex: { url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-100", dispatchManifest: "none" } },
+      }),
+      runPrepareDispatchManifestImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        plan: { planIndex: { url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-100" } },
+        entries: [
+          { unitId: "498-A", route: "REPLAN_REQUIRED", dispatchReady: false, note: "capability class \"bogus\" does not resolve" },
+        ],
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 12);
+  assert.equal(result.state, "REPLAN_REQUIRED");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.controlIssue, 500);
+  assert.equal(result.executionIssue, 498);
+  assert.equal(result.planIndexUrl, "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-100");
+  assert.deepEqual(result.replanRequiredUnitIds, ["498-A"]);
+  assert.match(result.reason, /498-A: capability class "bogus" does not resolve/);
+  // The verdict never invents a default/fuzzy worker route on the controller's behalf --
+  // "planning worker" is always the literal value, the same capability READY_FOR_PLAN's own
+  // Route field already requires, never re-derived from the failing unit(s)' own capability
+  // text.
+  assert.equal(result.route, "planning worker");
+});
+
+// Verification step 5/7 equivalent (execution Issue #498): after a planning-correction worker
+// persists a corrected plan (every unit now routes deterministically), the identical control
+// Issue re-evaluated by this same gate converges on the ordinary READY_TO_RUN_DISPATCH_MANIFEST
+// boundary -- the exact same stop boundary a plan that never hit REPLAN_REQUIRED would reach.
+// No special-cased "recovered from REPLAN_REQUIRED" verdict shape exists or is needed.
+test("checkReadyDispatch: a corrected plan (no unit routes to REPLAN_REQUIRED any more) converges on the identical READY_TO_RUN_DISPATCH_MANIFEST boundary as an initially valid plan", async () => {
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 500 },
+    {
+      ghIssueViewImpl: async () => ({ body: PLAN_READY_BODY_498, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        plan: { planIndex: { url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-100", dispatchManifest: "none" } },
+      }),
+      runPrepareDispatchManifestImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        plan: { planIndex: { url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-100" } },
+        entries: [{ unitId: "498-A", route: "stronger/general worker", dispatchReady: true, note: "no prerequisites" }],
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 6);
+  assert.equal(result.state, "READY_TO_RUN_DISPATCH_MANIFEST");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.executionIssue, 498);
+});
+
+test("checkReadyDispatch: PLAN_READY reports ERROR (exit 1), not a false REPLAN_REQUIRED/dispatch verdict, when computing unit routes itself fails operationally", async () => {
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 500 },
+    {
+      ghIssueViewImpl: async () => ({ body: PLAN_READY_BODY_498, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        plan: { planIndex: { url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-100", dispatchManifest: "none" } },
+      }),
+      runPrepareDispatchManifestImpl: async () => ({ exitCode: 1, message: "gh api call failed: network error" }),
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.notEqual(result.state, "REPLAN_REQUIRED");
+  assert.match(result.message, /operational failure/i);
+});
+
+// Issue #498 unit 498-A: an explicitly injected `parseExecutionPlanImpl` (this file's existing
+// network-isolation convention) must never be silently bypassed by a second, uninjected
+// real-`gh`-backed plan parse inside this gate's own REPLAN_REQUIRED probe -- the effective
+// default `runPrepareDispatchManifestImpl` threads the same injected `parseExecutionPlanImpl`
+// through instead of independently defaulting to the real plan parser.
+test("checkReadyDispatch: PLAN_READY's REPLAN_REQUIRED probe reuses the already-injected parseExecutionPlanImpl by default, never a second uninjected real plan parse", async () => {
+  let parseCalls = 0;
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 500 },
+    {
+      ghIssueViewImpl: async () => ({ body: PLAN_READY_BODY_498, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => {
+        parseCalls++;
+        // Malformed/unparseable from this probe's point of view -- exercises the exitCode 2
+        // "not this probe's own concern" branch inside probeReplanRequired without ever
+        // touching a real `gh`-backed plan parser.
+        return { exitCode: 2, ok: false, errors: ["fixture: no Dispatch Manifest yet"] };
+      },
+    },
+  );
+  assert.ok(parseCalls >= 1, "the injected parseExecutionPlanImpl must have been used at least once");
+  assert.equal(result.exitCode, 6);
+  assert.equal(result.state, "READY_TO_RUN_DISPATCH_MANIFEST");
 });
