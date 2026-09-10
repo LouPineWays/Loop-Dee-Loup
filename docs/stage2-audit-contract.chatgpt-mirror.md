@@ -123,8 +123,9 @@ the specific unresolved item under Founder judgment) rather than declaring CLEAN
 
 Do not produce: (1) a findings list with no restated merge commit, checklist walk-through, or
 verdict; (2) a bare `CLEAN`/`looks good` with no evidence; (3) a response citing the wrong commit
-(a PR head, a different PR, or only the frozen Stage 1 reviewed head — never a substitute for the
-actual merge commit); (4) contradictory verdict declarations in the same response; (5) a response
+(a PR head, a different PR, or only the frozen Stage 1 reviewed head or, for a correction-satisfied
+PR, the corrected head — legitimate only for the one checklist item that specifically asks for it,
+never a substitute for the actual merge commit); (4) contradictory verdict declarations in the same response; (5) a response
 that edits, commits, pushes, or opens/updates a PR (or narrates having done so); (6) a response
 whose own quoted example of this skeleton is mistaken for its actual declaration — keep quoted
 examples clearly fenced/indented and make sure the real declaration is not itself inside one.

@@ -74,13 +74,22 @@ body:
         check), the checklist must include an item confirming that every workflow whose `paths:`
         trigger should match the diff actually shows a completed run — e.g. "N. Confirm
         `gh api repos/<owner>/<repo>/actions/runs?head_sha=<sha>` shows a completed run of
-        `<workflow>.yml`." — not merely that the file contents are correct. Use the PR's frozen
-        reviewed head SHA (Stage 1 step 2) for `<sha>`, not the merge commit recorded above:
-        control-plane workflows trigger only on `pull_request`, so their runs are keyed to the PR
-        branch's head SHA, and the merge commit created on `main` never appears as a `head_sha`
-        even when CI ran and passed. A workflow whose trigger silently never matches (e.g. a
-        broken `paths:` glob) will pass a content-only audit; this item exists to catch that class
-        of defect. Keep this list to the number of genuinely independent checks the diff actually
+        `<workflow>.yml`." — not merely that the file contents are correct. Do not default `<sha>`
+        to the PR's frozen reviewed head SHA (Stage 1 step 2) unconditionally — audit #508
+        (control #499, PR #507) proved that stale for a correction-satisfied PR, where the
+        reviewed head never ran CI at all and only the distinct corrected/merge-authorized head
+        did. Resolve `<sha>` deterministically with
+        `node tools/review-watch/stage2-control-plane-ci-head.mjs --control-issue <N>` against
+        the control issue this audit traces back to: it returns the frozen reviewed head for an
+        ordinary Stage 1 disposition, the corrected head for a correction-satisfied disposition
+        (`docs/bounded-review-cycle.md`'s "Correction-satisfied disposition" section), and fails
+        closed rather than guessing when the disposition is missing or malformed. Never use the
+        merge commit recorded above for this item either way: control-plane workflows trigger
+        only on `pull_request`, so their runs are keyed to a PR branch's head SHA, and the merge
+        commit created on `main` never appears as a `head_sha` even when CI ran and passed
+        (issue #98). A workflow whose trigger silently never matches (e.g. a broken `paths:`
+        glob) will pass a content-only audit; this item exists to catch that class of defect.
+        Keep this list to the number of genuinely independent checks the diff actually
         needs — group tightly related sub-checks (e.g. several failure-mode branches of the same
         function) under one numbered item rather than splitting them into many top-level items
         purely for enumeration's own sake. The response's completeness is judged by comparing its
