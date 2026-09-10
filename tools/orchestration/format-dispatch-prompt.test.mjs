@@ -177,7 +177,7 @@ test("formatPlanningWorkerDispatchPrompt never contains restated AGENTS.md contr
 
 // -- issue #498 unit 498-B: "Planning-correction worker dispatch" -----------------------------
 
-test("formatPlanningCorrectionWorkerDispatchPrompt includes control/execution issue references and plan index URL, and points the worker at re-running the gate rather than restating failing unit ids", () => {
+test("formatPlanningCorrectionWorkerDispatchPrompt includes control/execution issue references and points the worker at re-running the gate to recover the Plan Index and failing unit ids, rather than restating either", () => {
   const prompt = formatPlanningCorrectionWorkerDispatchPrompt({
     controlIssue: 500,
     executionIssue: 498,
@@ -187,7 +187,6 @@ test("formatPlanningCorrectionWorkerDispatchPrompt includes control/execution is
   assert.match(prompt, /^Planning-correction worker dispatch\./);
   assert.match(prompt, /#498/);
   assert.match(prompt, /#500/);
-  assert.match(prompt, /https:\/\/github\.com\/LouPineWays\/Loop-Dee-Loup\/issues\/498#issuecomment-5624721353/);
   assert.match(prompt, /ready-dispatch-gate\.mjs against the Controlling Issue above/);
   // Stage 1 finding P1: the failing unit set must never be interpolated as prose — the
   // worker recovers it deterministically by re-running the gate instead.
@@ -196,25 +195,29 @@ test("formatPlanningCorrectionWorkerDispatchPrompt includes control/execution is
   // Stage 2 audit finding on issue #526: a second embedding inside a CLI snippet doubled this
   // field's contribution to the rendered length and defeated the P1 fix's own claimed bound.
   assert.equal((prompt.match(/500/g) ?? []).length, 1);
+  // Stage 1 finding on follow-up correction PR #527: the Plan Index URL itself must never be
+  // rendered either — its git host is not bounded by any GitHub API limit (an Enterprise
+  // remote can carry an arbitrarily long hostname), so the worker recovers it the same way it
+  // recovers the failing unit set: by re-running the gate.
+  assert.ok(!prompt.includes("issuecomment-5624721353"));
 });
 
-test("formatPlanningCorrectionWorkerDispatchPrompt stays under the reference-only threshold at the true worst case: Number.MAX_SAFE_INTEGER control/execution issue numbers combined with GitHub's own structural username/repo-name maximums and a 16-digit comment id", () => {
+test("formatPlanningCorrectionWorkerDispatchPrompt stays under the reference-only threshold at the true worst case: Number.MAX_SAFE_INTEGER control/execution issue numbers", () => {
   const manyUnits = Array.from({ length: 40 }, (_, i) => `498-${String.fromCharCode(65 + (i % 26))}${i}`);
-  // Stage 2 audit finding on issue #526: the prior version of this test left controlIssue and
-  // executionIssue at their real 3-digit values (500/498) even while stress-testing a long
-  // permalink, so it never actually measured the shape the finding reproduced. GitHub's own
-  // structural maximums (39-char username, 100-char repository name) combined with
-  // Number.MAX_SAFE_INTEGER-sized issue/comment ids (2^53-1, 16 digits -- the true upper bound
-  // isPositiveInteger can ever accept, since it validates integer-ness, not digit count) is the
-  // genuine worst case, not merely a "long-looking" example.
-  const longOwner = "a".repeat(39);
-  const longRepo = "b".repeat(100);
+  // Stage 2 audit finding on issue #526 (fixed on PR #527, itself Stage-1-corrected again):
+  // earlier versions of this test used small real issue numbers and/or a bounded-looking long
+  // permalink, neither of which actually measured the template's true worst case. Since
+  // `planIndexUrl` is no longer rendered into the prompt at all (Stage 1 finding on PR #527 --
+  // a GitHub Enterprise git host is not bounded by any GitHub API length limit the way a
+  // username/repo name is), the only remaining variable-length inputs are `controlIssue` and
+  // `executionIssue`. `Number.MAX_SAFE_INTEGER` (2^53-1, 16 digits) is the true upper bound
+  // `isPositiveInteger` can ever accept for either, since it validates integer-ness, not digit
+  // count -- this is the genuine worst case, not a plausible-looking example.
   const maxSafeInteger = Number.MAX_SAFE_INTEGER;
-  const longPlanIndexUrl = `https://github.com/${longOwner}/${longRepo}/issues/${maxSafeInteger}#issuecomment-${maxSafeInteger}`;
   const prompt = formatPlanningCorrectionWorkerDispatchPrompt({
     controlIssue: maxSafeInteger,
     executionIssue: maxSafeInteger,
-    planIndexUrl: longPlanIndexUrl,
+    planIndexUrl: "https://github.internal.example-enterprise-host.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-5624721353",
     replanRequiredUnitIds: manyUnits,
   });
   assert.ok(prompt.length < 700, `expected < 700 chars, got ${prompt.length}`);
