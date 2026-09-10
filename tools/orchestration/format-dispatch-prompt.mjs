@@ -142,16 +142,42 @@ export function formatPlanningWorkerDispatchPrompt({ controlIssue, executionIssu
 // failing unit(s) and reason from durable authority. That is the exact same deterministic
 // computation `probeReplanRequired` already performed to produce this verdict, so the worker
 // gets identical information without the controller ever having to fit an open-ended list into
-// a fixed-size template. `planIndexUrl` and `replanRequiredUnitIds` remain required inputs here
-// (the caller must hold a genuine REPLAN_REQUIRED result, not merely `controlIssue`), but only
-// `planIndexUrl` is rendered — the prompt's length is now bounded by the fixed template text
-// plus one issue-comment permalink, independent of plan/unit-set size.
+// a fixed-size template.
 //
 // Deliberately omits the verdict's own `reason` text from the prompt itself — that string is
 // for the controller's compact chat/handoff record, not the worker prompt; the dispatched
 // worker reads the authoritative routing failure directly off the Plan Index/unit contracts
 // (and, now, the gate's own re-run output) it is pointed at, exactly as every other dispatch
 // template in this file hands over references rather than restated content.
+//
+// Stage 2 audit finding on issue #526 (audited merge commit 442d19de03cd94769bac0ebaf5f8ddae0
+// cbbd515): removing the unit-list interpolation above was not by itself a structural bound —
+// `controlIssue` and `executionIssue` are only validated by `isPositiveInteger` (no digit-count
+// ceiling), a real GitHub comment permalink can carry a 39-char username, a 100-char repository
+// name (GitHub's own structural maximums), and a comment/issue id already around 10 digits and
+// growing, and the fix still rendered `controlIssue` twice and the full `planIndexUrl` once.
+// That fix's own verification test also only exercised 3-digit control/execution issue numbers,
+// so it never measured the shape this finding reproduced.
+//
+// Stage 1 review finding on the follow-up correction PR #527: even after bounding
+// `controlIssue`/`executionIssue` to a single rendering each, `planIndexUrl` embeds the
+// checkout's own git host, not merely "github.com" — `resolveRepoIdentity`/
+// `parseOwnerRepoFromRemoteUrl` in `ready-dispatch-gate.mjs` accept GitHub Enterprise remotes
+// with an arbitrarily longer hostname, and that host is not bounded by any GitHub API
+// limit the way username/repo-name length is. A 60-char Enterprise hostname alone pushed the
+// then-current worst case from 677 to 727 chars. There is no way to bound an arbitrary
+// hostname's length by construction, so the fix is not another round of prose-trimming
+// arithmetic against a slightly-wider worst case: `planIndexUrl` is no longer rendered into the
+// prompt text at all. The worker is instead told to recover the Plan Index the same way it
+// already recovers the failing unit set — by re-running `ready-dispatch-gate.mjs` against the
+// Controlling Issue above, which returns `planIndexUrl` from the exact same deterministic
+// `probeReplanRequired` computation this verdict itself used. `planIndexUrl` and
+// `replanRequiredUnitIds` remain required inputs (the caller must hold a genuine
+// REPLAN_REQUIRED result, not merely `controlIssue`/`executionIssue`), but neither is rendered
+// any more — the prompt's length is now a function of two bounded integers and fixed prose
+// only, independent of plan/unit-set size, repository name, and git host length alike: 472
+// chars even at `Number.MAX_SAFE_INTEGER` (2^53-1, 16 digits, the true upper bound
+// `isPositiveInteger` can ever accept) for both `controlIssue` and `executionIssue`.
 export function formatPlanningCorrectionWorkerDispatchPrompt({ controlIssue, executionIssue, planIndexUrl, replanRequiredUnitIds }) {
   if (
     !isPositiveInteger(controlIssue) ||
@@ -168,12 +194,11 @@ export function formatPlanningCorrectionWorkerDispatchPrompt({ controlIssue, exe
   }
   return (
     `Planning-correction worker dispatch. Execution Issue: #${executionIssue}. Controlling Issue: ` +
-    `#${controlIssue}. Plan Index: ${planIndexUrl}.\n\n` +
-    `Run \`ready-dispatch-gate.mjs --control-issue ${controlIssue}\` for the failing unit(s)/reason — not ` +
-    `restated here. Read the Plan Index and each failing unit's Worker Unit Contract on GitHub. Correct ` +
-    `per AGENTS.md/docs/operating-model.md via format-execution-plan.mjs (#497). Return a compact ` +
-    `confirmation and stop — do not prepare the Dispatch Manifest, advance Lifecycle, or dispatch units ` +
-    `this invocation.`
+    `#${controlIssue}.\n\n` +
+    `Re-run ready-dispatch-gate.mjs against the Controlling Issue above to recover the Plan Index and ` +
+    `failing unit(s). Read the Plan Index and each unit's contract, then correct per ` +
+    `AGENTS.md/docs/operating-model.md using format-execution-plan.mjs. Return a compact confirmation ` +
+    `and stop — do not prepare the Dispatch Manifest, advance Lifecycle, or dispatch units.`
   );
 }
 
