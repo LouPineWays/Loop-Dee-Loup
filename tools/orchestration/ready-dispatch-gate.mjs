@@ -64,6 +64,15 @@
 // created it.
 //
 // Verdicts:
+//   Every verdict that authorizes exactly one bounded next action for the pre-PR pipeline —
+//   READY_TO_DISPATCH, READY_TO_DISPATCH_PLANNING, READY_TO_RUN_DISPATCH_MANIFEST,
+//   READY_TO_DISPATCH_UNITS, READY_TO_DISPATCH_INTEGRATION, READY_TO_PROJECT_PLAN_READY, and
+//   READY_TO_PROJECT_ROUTED — carries a literal `stopAfter: true` field (issue #498 unit
+//   498-A), mirroring the convention `tools/orchestration/next-review-transition-gate.mjs`
+//   already established. This is a mandatory, literal stop only after the authorized
+//   transition's own durable output (and, for the two PROJECT verdicts, the required
+//   thin-control projection) has already been verified by the gate itself — never license to
+//   continue reasoning past the stop in the same invocation.
 //   AUDIT_ISSUE_DETECTED — issue #407 unit 407-B (Shared Contract item 8), the #432 fix: the
 //     directly-dispatched Issue is itself a canonical Stage 2 Audit Issue (a real
 //     "audit-control-issue.yml"-rendered body — parseStage2Verdict, "### Merged PR", and
@@ -89,6 +98,20 @@
 //     { controlIssue, executionIssue, route } — the exact reference-only triple to hand
 //     the dispatched worker; nothing else belongs in that prompt (AGENTS.md § Subagent
 //     dispatch).
+//   READY_TO_PROJECT_PLAN_READY / READY_TO_PROJECT_ROUTED — issue #498 unit 498-A, the
+//     2026-09-10 #500 live-trace fix: `Lifecycle` is READY_FOR_PLAN (respectively PLAN_READY)
+//     but durable state shows the transition already happened — a valid Execution Plan Index
+//     already exists (respectively a Dispatch Manifest already verifies), just never
+//     projected into thin control state before the prior controller stopped. exit 10
+//     (respectively 11). Result carries { controlIssue, executionIssue, planIndexUrl,
+//     proposedBody } — `proposedBody` is the control Issue's current body with `Lifecycle`
+//     already updated (to PLAN_READY plus a `Plan:` bullet, or to ROUTED) via
+//     upsertControlBullet, ready to pipe into `write-control-snapshot.mjs --body-file -`
+//     verbatim (AGENTS.md § Session execution). Every verdict in this pair carries a literal
+//     `stopAfter: true` (mirroring next-review-transition-gate.mjs's own convention): persist
+//     and stop, never also dispatch a (now-redundant) planning worker or manifest-prep run in
+//     the same breath. See probeExistingPlan's own comment for why this recognition is
+//     necessary rather than merely a nice-to-have.
 //   BLOCKED — issue #368: the control Issue was read successfully and its own recorded
 //     fields *explicitly* say the current invocation must not advance — a blocking
 //     lifecycle value (the ad hoc bullet convention's `Lifecycle: BLOCKED`, or the shipped
@@ -214,6 +237,121 @@ export function parseControlBullet(body, label) {
     if (m) match = m;
   }
   return match ? match[1].trim() : null;
+}
+
+// Pure. Replaces an existing "- **Label:** value" bullet line in `body` with a freshly
+// composed one (every matching occurrence gets the same replacement line, mirroring
+// prepare-dispatch-manifest.mjs's updateDispatchManifestPointer bullet-replace precedent),
+// or — when no such bullet exists yet — inserts it immediately after the
+// "- **Lifecycle:**" bullet (appending to the body instead, when even that anchor is
+// absent). Issue #498 unit 498-A: the PLAN_READY/ROUTED thin-control projection this
+// enables introduces a "- **Plan:**" bullet a genuine READY_FOR_PLAN control Issue does not
+// yet carry at all, so a replace-only helper (like updateDispatchManifestPointer) cannot by
+// itself converge that transition — this is that helper generalized to also handle the
+// insert case. Case-insensitive on the label, matching parseControlBullet's own read-side
+// convention.
+// Pure. Finds the last "### <label>" heading in `lines` and replaces that field's first
+// non-blank content line (or its "_No response_" placeholder) with `newLine` verbatim; a
+// field with no content line at all gets `newLine` inserted right after the heading.
+// Returns null when the heading isn't present at all. Mirrors parseHeadingField's own
+// last-occurrence, first-non-blank-line convention so a write here is always visible to a
+// subsequent read through that same function.
+function replaceHeadingFieldValue(lines, label, newLine) {
+  const heading = `### ${label}`;
+  let headingIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim() === heading) {
+      headingIdx = i;
+      break;
+    }
+  }
+  if (headingIdx === -1) return null;
+  const next = [...lines];
+  for (let i = headingIdx + 1; i < next.length; i++) {
+    const trimmed = next[i].trim();
+    if (trimmed.startsWith("### ")) {
+      next.splice(i, 0, newLine);
+      return next;
+    }
+    if (trimmed === "") continue;
+    next[i] = newLine;
+    return next;
+  }
+  next.push(newLine);
+  return next;
+}
+
+// Pure. Finds the last "### <label>" heading in `lines` and appends `newLine` at the end
+// of that field's own block (immediately before the next "### " heading, or end of body),
+// replacing a lone "_No response_" placeholder outright rather than appending alongside
+// it. Returns null when the heading isn't present. Used to place a new ad hoc "- **Label:**
+// value" bullet inside the template's own intended control-state field instead of past
+// every later template field.
+function insertIntoHeadingBlock(lines, label, newLine) {
+  const heading = `### ${label}`;
+  let headingIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim() === heading) {
+      headingIdx = i;
+      break;
+    }
+  }
+  if (headingIdx === -1) return null;
+  const next = [...lines];
+  let insertAt = next.length;
+  for (let i = headingIdx + 1; i < next.length; i++) {
+    if (next[i].trim().startsWith("### ")) {
+      insertAt = i;
+      break;
+    }
+  }
+  if (insertAt > headingIdx + 1 && next[insertAt - 1].trim() === "_No response_") {
+    next.splice(insertAt - 1, 1, newLine);
+    return next;
+  }
+  next.splice(insertAt, 0, newLine);
+  return next;
+}
+
+export function upsertControlBullet(body, label, value) {
+  const lines = (body ?? "").split("\n");
+  const pattern = new RegExp(`^-\\s*\\*\\*${label}:\\*\\*`, "i");
+  let replaced = false;
+  const next = lines.map((line) => {
+    if (pattern.test(line)) {
+      replaced = true;
+      return `- **${label}:** ${value}`;
+    }
+    return line;
+  });
+  if (replaced) return next.join("\n");
+
+  const lifecycleIdx = lines.findIndex((line) => /^-\s*\*\*Lifecycle:\*\*/i.test(line));
+  if (lifecycleIdx !== -1) {
+    const inserted = [...lines];
+    inserted.splice(lifecycleIdx + 1, 0, `- **${label}:** ${value}`);
+    return inserted.join("\n");
+  }
+
+  // Stage 1 review finding on PR #521: no ad hoc "- **Lifecycle:**" bullet exists at all --
+  // the shape `.github/ISSUE_TEMPLATE/parent-execution.yml` actually renders, whose
+  // Lifecycle-equivalent is the "### State" dropdown heading, not a bullet
+  // (readExecutionBulletField's own Lifecycle read already falls back to
+  // parseHeadingField(body, "State") for exactly this case). Updating "Lifecycle" here used
+  // to always append a brand-new bullet past every template field instead, leaving "### State"
+  // stale and contradictory. For the Lifecycle label, update "### State" in place; for any
+  // other ad hoc label (e.g. "Plan"), the template's own "### Current state" field
+  // description names itself as where such bullets belong for a thin control Issue.
+  if (/^lifecycle$/i.test(label)) {
+    const headingUpdated = replaceHeadingFieldValue(lines, "State", value);
+    if (headingUpdated) return headingUpdated.join("\n");
+  } else {
+    const blockInserted = insertIntoHeadingBlock(lines, "Current state", `- **${label}:** ${value}`);
+    if (blockInserted) return blockInserted.join("\n");
+  }
+
+  const trimmedBody = (body ?? "").replace(/\n+$/, "");
+  return trimmedBody ? `${trimmedBody}\n- **${label}:** ${value}\n` : `- **${label}:** ${value}\n`;
 }
 
 // Pure. Reads one GitHub issue-form field's rendered value by its "### Label" heading —
@@ -374,6 +512,31 @@ function parseManifestPlanIndexUrl(body) {
     if (m) match = m;
   }
   return match ? match[1] : null;
+}
+
+// Pure. Extracts every "- <UnitID>: route=<route> dispatch_ready=<true|false> note=<note>"
+// entry from a Dispatch Manifest comment body — the exact line shape
+// prepare-dispatch-manifest.mjs's own `renderDispatchManifest` writes (see its "- ${unitId}:
+// route=${route} dispatch_ready=${dispatchReady} note=${note}" template). Returns a Map
+// keyed by unitId; a manifest with a duplicate unitId keeps only the last occurrence in the
+// map but the caller (verifyRoutedDispatchManifest) counts raw matches separately so a
+// duplicate is still detected rather than silently collapsed.
+function parseManifestUnitEntries(body) {
+  // `route` is a non-greedy match up to the next " dispatch_ready=" token, not `\S+` --
+  // prepare-dispatch-manifest.mjs's own resolved route values can contain a space (e.g.
+  // "stronger/general worker", the real #498 manifest's own shape), which `\S+` would
+  // truncate at, making every real manifest line fail to match at all.
+  const pattern = /^-\s*(\S+):\s*route=(.*?)\s+dispatch_ready=(true|false)\s+note=(.*)$/i;
+  const entries = new Map();
+  const unitIdsSeen = [];
+  for (const rawLine of (body ?? "").split("\n")) {
+    const m = pattern.exec(rawLine.trim());
+    if (!m) continue;
+    const [, unitId, route, dispatchReady, note] = m;
+    unitIdsSeen.push(unitId);
+    entries.set(unitId, { route, dispatchReady: dispatchReady === "true", note: note.trim() });
+  }
+  return { entries, unitIdsSeen };
 }
 
 // Pure. Extracts a comment permalink's identity: origin (scheme+host), owner/repo, issue
@@ -947,6 +1110,31 @@ export async function verifyRoutedDispatchManifest(
         `expected canonical URL ${JSON.stringify(parsed.plan.planIndex.url)}.`,
     };
   }
+
+  // Stage 1 review finding on PR #521 (ready-dispatch-gate.mjs P2): the checks above only
+  // confirm the manifest comment has the required heading and correctly backlinks the Plan
+  // Index — a manifest carrying zero (or incomplete/duplicated) per-unit `route=`/
+  // `dispatch_ready=` entries used to pass this probe anyway, letting checkReadyDispatch
+  // project `Lifecycle: ROUTED` with no authoritative unit routes for the Execute stage to
+  // dispatch from. Every unit id the Plan Index's own Units list names (parsed.plan.units,
+  // including a REPLAN_REQUIRED one — prepare-dispatch-manifest.mjs still emits an entry
+  // for those, just with route=REPLAN_REQUIRED) must appear in the manifest exactly once.
+  const planUnitIds = Object.keys(parsed.plan.units ?? {});
+  const { entries: manifestEntries, unitIdsSeen } = parseManifestUnitEntries(manifestComment?.body ?? "");
+  const missingUnitIds = planUnitIds.filter((unitId) => !manifestEntries.has(unitId));
+  const duplicateUnitIds = [...new Set(unitIdsSeen.filter((unitId) => unitIdsSeen.filter((id) => id === unitId).length > 1))];
+  const unknownUnitIds = [...manifestEntries.keys()].filter((unitId) => !planUnitIds.includes(unitId));
+  if (missingUnitIds.length > 0 || duplicateUnitIds.length > 0 || unknownUnitIds.length > 0) {
+    const problems = [];
+    if (missingUnitIds.length > 0) problems.push(`missing entries for unit(s): ${missingUnitIds.join(", ")}`);
+    if (duplicateUnitIds.length > 0) problems.push(`duplicate entries for unit(s): ${duplicateUnitIds.join(", ")}`);
+    if (unknownUnitIds.length > 0) problems.push(`entries for unit(s) not in the Plan Index: ${unknownUnitIds.join(", ")}`);
+    return {
+      ok: false,
+      reason: `Dispatch manifest comment #${manifestCommentId} does not have exactly one route/dispatch_ready entry per Plan Index unit -- ${problems.join("; ")}.`,
+    };
+  }
+
   return {
     ok: true,
     executionIssue: Number(executionIssue),
@@ -954,6 +1142,44 @@ export async function verifyRoutedDispatchManifest(
     manifestCommentId,
     manifestUrl,
   };
+}
+
+// Pure async (given injected `parseExecutionPlanImpl`). Issue #498 unit 498-A, the 2026-09-10
+// #500 live-trace fix: probes whether a valid Execution Plan Index already exists for
+// `executionIssue` before authorizing a fresh planning-worker dispatch off a control Issue
+// still recording `Lifecycle: READY_FOR_PLAN`. Returns { alreadyPlanned: true, planIndexUrl }
+// when parse-execution-plan.mjs resolves a valid plan (exitCode 0) — the #500 shape, where a
+// planning worker already persisted and correctly returned `PLAN_READY <ref>`, but the prior
+// controller stopped without projecting that result into thin control state, leaving
+// `Lifecycle: READY_FOR_PLAN` / `Plan: none` durable and licensing a second, duplicate
+// planning dispatch on the next invocation. Returns { alreadyPlanned: false } for the
+// ordinary "no plan yet" case (exitCode 2 — comments were read but no valid Plan Index
+// parses, the expected shape for a genuine fresh READY_FOR_PLAN control Issue), so the
+// caller falls through to dispatching planning exactly as before this fix. Returns
+// { alreadyPlanned: false, operationalError: true, reason } for exitCode 1 (a real
+// read/network/repository-identity failure) — mirroring verifyRoutedDispatchManifest's own
+// operational-vs-malformed distinction above: authoritative state was never actually
+// reached, so this must never be silently read as "no plan yet" and used to license a
+// possibly-duplicate planning dispatch.
+export async function probeExistingPlan({ repo, executionIssue }, { parseExecutionPlanImpl = defaultParseExecutionPlanImpl } = {}) {
+  const parsed = await parseExecutionPlanImpl({ repo, executionIssue });
+  if (!parsed || parsed.exitCode === 1) {
+    return {
+      alreadyPlanned: false,
+      operationalError: true,
+      reason:
+        "operational failure probing for an already-existing Execution Plan Index while evaluating READY_FOR_PLAN: " +
+        (parsed?.message ?? "unknown operational failure"),
+    };
+  }
+  if (parsed.exitCode !== 0) {
+    return { alreadyPlanned: false };
+  }
+  const planIndexUrl = parsed.plan?.planIndex?.url;
+  if (typeof planIndexUrl !== "string" || !planIndexUrl.trim()) {
+    return { alreadyPlanned: false };
+  }
+  return { alreadyPlanned: true, planIndexUrl };
 }
 
 // `ghIssueViewImpl` is injected so tests can drive this end-to-end without touching the
@@ -1040,13 +1266,91 @@ export async function checkReadyDispatch(
   // READY_TO_DISPATCH's 0 and from each other, so a caller (or a test) can never mistake one
   // for another purely from the exit code alone. Chosen to avoid every exit code already
   // fixed above (0, 1, 3, 4) and below (none currently used past 4), documented together
-  // here since there is no established prior convention this had to match.
+  // here since there is no established prior convention this had to match. Issue #498 unit
+  // 498-A adds READY_TO_PROJECT_PLAN_READY (10) and READY_TO_PROJECT_ROUTED (11) — the next
+  // unused integers after 9 (AUDIT_ISSUE_DETECTED) — for the idempotent-recovery verdicts
+  // below.
   const EXIT_CODES_BY_STATUS = {
     READY_TO_DISPATCH_PLANNING: 5,
     READY_TO_RUN_DISPATCH_MANIFEST: 6,
     READY_TO_DISPATCH_UNITS: 7,
     READY_TO_DISPATCH_INTEGRATION: 8,
+    READY_TO_PROJECT_PLAN_READY: 10,
+    READY_TO_PROJECT_ROUTED: 11,
   };
+
+  // Issue #498 unit 498-A, the 2026-09-10 #500 live-trace fix: before authorizing a fresh
+  // planning-worker dispatch off `Lifecycle: READY_FOR_PLAN`, check whether a valid
+  // Execution Plan Index already exists (probeExistingPlan's own comment above has the full
+  // rationale — this is the #500 stranded-state shape). A hit converges thin control state
+  // in one step: it returns the exact `proposedBody` (current body with Lifecycle replaced
+  // to PLAN_READY and a Plan bullet upserted with the canonical Plan Index permalink) ready
+  // to pipe into write-control-snapshot.mjs verbatim, so the controller never composes this
+  // edit by hand. A miss (exitCode 2 — no plan yet) falls through to the ordinary
+  // READY_TO_DISPATCH_PLANNING verdict below, unchanged from before this fix.
+  if (result.status === "READY_TO_DISPATCH_PLANNING") {
+    const probe = await probeExistingPlan({ repo: resolvedRepo, executionIssue: result.executionIssue }, { parseExecutionPlanImpl });
+    if (probe.operationalError) {
+      return {
+        exitCode: 1,
+        message:
+          `Operational failure probing for an already-existing Execution Plan Index for ${resolvedRepo}#${result.executionIssue} ` +
+          `while evaluating READY_FOR_PLAN: ${probe.reason}`,
+      };
+    }
+    if (probe.alreadyPlanned) {
+      const proposedBody = upsertControlBullet(upsertControlBullet(data.body ?? "", "Lifecycle", "PLAN_READY"), "Plan", probe.planIndexUrl);
+      return {
+        exitCode: EXIT_CODES_BY_STATUS.READY_TO_PROJECT_PLAN_READY,
+        state: "READY_TO_PROJECT_PLAN_READY",
+        stopAfter: true,
+        controlIssue: Number(controlIssue),
+        repo: resolvedRepo,
+        executionIssue: result.executionIssue,
+        planIndexUrl: probe.planIndexUrl,
+        proposedBody,
+      };
+    }
+  }
+
+  // The analogous PLAN_READY -> ROUTED case (#498 Live reproduction C, #497/#499): before
+  // running prepare-dispatch-manifest.mjs to create a first Dispatch Manifest, check whether
+  // one already exists and verifies — reusing verifyRoutedDispatchManifest itself, the exact
+  // check the ROUTED path below already performs, rather than a second competing check. A
+  // hit means a prior Route/Prepare session already persisted and verified the manifest but
+  // the controller stopped before projecting `Lifecycle: ROUTED`; a miss (no settled
+  // Dispatch manifest pointer yet — the ordinary case for a genuine fresh PLAN_READY control
+  // Issue) falls through to READY_TO_RUN_DISPATCH_MANIFEST below, unchanged.
+  if (result.status === "READY_TO_RUN_DISPATCH_MANIFEST") {
+    const manifestProbe = await verifyRoutedDispatchManifest(
+      { repo: resolvedRepo, executionIssue: result.executionIssue },
+      { parseExecutionPlanImpl, ghCommentViewImpl },
+    );
+    if (manifestProbe.operationalError) {
+      return {
+        exitCode: 1,
+        message:
+          `Operational failure probing for an already-verified Dispatch Manifest for ${resolvedRepo}#${result.executionIssue} ` +
+          `while evaluating PLAN_READY: ${manifestProbe.reason}`,
+      };
+    }
+    if (manifestProbe.ok) {
+      const proposedBody = upsertControlBullet(data.body ?? "", "Lifecycle", "ROUTED");
+      return {
+        exitCode: EXIT_CODES_BY_STATUS.READY_TO_PROJECT_ROUTED,
+        state: "READY_TO_PROJECT_ROUTED",
+        stopAfter: true,
+        controlIssue: Number(controlIssue),
+        repo: resolvedRepo,
+        executionIssue: result.executionIssue,
+        planIndexUrl: manifestProbe.planIndexUrl,
+        manifestCommentId: manifestProbe.manifestCommentId,
+        manifestUrl: manifestProbe.manifestUrl,
+        proposedBody,
+      };
+    }
+  }
+
   if (result.status === "READY_TO_VERIFY_DISPATCH_MANIFEST") {
     const manifestCheck = await verifyRoutedDispatchManifest(
       { repo: resolvedRepo, executionIssue: result.executionIssue },
@@ -1077,6 +1381,7 @@ export async function checkReadyDispatch(
     return {
       exitCode: EXIT_CODES_BY_STATUS.READY_TO_DISPATCH_UNITS,
       state: "READY_TO_DISPATCH_UNITS",
+      stopAfter: true,
       controlIssue: Number(controlIssue),
       repo: resolvedRepo,
       executionIssue: result.executionIssue,
@@ -1089,6 +1394,7 @@ export async function checkReadyDispatch(
     return {
       exitCode: EXIT_CODES_BY_STATUS[result.status],
       state: result.status,
+      stopAfter: true,
       controlIssue: Number(controlIssue),
       repo: resolvedRepo,
       executionIssue: result.executionIssue,
@@ -1099,6 +1405,7 @@ export async function checkReadyDispatch(
   return {
     exitCode: 0,
     state: "READY_TO_DISPATCH",
+    stopAfter: true,
     controlIssue: Number(controlIssue),
     repo: resolvedRepo,
     executionIssue: result.executionIssue,
