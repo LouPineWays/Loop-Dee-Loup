@@ -10,16 +10,16 @@ Loop-Dee-Loup improves itself over time — new templates, tighter operating rul
 
 The GitHub Issue is the backlog item. There is no separate ordinal file, database, or synchronized state to keep in step with it.
 
-Four mutually exclusive labels express how soon the founder currently expects to work on an accepted, open Issue:
+Four mutually exclusive labels express the founder's current execution horizon for an accepted, open Issue:
 
-- **`priority:now`** — the immediate/current working horizon. The founder intends to work on this now or next. Multiple Issues may legitimately be `priority:now` at once. This label alone does not authorize execution — it does not replace any founder/execution authorization gate elsewhere in `AGENTS.md`.
-- **`priority:soon`** — accepted work expected relatively soon after the current Now work. Important enough to keep prominent, not an immediate commitment.
-- **`priority:later`** — accepted work still worth doing, not currently near the front of the founder's attention.
-- **`priority:wishes`** — accepted ideas worth retaining without a near-term execution commitment. Not rejected ideas — deliberately low-commitment accepted possibilities.
+- **`priority:now`** — the explicitly defined set of Issues LDL is working toward right now. Now is a bounded current pipeline/campaign, not a synonym for “important,” “core,” or “high severity.” An Issue enters Now only when the founder has deliberately included it in the current working set. Multiple Issues may legitimately be `priority:now` at once. This label alone does not authorize execution — it does not replace any founder/execution authorization gate elsewhere in `AGENTS.md`.
+- **`priority:soon`** — mechanically demonstrated, accepted work that is not yet in the current Now pipeline. The defect, friction, or optimization has concrete evidence and a sufficiently established direction to retain near-term prominence, but it remains discretionary until admitted to Now.
+- **`priority:later`** — more abstract work that is worth retaining for future consideration but whose benefit, mechanism, scope, or need is not yet concrete enough to place in the near-term mechanical queue. Research, design exploration, methodology refinement, and unproven optimization hypotheses normally begin here.
+- **`priority:wishes`** — optional nice-to-haves worth preserving but currently lower-value and lower-commitment than Later work. Wishes are typically abstract, externally oriented, convenience-oriented, or otherwise nonessential to the founder's current operating goals. They are not rejected ideas.
 
 An Issue carries at most one of these labels at a time. `tools/check-priority-labels.mjs`, run by `.github/workflows/priority-labels.yml` whenever a label lands on an Issue, fails loudly if that Issue now carries more than one `priority:*` label; run it with no arguments to scan every open issue on demand.
 
-Within one horizon, relative order is intentionally unspecified. Two Issues both tagged `priority:now` are both currently important; neither is asked to rank ahead of the other unless a real workflow decision requires it. Do not introduce ordinals, numbered labels, or a JSON rank file to answer that question — that is exactly the state this replaced.
+Within one horizon, relative order is intentionally unspecified by default. Two Issues carrying the same horizon label are peers unless the founder records a concrete local sequencing decision. A one-off instruction such as “this is the first Soon item after the current Now set” may be recorded in the relevant Issue/control state when it materially affects execution, but do not introduce ordinals, numbered labels, or a synchronized JSON rank file merely to rank an entire horizon.
 
 ### Blocked is not a priority horizon
 
@@ -37,14 +37,16 @@ When a session is dispatched on (or resumes chat about) an open `idea-intake` is
 
 1. Read the raw idea. If it is genuinely ambiguous, ask one direct concise question in chat per the founder interrupt conditions — do not open a full decision form for a single-item backlog entry unless it exposes a real multi-option founder decision.
 2. Once clear, refine that same issue in place into one ironed-out, durable outcome (title and body) rather than opening a second tracking issue to represent the same accepted outcome.
-3. Apply the founder-set `priority:*` label. Never guess a priority from issue age, issue number, technical interest, estimated difficulty, or model preference — see `AGENTS.md`'s founder decision-form rule.
+3. Apply the founder-set `priority:*` label using the horizon semantics above. Never promote something to Now merely because it is severe, touches the core loop, is technically interesting, or has existed for a long time. Soon requires concrete/mechanical evidence; Later and Wishes preserve progressively more abstract or discretionary work. When no founder-set horizon can be established from durable authority, surface that as a founder-priority decision rather than guessing from issue age, issue number, estimated difficulty, or model preference — see `AGENTS.md`'s founder decision-form rule.
 4. Represent any genuine dependency with GitHub's native Issue `blocked by`/`blocking` relationship, not a label or a free-text cross-reference.
 5. Close the original `idea-intake` issue only when refinement produced a genuinely separate durable issue (normal decomposition); otherwise the same issue simply now carries its priority label and refined body, and stays open as the canonical backlog item.
 6. Report the fixed `CLEAN` chat line per `AGENTS.md` § Fixed chat report formats.
 
 ## Prioritization
 
-The founder may change an Issue's priority horizon at any time by swapping its `priority:*` label — moving an Issue from Soon to Now requires changing only that one label. Routine implementation work must preserve an Issue's existing priority; only an explicit founder decision changes it.
+The founder may change an Issue's priority horizon at any time by swapping its `priority:*` label. Moving an Issue from Soon to Now means admitting it into the explicitly defined current working set; moving it back out means it is no longer part of that pipeline. Routine implementation work must preserve an Issue's existing priority; only an explicit founder decision changes it.
+
+Priority is therefore a sequencing/value decision, not a defect-severity taxonomy. A concrete bug may remain Soon when it does not belong to the current working set, while a telemetry or infrastructure item may be Now when it is an explicit prerequisite of the current campaign.
 
 ## Turning a priority Issue into work
 
