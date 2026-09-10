@@ -48,7 +48,14 @@ body:
     id: inline_review
     attributes:
       label: Stage 1 inline review disposition
-      description: Link the single inline review round and state how each valid finding was fixed.
+      description: >-
+        Link the single inline review round and state how each valid finding was fixed. If this
+        audit is itself a correction responding to a prior NOT CLEAN/PENDING Stage 2 verdict, say
+        so using this exact recurring phrasing so tooling can find it: "This is itself a
+        correction PR responding to a prior Stage 2 NOT CLEAN (or PENDING) verdict on audit issue
+        #<N>." (see tools/review-watch/lifecycle-gate.mjs's parseCorrectsAuditRef, issue #513) —
+        it is how close-audit retires the full predecessor correction chain once it reaches a
+        CLEAN terminal, including a predecessor that itself records no Work issue.
     validations:
       required: true
   - type: textarea

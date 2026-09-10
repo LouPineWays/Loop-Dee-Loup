@@ -24,6 +24,7 @@ import {
   normalizeIssueNumber,
   normalizeSearchIssuesPage,
   parseArgs,
+  parseCorrectsAuditRef,
   parseFormField,
   parseFormFieldBlock,
   parseMergeCommitRef,
@@ -2569,6 +2570,288 @@ test("checkCloseAudit: a comment-post failure after a successful close still rep
   assert.equal(result.state, "CLOSED");
   assert.equal(result.commentPosted, false);
   assert.match(result.message, /could not post the durable explanation comment/);
+});
+
+// -- checkCloseAudit: correction-chain provenance (issue #513) ---------------------------------
+// Generalizes the #396->#406 Work-issue-match supersession fix so a predecessor audit is found and
+// retired even when the chain includes an intermediate audit recording no Work issue at all --
+// the live #506 (Work issue #497) -> #508 (Work issue: none) -> #512 (Work issue #497, CLEAN)
+// regression fixture this unit reconciles. parseCorrectsAuditRef reads the same recurring sentence
+// every live correction audit already writes into its own "Stage 1 inline review disposition"
+// field ("This is itself a correction PR responding to a prior Stage 2 NOT CLEAN verdict on audit
+// issue #N.").
+
+function correctsSentence(predecessorAuditIssue) {
+  return (
+    `Stage 1 inline review at frozen head \`${MERGE_COMMIT}\` returned findings; fixed in a correction commit. ` +
+    `This is itself a correction PR responding to a prior Stage 2 NOT CLEAN verdict on audit issue #${predecessorAuditIssue}.`
+  );
+}
+
+function chainFixtureWithCorrects({ workIssue = "none", commit = MERGE_COMMIT, verdict, createdAt, corrects = null }) {
+  const disposition = corrects !== null ? `### Stage 1 inline review disposition\n\n${correctsSentence(corrects)}\n\n` : "";
+  return {
+    body:
+      `### Work issue\n\n${workIssue}\n\n### Exact merge commit\n\n${commit}\n\n${disposition}` +
+      `### Verification checklist\n\n1. Confirm A.\n\n### Verdict\n\n${verdict}\n`,
+    state: "OPEN",
+    createdAt,
+  };
+}
+
+test("parseCorrectsAuditRef: reads the predecessor audit issue number from the live recurring correction sentence", () => {
+  assert.equal(parseCorrectsAuditRef(chainFixtureWithCorrects({ verdict: "NOT CLEAN", createdAt: "x", corrects: 506 }).body), 506);
+});
+
+test("parseCorrectsAuditRef: returns null when the field is absent (an ordinary, non-correction audit)", () => {
+  assert.equal(parseCorrectsAuditRef(closeAuditBody({ verdict: "PENDING" })), null);
+});
+
+test("parseCorrectsAuditRef: returns null for unrelated prose in the same field that never uses the recurring phrase", () => {
+  const body = "### Stage 1 inline review disposition\n\nStage 1 inline review at frozen head `abc123` found no issues.\n\n### Verdict\n\nCLEAN\n";
+  assert.equal(parseCorrectsAuditRef(body), null);
+});
+
+// Verification cases 1 & 3 (live regression fixture; no-work intermediate): reproduces the exact
+// #506 (Work issue #497) -> #508 (Work issue: none) -> #512 (Work issue #497, CLEAN) shape with
+// fictional numbers, and closes the no-work-issue middle audit via direct invocation using only
+// correction-chain provenance -- the Work-issue-match strategy alone can never find this, since
+// the middle audit's own Work issue field is "none".
+test("checkCloseAudit: SUPERSEDED_CLOSE_READY / SUPERSEDED_CLOSED — a no-work-issue intermediate audit resolves via correction-chain provenance alone, and cascades to retire its own predecessor in the same call", async () => {
+  const chain = {
+    700: chainFixtureWithCorrects({ workIssue: "#497", verdict: "NOT CLEAN", createdAt: "2026-09-05T09:00:00Z" }),
+    701: chainFixtureWithCorrects({ workIssue: "none", verdict: "NOT CLEAN", createdAt: "2026-09-05T10:00:00Z", corrects: 700 }),
+    702: chainFixtureWithCorrects({ workIssue: "#497", verdict: "CLEAN", createdAt: "2026-09-05T11:00:00Z", corrects: 701 }),
+  };
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+  const ghApiImpl = ghApiForThreads({ 702: completedAuditThread({ verdict: "CLEAN" }) });
+
+  const dryRunResult = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 701, "dry-run": "true" },
+    { ghIssueViewImpl, ghIssueListImpl, ghApiImpl },
+  );
+  assert.equal(dryRunResult.state, "SUPERSEDED_CLOSE_READY");
+  assert.equal(dryRunResult.supersededBy, 702, "the no-work-issue audit resolves via its own corrects-chain pointer, not a Work-issue match");
+
+  const closeCalls = [];
+  const commentCalls = [];
+  const realResult = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 701 },
+    {
+      ghIssueViewImpl,
+      ghIssueListImpl,
+      ghApiImpl,
+      ghCloseImpl: async (a) => closeCalls.push(a),
+      ghCommentImpl: async (a) => commentCalls.push(a),
+    },
+  );
+  assert.equal(realResult.exitCode, 0);
+  assert.equal(realResult.state, "SUPERSEDED_CLOSED");
+  // Requirement 7: closing #701 also retires its own predecessor #700 in this same call, with no
+  // separate operator invocation against #700's own issue number.
+  assert.equal(realResult.retiredPredecessors.length, 1);
+  assert.equal(realResult.retiredPredecessors[0].auditIssue, 700);
+  assert.equal(realResult.retiredPredecessors[0].supersededBy, 701);
+  assert.deepEqual(
+    closeCalls.map((c) => c.auditIssue),
+    [701, 700],
+  );
+  assert.equal(commentCalls.length, 2);
+  assert.match(commentCalls[0].body, /#702/, "the audit's own close comment names the corrects-chain successor it was resolved through");
+  assert.match(commentCalls[1].body, /#701/, "the cascaded predecessor's close comment names the audit that named it as corrected");
+});
+
+// Verification case 2: a two-level predecessor chain -- direct invocation on the *earliest* audit
+// (#700) must recurse through the intermediate (#701, itself not backed CLEAN) to find the
+// terminal CLEAN audit (#702), not stop at the first non-CLEAN hop.
+test("checkCloseAudit: a two-level correction chain resolves via recursive corrects-chain search, invoked directly on the earliest predecessor", async () => {
+  const chain = {
+    700: chainFixtureWithCorrects({ workIssue: "#497", verdict: "NOT CLEAN", createdAt: "2026-09-05T09:00:00Z" }),
+    701: chainFixtureWithCorrects({ workIssue: "none", verdict: "NOT CLEAN", createdAt: "2026-09-05T10:00:00Z", corrects: 700 }),
+    702: chainFixtureWithCorrects({ workIssue: "#497", verdict: "CLEAN", createdAt: "2026-09-05T11:00:00Z", corrects: 701 }),
+  };
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+  const ghApiImpl = ghApiForThreads({ 702: completedAuditThread({ verdict: "CLEAN" }) });
+
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 700, "dry-run": "true" },
+    { ghIssueViewImpl, ghIssueListImpl, ghApiImpl },
+  );
+  assert.equal(result.state, "SUPERSEDED_CLOSE_READY");
+  assert.equal(result.supersededBy, 702, "must recurse past the intermediate #701 (not itself backed CLEAN) to the terminal #702");
+});
+
+// Requirement 7 / the pipeline's own invocation pattern: `close-audit` is only ever run by the
+// live pipeline against the current/latest audit issue. Closing the terminal audit directly (via
+// its own backed-CLEAN verdict) must, in the very same call, cascade backward through the whole
+// correction chain -- so a human is never required to separately discover and invoke close-audit
+// against #700 or #701's own issue numbers.
+test("checkCloseAudit: closing the terminal CLEAN audit cascades to retire the full multi-level predecessor chain in one call", async () => {
+  const chain = {
+    700: chainFixtureWithCorrects({ workIssue: "#497", verdict: "NOT CLEAN", createdAt: "2026-09-05T09:00:00Z" }),
+    701: chainFixtureWithCorrects({ workIssue: "none", verdict: "NOT CLEAN", createdAt: "2026-09-05T10:00:00Z", corrects: 700 }),
+    702: chainFixtureWithCorrects({ workIssue: "#497", verdict: "CLEAN", createdAt: "2026-09-05T11:00:00Z", corrects: 701 }),
+  };
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghApiImpl = ghApiForThreads({ 702: completedAuditThread({ verdict: "CLEAN" }) });
+
+  const closeCalls = [];
+  const commentCalls = [];
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 702 },
+    {
+      ghIssueViewImpl,
+      ghApiImpl,
+      ghCloseImpl: async (a) => closeCalls.push(a),
+      ghCommentImpl: async (a) => commentCalls.push(a),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "CLOSED", "own-backed-CLEAN close, no successor search needed for #702 itself");
+  assert.equal(result.retiredPredecessors.length, 2, "both #701 and #700 are retired in the same call");
+  assert.deepEqual(
+    result.retiredPredecessors.map((r) => r.auditIssue),
+    [701, 700],
+  );
+  assert.deepEqual(closeCalls.map((c) => c.auditIssue), [702, 701, 700]);
+});
+
+// Verification case 4 (active negative control): a NOT CLEAN predecessor whose corrects-chain
+// pointer names a real, later-created audit that itself never reaches backed CLEAN must remain
+// open -- an unresolved correction chain is not evidence of supersession.
+test("checkCloseAudit: NOT_TERMINAL_YET — a corrects-chain pointer to a still-unresolved successor leaves the predecessor open (active negative control)", async () => {
+  const chain = {
+    710: chainFixtureWithCorrects({ workIssue: "none", verdict: "NOT CLEAN", createdAt: "2026-09-05T09:00:00Z" }),
+    711: chainFixtureWithCorrects({ workIssue: "none", verdict: "NOT CLEAN", createdAt: "2026-09-05T10:00:00Z", corrects: 710 }),
+  };
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+  const ghApiImpl = async () => [];
+
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 710, "dry-run": "true" },
+    { ghIssueViewImpl, ghIssueListImpl, ghApiImpl },
+  );
+  assert.equal(result.state, "NOT_TERMINAL_YET", "the chain's own successor (#711) is itself not backed CLEAN, so nothing here proves supersession yet");
+});
+
+// Verification case 5 (unrelated-newer negative control): a later, unrelated CLEAN audit that
+// never names this audit as its corrects-chain predecessor (and shares no Work issue) must never
+// supersede it, merely by existing and being newer.
+test("checkCloseAudit: NOT_TERMINAL_YET — an unrelated newer CLEAN audit naming a different corrects-chain predecessor never supersedes", async () => {
+  const chain = {
+    720: chainFixtureWithCorrects({ workIssue: "none", verdict: "NOT CLEAN", createdAt: "2026-09-05T09:00:00Z" }),
+    // Unrelated: created later, backed CLEAN, but its own corrects-chain pointer (and Work issue)
+    // name a completely different audit, not #720.
+    721: chainFixtureWithCorrects({ workIssue: "#999", verdict: "CLEAN", createdAt: "2026-09-05T10:00:00Z", corrects: 999 }),
+  };
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+  const ghApiImpl = ghApiForThreads({ 721: completedAuditThread({ verdict: "CLEAN" }) });
+
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 720, "dry-run": "true" },
+    { ghIssueViewImpl, ghIssueListImpl, ghApiImpl },
+  );
+  assert.equal(result.state, "NOT_TERMINAL_YET");
+});
+
+// Verification case 6 (malformed/contradictory provenance fails closed), forward-search side: a
+// candidate naming this audit as its corrects-chain predecessor but created at or before it is
+// contradictory provenance (a real successor must be created after what it corrects) and must
+// never be treated as a match.
+test("checkCloseAudit: NOT_TERMINAL_YET — a corrects-chain pointer from a candidate NOT created after this audit is contradictory provenance and fails closed", async () => {
+  const chain = {
+    730: chainFixtureWithCorrects({ workIssue: "none", verdict: "NOT CLEAN", createdAt: "2026-09-05T10:00:00Z" }),
+    // Claims to correct #730 but was created *before* it -- contradictory, never a real successor.
+    731: chainFixtureWithCorrects({ workIssue: "none", verdict: "CLEAN", createdAt: "2026-09-05T09:00:00Z", corrects: 730 }),
+  };
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+  const ghApiImpl = ghApiForThreads({ 731: completedAuditThread({ verdict: "CLEAN" }) });
+
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 730, "dry-run": "true" },
+    { ghIssueViewImpl, ghIssueListImpl, ghApiImpl },
+  );
+  assert.equal(result.state, "NOT_TERMINAL_YET");
+});
+
+// Verification case 6, cascade/backward side: once a terminal audit closes, a predecessor whose
+// *own* corrects-chain pointer is contradictory (names an issue not created before it) must be
+// left untouched and reported in predecessorChainNotes, without blocking the terminal audit's own
+// legitimate close or any earlier, valid part of the chain.
+test("checkCloseAudit: the predecessor cascade fails closed on a contradictory mid-chain pointer, closing the terminal audit but not any predecessor beyond the break", async () => {
+  const chain = {
+    // #740's own corrects-chain pointer (to #741) is contradictory: #741 was NOT created before
+    // #740, so the cascade must stop there without closing #740 or looking further back.
+    740: chainFixtureWithCorrects({ workIssue: "none", verdict: "NOT CLEAN", createdAt: "2026-09-05T08:00:00Z", corrects: 741 }),
+    741: chainFixtureWithCorrects({ workIssue: "none", verdict: "NOT CLEAN", createdAt: "2026-09-05T09:00:00Z" }),
+    742: chainFixtureWithCorrects({ workIssue: "#497", verdict: "CLEAN", createdAt: "2026-09-05T11:00:00Z", corrects: 740 }),
+  };
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghApiImpl = ghApiForThreads({ 742: completedAuditThread({ verdict: "CLEAN" }) });
+
+  const closeCalls = [];
+  const commentCalls = [];
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 742 },
+    {
+      ghIssueViewImpl,
+      ghApiImpl,
+      ghCloseImpl: async (a) => closeCalls.push(a),
+      ghCommentImpl: async (a) => commentCalls.push(a),
+    },
+  );
+  assert.equal(result.state, "CLOSED", "the terminal audit's own backed-CLEAN close is unaffected by a downstream predecessor's bad provenance");
+  assert.equal(result.retiredPredecessors.length, 1, "#740 itself still retires cleanly (its own pointer to #741 is what's contradictory, not #742's pointer to #740)");
+  assert.equal(result.retiredPredecessors[0].auditIssue, 740);
+  assert.equal(result.predecessorChainNotes.length, 1);
+  assert.equal(result.predecessorChainNotes[0].auditIssue, 741);
+  assert.match(result.predecessorChainNotes[0].reason, /contradictory provenance/);
+  assert.deepEqual(closeCalls.map((c) => c.auditIssue), [742, 740], "must never close #741, the contradictory-provenance predecessor");
+});
+
+// Verification case 7 (idempotence): rerunning close-audit against the terminal audit after a
+// successful cascade retirement is a safe no-op -- no duplicate close or comment, for the
+// terminal audit or any already-retired predecessor.
+test("checkCloseAudit: rerunning close-audit after a successful cascade retirement is idempotent (ALREADY_TERMINAL, no mutation)", async () => {
+  // Simulates post-retirement state: all three issues are already closed.
+  const chain = {
+    700: chainFixtureWithCorrects({ workIssue: "#497", verdict: "NOT CLEAN", createdAt: "2026-09-05T09:00:00Z" }),
+    701: chainFixtureWithCorrects({ workIssue: "none", verdict: "NOT CLEAN", createdAt: "2026-09-05T10:00:00Z", corrects: 700 }),
+    702: chainFixtureWithCorrects({ workIssue: "#497", verdict: "CLEAN", createdAt: "2026-09-05T11:00:00Z", corrects: 701 }),
+  };
+  for (const number of Object.keys(chain)) chain[number].state = "CLOSED";
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+
+  for (const auditIssue of [700, 701, 702]) {
+    let apiCalls = 0;
+    let closeCalls = 0;
+    let commentCalls = 0;
+    const result = await checkCloseAudit(
+      { repo: "owner/repo", "audit-issue": auditIssue },
+      {
+        ghIssueViewImpl,
+        ghApiImpl: async () => {
+          apiCalls++;
+          return [];
+        },
+        ghCloseImpl: async () => {
+          closeCalls++;
+        },
+        ghCommentImpl: async () => {
+          commentCalls++;
+        },
+      },
+    );
+    assert.equal(result.state, "ALREADY_TERMINAL", `#${auditIssue} must report ALREADY_TERMINAL on rerun`);
+    assert.equal(apiCalls, 0);
+    assert.equal(closeCalls, 0, `must never re-attempt closing #${auditIssue}`);
+    assert.equal(commentCalls, 0, `must never post a duplicate comment for #${auditIssue}`);
+  }
 });
 
 // -- normalizeSearchIssuesPage (Stage 1 review finding on PR #435: real pagination for
