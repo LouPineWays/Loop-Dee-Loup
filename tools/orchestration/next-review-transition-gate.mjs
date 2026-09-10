@@ -159,6 +159,8 @@ import {
   isNoneSentinel,
   resolveRepoIdentity,
   readExecutionBulletField,
+  describeExecutionConflict,
+  findNearDuplicateBulletLabels,
 } from "./ready-dispatch-gate.mjs";
 import { run as stage1Run } from "../review-watch/stage1-gate.mjs";
 import { checkMergeReady, checkPostAudit } from "../review-watch/lifecycle-gate.mjs";
@@ -209,6 +211,33 @@ export function parseOptionalIssueRef(raw, label) {
     return { kind: "invalid", reason: `"${label}" field ${JSON.stringify(raw)}: ${parsed.reason}` };
   }
   return { kind: "issue", issue: parsed.issue };
+}
+
+// Pure. Issue #493 (the #440 regression): wraps parseOptionalIssueRef with a near-duplicate-
+// label ambiguity guard shared by the "PR" and "Stage 2" control bullets — the same silent-
+// ignore hazard ready-dispatch-gate.mjs's readExecutionBulletField already closes for
+// "Execution". When a recognized "- **<label>:**" bullet is present at all, an unrecognized
+// near-duplicate label that could represent the same live field (e.g. canonical
+// "Stage 2: #480" alongside "Stage 2 (current): #492") returns { kind: "ambiguous", reason }
+// before the recognized value — possibly stale — is ever selected as authoritative. When no
+// near-duplicate is found, behaves exactly like parseOptionalIssueRef(raw, label), preserving
+// every existing missing/none/issue/invalid outcome unchanged.
+export function parseOptionalIssueRefGuarded(body, label) {
+  const raw = parseControlBullet(body, label);
+  if (raw !== null) {
+    const nearDuplicates = findNearDuplicateBulletLabels(body, label);
+    if (nearDuplicates.length > 0) {
+      return {
+        kind: "ambiguous",
+        reason:
+          `"${label}" reference is ambiguous: recognized "- **${label}:**" bullet (${JSON.stringify(raw)}) coexists ` +
+          `with unrecognized near-duplicate label(s) ${nearDuplicates
+            .map((m) => `"- **${m.label}:**" (${JSON.stringify(m.raw)})`)
+            .join(", ")} that could represent the same live field — refusing to select the canonical value as authoritative`,
+      };
+    }
+  }
+  return parseOptionalIssueRef(raw, label);
 }
 
 // Pure. True only for a result object this gate can trust as a genuine, fully-formed
@@ -781,7 +810,17 @@ export async function runNextReviewTransitionGate(
     };
   }
 
-  const auditRef = parseOptionalIssueRef(parseControlBullet(body, "Stage 2"), "Stage 2");
+  const auditRef = parseOptionalIssueRefGuarded(body, "Stage 2");
+  if (auditRef.kind === "ambiguous") {
+    return {
+      exitCode: 4,
+      state: "AMBIGUOUS",
+      stopAfter: true,
+      repo,
+      controlIssue: controlIssueNumber,
+      reason: auditRef.reason,
+    };
+  }
   if (auditRef.kind === "issue") {
     return resolvePostMerge({ repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber }, { checkPostAuditImpl });
   }
@@ -796,16 +835,21 @@ export async function runNextReviewTransitionGate(
     };
   }
 
-  const prRef = parseOptionalIssueRef(parseControlBullet(body, "PR"), "PR");
+  const prRef = parseOptionalIssueRefGuarded(body, "PR");
+  if (prRef.kind === "ambiguous") {
+    return {
+      exitCode: 4,
+      state: "AMBIGUOUS",
+      stopAfter: true,
+      repo,
+      controlIssue: controlIssueNumber,
+      reason: prRef.reason,
+    };
+  }
   if (prRef.kind === "issue") {
     const executionField = readExecutionBulletField(body);
     const executionRef = executionField.conflict
-      ? {
-          ok: false,
-          reason:
-            `Execution pointer is ambiguous: "- **Execution:**" names ${JSON.stringify(executionField.legacy)} ` +
-            `while "- **Execution issue:**" names ${JSON.stringify(executionField.liveSpelling)} — these must resolve to the same execution Issue`,
-        }
+      ? { ok: false, reason: describeExecutionConflict(executionField) }
       : parseExecutionPointer(executionField.value);
     if (!executionRef.ok) {
       return {
