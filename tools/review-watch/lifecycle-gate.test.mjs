@@ -2619,6 +2619,31 @@ test("parseCorrectsAuditRef: returns null for unrelated prose in the same field 
   assert.equal(parseCorrectsAuditRef(body), null);
 });
 
+// Documentation/parser consistency (audit issue #516 finding 1): docs/bounded-review-cycle.md
+// once described the two accepted recurring phrasings as a single combined "NOT CLEAN (or
+// PENDING) verdict" sentence -- a shape parseCorrectsAuditRef never matches, so an operator
+// following that documentation literally produced provenance the parser silently failed to
+// find. Reads the doc's own recurring-phrase prose directly (rather than re-typing an expected
+// phrase here) so this test would fail again if the doc regresses to the combined form.
+const REPO_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+test("docs/bounded-review-cycle.md's recurring corrects-phrasings are ones parseCorrectsAuditRef actually accepts", () => {
+  const doc = readFileSync(path.join(REPO_ROOT, "docs", "bounded-review-cycle.md"), "utf8");
+
+  // The doc must not regress to the single combined phrase the parser rejects.
+  assert.doesNotMatch(doc, /NOT CLEAN \(or PENDING\) verdict/);
+
+  // Both of the two exact phrasings the audit-control-issue template documents must appear
+  // verbatim (with a placeholder issue number substituted) and must each parse.
+  for (const verdictWord of ["NOT CLEAN", "PENDING"]) {
+    const phrase = `This is itself a correction PR responding to a prior Stage 2 ${verdictWord} verdict on audit issue #\\<N\\>.`;
+    assert.ok(doc.includes(phrase), `doc is missing the exact ${verdictWord} phrasing: ${phrase}`);
+
+    const body = `### Stage 1 inline review disposition\n\n${phrase.replace("\\<N\\>", "506")}\n`;
+    assert.equal(parseCorrectsAuditRef(body), 506, `parser rejected the doc's own ${verdictWord} phrasing`);
+  }
+});
+
 // Verification cases 1 & 3 (live regression fixture; no-work intermediate): reproduces the exact
 // #506 (Work issue #497) -> #508 (Work issue: none) -> #512 (Work issue #497, CLEAN) shape with
 // fictional numbers, and closes the no-work-issue middle audit via direct invocation using only
