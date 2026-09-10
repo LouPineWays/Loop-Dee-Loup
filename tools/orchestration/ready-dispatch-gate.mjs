@@ -425,12 +425,13 @@ export function parseExecutionPointer(value) {
 
 // Pure. Extracts every bold-bullet label appearing in the body as "- **Label:** value" (the
 // same line shape parseControlBullet reads), returning { label, raw } for each matching
-// line regardless of what label text it carries. Used only to scan for near-duplicate
-// labels of one specific parser-sensitive field below — never to interpret arbitrary body
-// prose, and never applied to plain paragraphs or "### Heading" template fields (issue
-// #493 is scoped to the ad hoc bold-bullet convention only, the shape #440's own
-// reproduction used).
-function extractBoldBulletLabels(body) {
+// line regardless of what label text it carries. Originally used only to scan for
+// near-duplicate labels of one specific parser-sensitive field below; also exported for
+// control-field-validator.mjs's exact-duplicate-label detection (Stage 1 review finding on
+// PR #519, issue #510) — never to interpret arbitrary body prose, and never applied to plain
+// paragraphs or "### Heading" template fields (issue #493 is scoped to the ad hoc bold-bullet
+// convention only, the shape #440's own reproduction used).
+export function extractBoldBulletLabels(body) {
   const pattern = /^-\s*\*\*(.+?):\*\*\s*(.*)$/;
   const result = [];
   for (const line of (body ?? "").split("\n")) {

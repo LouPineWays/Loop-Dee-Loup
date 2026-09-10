@@ -34,6 +34,7 @@ import {
   parseWorkIssueRef,
   recoverPrematureClosure,
   replaceVerdictField,
+  validateAuditVerdictRewrite,
 } from "./lifecycle-gate.mjs";
 import { triggerCommentBody } from "./trigger.mjs";
 
@@ -1774,6 +1775,35 @@ test("replaceVerdictField: repairing a missing heading against a body with no tr
   const updated = replaceVerdictField(bodyNoTrailingNewline, "NOT CLEAN");
   assert.equal(updated, "### Exact merge commit\n\nabc123\n\n### Verdict\n\nNOT CLEAN\n");
   assert.equal(parseStage2Verdict(updated), "NOT CLEAN");
+});
+
+// -- validateAuditVerdictRewrite (issue #510, unit 510-A) ---------------------------------
+// Defense-in-depth guard for checkRecordVerdict's own body-rewrite mutation surface: proves a
+// Verdict-only rewrite actually stayed scoped to the "### Verdict" field and did not disturb
+// the adjacent "Work issue"/"Merged PR" pointer fields other gates trust.
+
+test("validateAuditVerdictRewrite: ok when only the Verdict field's value differs between before/after", () => {
+  const before = auditBodyWithCommit({ workIssue: 151, verdict: "PENDING" });
+  const after = auditBodyWithCommit({ workIssue: 151, verdict: "CLEAN" });
+  const result = validateAuditVerdictRewrite(before, after);
+  assert.equal(result.ok, true);
+});
+
+test("validateAuditVerdictRewrite: rejects a rewrite that also changed the 'Work issue' field", () => {
+  const before = auditBodyWithCommit({ workIssue: 151, verdict: "PENDING" });
+  const after = auditBodyWithCommit({ workIssue: 999, verdict: "CLEAN" });
+  const result = validateAuditVerdictRewrite(before, after);
+  assert.equal(result.ok, false);
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0], /"Work issue" field changed/);
+});
+
+test("validateAuditVerdictRewrite: rejects a rewrite that introduced a 'Merged PR' field where none existed before", () => {
+  const before = auditBodyWithCommit({ workIssue: 151, verdict: "PENDING" });
+  const after = `${before}\n### Merged PR\n\n#509\n`;
+  const result = validateAuditVerdictRewrite(before, after);
+  assert.equal(result.ok, false);
+  assert.match(result.errors[0], /"Merged PR" field changed/);
 });
 
 // -- checkRecordVerdict (issue #439) ------------------------------------------------------

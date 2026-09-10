@@ -144,6 +144,8 @@ A parent issue body is a mutable current-state snapshot, not an append-only diar
 
 History may remain in comments for auditability, but executors must not normally read it.
 
+When editing a thin control Issue's own bold-bullet fields (`- **Lifecycle:**`, `- **Execution:**`/`- **Execution issue:**`, `- **PR:**`, `- **Stage 2:**`, `- **Blocker:**`, `- **Founder decision:**`), compose the full proposed body and persist it through `node tools/orchestration/write-control-snapshot.mjs --control-issue <N> --body-file <path-or-«-»-for-stdin>` rather than calling `gh issue edit` directly. It validates each field's own pointer cardinality and kind before writing and refuses the write, leaving the durable body unchanged, if a field would resolve ambiguously — issue #510: a `Stage 2` value that embeds a second parseable pointer in its own explanatory prose (e.g. `Stage 2: #508 ... correction dispatched as PR #509`) is exactly the shape this closes. A generic annotation naming "the current correction PR"/"the current audit" without repeating its number is always safe.
+
 <!-- ldl:source-only:start -->
 ## Loop-Dee-Loup priority horizons
 

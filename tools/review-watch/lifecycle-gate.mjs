@@ -1144,6 +1144,44 @@ export function replaceVerdictField(body, newVerdict) {
   return lines.join("\n");
 }
 
+// Pure. Defense-in-depth pre-persistence guard for checkRecordVerdict's own body-rewrite
+// mutation surface — issue #510 (unit 510-A) Required Behavior #1: "Identify the current
+// repository-authorized control-state mutation surface(s) and add the smallest deterministic
+// guard that validates the resulting parser-sensitive control fields before writing them
+// durably." checkRecordVerdict is the only body-rewriting `gh issue edit` call site in this
+// file (`defaultGhEditAuditVerdict`), and its own rewrite (replaceVerdictField) is
+// deliberately scoped to touch only the "### Verdict" field — a closed three-value enum
+// (PENDING/CLEAN/NOT CLEAN) with no pointer cardinality of its own, unlike the thin control
+// Issue's bold-bullet "Execution"/"PR"/"Stage 2" fields #499 corrupted (see
+// tools/orchestration/control-field-validator.mjs's module comment for that reproduction and
+// its own guard, wired into tools/orchestration/write-control-snapshot.mjs for the actual
+// thin-control-body mutation path). The audit-control-issue template never renders the
+// bold-bullet convention at all, so that guard does not apply to this surface's own body
+// shape; the equivalent guard here proves the *other* structural invariant this surface must
+// preserve instead — that a rewrite this file itself performs actually stayed scoped to the
+// one field it is authorized to change. `replaceVerdictField`'s own line-splice surgery
+// touching the wrong line (or an off-by-one against a differently-shaped body) would silently
+// corrupt an adjacent pointer field such as "Work issue" or "Merged PR" — both single-pointer
+// fields other gates trust (classifyAuditIssue, parseWorkIssueRef) — without this ever
+// surfacing until a later read. Reuses `parseFormField`, the exact parser those fields'
+// existing readers already trust, rather than inventing a second reading of the same
+// template.
+export function validateAuditVerdictRewrite(beforeBody, afterBody) {
+  const fields = ["Work issue", "Merged PR"];
+  const errors = [];
+  for (const label of fields) {
+    const before = parseFormField(beforeBody ?? "", label);
+    const after = parseFormField(afterBody ?? "", label);
+    if (before !== after) {
+      errors.push(
+        `"${label}" field changed from ${JSON.stringify(before)} to ${JSON.stringify(after)} during a Verdict-only ` +
+          "rewrite — refusing to persist",
+      );
+    }
+  }
+  return errors.length === 0 ? { ok: true } : { ok: false, errors };
+}
+
 // Pure. Builds the explanatory comment posted on a real `RECORDED` run — names the recorded
 // verdict and the backing evidence comment so a fresh reader never has to re-derive why the
 // durable Verdict field changed. Deliberately never restates or summarizes the report's own
@@ -1374,6 +1412,19 @@ export async function checkRecordVerdict(
     return {
       exitCode: 1,
       message: `Could not find a "### Verdict" field to update in audit issue ${repo}#${auditIssue}'s body.`,
+    };
+  }
+
+  // Issue #510 (unit 510-A): validate the resulting body — not just compose it — before it is
+  // ever persisted. A failure here means the durable audit issue body is left completely
+  // unchanged; `ghEditImpl` is never reached.
+  const rewriteValidation = validateAuditVerdictRewrite(finalAuditIssueData.body ?? "", newBody);
+  if (!rewriteValidation.ok) {
+    return {
+      exitCode: 1,
+      message:
+        `Refusing to persist a Verdict rewrite for ${repo}#${auditIssue}: the resulting body would change more ` +
+        `than the "### Verdict" field: ${rewriteValidation.errors.join(" | ")}`,
     };
   }
 
