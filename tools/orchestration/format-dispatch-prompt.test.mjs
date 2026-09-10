@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import {
   formatDispatchPrompt,
   formatPlanningWorkerDispatchPrompt,
+  formatPlanningCorrectionWorkerDispatchPrompt,
   formatIntegrationWorkerDispatchPrompt,
   assertReferenceOnly,
 } from "./format-dispatch-prompt.mjs";
@@ -174,6 +175,69 @@ test("formatPlanningWorkerDispatchPrompt never contains restated AGENTS.md contr
   }
 });
 
+// -- issue #498 unit 498-B: "Planning-correction worker dispatch" -----------------------------
+
+test("formatPlanningCorrectionWorkerDispatchPrompt includes control/execution issue references and plan index URL, and points the worker at re-running the gate rather than restating failing unit ids", () => {
+  const prompt = formatPlanningCorrectionWorkerDispatchPrompt({
+    controlIssue: 500,
+    executionIssue: 498,
+    planIndexUrl: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-5624721353",
+    replanRequiredUnitIds: ["498-A", "498-B"],
+  });
+  assert.match(prompt, /^Planning-correction worker dispatch\./);
+  assert.match(prompt, /#498/);
+  assert.match(prompt, /#500/);
+  assert.match(prompt, /https:\/\/github\.com\/LouPineWays\/Loop-Dee-Loup\/issues\/498#issuecomment-5624721353/);
+  assert.match(prompt, /ready-dispatch-gate\.mjs --control-issue 500/);
+  // Stage 1 finding P1: the failing unit set must never be interpolated as prose — the
+  // worker recovers it deterministically by re-running the gate instead.
+  assert.ok(!prompt.includes("498-A, 498-B"));
+});
+
+test("formatPlanningCorrectionWorkerDispatchPrompt stays well under the reference-only threshold regardless of how many units are failing or how long the plan index permalink is", () => {
+  const manyUnits = Array.from({ length: 40 }, (_, i) => `498-${String.fromCharCode(65 + (i % 26))}${i}`);
+  // A permalink at GitHub's own structural limits — 39-char max username, 100-char max repo
+  // name — rather than an arbitrary made-up long string: this proves the bound holds for the
+  // longest URL GitHub itself can ever produce, not just for a plausible-looking one.
+  const longOwner = "a".repeat(39);
+  const longRepo = "b".repeat(100);
+  const longPlanIndexUrl = `https://github.com/${longOwner}/${longRepo}/issues/498#issuecomment-5624721626`;
+  const prompt = formatPlanningCorrectionWorkerDispatchPrompt({
+    controlIssue: 500,
+    executionIssue: 498,
+    planIndexUrl: longPlanIndexUrl,
+    replanRequiredUnitIds: manyUnits,
+  });
+  assert.ok(prompt.length < 700, `expected < 700 chars, got ${prompt.length}`);
+});
+
+test("formatPlanningCorrectionWorkerDispatchPrompt never restates the verdict's own reason text or AGENTS.md contract prose", () => {
+  const prompt = formatPlanningCorrectionWorkerDispatchPrompt({
+    controlIssue: 500,
+    executionIssue: 498,
+    planIndexUrl: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-5624721353",
+    replanRequiredUnitIds: ["498-A"],
+  });
+  for (const forbidden of ["STATUS", "OUTCOME", "CHANGED", "VERIFIED", "DECISIONS", "NEW RISKS", "Founder interrupt conditions"]) {
+    assert.ok(!prompt.includes(forbidden), `prompt unexpectedly contains restated field "${forbidden}"`);
+  }
+});
+
+test("formatPlanningCorrectionWorkerDispatchPrompt throws for missing/invalid required fields", () => {
+  assert.throws(() =>
+    formatPlanningCorrectionWorkerDispatchPrompt({ controlIssue: null, executionIssue: 498, planIndexUrl: "https://x", replanRequiredUnitIds: ["498-A"] }),
+  );
+  assert.throws(() =>
+    formatPlanningCorrectionWorkerDispatchPrompt({ controlIssue: 500, executionIssue: 498, planIndexUrl: "", replanRequiredUnitIds: ["498-A"] }),
+  );
+  assert.throws(() =>
+    formatPlanningCorrectionWorkerDispatchPrompt({ controlIssue: 500, executionIssue: 498, planIndexUrl: "https://x", replanRequiredUnitIds: [] }),
+  );
+  assert.throws(() =>
+    formatPlanningCorrectionWorkerDispatchPrompt({ controlIssue: 500, executionIssue: 498, planIndexUrl: "https://x", replanRequiredUnitIds: null }),
+  );
+});
+
 test("formatIntegrationWorkerDispatchPrompt includes the exact control Issue and execution Issue references and no route", () => {
   const prompt = formatIntegrationWorkerDispatchPrompt({ controlIssue: 408, executionIssue: 407 });
   assert.match(prompt, /^Integration\/PR worker dispatch\./);
@@ -237,6 +301,26 @@ test("CLI: an unrecognized state is still refused, error message names every rec
   assert.match(result.stderr, /not "READY_TO_DISPATCH"/);
   assert.match(result.stderr, /READY_TO_DISPATCH_PLANNING/);
   assert.match(result.stderr, /READY_TO_DISPATCH_INTEGRATION/);
+  assert.match(result.stderr, /REPLAN_REQUIRED/);
+});
+
+test("CLI: piped REPLAN_REQUIRED selects the planning-correction template", async () => {
+  const result = await runCli({
+    state: "REPLAN_REQUIRED",
+    controlIssue: 500,
+    executionIssue: 498,
+    planIndexUrl: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-5624721353",
+    replanRequiredUnitIds: ["498-A"],
+    reason: "498-A: capability class ... does not resolve",
+  });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Planning-correction worker dispatch\./);
+  assert.match(result.stdout, /#498/);
+  assert.match(result.stdout, /#500/);
+  assert.match(result.stdout, /ready-dispatch-gate\.mjs --control-issue 500/);
+  // The verdict's own `reason` text must never be retransmitted into the dispatch prompt --
+  // it is for the controller's compact chat/handoff record, not the worker prompt.
+  assert.ok(!result.stdout.includes("does not resolve"));
 });
 
 // -- CLI: explicit --kind selection (explicit-fields mode) ------------------------------------
@@ -265,6 +349,32 @@ test("CLI: explicit --kind integration selects the integration template without 
   );
   assert.equal(result.status, 0);
   assert.match(result.stdout, /^Integration\/PR worker dispatch\./);
+});
+
+test("CLI: explicit --kind planning-correction selects the planning-correction template with --plan-index-url and --replan-unit-ids", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const scriptPath = fileURLToPath(new URL("./format-dispatch-prompt.mjs", import.meta.url));
+  const result = spawnSync(
+    process.execPath,
+    [
+      scriptPath,
+      "--control-issue",
+      "500",
+      "--execution-issue",
+      "498",
+      "--kind",
+      "planning-correction",
+      "--plan-index-url",
+      "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-5624721353",
+      "--replan-unit-ids",
+      "498-A,498-B",
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Planning-correction worker dispatch\./);
+  assert.match(result.stdout, /ready-dispatch-gate\.mjs --control-issue 500/);
 });
 
 test("CLI: an unknown --kind fails closed with exit 2", async () => {
