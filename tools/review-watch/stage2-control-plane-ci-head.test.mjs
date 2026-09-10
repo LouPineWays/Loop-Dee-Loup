@@ -193,3 +193,113 @@ test("run: the exact live #499 control issue body resolves to exit 0 with the co
   assert.equal(result.head, "18f960088bb41704f2f970c72089640dc0c63bb9");
   assert.equal(result.source, "corrected");
 });
+
+// Stage 1 correction on PR #509 (Codex finding): an abbreviated disposition SHA must be resolved
+// to its canonical full 40-character commit SHA before `run()` reports success, since GitHub's
+// `actions/runs?head_sha=<sha>` filter requires an exact full-length match and does not resolve
+// a prefix. The tests below drive this end-to-end via an injected `resolveCommitImpl` fake —
+// never the real `gh` CLI/network.
+
+test("run: point 1 — ordinary disposition with a full 40-character SHA still returns that exact SHA, with no resolution lookup", async () => {
+  const body = "- **Stage 1:** satisfied at 9d775fc1a2b3c4d5e6f708192a3b4c5d6e7f8091\n";
+  const result = await run(
+    { controlIssue: "1", repo: "owner/repo" },
+    {
+      ghIssueViewImpl: () => ({ body }),
+      resolveCommitImpl: () => {
+        throw new Error("resolveCommitImpl must not be called for an already-full-length SHA");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.head, "9d775fc1a2b3c4d5e6f708192a3b4c5d6e7f8091");
+  assert.equal(result.source, "reviewed");
+});
+
+test("run: point 2 — ordinary disposition with a valid abbreviated SHA resolves via resolveCommitImpl to the full SHA", async () => {
+  const body = "- **Stage 1:** satisfied at abcdef1\n";
+  let seenArg = null;
+  const result = await run(
+    { controlIssue: "1", repo: "owner/repo" },
+    {
+      ghIssueViewImpl: () => ({ body }),
+      resolveCommitImpl: (arg) => {
+        seenArg = arg;
+        return "abcdef1234567890abcdef1234567890abcdef12";
+      },
+    },
+  );
+  assert.deepEqual(seenArg, { repo: "owner/repo", sha: "abcdef1" });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.head, "abcdef1234567890abcdef1234567890abcdef12");
+  assert.equal(result.source, "reviewed");
+});
+
+test("run: point 3 — correction-satisfied disposition with an abbreviated corrected SHA resolves to the full SHA", async () => {
+  const body =
+    "- **Stage 1:** correction-satisfied at 18f9600 (reviewed 05c70da1404ef89954c15be720222a81c01a230c)\n";
+  const result = await run(
+    { controlIssue: "499", repo: "LouPineWays/Loop-Dee-Loup" },
+    {
+      ghIssueViewImpl: () => ({ body }),
+      resolveCommitImpl: ({ sha }) => {
+        assert.equal(sha, "18f9600");
+        return "18f960088bb41704f2f970c72089640dc0c63bb9";
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.head, "18f960088bb41704f2f970c72089640dc0c63bb9");
+  assert.equal(result.source, "corrected");
+});
+
+test("run: point 4 — an abbreviated SHA that cannot be resolved fails closed and never appears as a successful head", async () => {
+  const body = "- **Stage 1:** satisfied at abcdef1\n";
+  const result = await run(
+    { controlIssue: "1", repo: "owner/repo" },
+    {
+      ghIssueViewImpl: () => ({ body }),
+      resolveCommitImpl: () => null,
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.ok, false);
+  assert.equal(result.head, undefined);
+  assert.match(result.reason, /does not resolve to a real commit/);
+});
+
+test("run: a thrown resolveCommitImpl is an operational error, not a fail-closed resolution", async () => {
+  const body = "- **Stage 1:** satisfied at abcdef1\n";
+  const result = await run(
+    { controlIssue: "1", repo: "owner/repo" },
+    {
+      ghIssueViewImpl: () => ({ body }),
+      resolveCommitImpl: () => {
+        throw new Error("network error");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /network error/);
+});
+
+test("run: point 5 — the live #499/#507/#508 reproduction resolves to the corrected head with no resolution lookup (already full length)", async () => {
+  const body =
+    "- **Stage 1:** correction-satisfied at 18f960088bb41704f2f970c72089640dc0c63bb9 " +
+    "(reviewed 05c70da1404ef89954c15be720222a81c01a230c)\n";
+  const result = await run(
+    { controlIssue: "499", repo: "LouPineWays/Loop-Dee-Loup" },
+    {
+      ghIssueViewImpl: () => ({ body }),
+      resolveCommitImpl: () => {
+        throw new Error("resolveCommitImpl must not be called for an already-full-length SHA");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.head, "18f960088bb41704f2f970c72089640dc0c63bb9");
+});
+
+// Point 6: the pre-existing malformed/unrecognized-disposition and #98 merge-commit-vs-PR-head
+// negative-control tests above are unmodified by this correction and still hold — resolution
+// only ever runs after `resolveControlPlaneCiHead` already returned `ok: true`.

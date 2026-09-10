@@ -47,10 +47,24 @@
 // "cannot determine" outcome, not an operational error), 1 = operational error (missing
 // argument, unreadable control issue, or unresolvable repo identity).
 //
+// Stage 1 correction on PR #509 (Codex finding): `resolveControlPlaneCiHead` below accepts the
+// same 7-40 character hex-prefix disposition forms tools/review-watch/stage1-correction-gate.mjs
+// already established (deliberately, for abbreviated disposition SHAs), but GitHub's
+// `actions/runs?head_sha=<sha>` filter requires an exact full-length match and does not resolve
+// a prefix — a legitimately short disposition like `correction-satisfied at 18f9600 (...)` would
+// otherwise make a real, successful CI run look absent, producing another false NOT CLEAN audit.
+// `run()` below resolves a non-40-character `head` to its canonical full commit SHA (reusing
+// stage1-correction-gate.mjs's own `defaultResolveCommit`, the established precedent for this
+// exact prefix-resolution problem) before returning success, and fails closed (exit 2) rather
+// than guessing when the prefix does not resolve to a real commit. `resolveControlPlaneCiHead`
+// itself stays a pure, repo-agnostic disposition parser — the resolution step needs network/repo
+// access, so it belongs in `run()`, the only place both are available.
+//
 // Tests: node --test tools/review-watch/stage2-control-plane-ci-head.test.mjs
 
 import { execFileSync } from "node:child_process";
 import { parseControlBullet, resolveRepoIdentity } from "../orchestration/ready-dispatch-gate.mjs";
+import { defaultResolveCommit } from "./stage1-correction-gate.mjs";
 
 // Matches docs/bounded-review-cycle.md's "Correction-satisfied disposition" bullet shape — an
 // independent copy of tools/review-watch/stage1-correction-gate.mjs's own
@@ -141,11 +155,15 @@ export function parseArgs(argv) {
   return args;
 }
 
-// Async. `ghIssueViewImpl`/`resolveRepoIdentityImpl` are injected so tests can drive this
-// end-to-end without touching the real network, `gh` CLI, or `git` binary.
+// Async. `ghIssueViewImpl`/`resolveRepoIdentityImpl`/`resolveCommitImpl` are injected so tests
+// can drive this end-to-end without touching the real network, `gh` CLI, or `git` binary.
 export async function run(
   args,
-  { ghIssueViewImpl = defaultGhIssueView, resolveRepoIdentityImpl = resolveRepoIdentity } = {},
+  {
+    ghIssueViewImpl = defaultGhIssueView,
+    resolveRepoIdentityImpl = resolveRepoIdentity,
+    resolveCommitImpl = defaultResolveCommit,
+  } = {},
 ) {
   const { controlIssue } = args;
   if (!controlIssue) {
@@ -170,7 +188,37 @@ export async function run(
 
   const bullet = parseControlBullet(issueData.body ?? "", "Stage 1");
   const resolved = resolveControlPlaneCiHead(bullet);
-  return resolved.ok ? { exitCode: 0, ...resolved } : { exitCode: 2, ...resolved };
+  if (!resolved.ok) {
+    return { exitCode: 2, ...resolved };
+  }
+
+  // Full-length heads need no lookup (the common case, and the exact optimization
+  // stage1-correction-gate.mjs's own resolver already applies for the same reason). A shorter
+  // hex prefix must resolve to a real commit before it is ever forwarded as a successful `head`
+  // — see module header comment.
+  if (resolved.head.length !== 40) {
+    let fullHead;
+    try {
+      fullHead = await resolveCommitImpl({ repo, sha: resolved.head });
+    } catch (err) {
+      return {
+        exitCode: 1,
+        message: `commit resolution threw for ${resolved.source} head ${resolved.head}: ${err.message}`,
+      };
+    }
+    if (!fullHead) {
+      return {
+        exitCode: 2,
+        ok: false,
+        reason:
+          `${resolved.source} head ${resolved.head} (from the control issue's Stage 1 disposition) ` +
+          `does not resolve to a real commit in ${repo}.`,
+      };
+    }
+    resolved.head = fullHead.toLowerCase();
+  }
+
+  return { exitCode: 0, ...resolved };
 }
 
 async function main() {
