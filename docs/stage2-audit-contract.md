@@ -186,10 +186,12 @@ an exhaustive incident log:
    restatement and no verification content. A verdict with nothing behind it is not evidence.
 3. **Wrong commit.** A response that restates a commit other than the audit Issue's own
    `Exact merge commit` — e.g. a PR head SHA, a different PR's commit, or (Stage 1 review finding,
-   issue #335) only the frozen Stage 1 reviewed head. Citing the reviewed head is legitimate for
-   the one checklist item that specifically asks for it (control-plane workflow runs are keyed to
-   it, not the merge commit — see the audit Issue's checklist instructions), but it never replaces
-   restating the actual merge commit under audit.
+   issue #335) only the frozen Stage 1 reviewed head. Citing the reviewed head — or, for a
+   correction-satisfied PR (audit #508, control #499), the corrected head — is legitimate for the
+   one checklist item that specifically asks for it (control-plane workflow runs are keyed to
+   whichever exact pre-merge head Stage 1 authority actually authorized, not the merge commit —
+   see the audit Issue's checklist instructions and `tools/review-watch/stage2-control-plane-ci-head.mjs`),
+   but it never replaces restating the actual merge commit under audit.
 4. **Contradictory verdicts.** Two or more genuine verdict declarations in the same response that
    disagree (e.g. a `CLEAN` status line but a `Verdict: NOT CLEAN` label later). This fails closed
    to no verdict, not to whichever declaration happened to come first.
