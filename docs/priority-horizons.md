@@ -27,6 +27,8 @@ Priority answers "when do we expect to pursue this"; blocked answers "can this p
 
 `Done` needs no priority label either — a closed Issue is retired GitHub state, subject to LDL's existing lifecycle semantics (see `AGENTS.md`) for when an implementation Issue may actually close.
 
+Pure lifecycle-evidence/reference artifacts that are intentionally not executable backlog work also need no horizon label. Examples include an Audit Issue whose job is to preserve audit state/evidence and a North Star/reference Issue that explicitly says not to execute it. Do not force such artifacts into Wishes merely to make every open Issue carry a priority.
+
 ## Intake
 
 The founder logs a raw idea with the `idea-intake` issue template (`.github/ISSUE_TEMPLATE/idea-intake.yml`) — a couple of short fields, fast to fill from a phone, no free-form issue writing required.
