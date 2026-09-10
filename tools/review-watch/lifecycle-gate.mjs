@@ -1097,9 +1097,13 @@ export function replaceVerdictField(body, newVerdict) {
   }
 
   if (headingIdx === -1) {
-    const trimmedTail = src.replace(/\s+$/, "");
-    const separator = trimmedTail === "" ? "" : "\n\n";
-    return `${trimmedTail}${separator}### Verdict\n\n${newVerdict}\n`;
+    // Stage 2 audit finding on issue #480: this branch previously stripped trailing whitespace
+    // from `src` before appending (`src.replace(/\s+$/, "")`), which mutated pre-existing content
+    // instead of leaving it byte-for-byte intact — the audit requirement this repair exists to
+    // honor. `src` itself is never altered here; only a separator and the new section are added
+    // after it, whatever its own trailing content already is.
+    const separator = src === "" ? "" : "\n\n";
+    return `${src}${separator}### Verdict\n\n${newVerdict}\n`;
   }
 
   for (let i = headingIdx + 1; i < lines.length; i++) {
@@ -1138,9 +1142,12 @@ function recordedVerdictComment({ repo, auditIssue, verdict, reportEvidence }) {
 // mechanism `REPORT_READY_TO_RECORD` (checkPostAudit above) authorizes. Reuses checkPostAudit
 // internally — never a second evidence parser, never re-adjudicating finding substance — to
 // decide whether a completed report already backs a not-yet-recorded verdict, then re-reads the
-// audit issue fresh immediately before mutating it: this closes the race window between the
-// evidence check and the mutation, and is what gives ALREADY_RECORDED/CONFLICTING_VERDICT their
-// own genuine meaning below rather than merely restating checkPostAudit's already-stale read.
+// audit issue fresh before revalidating report evidence, and re-reads it *again* immediately
+// before mutating it (Stage 2 audit finding on issue #480): the evidence-revalidation network call
+// in between is itself a window a concurrent invocation could record a settled verdict in, so the
+// conflict check run right before the edit uses that final read, not the one taken before the
+// network call. This is what gives ALREADY_RECORDED/CONFLICTING_VERDICT their own genuine meaning
+// below rather than merely restating checkPostAudit's already-stale read.
 // `ghIssueViewImpl`, `ghApiImpl`, `ghEditImpl`, and `ghCommentImpl` are all injected so tests can
 // drive this end-to-end without touching the real network or `gh` CLI.
 export async function checkRecordVerdict(
@@ -1269,7 +1276,76 @@ export async function checkRecordVerdict(
     };
   }
 
-  const newBody = replaceVerdictField(auditIssueData.body ?? "", evidenceVerdict);
+  // Stage 2 audit finding on issue #480: `currentRawVerdict` and `auditIssueData.body` above were
+  // both captured *before* the `findStage2ReportEvidence` network round trip that produced
+  // `freshReportEvidence` — a request that itself takes real time, during which a concurrent
+  // invocation could record a settled verdict. Checking `currentRawVerdict` for that race is not
+  // enough if the body actually mutated is the older, pre-revalidation read: the edit below would
+  // still overwrite a verdict that landed during the revalidation call. Re-read one more time,
+  // immediately before the mutation, and re-run the same ALREADY_RECORDED/CONFLICTING_VERDICT
+  // checks against that final read — narrowing the unresolved window to the unavoidable minimum
+  // (a single read-then-write gap) rather than one spanning the entire evidence revalidation call.
+  let finalAuditIssueData;
+  try {
+    finalAuditIssueData = await ghIssueViewImpl({ repo, number: auditIssue });
+  } catch (err) {
+    return { exitCode: 1, message: `gh issue view failed for ${repo}#${auditIssue}: ${err.message}` };
+  }
+  const finalRawVerdict = parseStage2Verdict(finalAuditIssueData.body ?? "");
+
+  // Stage 1 review finding on this PR (#491): reparsing only the verdict from
+  // `finalAuditIssueData` is not enough on its own. A concurrent edit could change the
+  // evidence-bearing context fields — `Exact merge commit` or `Verification checklist` — between
+  // the read `freshReportEvidence` was validated against and this final read, while leaving
+  // `Verdict` itself PENDING throughout; the verdict-only check above would never notice, and this
+  // invocation would record `evidenceVerdict` (validated against the *old* context) onto a body
+  // that now carries a *different* context. Fail closed instead of recording a verdict against a
+  // contract this invocation never actually revalidated.
+  const finalMergeCommit = parseMergeCommitRef(finalAuditIssueData.body ?? "");
+  const finalReviewedHeadCommit = parseReviewedHeadCommitRef(finalAuditIssueData.body ?? "");
+  const finalRequestedChecklist = parseVerificationChecklistRef(finalAuditIssueData.body ?? "");
+  if (
+    finalMergeCommit !== freshMergeCommit ||
+    finalReviewedHeadCommit !== freshReviewedHeadCommit ||
+    finalRequestedChecklist !== freshRequestedChecklist
+  ) {
+    return {
+      exitCode: 1,
+      message:
+        `Audit issue ${repo}#${auditIssue}'s evidence-bearing context (Exact merge commit / Reviewed head ` +
+        `commit / Verification checklist) changed between evidence revalidation and the final pre-edit read, ` +
+        `so the evidence already validated against the earlier context can no longer be trusted for this ` +
+        `body. Re-run record-verdict to revalidate against the current context.`,
+    };
+  }
+
+  if (finalRawVerdict === evidenceVerdict) {
+    return {
+      exitCode: 0,
+      state: "ALREADY_RECORDED",
+      auditIssue: postAudit.auditIssue,
+      verdict: finalRawVerdict,
+      reportEvidence: freshReportEvidence,
+    };
+  }
+
+  if (finalRawVerdict !== "PENDING" && finalRawVerdict !== null) {
+    return {
+      exitCode: 2,
+      state: "CONFLICTING_VERDICT",
+      auditIssue: postAudit.auditIssue,
+      recordedVerdict: finalRawVerdict,
+      evidenceVerdict,
+      reportEvidence: freshReportEvidence,
+      message:
+        `Refusing to record ${repo}#${auditIssue}'s evidence-backed verdict (${evidenceVerdict}, backed by ` +
+        `${freshReportEvidence.matchedCommentUrl ?? "this issue's own comment thread"}) over its already-` +
+        `recorded, conflicting durable Verdict field (${finalRawVerdict}). This is never silently overwritten; ` +
+        `resolve the conflict by hand.`,
+    };
+  }
+
+  const newBody = replaceVerdictField(finalAuditIssueData.body ?? "", evidenceVerdict);
   if (newBody === null) {
     return {
       exitCode: 1,
