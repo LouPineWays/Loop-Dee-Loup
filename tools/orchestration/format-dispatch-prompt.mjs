@@ -152,6 +152,26 @@ export function formatPlanningWorkerDispatchPrompt({ controlIssue, executionIssu
 // worker reads the authoritative routing failure directly off the Plan Index/unit contracts
 // (and, now, the gate's own re-run output) it is pointed at, exactly as every other dispatch
 // template in this file hands over references rather than restated content.
+//
+// Stage 2 audit finding on issue #526 (audited merge commit 442d19de03cd94769bac0ebaf5f8ddae0
+// cbbd515): removing the unit-list interpolation above was not by itself a structural bound —
+// `controlIssue` and `executionIssue` are only validated by `isPositiveInteger` (no digit-count
+// ceiling), a real GitHub comment permalink can carry a 39-char username, a 100-char repository
+// name (GitHub's own structural maximums), and a comment/issue id already around 10 digits and
+// growing, and the P1-corrected template still rendered `controlIssue` twice (once as
+// `#${controlIssue}`, once again inside the literal `--control-issue ${controlIssue}` CLI
+// snippet) — doubling that one field's contribution to the total length. The verification test
+// added alongside the P1 fix only exercised 3-digit control/execution issue numbers, so it
+// never actually measured the shape this finding reproduced (a 39/100-char owner/repo combined
+// with 10-digit issue/comment ids), and passed while the real worst case did not. This version
+// renders `controlIssue` exactly once (the worker infers `--control-issue`'s value from the
+// "Controlling Issue" reference already stated, instead of the value being repeated in a CLI
+// snippet) and trims the surrounding fixed prose further, so the template now stays under the
+// 700-char threshold even at `Number.MAX_SAFE_INTEGER` (2^53-1, 16 digits — the true upper
+// bound `isPositiveInteger` can ever accept) for both `controlIssue` and `executionIssue`
+// combined with a 39-char username, a 100-char repository name, and a 16-digit comment id: that
+// combination renders at 677 chars, comfortably under the threshold rather than scraping under
+// it the way the previous fix's own untested worst case did.
 export function formatPlanningCorrectionWorkerDispatchPrompt({ controlIssue, executionIssue, planIndexUrl, replanRequiredUnitIds }) {
   if (
     !isPositiveInteger(controlIssue) ||
@@ -169,11 +189,10 @@ export function formatPlanningCorrectionWorkerDispatchPrompt({ controlIssue, exe
   return (
     `Planning-correction worker dispatch. Execution Issue: #${executionIssue}. Controlling Issue: ` +
     `#${controlIssue}. Plan Index: ${planIndexUrl}.\n\n` +
-    `Run \`ready-dispatch-gate.mjs --control-issue ${controlIssue}\` for the failing unit(s)/reason — not ` +
-    `restated here. Read the Plan Index and each failing unit's Worker Unit Contract on GitHub. Correct ` +
-    `per AGENTS.md/docs/operating-model.md via format-execution-plan.mjs (#497). Return a compact ` +
-    `confirmation and stop — do not prepare the Dispatch Manifest, advance Lifecycle, or dispatch units ` +
-    `this invocation.`
+    `Re-run ready-dispatch-gate.mjs against the Controlling Issue above for the failing unit(s). Read ` +
+    `the Plan Index and each unit's contract, then correct per AGENTS.md/docs/operating-model.md using ` +
+    `format-execution-plan.mjs. Return a compact confirmation and stop — do not prepare the Dispatch ` +
+    `Manifest, advance Lifecycle, or dispatch units.`
   );
 }
 

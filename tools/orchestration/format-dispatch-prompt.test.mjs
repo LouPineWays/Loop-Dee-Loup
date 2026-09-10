@@ -188,23 +188,32 @@ test("formatPlanningCorrectionWorkerDispatchPrompt includes control/execution is
   assert.match(prompt, /#498/);
   assert.match(prompt, /#500/);
   assert.match(prompt, /https:\/\/github\.com\/LouPineWays\/Loop-Dee-Loup\/issues\/498#issuecomment-5624721353/);
-  assert.match(prompt, /ready-dispatch-gate\.mjs --control-issue 500/);
+  assert.match(prompt, /ready-dispatch-gate\.mjs against the Controlling Issue above/);
   // Stage 1 finding P1: the failing unit set must never be interpolated as prose — the
   // worker recovers it deterministically by re-running the gate instead.
   assert.ok(!prompt.includes("498-A, 498-B"));
+  // controlIssue must be rendered exactly once (only as the "Controlling Issue" reference) --
+  // Stage 2 audit finding on issue #526: a second embedding inside a CLI snippet doubled this
+  // field's contribution to the rendered length and defeated the P1 fix's own claimed bound.
+  assert.equal((prompt.match(/500/g) ?? []).length, 1);
 });
 
-test("formatPlanningCorrectionWorkerDispatchPrompt stays well under the reference-only threshold regardless of how many units are failing or how long the plan index permalink is", () => {
+test("formatPlanningCorrectionWorkerDispatchPrompt stays under the reference-only threshold at the true worst case: Number.MAX_SAFE_INTEGER control/execution issue numbers combined with GitHub's own structural username/repo-name maximums and a 16-digit comment id", () => {
   const manyUnits = Array.from({ length: 40 }, (_, i) => `498-${String.fromCharCode(65 + (i % 26))}${i}`);
-  // A permalink at GitHub's own structural limits — 39-char max username, 100-char max repo
-  // name — rather than an arbitrary made-up long string: this proves the bound holds for the
-  // longest URL GitHub itself can ever produce, not just for a plausible-looking one.
+  // Stage 2 audit finding on issue #526: the prior version of this test left controlIssue and
+  // executionIssue at their real 3-digit values (500/498) even while stress-testing a long
+  // permalink, so it never actually measured the shape the finding reproduced. GitHub's own
+  // structural maximums (39-char username, 100-char repository name) combined with
+  // Number.MAX_SAFE_INTEGER-sized issue/comment ids (2^53-1, 16 digits -- the true upper bound
+  // isPositiveInteger can ever accept, since it validates integer-ness, not digit count) is the
+  // genuine worst case, not merely a "long-looking" example.
   const longOwner = "a".repeat(39);
   const longRepo = "b".repeat(100);
-  const longPlanIndexUrl = `https://github.com/${longOwner}/${longRepo}/issues/498#issuecomment-5624721626`;
+  const maxSafeInteger = Number.MAX_SAFE_INTEGER;
+  const longPlanIndexUrl = `https://github.com/${longOwner}/${longRepo}/issues/${maxSafeInteger}#issuecomment-${maxSafeInteger}`;
   const prompt = formatPlanningCorrectionWorkerDispatchPrompt({
-    controlIssue: 500,
-    executionIssue: 498,
+    controlIssue: maxSafeInteger,
+    executionIssue: maxSafeInteger,
     planIndexUrl: longPlanIndexUrl,
     replanRequiredUnitIds: manyUnits,
   });
@@ -317,7 +326,7 @@ test("CLI: piped REPLAN_REQUIRED selects the planning-correction template", asyn
   assert.match(result.stdout, /^Planning-correction worker dispatch\./);
   assert.match(result.stdout, /#498/);
   assert.match(result.stdout, /#500/);
-  assert.match(result.stdout, /ready-dispatch-gate\.mjs --control-issue 500/);
+  assert.match(result.stdout, /ready-dispatch-gate\.mjs against the Controlling Issue above/);
   // The verdict's own `reason` text must never be retransmitted into the dispatch prompt --
   // it is for the controller's compact chat/handoff record, not the worker prompt.
   assert.ok(!result.stdout.includes("does not resolve"));
@@ -374,7 +383,7 @@ test("CLI: explicit --kind planning-correction selects the planning-correction t
   );
   assert.equal(result.status, 0);
   assert.match(result.stdout, /^Planning-correction worker dispatch\./);
-  assert.match(result.stdout, /ready-dispatch-gate\.mjs --control-issue 500/);
+  assert.match(result.stdout, /ready-dispatch-gate\.mjs against the Controlling Issue above/);
 });
 
 test("CLI: an unknown --kind fails closed with exit 2", async () => {
