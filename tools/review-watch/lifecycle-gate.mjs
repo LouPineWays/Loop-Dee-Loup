@@ -1293,6 +1293,32 @@ export async function checkRecordVerdict(
   }
   const finalRawVerdict = parseStage2Verdict(finalAuditIssueData.body ?? "");
 
+  // Stage 1 review finding on this PR (#491): reparsing only the verdict from
+  // `finalAuditIssueData` is not enough on its own. A concurrent edit could change the
+  // evidence-bearing context fields — `Exact merge commit` or `Verification checklist` — between
+  // the read `freshReportEvidence` was validated against and this final read, while leaving
+  // `Verdict` itself PENDING throughout; the verdict-only check above would never notice, and this
+  // invocation would record `evidenceVerdict` (validated against the *old* context) onto a body
+  // that now carries a *different* context. Fail closed instead of recording a verdict against a
+  // contract this invocation never actually revalidated.
+  const finalMergeCommit = parseMergeCommitRef(finalAuditIssueData.body ?? "");
+  const finalReviewedHeadCommit = parseReviewedHeadCommitRef(finalAuditIssueData.body ?? "");
+  const finalRequestedChecklist = parseVerificationChecklistRef(finalAuditIssueData.body ?? "");
+  if (
+    finalMergeCommit !== freshMergeCommit ||
+    finalReviewedHeadCommit !== freshReviewedHeadCommit ||
+    finalRequestedChecklist !== freshRequestedChecklist
+  ) {
+    return {
+      exitCode: 1,
+      message:
+        `Audit issue ${repo}#${auditIssue}'s evidence-bearing context (Exact merge commit / Reviewed head ` +
+        `commit / Verification checklist) changed between evidence revalidation and the final pre-edit read, ` +
+        `so the evidence already validated against the earlier context can no longer be trusted for this ` +
+        `body. Re-run record-verdict to revalidate against the current context.`,
+    };
+  }
+
   if (finalRawVerdict === evidenceVerdict) {
     return {
       exitCode: 0,

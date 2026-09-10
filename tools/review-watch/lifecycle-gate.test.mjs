@@ -2032,6 +2032,42 @@ test("checkRecordVerdict: CONFLICTING_VERDICT — a concurrent conflicting recor
   assert.equal(editCalls.length, 0, "a conflicting concurrent recording must never be silently overwritten");
 });
 
+// Stage 1 review finding on PR #491: reparsing only the verdict from the final pre-edit read is
+// not enough — a concurrent edit could change the evidence-bearing context (Exact merge commit /
+// Verification checklist) while leaving Verdict PENDING throughout, so freshReportEvidence would
+// still be validated against a context the final body no longer carries. This must fail closed
+// rather than record a verdict against a contract this invocation never actually revalidated.
+
+test("checkRecordVerdict: fails closed when the evidence-bearing 'Exact merge commit' context changes between evidence revalidation and the final pre-edit read, even though Verdict stays PENDING throughout", async () => {
+  const OTHER_COMMIT = "d281dbd5e7590b8ac2992753cd875f5e6472d999";
+  let issueViewCalls = 0;
+  const editCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number !== 160) return { body: "", state: "OPEN" };
+        issueViewCalls++;
+        // Calls 1 (inside checkPostAudit) and 2 (the read used to revalidate report evidence)
+        // both see the original merge commit with Verdict still PENDING; only the final pre-edit
+        // read (call 3) sees a concurrently-edited 'Exact merge commit' field — Verdict itself
+        // never changes, so a verdict-only recheck would miss this entirely.
+        return {
+          body: auditBodyWithCommit({ verdict: "PENDING", commit: issueViewCalls <= 2 ? MERGE_COMMIT : OTHER_COMMIT }),
+          state: "OPEN",
+        };
+      },
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /evidence-bearing context/);
+  assert.match(result.message, /Re-run record-verdict/);
+  assert.equal(editCalls.length, 0, "a verdict validated against a since-changed context must never be recorded");
+});
+
 // Stage 1 review finding on this PR: the fresh issue-body re-read alone does not close the race
 // Codex identified, because postAudit.reportEvidence can already be stale by the time the
 // mutation step runs — a newer completed report may land on the thread in between. These tests
