@@ -1497,11 +1497,12 @@ function correctionChainSupersededCloseComment({ repo, auditIssue, supersededBy,
   const evidenceRef = reportEvidence?.matchedCommentUrl ?? `its own completed Stage 2 audit report (audit issue ${repo}#${supersededBy})`;
   return (
     `Closed by \`tools/review-watch/lifecycle-gate.mjs close-audit\`: this audit issue's own verdict is not backed ` +
-    `CLEAN, but its own "Stage 1 inline review disposition" field records a later audit issue as its correction ` +
-    `successor, and that same correction chain reaches a distinct, backed-CLEAN audit — #${supersededBy} — under ` +
-    `this same evidence contract (backed by ${evidenceRef}), not merely by existing, being numbered later, or ` +
-    `sharing a similar title. Superseded by that correction chain; see #${supersededBy} for its own closing ` +
-    `evidence (issue #407, generalized to correction chains with no shared Work issue field by issue #513).`
+    `CLEAN, but a later correction audit's own "Stage 1 inline review disposition" field records that it is a ` +
+    `correction PR responding to this audit issue's own prior verdict, and that same correction chain reaches a ` +
+    `distinct, backed-CLEAN audit — #${supersededBy} — under this same evidence contract (backed by ${evidenceRef}), ` +
+    `not merely by existing, being numbered later, or sharing a similar title. Superseded by that correction chain; ` +
+    `see #${supersededBy} for its own closing evidence (issue #407, generalized to correction chains with no shared ` +
+    `Work issue field by issue #513).`
   );
 }
 
@@ -1512,17 +1513,23 @@ function correctionChainSupersededCloseComment({ repo, auditIssue, supersededBy,
 // against each intermediate audit issue number merely to discover and close it after the chain's
 // terminal audit reaches CLEAN.
 function chainRetiredCloseComment({ successorAuditIssue, terminalAuditIssue }) {
-  const successorRef =
+  // Stage 1 review finding on this PR: the correction-provenance pointer runs forward, not
+  // backward — the *successor*'s own "Stage 1 inline review disposition" field is what records
+  // that it corrects this (older, now-closed) predecessor; this predecessor's own field records
+  // no such thing about the successor. Name the successor's field as the source, never this
+  // issue's own.
+  const chainContext =
     successorAuditIssue === terminalAuditIssue
-      ? `#${terminalAuditIssue}`
-      : `#${successorAuditIssue}, itself retired in the same correction chain terminating at #${terminalAuditIssue}`;
+      ? ""
+      : `, itself retired in the same correction chain terminating at #${terminalAuditIssue}`;
   return (
-    `Closed by \`tools/review-watch/lifecycle-gate.mjs close-audit\`: this audit issue's own "Stage 1 inline ` +
-    `review disposition" field records that it is corrected by ${successorRef}. Per docs/bounded-review-cycle.md, ` +
-    `a correction chain that reaches an authoritative terminal Stage 2 audit retires every mechanically proven ` +
-    `superseded predecessor, not only the current/latest audit (issue #407, generalized to full multi-issue ` +
-    `correction chains by issue #513). This predecessor's own historical verdict and provenance are preserved ` +
-    `unchanged; see #${successorAuditIssue} for the successor's own evidence.`
+    `Closed by \`tools/review-watch/lifecycle-gate.mjs close-audit\`: #${successorAuditIssue}'s own "Stage 1 ` +
+    `inline review disposition" field records that it is a correction PR responding to this audit issue's own ` +
+    `prior verdict${chainContext}. Per docs/bounded-review-cycle.md, a correction chain that reaches an ` +
+    `authoritative terminal Stage 2 audit retires every mechanically proven superseded predecessor, not only the ` +
+    `current/latest audit (issue #407, generalized to full multi-issue correction chains by issue #513). This ` +
+    `predecessor's own historical verdict and provenance are preserved unchanged; see #${successorAuditIssue} for ` +
+    `the successor's own evidence.`
   );
 }
 
@@ -1548,27 +1555,60 @@ async function findCorrectionChainSuccessor(repo, auditIssueNumber, auditCreated
   if (visited.has(auditIssueNumber)) return null;
   visited.add(auditIssueNumber);
 
-  let nextInChain = null;
+  // Collect every later-created candidate naming this issue as what it corrects, rather than
+  // committing to the first one found in Map-iteration order. Stage 1 review finding on this PR:
+  // more than one later audit can independently name the same predecessor (e.g. an abandoned or
+  // still-PENDING first correction attempt, followed by a fresh replacement correction issue that
+  // also references the original predecessor) — if the first-found branch has no CLEAN
+  // descendant, an unexplored sibling that is already backed CLEAN must still be found, not
+  // treated as if no successor existed at all. Sorted oldest-created-first for a deterministic
+  // exploration order, independent of the caller's own Map insertion order.
+  const branchCandidates = [];
   for (const candidate of candidatesByNumber.values()) {
     const candidateNumber = Number(candidate.number);
     if (candidateNumber === auditIssueNumber) continue;
     const candidateCreatedMs = new Date(candidate.createdAt ?? 0).getTime();
     if (!(candidateCreatedMs > auditCreatedMs)) continue;
     if (parseCorrectsAuditRef(candidate.body ?? "") !== auditIssueNumber) continue;
-    nextInChain = candidate;
-    break;
+    branchCandidates.push(candidate);
   }
-  if (!nextInChain) return null;
+  branchCandidates.sort((a, b) => new Date(a.createdAt ?? 0).getTime() - new Date(b.createdAt ?? 0).getTime());
 
-  const nextNumber = Number(nextInChain.number);
-  const nextCreatedMs = new Date(nextInChain.createdAt ?? 0).getTime();
-  const nextOwn = await evaluateAuditCloseReadiness(repo, nextNumber, nextInChain.body ?? "", { ghApiImpl, bot });
-  if (nextOwn.backedClean) {
-    return { supersededBy: nextNumber, reportEvidence: nextOwn.reportEvidence, terminal: nextNumber };
+  for (const nextInChain of branchCandidates) {
+    const nextNumber = Number(nextInChain.number);
+    const nextCreatedMs = new Date(nextInChain.createdAt ?? 0).getTime();
+    const nextOwn = await evaluateAuditCloseReadiness(repo, nextNumber, nextInChain.body ?? "", { ghApiImpl, bot });
+    if (nextOwn.backedClean) {
+      return { supersededBy: nextNumber, reportEvidence: nextOwn.reportEvidence, terminal: nextNumber };
+    }
+    // Each sibling branch gets its own copy of the ancestor-path `visited` set: a dead-end
+    // explored while walking one branch must never block a completely independent sibling branch
+    // from exploring the same descendant, only guard against a genuine cycle on one path.
+    const deeper = await findCorrectionChainSuccessor(repo, nextNumber, nextCreatedMs, candidatesByNumber, new Set(visited), { ghApiImpl, bot });
+    if (deeper) {
+      return { supersededBy: nextNumber, reportEvidence: deeper.reportEvidence, terminal: deeper.terminal };
+    }
   }
-  const deeper = await findCorrectionChainSuccessor(repo, nextNumber, nextCreatedMs, candidatesByNumber, visited, { ghApiImpl, bot });
-  if (!deeper) return null;
-  return { supersededBy: nextNumber, reportEvidence: deeper.reportEvidence, terminal: deeper.terminal };
+  return null;
+}
+
+// Pure. Whether `body` has the basic recognizable shape of a canonical Stage 2
+// audit-control-issue (the `.github/ISSUE_TEMPLATE/audit-control-issue.yml` shape) rather than
+// some unrelated open issue that merely happens to share a number with a typo in a
+// correction-chain pointer. Stage 1 review finding on this PR (P1): a manually entered
+// predecessor number that is a typo naming any older open non-audit issue would otherwise pass
+// `retirePredecessorChain`'s existing checks (exists, predates the current audit) and get closed
+// unconditionally. Requires the same three required fields `retirePredecessorChain` and its
+// callers already parse elsewhere in this file — Exact merge commit, Work issue, and the "Stage 1
+// inline review disposition" block itself — all present at once; a real audit issue always has
+// all three, and an arbitrary unrelated issue essentially never does by coincidence.
+function hasCanonicalAuditShape(body) {
+  const text = body ?? "";
+  return (
+    parseMergeCommitRef(text) !== null &&
+    parseWorkIssueRef(text) !== null &&
+    parseFormFieldBlock(text, "Stage 1 inline review disposition") !== null
+  );
 }
 
 // Walks the `correctsAuditRef` chain backward from an audit issue this same `checkCloseAudit`
@@ -1615,6 +1655,21 @@ async function retirePredecessorChain(
       predecessorData = await ghIssueViewImpl({ repo, number: predecessorNumber });
     } catch (err) {
       skipped.push({ auditIssue: predecessorNumber, reason: `could not read predecessor issue #${predecessorNumber}: ${err.message}` });
+      break;
+    }
+
+    // P1 Stage 1 review finding: never mutate an issue on the strength of a bare number match
+    // alone — a typo'd predecessor reference that happens to name some older open non-audit issue
+    // must fail closed here rather than being closed unconditionally just because it exists and
+    // predates the current audit.
+    if (!hasCanonicalAuditShape(predecessorData.body ?? "")) {
+      skipped.push({
+        auditIssue: predecessorNumber,
+        reason:
+          `#${predecessorNumber} does not have the canonical Stage 2 audit-control-issue shape ` +
+          `(missing Exact merge commit / Work issue / Stage 1 inline review disposition fields); ` +
+          `fails closed rather than closing a possibly-mistyped reference`,
+      });
       break;
     }
 
@@ -1815,11 +1870,28 @@ export async function checkCloseAudit(
     return { exitCode: 1, message: `gh issue view failed for ${repo}#${auditIssue}: ${err.message}` };
   }
 
-  // Safe no-op regardless of --dry-run: an already-closed audit issue is already terminal, so
-  // there is nothing to compute or mutate. Checked before any evidence evaluation so a rerun
-  // against a just-closed issue never re-derives (or re-posts) anything.
+  // An already-closed audit issue is already terminal for *its own* evidence, so there is no
+  // evidence to (re-)compute and this issue itself is never re-closed or re-commented-on. Checked
+  // before any evidence evaluation for that reason. But the predecessor cascade below is still
+  // attempted here (idempotently — retirePredecessorChain never re-closes or re-comments on an
+  // already-closed predecessor, and does nothing at all when this issue's own body names no
+  // predecessor): Stage 1 review finding on this PR (P2) — without this, a predecessor whose close
+  // attempt failed transiently on a prior run would remain open permanently, since a retry
+  // against this same terminal audit used to exit immediately as ALREADY_TERMINAL with no way to
+  // ever revisit that predecessor again.
   if (auditData.state === "CLOSED") {
-    return { exitCode: 0, state: "ALREADY_TERMINAL", auditIssue: auditIssueNumber };
+    const cascade = await retirePredecessorChain(
+      repo,
+      { number: auditIssueNumber, body: auditData.body, createdAt: auditData.createdAt },
+      { ghIssueViewImpl, ghCloseImpl, ghCommentImpl, dryRun },
+    );
+    return {
+      exitCode: 0,
+      state: "ALREADY_TERMINAL",
+      auditIssue: auditIssueNumber,
+      retiredPredecessors: cascade.retired,
+      predecessorChainNotes: cascade.skipped,
+    };
   }
 
   let own;
