@@ -326,6 +326,23 @@ test("verifyFullRoundTrip catches a mismatched Plan Index / Worker Unit set inte
   assert.ok(result.errors.some((e) => /999-Z/.test(e) && /workerUnits/.test(e)));
 });
 
+test("validatePlanInput rejects a workerUnits entry absent from the Plan Index Units list (#497 Stage 1 review finding)", () => {
+  // The reverse direction of the mismatch above: a submitted Worker Unit Contract that the
+  // Plan Index never lists would still be persisted on --publish, yet the Plan Index (and
+  // any Dispatch Manifest derived from it) would never reference it, so it could never be
+  // dispatched even though the submitted plan included it.
+  const input = validInput({
+    workerUnits: [validWorkerUnit("999-A"), validWorkerUnit("999-B")],
+    planIndex: { ...validInput().planIndex, units: [validPlanIndexUnit("999-A")] },
+  });
+  const result = validatePlanInput(input);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => /999-B/.test(e) && /Plan Index/.test(e)),
+    `expected a reverse-direction mismatch error, got: ${JSON.stringify(result.errors)}`,
+  );
+});
+
 // ---------------------------------------------------------------------------------------
 // Structural validation coverage: unitId shape, duplicates, missing executionIssue, etc.
 // ---------------------------------------------------------------------------------------
@@ -356,6 +373,32 @@ test("validatePlanInput rejects duplicate workerUnits entries for the same unitI
   assert.ok(result.errors.some((e) => /duplicate/.test(e)));
 });
 
+test("validatePlanInput enforces the execution-scoped unitId convention against the current executionIssue (#497 Stage 1 review finding)", () => {
+  // docs/operating-model.md § Durable plan artifacts fixes the convention as
+  // "<execution-issue-number>-<Letter>". prepare-dispatch-manifest.mjs's own dependency
+  // matcher (UNIT_ID_TOKEN = /\d+-[A-Za-z]+/) silently treats an out-of-convention ID as no
+  // dependency at all, so this must be rejected at write time, not merely discovered later.
+  for (const badId of ["foo", "999", "A-999", "1000-A"]) {
+    const input = validInput({
+      workerUnits: [validWorkerUnit(badId)],
+      planIndex: { ...validInput().planIndex, units: [validPlanIndexUnit(badId)] },
+    });
+    const result = validatePlanInput(input);
+    assert.equal(result.ok, false, `expected rejection for unitId ${JSON.stringify(badId)}`);
+    assert.ok(
+      result.errors.some((e) => /execution-scoped/.test(e)),
+      `expected an execution-scoped-convention error, got: ${JSON.stringify(result.errors)}`,
+    );
+  }
+});
+
+test("validatePlanIndexInput and validateWorkerUnitInput skip the execution-scoped check when executionIssue is not supplied", () => {
+  // Existing direct callers (e.g. this file's own validatePlanIndexInput(planIndex) tests
+  // below) do not pass executionIssue at all -- the new check must not force that on every
+  // caller; validatePlanInput is the one that always threads it through.
+  assert.deepEqual(validateWorkerUnitInput(validWorkerUnit("not-scoped"), { unitId: "not-scoped" }), []);
+});
+
 test("validatePlanIndexInput rejects a duplicate unitId within the Units list", () => {
   const planIndex = validInput().planIndex;
   planIndex.units = [validPlanIndexUnit("999-A"), validPlanIndexUnit("999-A")];
@@ -375,6 +418,34 @@ test("validateSharedContractInput rejects a missing or blank body", () => {
   assert.ok(validateSharedContractInput({}).length > 0);
   assert.ok(validateSharedContractInput({ body: "   " }).length > 0);
   assert.deepEqual(validateSharedContractInput({ body: "real content" }), []);
+});
+
+test("validatePlanIndexInput rejects a sharedContractUrl/commentUrl that is not a real comment permalink (#497 Stage 1 review finding)", () => {
+  // A merely whitespace-free string (e.g. "not-a-comment-url") previously passed this
+  // check; it would then fail to resolve via parse-execution-plan.mjs's own
+  // extractCommentIdFromUrl once actually read back, and buildPlanArtifacts's own
+  // verifyFullRoundTrip did not catch this because it replaces supplied URLs with
+  // synthetic valid ones before checking (see the "buildPlanArtifacts round-trip check
+  // does not mask" test below).
+  const planIndexBadShared = { ...validInput().planIndex, sharedContractUrl: "not-a-comment-url" };
+  const sharedErrors = validatePlanIndexInput(planIndexBadShared);
+  assert.ok(
+    sharedErrors.some((e) => /sharedContractUrl/.test(e) && /permalink/.test(e)),
+    `expected a permalink rejection, got: ${JSON.stringify(sharedErrors)}`,
+  );
+
+  const planIndexBadUnit = {
+    ...validInput().planIndex,
+    units: [validPlanIndexUnit("999-A", { commentUrl: "not-a-comment-url" })],
+  };
+  const unitErrors = validatePlanIndexInput(planIndexBadUnit);
+  assert.ok(
+    unitErrors.some((e) => /commentUrl/.test(e) && /permalink/.test(e)),
+    `expected a permalink rejection, got: ${JSON.stringify(unitErrors)}`,
+  );
+
+  // A real permalink shape still passes.
+  assert.deepEqual(validatePlanIndexInput(validInput().planIndex), []);
 });
 
 // ---------------------------------------------------------------------------------------
@@ -473,4 +544,37 @@ test("publishPlanArtifacts surfaces a failed live round-trip verification as a n
   const result = await publishPlanArtifacts(validInput(), { repo: REPO, postImpl, verifyImpl });
   assert.equal(result.ok, false);
   assert.ok(result.errors.some((e) => /live round-trip verification failed/.test(e)));
+});
+
+test("publishPlanArtifacts writes nothing when Shared Contract and Worker Units are valid but the Plan Index is malformed (#497 Stage 1 review finding)", async () => {
+  // A prior version stripped planIndex out of publishPlanArtifacts' own pre-validation
+  // call, so a structurally invalid Plan Index (here: an empty "units" array) was only
+  // discovered by buildPlanArtifacts further downstream -- after the Shared Contract and
+  // Worker Unit comments had already been posted for real. Confirm zero writes happen now.
+  let calls = 0;
+  const postImpl = async () => {
+    calls++;
+    return { html_url: "unused" };
+  };
+  const input = validInput({ planIndex: { ...validInput().planIndex, units: [] } });
+  const result = await publishPlanArtifacts(input, { repo: REPO, postImpl });
+  assert.equal(result.ok, false);
+  assert.equal(calls, 0, "no gh write should happen when the Plan Index itself is malformed");
+});
+
+// ---------------------------------------------------------------------------------------
+// CLI (#497 Stage 1 review finding: exit codes must distinguish operational errors from
+// validated-but-rejected plan input)
+// ---------------------------------------------------------------------------------------
+
+test("CLI: a missing --input file fails closed with the documented operational-error exit code, not an uncaught exception", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const scriptPath = fileURLToPath(new URL("./format-execution-plan.mjs", import.meta.url));
+  const result = spawnSync(process.execPath, [scriptPath, "--input", "definitely-does-not-exist.json"], {
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 2, `expected operational-error exit code 2, got ${result.status}: ${result.stderr}`);
+  assert.match(result.stderr, /could not read --input file/);
+  assert.equal(result.stdout, "");
 });

@@ -49,7 +49,8 @@
 // `commentUrl` — must already be known and supplied in the input):
 //   node tools/orchestration/format-execution-plan.mjs --input plan.json
 //
-// Usage (compose + persist — posts/patches the real comments via `gh api`, in Shared
+// Usage (compose + persist — posts the real comments via `gh api` (always creating fresh
+// comments; no in-place refresh/PATCH support — see `publishPlanArtifacts`), in Shared
 // Contract -> Worker Units -> Plan Index order so the Plan Index's own Units list can
 // reference the just-created real comment URLs; re-reads and re-parses via
 // `parse-execution-plan.mjs` after writing to verify the live round trip):
@@ -94,7 +95,13 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { parseExecutionPlan, parseUnitListItem, runParseExecutionPlan, WORKER_UNIT_FIELDS } from "./parse-execution-plan.mjs";
+import {
+  parseExecutionPlan,
+  parseUnitListItem,
+  runParseExecutionPlan,
+  WORKER_UNIT_FIELDS,
+  extractCommentIdFromUrl,
+} from "./parse-execution-plan.mjs";
 import { CAPABILITY_CLASS_ROUTE_TABLE } from "./prepare-dispatch-manifest.mjs";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 
@@ -118,6 +125,31 @@ function hasWhitespace(value) {
   return typeof value === "string" && /\s/.test(value);
 }
 
+// Pure. `docs/operating-model.md` § Durable plan artifacts fixes the Unit-ID convention as
+// `<execution-issue-number>-<Letter>` (a plan's units are always scoped to the execution
+// Issue that owns them). This is not cosmetic: `prepare-dispatch-manifest.mjs` recognizes a
+// "depends on" dependency token only via its own `UNIT_ID_TOKEN = /\d+-[A-Za-z]+/`, so a
+// unit ID that does not carry the current execution Issue's own number is silently
+// unrecognizable to that downstream matcher (a prerequisite naming it would be read as no
+// dependency at all). Returns true when `executionIssue` itself is not a valid positive
+// integer — that condition is already reported separately by the caller, and this check
+// must not produce a second, confusing error about it.
+function isExecutionScopedUnitId(unitId, executionIssue) {
+  if (!Number.isInteger(executionIssue) || executionIssue <= 0) return true;
+  return new RegExp(`^${executionIssue}-[A-Za-z]+$`).test(unitId);
+}
+
+// Pure. A Plan Index `sharedContractUrl` / unit `commentUrl` must be an actual GitHub issue
+// comment permalink (`...#issuecomment-<numeric id>`) — the exact shape
+// `parse-execution-plan.mjs`'s own `extractCommentIdFromUrl` requires to resolve the
+// referenced comment. A merely whitespace-free string (e.g. "not-a-comment-url") is not
+// sufficient: it would pass this writer's own compose-only validation yet fail to parse
+// once read back for real, since nothing here re-derives the comment ID a live `gh` read
+// would need.
+function isCommentPermalink(value) {
+  return typeof value === "string" && extractCommentIdFromUrl(value) !== null;
+}
+
 // Pure. Returns the canonical token (in the table's own casing) matching `value`
 // case-insensitively, or null when `value` is not exactly one of the five tokens — never a
 // fuzzy/partial match.
@@ -136,7 +168,7 @@ const WORKER_UNIT_INPUT_KEYS = WORKER_UNIT_FIELDS.map(([, key]) => key).filter(
 
 // Pure. Validates one Worker Unit Contract's structured input. Returns an array of every
 // problem found (empty when valid) — never stops at the first.
-export function validateWorkerUnitInput(unit, { unitId } = {}) {
+export function validateWorkerUnitInput(unit, { unitId, executionIssue } = {}) {
   const errors = [];
   const label = isNonEmptyString(unitId) ? `worker unit "${unitId}"` : "a worker unit";
 
@@ -144,6 +176,12 @@ export function validateWorkerUnitInput(unit, { unitId } = {}) {
     errors.push("a worker unit is missing its unitId");
   } else if (/[\s:]/.test(unitId)) {
     errors.push(`${label}: unitId must not contain whitespace or ":"`);
+  } else if (!isExecutionScopedUnitId(unitId, executionIssue)) {
+    errors.push(
+      `${label}: unitId ${JSON.stringify(unitId)} must match the execution-scoped convention ` +
+        `"<executionIssue>-<Letter>" (e.g. "${executionIssue}-A") for execution issue #${executionIssue} ` +
+        `(docs/operating-model.md § Durable plan artifacts, Unit-ID convention)`,
+    );
   }
 
   for (const key of WORKER_UNIT_INPUT_KEYS) {
@@ -191,7 +229,7 @@ export function validateSharedContractInput(sharedContract) {
 // invocation composes, and a Plan Index bullet/entry with no URL is not a valid artifact —
 // the `--publish` CLI path resolves real URLs from what it just posted before ever calling
 // this validator, rather than this function itself growing a "URLs optional" mode.
-export function validatePlanIndexInput(planIndex) {
+export function validatePlanIndexInput(planIndex, { executionIssue } = {}) {
   const errors = [];
   if (!planIndex) return errors;
 
@@ -216,6 +254,11 @@ export function validatePlanIndexInput(planIndex) {
     errors.push('Plan Index: missing required field "sharedContractUrl"');
   } else if (hasWhitespace(planIndex.sharedContractUrl.trim())) {
     errors.push('Plan Index: "sharedContractUrl" must not contain whitespace');
+  } else if (!isCommentPermalink(planIndex.sharedContractUrl.trim())) {
+    errors.push(
+      'Plan Index: "sharedContractUrl" must be a real GitHub issue comment permalink ' +
+        '(".../issues/<N>#issuecomment-<id>"), not merely a whitespace-free string',
+    );
   }
 
   if (!Array.isArray(planIndex.units) || planIndex.units.length === 0) {
@@ -234,6 +277,13 @@ export function validatePlanIndexInput(planIndex) {
       errors.push(`${where}: duplicate unitId "${unit.unitId}"`);
     } else {
       seenUnitIds.add(unit.unitId);
+      if (!isExecutionScopedUnitId(unit.unitId, executionIssue)) {
+        errors.push(
+          `${where}: unitId ${JSON.stringify(unit.unitId)} must match the execution-scoped convention ` +
+            `"<executionIssue>-<Letter>" (e.g. "${executionIssue}-A") for execution issue #${executionIssue} ` +
+            `(docs/operating-model.md § Durable plan artifacts, Unit-ID convention)`,
+        );
+      }
     }
 
     if (!isNonEmptyString(unit?.state)) {
@@ -257,6 +307,11 @@ export function validatePlanIndexInput(planIndex) {
       errors.push(`${where}: missing required field "commentUrl"`);
     } else if (hasWhitespace(unit.commentUrl.trim())) {
       errors.push(`${where}: "commentUrl" must not contain whitespace`);
+    } else if (!isCommentPermalink(unit.commentUrl.trim())) {
+      errors.push(
+        `${where}: "commentUrl" must be a real GitHub issue comment permalink ` +
+          `(".../issues/<N>#issuecomment-<id>"), not merely a whitespace-free string`,
+      );
     }
   });
 
@@ -296,17 +351,29 @@ export function validatePlanInput(input) {
           }
           workerUnitIds.add(unit.unitId);
         }
-        errors.push(...validateWorkerUnitInput(unit, { unitId: unit?.unitId }));
+        errors.push(...validateWorkerUnitInput(unit, { unitId: unit?.unitId, executionIssue: input.executionIssue }));
       }
     }
   }
 
   if (input.planIndex) {
-    errors.push(...validatePlanIndexInput(input.planIndex));
+    errors.push(...validatePlanIndexInput(input.planIndex, { executionIssue: input.executionIssue }));
     if (input.workerUnits !== undefined && Array.isArray(input.planIndex.units)) {
+      const planIndexUnitIds = new Set(
+        input.planIndex.units.filter((u) => isNonEmptyString(u?.unitId)).map((u) => u.unitId),
+      );
       for (const u of input.planIndex.units) {
         if (isNonEmptyString(u?.unitId) && !workerUnitIds.has(u.unitId)) {
           errors.push(`Plan Index lists unit "${u.unitId}" but no matching entry exists in "workerUnits"`);
+        }
+      }
+      // The reverse direction (#497 Stage 1 review finding): a submitted Worker Unit
+      // Contract absent from the Plan Index would still be persisted on --publish, yet the
+      // Plan Index and any Dispatch Manifest derived from it would never reference it, so
+      // that unit could never be dispatched even though the submitted plan included it.
+      for (const unitId of workerUnitIds) {
+        if (!planIndexUnitIds.has(unitId)) {
+          errors.push(`"workerUnits" includes unit "${unitId}" but the Plan Index "units" list does not list it`);
         }
       }
     }
@@ -519,13 +586,20 @@ export function buildPlanArtifacts(input) {
 // testability convention.
 // ---------------------------------------------------------------------------------------
 
-function defaultPost({ repo, executionIssue, commentId, body }) {
+// Always creates a brand-new comment. This tool does not support in-place refresh (PATCH)
+// of an existing Plan Index/Shared Contract/Worker Unit comment — `docs/operating-model.md`
+// § Durable plan artifacts' "edit-ownership rule" refresh path (Route/Prepare-stage and
+// Integration/PR worker refreshing the Plan Index in place) is real, but is not yet wired
+// through this CLI. A prior version exposed an `existingCommentIds`/PATCH surface that no
+// caller (CLI or otherwise) could actually reach, and that was never verified to preserve
+// the "the parser reads back the comment we just wrote" invariant when it was reachable
+// (#497 Stage 1 review findings). Removing it here rather than wiring it half-built keeps
+// every `--publish` call unambiguous: it always creates fresh, freshly-verifiable comments.
+function defaultPost({ repo, executionIssue, body }) {
   const tmpFile = path.join(tmpdir(), `format-execution-plan-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
   writeFileSync(tmpFile, body, "utf8");
   try {
-    const args = commentId
-      ? ["api", `repos/${repo}/issues/comments/${commentId}`, "-X", "PATCH", "-F", `body=@${tmpFile}`]
-      : ["api", `repos/${repo}/issues/${executionIssue}/comments`, "-X", "POST", "-F", `body=@${tmpFile}`];
+    const args = ["api", `repos/${repo}/issues/${executionIssue}/comments`, "-X", "POST", "-F", `body=@${tmpFile}`];
     return JSON.parse(execFileSync("gh", args, { encoding: "utf8" }));
   } finally {
     try {
@@ -552,9 +626,20 @@ async function defaultRunParseExecutionPlan({ repo, executionIssue }) {
 // round-trip self-check as the compose-only path.
 export async function publishPlanArtifacts(
   input,
-  { repo, existingCommentIds = {}, postImpl = defaultPost, verifyImpl = defaultRunParseExecutionPlan } = {},
+  { repo, postImpl = defaultPost, verifyImpl = defaultRunParseExecutionPlan } = {},
 ) {
-  const preValidation = validatePlanInput({ ...input, planIndex: undefined });
+  // Validate the COMPLETE input — every artifact type present, including the Plan Index —
+  // before any GitHub write happens. A prior version stripped `planIndex` out of this
+  // pre-validation call, so a structurally malformed Plan Index (e.g. an empty "units"
+  // array) was only discovered by `buildPlanArtifacts` further below, after the Shared
+  // Contract and Worker Unit comments had already been posted — violating the "nothing is
+  // written on invalid input" contract (#497 Stage 1 review finding). The Plan Index's
+  // `sharedContractUrl`/unit `commentUrl` fields are always required as syntactically valid
+  // permalinks even here: when `input.sharedContract`/`input.workerUnits` are also present
+  // in this same call, those placeholder values are never actually persisted (they are
+  // overwritten below with the freshly-posted real URLs) — they exist only to satisfy this
+  // validation contract up front, matching every existing caller/test convention.
+  const preValidation = validatePlanInput(input);
   if (!preValidation.ok) return { ok: false, errors: preValidation.errors };
 
   const { executionIssue } = input;
@@ -562,7 +647,7 @@ export async function publishPlanArtifacts(
 
   if (input.sharedContract) {
     const body = formatSharedContractBody(input.sharedContract, { executionIssue });
-    const posted = await postImpl({ repo, executionIssue, commentId: existingCommentIds.sharedContract, body });
+    const posted = await postImpl({ repo, executionIssue, body });
     persisted.sharedContractUrl = posted.html_url;
   }
 
@@ -570,12 +655,7 @@ export async function publishPlanArtifacts(
     persisted.workerUnitUrls = {};
     for (const unit of input.workerUnits) {
       const body = formatWorkerUnitBody(unit, { executionIssue });
-      const posted = await postImpl({
-        repo,
-        executionIssue,
-        commentId: existingCommentIds.workerUnits?.[unit.unitId],
-        body,
-      });
+      const posted = await postImpl({ repo, executionIssue, body });
       persisted.workerUnitUrls[unit.unitId] = posted.html_url;
     }
   }
@@ -593,12 +673,7 @@ export async function publishPlanArtifacts(
     const built = buildPlanArtifacts(finalInput);
     if (!built.ok) return { ok: false, errors: built.errors };
 
-    const posted = await postImpl({
-      repo,
-      executionIssue,
-      commentId: existingCommentIds.planIndex,
-      body: built.artifacts.planIndexBody,
-    });
+    const posted = await postImpl({ repo, executionIssue, body: built.artifacts.planIndexBody });
     persisted.planIndexUrl = posted.html_url;
 
     const reparsed = await verifyImpl({ repo, executionIssue });
@@ -640,7 +715,19 @@ async function main() {
 
   let raw;
   if (args.input) {
-    raw = readFileSync(args.input, "utf8");
+    try {
+      raw = readFileSync(args.input, "utf8");
+    } catch (err) {
+      // A missing/unreadable --input file is an operational error (exit 2), the same as bad
+      // CLI usage or a `gh` failure — never exit 1, which this module's own documented exit
+      // codes reserve for validated-but-rejected plan input (#497 Stage 1 review finding: an
+      // uncaught readFileSync here previously produced a bare Node stack trace on exit 1,
+      // indistinguishable from a genuine invalid-plan rejection to any automation reading
+      // the exit code alone).
+      process.stderr.write(`format-execution-plan.mjs: could not read --input file "${args.input}": ${err.message}\n`);
+      process.exit(2);
+      return;
+    }
   } else {
     raw = readStdinIfPiped();
     if (!raw) {
