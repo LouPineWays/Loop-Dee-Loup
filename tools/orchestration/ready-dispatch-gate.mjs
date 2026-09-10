@@ -441,24 +441,30 @@ function extractBoldBulletLabels(body) {
 }
 
 // Pure. True when `label` is a near-duplicate of `canonical`: it begins with the canonical
-// label text (case-insensitive) followed by a word boundary and additional non-empty
-// qualifier content before the colon — a parenthetical like "(current)"/"(updated)", or a
-// bare trailing word like "note" — while not itself being an exact (case-insensitive) match
-// for `canonical`. Issue #493's #440 regression: "Stage 2 (current):" and
-// "Stage 2 (updated):" both take this shape relative to canonical "Stage 2". Deliberately a
-// structural prefix-plus-leftover-content rule, not a fixed whitelist of qualifier words —
-// the issue explicitly rejects special-casing only the literal observed spellings, so any
-// future lookalike qualifier is caught the same way. The word-boundary requirement (the
-// character immediately after the canonical prefix must be whitespace or "(") keeps an
-// unrelated label that merely shares a character prefix — e.g. canonical "PR" against a
-// hypothetical "Precondition" — from being misread as a near-duplicate.
+// label text (case-insensitive) followed by a non-word boundary and additional non-empty
+// qualifier content before the colon — a parenthetical like "(current)"/"(updated)", a bare
+// trailing word like "note", or a punctuation-delimited qualifier like "-current"/"/current"/
+// "[current]"/an em-dash form — while not itself being an exact (case-insensitive) match for
+// `canonical`. Issue #493's #440 regression: "Stage 2 (current):" and "Stage 2 (updated):"
+// both take this shape relative to canonical "Stage 2". Stage 1 review finding on this PR:
+// the original boundary recognized only whitespace/"(" and missed punctuation-delimited
+// qualifiers such as "Stage 2-current" or "Stage 2/current", which could still leave a stale
+// canonical field authoritative. Deliberately a structural prefix-plus-leftover-content rule,
+// not a fixed whitelist of qualifier words or separator spellings — the issue explicitly
+// rejects special-casing only the literal observed spellings, so any future lookalike
+// qualifier is caught the same way. The boundary requirement (the character immediately after
+// the canonical prefix must be a non-word character — i.e. not a letter, digit, or
+// underscore) keeps an unrelated label that merely shares a character prefix — e.g. canonical
+// "PR" against a hypothetical "Precondition", or canonical "Stage 2" against a hypothetical
+// "Stage 20" — from being misread as a near-duplicate, while still catching any punctuation or
+// whitespace separator as a genuine qualifier boundary.
 function isNearDuplicateLabel(label, canonical) {
   const normalizedLabel = label.trim().toLowerCase();
   const normalizedCanonical = canonical.trim().toLowerCase();
   if (normalizedLabel === normalizedCanonical) return false;
   if (!normalizedLabel.startsWith(normalizedCanonical)) return false;
   const remainder = normalizedLabel.slice(normalizedCanonical.length);
-  if (!/^[\s(]/.test(remainder)) return false;
+  if (!/^\W/.test(remainder)) return false;
   return remainder.trim().length > 0;
 }
 

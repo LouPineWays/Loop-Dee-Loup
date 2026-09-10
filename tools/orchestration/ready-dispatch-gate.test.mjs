@@ -1037,6 +1037,38 @@ test("findNearDuplicateBulletLabels: exact canonical match alone is never flagge
   assert.deepEqual(findNearDuplicateBulletLabels("- **Stage 2:** #480\n", "Stage 2"), []);
 });
 
+// Stage 1 review finding on this PR: the original boundary recognized only whitespace/"("
+// and missed punctuation-delimited qualifiers, which could still leave a stale canonical
+// field authoritative (e.g. "Stage 2-current" beside canonical "Stage 2").
+test("findNearDuplicateBulletLabels: punctuation-delimited Stage 2 lookalikes (hyphen, slash, bracket, em-dash) are each flagged", () => {
+  const body =
+    "- **Stage 2:** #480\n" +
+    "- **Stage 2-current:** #492\n" +
+    "- **Stage 2/current:** #493\n" +
+    "- **Stage 2[current]:** #494\n" +
+    "- **Stage 2—current:** #495\n";
+  const conflicts = findNearDuplicateBulletLabels(body, "Stage 2");
+  assert.deepEqual(
+    conflicts.map((c) => c.label).sort(),
+    ["Stage 2-current", "Stage 2/current", "Stage 2[current]", "Stage 2—current"].sort(),
+  );
+});
+
+test("findNearDuplicateBulletLabels: the punctuation-boundary rule applies equally to PR and Execution", () => {
+  assert.equal(findNearDuplicateBulletLabels("- **PR:** #376\n- **PR-current:** #400\n", "PR").length, 1);
+  assert.equal(
+    findNearDuplicateBulletLabels("- **Execution:** #310\n- **Execution-current:** #999\n", "Execution", [
+      "Execution issue",
+    ]).length,
+    1,
+  );
+});
+
+test("findNearDuplicateBulletLabels: a longer alphanumeric word/token sharing only a character prefix is never a near-duplicate", () => {
+  assert.deepEqual(findNearDuplicateBulletLabels("- **Stage 20:** #480\n", "Stage 2"), []);
+  assert.deepEqual(findNearDuplicateBulletLabels("- **PR:** #376\n- **Precondition:** #400\n", "PR"), []);
+});
+
 test("findNearDuplicateBulletLabels: an allowed alias is recognized, never flagged as a near-duplicate of the canonical label", () => {
   const body = "- **Execution:** #310\n- **Execution issue:** #310\n";
   assert.deepEqual(findNearDuplicateBulletLabels(body, "Execution", ["Execution issue"]), []);

@@ -61,6 +61,20 @@ test("parseOptionalIssueRefGuarded: PR equivalent -- canonical PR pointer plus a
   assert.match(result.reason, /#400/);
 });
 
+// Stage 1 review finding on this PR: a punctuation-delimited qualifier (not just "("-style
+// or whitespace) must also be caught, or a stale canonical field stays authoritative.
+test("parseOptionalIssueRefGuarded: punctuation-delimited Stage 2 lookalikes (hyphen, slash) fail closed beside the canonical field", () => {
+  assert.equal(parseOptionalIssueRefGuarded("- **Stage 2:** #480\n- **Stage 2-current:** #492\n", "Stage 2").kind, "ambiguous");
+  assert.equal(parseOptionalIssueRefGuarded("- **Stage 2:** #480\n- **Stage 2/current:** #492\n", "Stage 2").kind, "ambiguous");
+});
+
+test("parseOptionalIssueRefGuarded: a punctuation-delimited PR near-duplicate cannot silently route through a stale canonical pointer", () => {
+  const result = parseOptionalIssueRefGuarded("- **PR:** #376\n- **PR-current:** #400\n", "PR");
+  assert.equal(result.kind, "ambiguous");
+  assert.match(result.reason, /#376/);
+  assert.match(result.reason, /#400/);
+});
+
 test("parseOptionalIssueRefGuarded: normal control -- exactly one canonical value for Stage 2 and PR resolves unchanged", () => {
   assert.deepEqual(parseOptionalIssueRefGuarded("- **Stage 2:** #480\n", "Stage 2"), { kind: "issue", issue: 480 });
   assert.deepEqual(parseOptionalIssueRefGuarded("- **PR:** #376\n", "PR"), { kind: "issue", issue: 376 });
@@ -1008,6 +1022,25 @@ test("runNextReviewTransitionGate: control-Issue mode honors an explicit --head,
 
 test("runNextReviewTransitionGate: the exact #440 regression -- stale 'Stage 2: #480' plus live 'Stage 2 (current): #492' fails closed as AMBIGUOUS before either audit reference can select a Stage 2 transition, never calling checkPostAudit", async () => {
   const body = CONTROL_BODY_POST_MERGE.replace("- **Stage 2:** #378", "- **Stage 2:** #480\n- **Stage 2 (current):** #492");
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      checkPostAuditImpl: async () => {
+        throw new Error("should never be called -- the near-duplicate guard must fail closed first");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /#480/);
+  assert.match(result.reason, /#492/);
+});
+
+// Stage 1 review finding on this PR: the same #440 shape recurs with a punctuation-delimited
+// qualifier instead of a parenthetical, and must fail closed the same way end to end.
+test("runNextReviewTransitionGate: a punctuation-delimited Stage 2 near-duplicate ('Stage 2-current') fails closed as AMBIGUOUS the same way as the parenthetical form", async () => {
+  const body = CONTROL_BODY_POST_MERGE.replace("- **Stage 2:** #378", "- **Stage 2:** #480\n- **Stage 2-current:** #492");
   const result = await runNextReviewTransitionGate(
     { repo: "o/r", controlIssue: "322" },
     {
