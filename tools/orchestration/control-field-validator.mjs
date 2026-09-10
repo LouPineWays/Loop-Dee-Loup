@@ -57,6 +57,7 @@ import {
   findNearDuplicateBulletLabels,
   readExecutionBulletField,
   describeExecutionConflict,
+  extractBoldBulletLabels,
 } from "./ready-dispatch-gate.mjs";
 
 // Pure. Extracts { kind, number } for every full GitHub issue/PR URL reference inside `value`
@@ -115,18 +116,59 @@ export const DEFAULT_CONTROL_FIELD_SPECS = [
   { label: "Stage 2", expectedKind: "issue" },
 ];
 
+// Pure. Returns the raw values of every exact-label bold-bullet occurrence for `label`
+// (case-insensitive "- **Label:** value" line, the same shape parseControlBullet reads) —
+// every occurrence, not just the last one parseControlBullet itself returns. Stage 1 review
+// finding on PR #519 (issue #510): when a composed snapshot retains both an old and a new
+// copy of the same canonical field — e.g. "- **PR:** #509" followed later by
+// "- **PR:** #510" — parseControlBullet's own last-occurrence-wins convention (deliberate,
+// and correct, for read-time gates re-reading an already-amended body) meant this validator
+// only ever saw the winning duplicate and reported success, silently letting a composed body
+// that still carries a stale copy of a canonical field become durable. This is a distinct
+// corruption shape from findNearDuplicateBulletLabels' near-duplicate-*label* case: here the
+// label text is exactly identical, so that check's unrecognized-label filter never fires.
+export function findExactDuplicateBulletValues(body, label) {
+  const normalized = label.trim().toLowerCase();
+  return extractBoldBulletLabels(body)
+    .filter((b) => b.label.trim().toLowerCase() === normalized)
+    .map((b) => b.raw);
+}
+
+// Pure. A validateControlField-shaped failure when `label` has more than one exact
+// bold-bullet occurrence in `body` — regardless of whether the duplicate values agree, since
+// a proposed body that repeats the same canonical bullet is itself ambiguous about which
+// occurrence is authoritative (the same fail-closed stance findNearDuplicateBulletLabels
+// already takes for near-duplicate *labels*). Returns null when zero or one occurrence
+// exists — not this check's concern either way.
+function exactDuplicateBulletConflict(body, label) {
+  const values = findExactDuplicateBulletValues(body, label);
+  if (values.length <= 1) return null;
+  return {
+    ok: false,
+    label,
+    reason:
+      `"${label}" reference is ambiguous: "- **${label}:**" appears ${values.length} times ` +
+      `(${values.map((v) => JSON.stringify(v)).join(", ")}) — refusing to select the last occurrence as authoritative`,
+  };
+}
+
 // Pure. Validates one field spec against a proposed control-Issue body. Returns
 // { ok: true, label, ... } or { ok: false, label, reason }.
 export function validateControlField(body, spec) {
   const { label, expectedKind = null, isExecutionField = false } = spec;
 
   if (isExecutionField) {
+    const duplicateConflict = exactDuplicateBulletConflict(body, label) ?? exactDuplicateBulletConflict(body, "Execution issue");
+    if (duplicateConflict) return duplicateConflict;
     const field = readExecutionBulletField(body);
     if (field.conflict) {
       return { ok: false, label, reason: describeExecutionConflict(field) };
     }
     return { ...validatePointerFieldValue(field.value, { label, expectedKind }), label };
   }
+
+  const duplicateConflict = exactDuplicateBulletConflict(body, label);
+  if (duplicateConflict) return duplicateConflict;
 
   const raw = parseControlBullet(body, label);
   if (raw !== null) {

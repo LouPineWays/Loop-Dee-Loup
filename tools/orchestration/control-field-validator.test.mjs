@@ -11,6 +11,7 @@ import {
   validatePointerFieldValue,
   validateControlField,
   validateControlSnapshot,
+  findExactDuplicateBulletValues,
   DEFAULT_CONTROL_FIELD_SPECS,
 } from "./control-field-validator.mjs";
 
@@ -150,6 +151,53 @@ test("validateControlField: no near-duplicate label present behaves exactly like
   const result = validateControlField(body, { label: "Stage 2", expectedKind: "issue" });
   assert.equal(result.ok, true);
   assert.equal(result.issue, 508);
+});
+
+// -- Exact-duplicate canonical bullet detection (Stage 1 review finding on PR #519, #510) -
+
+test("findExactDuplicateBulletValues: returns every occurrence's raw value, not just the last", () => {
+  const body = "- **PR:** #509\n- **PR:** #510\n";
+  assert.deepEqual(findExactDuplicateBulletValues(body, "PR"), ["#509", "#510"]);
+});
+
+test("findExactDuplicateBulletValues: a single occurrence returns one value", () => {
+  assert.deepEqual(findExactDuplicateBulletValues("- **PR:** #509\n", "PR"), ["#509"]);
+});
+
+test("validateControlField: two exact 'PR' bullets fail closed even though parseControlBullet's last-occurrence-wins read would otherwise report success", () => {
+  const body = "- **PR:** #509\n- **PR:** #510\n";
+  const result = validateControlField(body, { label: "PR", expectedKind: "pull" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /appears 2 times/);
+});
+
+test("validateControlField: two exact 'Stage 2' bullets fail closed", () => {
+  const body = "- **Stage 2:** #508\n- **Stage 2:** #512\n";
+  const result = validateControlField(body, { label: "Stage 2", expectedKind: "issue" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /"Stage 2" reference is ambiguous/);
+});
+
+test("validateControlField: two exact 'Execution' bullets fail closed", () => {
+  const body = "- **Execution:** #497\n- **Execution:** #498\n";
+  const result = validateControlField(body, { label: "Execution", isExecutionField: true, expectedKind: "issue" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /"Execution" reference is ambiguous/);
+});
+
+test("validateControlField: two exact 'Execution issue' bullets (the live spelling) fail closed", () => {
+  const body = "- **Execution issue:** #497\n- **Execution issue:** #498\n";
+  const result = validateControlField(body, { label: "Execution", isExecutionField: true, expectedKind: "issue" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /"Execution issue" reference is ambiguous/);
+});
+
+test("validateControlSnapshot: rejects a real #499-shaped duplicate 'PR' bullet, naming PR specifically", () => {
+  const body = "- **Execution:** #497\n- **PR:** #509\n- **PR:** #510\n- **Stage 2:** #508\n";
+  const result = validateControlSnapshot(body);
+  assert.equal(result.ok, false);
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0], /"PR" reference is ambiguous/);
 });
 
 // -- validateControlSnapshot (whole-body, field-local) -------------------------------------
