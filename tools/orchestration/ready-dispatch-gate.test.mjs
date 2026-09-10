@@ -22,6 +22,8 @@ import {
   verifyRoutedDispatchManifest,
   parseOwnerRepoFromRemoteUrl,
   resolveRepoIdentity,
+  upsertControlBullet,
+  probeExistingPlan,
 } from "./ready-dispatch-gate.mjs";
 
 // Issue #311's real body (control Issue for execution Issue #310) — a genuine
@@ -543,6 +545,7 @@ test("checkReadyDispatch: never calls gh more than once, and never for anything 
   assert.equal(calls, 1);
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "READY_TO_DISPATCH");
+  assert.equal(result.stopAfter, true);
   assert.equal(result.executionIssue, 310);
   assert.equal(result.route, "implementation worker");
 });
@@ -948,7 +951,7 @@ test("evaluateReadyDispatchGate: the literal live #408 body ('Execution issue:' 
   assert.equal(result.route, "planning worker");
 });
 
-test("checkReadyDispatch: the literal live #408 body reports exit 5, state READY_TO_DISPATCH_PLANNING, from a single read (397-E)", async () => {
+test("checkReadyDispatch: the literal live #408 body reports exit 5, state READY_TO_DISPATCH_PLANNING, from a single control-Issue read, when no plan exists yet (397-E; issue #498 unit 498-A's idempotent-recovery probe correctly finds nothing to recover)", async () => {
   let calls = 0;
   const result = await checkReadyDispatch(
     { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 408 },
@@ -957,11 +960,17 @@ test("checkReadyDispatch: the literal live #408 body reports exit 5, state READY
         calls++;
         return { body: ISSUE_408_BODY, state: "OPEN" };
       },
+      // Issue #498 unit 498-A: checkReadyDispatch now probes for an already-existing plan
+      // before authorizing a fresh planning dispatch. Injected here (rather than left to the
+      // real default, which would call the real `gh` CLI against a live issue) so this test
+      // stays network-isolated, matching this file's existing injection convention.
+      parseExecutionPlanImpl: async () => ({ exitCode: 2, ok: false, errors: ["fixture: no Plan Index yet"] }),
     },
   );
   assert.equal(calls, 1);
   assert.equal(result.exitCode, 5);
   assert.equal(result.state, "READY_TO_DISPATCH_PLANNING");
+  assert.equal(result.stopAfter, true);
   assert.equal(result.executionIssue, 407);
   assert.equal(result.route, "planning worker");
 });
@@ -984,7 +993,7 @@ test("evaluateReadyDispatchGate: a #398-shaped PLAN_READY body ('Execution issue
   assert.equal(result.executionIssue, 397);
 });
 
-test("checkReadyDispatch: a #398-shaped PLAN_READY body reports exit 6, state READY_TO_RUN_DISPATCH_MANIFEST, from a single read (397-E)", async () => {
+test("checkReadyDispatch: a #398-shaped PLAN_READY body reports exit 6, state READY_TO_RUN_DISPATCH_MANIFEST, from a single control-Issue read, when no manifest exists yet (397-E; issue #498 unit 498-A's idempotent-recovery probe correctly finds nothing to recover)", async () => {
   let calls = 0;
   const result = await checkReadyDispatch(
     { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 398 },
@@ -993,11 +1002,16 @@ test("checkReadyDispatch: a #398-shaped PLAN_READY body reports exit 6, state RE
         calls++;
         return { body: ISSUE_398_PLAN_READY_BODY, state: "OPEN" };
       },
+      // Issue #498 unit 498-A: checkReadyDispatch now probes for an already-verified
+      // manifest before authorizing a fresh Route/Prepare run. Injected here (rather than
+      // left to the real default `gh` CLI call) so this test stays network-isolated.
+      parseExecutionPlanImpl: async () => ({ exitCode: 2, ok: false, errors: ["fixture: no Dispatch Manifest yet"] }),
     },
   );
   assert.equal(calls, 1);
   assert.equal(result.exitCode, 6);
   assert.equal(result.state, "READY_TO_RUN_DISPATCH_MANIFEST");
+  assert.equal(result.stopAfter, true);
   assert.equal(result.executionIssue, 397);
 });
 
@@ -1168,15 +1182,19 @@ test("evaluateReadyDispatchGate: PLAN_READY resolves to READY_TO_RUN_DISPATCH_MA
   assert.equal("route" in result, false);
 });
 
-test("checkReadyDispatch: PLAN_READY reports exit 6, state READY_TO_RUN_DISPATCH_MANIFEST", async () => {
+test("checkReadyDispatch: PLAN_READY reports exit 6, state READY_TO_RUN_DISPATCH_MANIFEST, when no manifest exists yet (issue #498 unit 498-A's idempotent-recovery probe correctly finds nothing to recover)", async () => {
   const body =
     "- **Lifecycle:** PLAN_READY\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
   const result = await checkReadyDispatch(
     { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 408 },
-    { ghIssueViewImpl: async () => ({ body, state: "OPEN" }) },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({ exitCode: 2, ok: false, errors: ["fixture: no Dispatch Manifest yet"] }),
+    },
   );
   assert.equal(result.exitCode, 6);
   assert.equal(result.state, "READY_TO_RUN_DISPATCH_MANIFEST");
+  assert.equal(result.stopAfter, true);
   assert.equal(result.executionIssue, 407);
 });
 
@@ -1219,6 +1237,7 @@ test("checkReadyDispatch: ROUTED reports exit 7 only when the manifest pointer a
   );
   assert.equal(result.exitCode, 7);
   assert.equal(result.state, "READY_TO_DISPATCH_UNITS");
+  assert.equal(result.stopAfter, true);
   assert.equal(result.manifestCommentId, 200);
   assert.equal(result.manifestUrl, "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200");
   assert.equal(result.planIndexUrl, "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100");
@@ -1467,6 +1486,7 @@ test("checkReadyDispatch: EXECUTION_COMPLETE reports exit 8, state READY_TO_DISP
   );
   assert.equal(result.exitCode, 8);
   assert.equal(result.state, "READY_TO_DISPATCH_INTEGRATION");
+  assert.equal(result.stopAfter, true);
   assert.equal(result.route, "integration worker");
 });
 
@@ -1489,4 +1509,182 @@ test("evaluateReadyDispatchGate: PLAN_READY/ROUTED/EXECUTION_COMPLETE still requ
     const selfRefResult = evaluateReadyDispatchGate(selfRef, 42);
     assert.equal(selfRefResult.status, "NOT_READY", `expected NOT_READY for ${lifecycle} with a self-referential Execution pointer`);
   }
+});
+
+// Issue #498 unit 498-A: durable thin-control-state projection at the PLAN_READY/ROUTED
+// breakpoints (the 2026-09-10 #500 stranded-state fix), plus the stopAfter contract on
+// every pre-PR terminal verdict.
+
+test("upsertControlBullet: replaces an existing bullet's value in place, preserving surrounding lines", () => {
+  const body = "- **Lifecycle:** PLAN_READY\n- **Execution:** #407\n- **Route:** planning worker\n";
+  const next = upsertControlBullet(body, "Lifecycle", "ROUTED");
+  assert.equal(next, "- **Lifecycle:** ROUTED\n- **Execution:** #407\n- **Route:** planning worker\n");
+});
+
+test("upsertControlBullet: case-insensitive on the label, matching parseControlBullet's own read-side convention", () => {
+  const body = "- **lifecycle:** PLAN_READY\n";
+  const next = upsertControlBullet(body, "Lifecycle", "ROUTED");
+  assert.equal(next, "- **Lifecycle:** ROUTED\n");
+});
+
+test("upsertControlBullet: inserts a brand-new bullet immediately after the Lifecycle bullet when the label is absent", () => {
+  const body = "- **Lifecycle:** READY_FOR_PLAN\n- **Execution:** #407\n- **Route:** planning worker\n";
+  const next = upsertControlBullet(body, "Plan", "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100");
+  assert.equal(
+    next,
+    "- **Lifecycle:** READY_FOR_PLAN\n" +
+      "- **Plan:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100\n" +
+      "- **Execution:** #407\n- **Route:** planning worker\n",
+  );
+});
+
+test("upsertControlBullet: appends the bullet when even a Lifecycle bullet is absent to anchor against", () => {
+  const body = "Some legacy unsplit Issue body with no control bullets at all.";
+  const next = upsertControlBullet(body, "Plan", "https://example.com/issues/1#issuecomment-1");
+  assert.equal(next, "Some legacy unsplit Issue body with no control bullets at all.\n- **Plan:** https://example.com/issues/1#issuecomment-1\n");
+});
+
+test("upsertControlBullet: chained calls compose Lifecycle-then-Plan updates, matching the READY_TO_PROJECT_PLAN_READY proposedBody shape", () => {
+  const body = "- **Lifecycle:** READY_FOR_PLAN\n- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const next = upsertControlBullet(
+    upsertControlBullet(body, "Lifecycle", "PLAN_READY"),
+    "Plan",
+    "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
+  );
+  assert.equal(
+    next,
+    "- **Lifecycle:** PLAN_READY\n" +
+      "- **Plan:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100\n" +
+      "- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n",
+  );
+});
+
+test("probeExistingPlan: alreadyPlanned true with the canonical Plan Index URL when a valid plan already exists (the #500 shape)", async () => {
+  const result = await probeExistingPlan(
+    { repo: "LouPineWays/Loop-Dee-Loup", executionIssue: 500 },
+    {
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        plan: { planIndex: { url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/500#issuecomment-1" } },
+      }),
+    },
+  );
+  assert.deepEqual(result, { alreadyPlanned: true, planIndexUrl: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/500#issuecomment-1" });
+});
+
+test("probeExistingPlan: alreadyPlanned false for the ordinary 'no plan yet' case (exitCode 2)", async () => {
+  const result = await probeExistingPlan(
+    { repo: "LouPineWays/Loop-Dee-Loup", executionIssue: 500 },
+    { parseExecutionPlanImpl: async () => ({ exitCode: 2, ok: false, errors: ["no Plan Index comment"] }) },
+  );
+  assert.equal(result.alreadyPlanned, false);
+  assert.equal(result.operationalError, undefined);
+});
+
+test("probeExistingPlan: operationalError true (never silently read as 'no plan yet') when the read itself fails (exitCode 1)", async () => {
+  const result = await probeExistingPlan(
+    { repo: "LouPineWays/Loop-Dee-Loup", executionIssue: 500 },
+    { parseExecutionPlanImpl: async () => ({ exitCode: 1, message: "gh api call failed: network error" }) },
+  );
+  assert.equal(result.alreadyPlanned, false);
+  assert.equal(result.operationalError, true);
+  assert.match(result.reason, /network error/);
+});
+
+test("checkReadyDispatch: READY_FOR_PLAN with an already-existing valid plan converges to READY_TO_PROJECT_PLAN_READY (exit 10) instead of dispatching planning again (the #500 stranded-state fix)", async () => {
+  const body =
+    "- **Lifecycle:** READY_FOR_PLAN\n- **Execution:** #500\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 501 },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        plan: { planIndex: { url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/500#issuecomment-1" } },
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 10);
+  assert.equal(result.state, "READY_TO_PROJECT_PLAN_READY");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.executionIssue, 500);
+  assert.equal(result.planIndexUrl, "https://github.com/LouPineWays/Loop-Dee-Loup/issues/500#issuecomment-1");
+  assert.equal(
+    result.proposedBody,
+    "- **Lifecycle:** PLAN_READY\n" +
+      "- **Plan:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/500#issuecomment-1\n" +
+      "- **Execution:** #500\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n",
+  );
+});
+
+test("checkReadyDispatch: READY_FOR_PLAN reports ERROR (exit 1), not a false planning dispatch, when the plan-existence probe fails operationally", async () => {
+  const body =
+    "- **Lifecycle:** READY_FOR_PLAN\n- **Execution:** #500\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 501 },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({ exitCode: 1, message: "gh api call failed: network error" }),
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.notEqual(result.state, "READY_TO_DISPATCH_PLANNING");
+  assert.match(result.message, /operational failure/i);
+});
+
+test("checkReadyDispatch: PLAN_READY with an already-verified manifest converges to READY_TO_PROJECT_ROUTED (exit 11) instead of re-running Route/Prepare (#498 Live reproduction C)", async () => {
+  const body =
+    "- **Lifecycle:** PLAN_READY\n- **Execution:** #500\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 501 },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        repo: "LouPineWays/Loop-Dee-Loup",
+        executionIssue: 500,
+        plan: {
+          planIndex: {
+            commentId: 100,
+            url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/500#issuecomment-100",
+            dispatchManifest: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/500#issuecomment-200",
+          },
+        },
+      }),
+      ghCommentViewImpl: async () => ({
+        id: 200,
+        html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/500#issuecomment-200",
+        issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/500",
+        body:
+          "## Dispatch Manifest (v1)\n\n- **Plan index:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/500#issuecomment-100\n",
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 11);
+  assert.equal(result.state, "READY_TO_PROJECT_ROUTED");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.executionIssue, 500);
+  assert.equal(result.manifestUrl, "https://github.com/LouPineWays/Loop-Dee-Loup/issues/500#issuecomment-200");
+  assert.equal(
+    result.proposedBody,
+    "- **Lifecycle:** ROUTED\n- **Execution:** #500\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n",
+  );
+});
+
+test("checkReadyDispatch: PLAN_READY reports ERROR (exit 1), not a false manifest-prep dispatch, when the manifest-verification probe fails operationally", async () => {
+  const body =
+    "- **Lifecycle:** PLAN_READY\n- **Execution:** #500\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 501 },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({ exitCode: 1, message: "gh api call failed: network error" }),
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.notEqual(result.state, "READY_TO_RUN_DISPATCH_MANIFEST");
+  assert.match(result.message, /operational failure/i);
 });
