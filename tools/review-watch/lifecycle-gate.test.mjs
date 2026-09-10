@@ -1752,6 +1752,29 @@ test("replaceVerdictField: repairs an empty '### Verdict' field at the very end 
   assert.match(updated, /### Findings\n\nPending/, "the neighboring section must be preserved verbatim");
 });
 
+// Stage 2 audit finding on issue #480: the missing-heading repair previously stripped trailing
+// whitespace from the existing body (`src.replace(/\s+$/, "")`) before appending the new section,
+// mutating pre-existing content instead of preserving it byte-for-byte. These pin the exact
+// pre-existing bytes — including trailing whitespace the audit requirement says must survive.
+
+test("replaceVerdictField: repairing a missing heading preserves the existing body byte-for-byte, including trailing whitespace", () => {
+  const bodyWithTrailingWhitespace = "### Work issue\n\n#151\n\n### Exact merge commit\n\nabc123\n\n   \n";
+  const updated = replaceVerdictField(bodyWithTrailingWhitespace, "CLEAN");
+  assert.notEqual(updated, null);
+  assert.ok(
+    updated.startsWith(bodyWithTrailingWhitespace),
+    "the pre-existing body, trailing whitespace included, must be preserved byte-for-byte, not trimmed before appending",
+  );
+  assert.equal(parseStage2Verdict(updated), "CLEAN");
+});
+
+test("replaceVerdictField: repairing a missing heading against a body with no trailing newline still preserves it exactly and appends a blank-line separator", () => {
+  const bodyNoTrailingNewline = "### Exact merge commit\n\nabc123";
+  const updated = replaceVerdictField(bodyNoTrailingNewline, "NOT CLEAN");
+  assert.equal(updated, "### Exact merge commit\n\nabc123\n\n### Verdict\n\nNOT CLEAN\n");
+  assert.equal(parseStage2Verdict(updated), "NOT CLEAN");
+});
+
 // -- checkRecordVerdict (issue #439) ------------------------------------------------------
 // The deterministic, idempotent, fail-closed-on-conflict promotion command
 // REPORT_READY_TO_RECORD authorizes. Reuses checkPostAudit internally for evidence, then
@@ -1942,6 +1965,71 @@ test("checkRecordVerdict: CONFLICTING_VERDICT — the fresh re-read shows a diff
   assert.equal(result.evidenceVerdict, "CLEAN");
   assert.equal(editCalls.length, 0, "a conflicting already-recorded verdict must never be silently overwritten");
   assert.match(result.message, /never silently overwritten/);
+});
+
+// Stage 2 audit finding on issue #480: the single fresh re-read above (used both for the
+// ALREADY_RECORDED/CONFLICTING_VERDICT check and as the evidence-revalidation input) is itself
+// captured *before* the findStage2ReportEvidence network round trip. A concurrent invocation
+// recording a settled verdict during that round trip — after the fresh read, before the edit —
+// was not caught by that single check. These pin the fix: a *second*, final re-read taken
+// immediately before the edit, re-running the same checks against it.
+
+test("checkRecordVerdict: ALREADY_RECORDED — a concurrent recording lands during the evidence-revalidation call itself, after the first fresh re-read; the final re-read immediately before editing catches it", async () => {
+  let issueViewCalls = 0;
+  const editCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number !== 160) return { body: "", state: "OPEN" };
+        issueViewCalls++;
+        // Calls 1 (inside checkPostAudit) and 2 (the fresh re-read before evidence
+        // revalidation) both still see PENDING — a naive single-recheck design would pass both
+        // and proceed straight to the edit. Only call 3, the final re-read taken *after* the
+        // evidence-revalidation network call and immediately before the edit, sees the verdict a
+        // concurrent invocation recorded while that network call was in flight.
+        return { body: auditBodyWithCommit({ verdict: issueViewCalls <= 2 ? "PENDING" : "CLEAN" }), state: "OPEN" };
+      },
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "ALREADY_RECORDED");
+  assert.equal(result.verdict, "CLEAN");
+  assert.equal(
+    editCalls.length,
+    0,
+    "a verdict recorded during the evidence-revalidation call must never be overwritten by a stale-read edit",
+  );
+});
+
+test("checkRecordVerdict: CONFLICTING_VERDICT — a concurrent conflicting recording lands during the evidence-revalidation call; the final re-read immediately before editing catches it", async () => {
+  let issueViewCalls = 0;
+  const editCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number !== 160) return { body: "", state: "OPEN" };
+        issueViewCalls++;
+        // Calls 1 and 2 both see PENDING; only the final re-read (call 3), taken after the
+        // evidence-revalidation network call, sees NOT CLEAN recorded by a concurrent invocation
+        // while that call was in flight — a genuine conflict against this invocation's own CLEAN
+        // evidence that must never be silently overwritten.
+        return { body: auditBodyWithCommit({ verdict: issueViewCalls <= 2 ? "PENDING" : "NOT CLEAN" }), state: "OPEN" };
+      },
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "CONFLICTING_VERDICT");
+  assert.equal(result.recordedVerdict, "NOT CLEAN");
+  assert.equal(result.evidenceVerdict, "CLEAN");
+  assert.equal(editCalls.length, 0, "a conflicting concurrent recording must never be silently overwritten");
 });
 
 // Stage 1 review finding on this PR: the fresh issue-body re-read alone does not close the race
