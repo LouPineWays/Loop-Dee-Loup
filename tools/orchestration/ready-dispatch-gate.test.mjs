@@ -1334,6 +1334,99 @@ test("verifyRoutedDispatchManifest: fails closed when manifest Plan index backli
   assert.match(result.reason, /Plan index backlink/i);
 });
 
+// Stage 1 review finding on PR #521 (P2): the checks above only confirmed the manifest
+// comment's own heading and Plan Index backlink -- a manifest with zero, duplicate, or
+// extra per-unit "route=.../dispatch_ready=..." entries relative to the Plan Index's own
+// Units list used to pass this probe anyway, letting checkReadyDispatch project
+// Lifecycle: ROUTED with no authoritative unit routes for the Execute stage.
+
+function manifestFixture({ repo = "LouPineWays/Loop-Dee-Loup", executionIssue = 407, units, manifestUnitLines }) {
+  const planIndexUrl = `https://github.com/${repo}/issues/${executionIssue}#issuecomment-100`;
+  const manifestUrl = `https://github.com/${repo}/issues/${executionIssue}#issuecomment-200`;
+  return {
+    repo,
+    executionIssue,
+    parseExecutionPlanImpl: async () => ({
+      exitCode: 0,
+      ok: true,
+      repo,
+      executionIssue,
+      plan: {
+        planIndex: { commentId: 100, url: planIndexUrl, dispatchManifest: manifestUrl },
+        units,
+      },
+    }),
+    ghCommentViewImpl: async () => ({
+      id: 200,
+      html_url: manifestUrl,
+      issue_url: `https://api.github.com/repos/${repo}/issues/${executionIssue}`,
+      body:
+        `## Dispatch Manifest (v1)\n\n- **Plan index:** ${planIndexUrl}\n` +
+        manifestUnitLines.map((line) => `- ${line}\n`).join(""),
+    }),
+  };
+}
+
+test("verifyRoutedDispatchManifest: succeeds when every Plan Index unit has exactly one matching manifest entry", async () => {
+  const fixture = manifestFixture({
+    units: { "498-A": {}, "498-B": {} },
+    manifestUnitLines: [
+      "498-A: route=stronger/general worker dispatch_ready=true note=none",
+      "498-B: route=stronger/general worker dispatch_ready=false note=blocked on 498-A",
+    ],
+  });
+  const { repo, executionIssue, ...impls } = fixture;
+  const result = await verifyRoutedDispatchManifest({ repo, executionIssue }, impls);
+  assert.equal(result.ok, true);
+});
+
+test("verifyRoutedDispatchManifest: fails closed when the manifest is missing an entry for a Plan Index unit", async () => {
+  const fixture = manifestFixture({
+    units: { "498-A": {}, "498-B": {} },
+    manifestUnitLines: ["498-A: route=stronger/general worker dispatch_ready=true note=none"],
+  });
+  const { repo, executionIssue, ...impls } = fixture;
+  const result = await verifyRoutedDispatchManifest({ repo, executionIssue }, impls);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /missing entries for unit\(s\): 498-B/);
+});
+
+test("verifyRoutedDispatchManifest: fails closed on a duplicate manifest entry for the same unit", async () => {
+  const fixture = manifestFixture({
+    units: { "498-A": {} },
+    manifestUnitLines: [
+      "498-A: route=stronger/general worker dispatch_ready=true note=none",
+      "498-A: route=stronger/general worker dispatch_ready=false note=stale duplicate",
+    ],
+  });
+  const { repo, executionIssue, ...impls } = fixture;
+  const result = await verifyRoutedDispatchManifest({ repo, executionIssue }, impls);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /duplicate entries for unit\(s\): 498-A/);
+});
+
+test("verifyRoutedDispatchManifest: fails closed on a manifest entry for a unit not in the Plan Index", async () => {
+  const fixture = manifestFixture({
+    units: { "498-A": {} },
+    manifestUnitLines: [
+      "498-A: route=stronger/general worker dispatch_ready=true note=none",
+      "498-Z: route=stronger/general worker dispatch_ready=true note=unknown unit",
+    ],
+  });
+  const { repo, executionIssue, ...impls } = fixture;
+  const result = await verifyRoutedDispatchManifest({ repo, executionIssue }, impls);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /entries for unit\(s\) not in the Plan Index: 498-Z/);
+});
+
+test("verifyRoutedDispatchManifest: fails closed on a manifest with the required heading and backlink but zero unit entries", async () => {
+  const fixture = manifestFixture({ units: { "498-A": {}, "498-B": {} }, manifestUnitLines: [] });
+  const { repo, executionIssue, ...impls } = fixture;
+  const result = await verifyRoutedDispatchManifest({ repo, executionIssue }, impls);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /missing entries for unit\(s\): 498-A, 498-B/);
+});
+
 // Stage 1 review findings on PR #420 -- four regressions, one per finding.
 
 test("verifyRoutedDispatchManifest: a duplicate 'Plan index:' bullet resolves via last-occurrence, matching parseControlBullet's convention, not the first", async () => {
@@ -1557,6 +1650,89 @@ test("upsertControlBullet: chained calls compose Lifecycle-then-Plan updates, ma
       "- **Plan:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100\n" +
       "- **Execution:** #407\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n",
   );
+});
+
+// Stage 1 review finding on PR #521 (P2): a template-shaped control body (no ad hoc
+// "- **Lifecycle:**" bullet at all -- .github/ISSUE_TEMPLATE/parent-execution.yml renders
+// "### State" instead) used to have "Lifecycle" updates always append a brand-new bullet
+// at the very end of the body -- landing inside the template's final "### Next slice /
+// resulting slices" block -- while leaving the canonical "### State" value stale and
+// contradictory. Updating "### State" in place, and placing any other ad hoc bullet (e.g.
+// "Plan") inside the template's own "### Current state" field, closes both halves of the
+// finding.
+
+function templateShapedBody() {
+  return [
+    "### State",
+    "",
+    "READY_FOR_PLAN",
+    "",
+    "### Accepted outcome",
+    "",
+    "Ship the thing.",
+    "",
+    "### Current state",
+    "",
+    "- **Execution:** #500",
+    "- **Route:** planning worker",
+    "",
+    "### Settled decisions",
+    "",
+    "None.",
+    "",
+    "### Current blocker",
+    "",
+    "None.",
+    "",
+    "### Founder interrupt",
+    "",
+    "None.",
+    "",
+    "### Next slice / resulting slices",
+    "",
+    "None.",
+    "",
+  ].join("\n");
+}
+
+test("upsertControlBullet: on a template-shaped body, a Lifecycle update replaces the ### State heading's own value in place", () => {
+  const next = upsertControlBullet(templateShapedBody(), "Lifecycle", "PLAN_READY");
+  const lines = next.split("\n");
+  const stateHeadingIdx = lines.indexOf("### State");
+  assert.equal(lines[stateHeadingIdx + 2], "PLAN_READY");
+  // No stray ad hoc "- **Lifecycle:**" bullet was introduced anywhere in the body.
+  assert.ok(!lines.some((l) => /^-\s*\*\*Lifecycle:\*\*/i.test(l)));
+});
+
+test("upsertControlBullet: on a template-shaped body, a non-Lifecycle bullet (Plan) is placed inside ### Current state, not past ### Next slice", () => {
+  const next = upsertControlBullet(
+    templateShapedBody(),
+    "Plan",
+    "https://github.com/LouPineWays/Loop-Dee-Loup/issues/500#issuecomment-1",
+  );
+  const lines = next.split("\n");
+  const currentStateIdx = lines.indexOf("### Current state");
+  const settledDecisionsIdx = lines.indexOf("### Settled decisions");
+  const planLineIdx = lines.findIndex((l) => /^-\s*\*\*Plan:\*\*/i.test(l));
+  assert.ok(planLineIdx > currentStateIdx && planLineIdx < settledDecisionsIdx);
+  // The last block (Next slice / resulting slices) is untouched.
+  const nextSliceIdx = lines.indexOf("### Next slice / resulting slices");
+  assert.equal(lines[nextSliceIdx + 2], "None.");
+});
+
+test("upsertControlBullet: chained Lifecycle-then-Plan on a template-shaped body converges ### State and adds Plan to ### Current state", () => {
+  const next = upsertControlBullet(
+    upsertControlBullet(templateShapedBody(), "Lifecycle", "PLAN_READY"),
+    "Plan",
+    "https://github.com/LouPineWays/Loop-Dee-Loup/issues/500#issuecomment-1",
+  );
+  const lines = next.split("\n");
+  const stateHeadingIdx = lines.indexOf("### State");
+  assert.equal(lines[stateHeadingIdx + 2], "PLAN_READY");
+  const currentStateIdx = lines.indexOf("### Current state");
+  const settledDecisionsIdx = lines.indexOf("### Settled decisions");
+  const planLineIdx = lines.findIndex((l) => /^-\s*\*\*Plan:\*\*/i.test(l));
+  assert.ok(planLineIdx > currentStateIdx && planLineIdx < settledDecisionsIdx);
 });
 
 test("probeExistingPlan: alreadyPlanned true with the canonical Plan Index URL when a valid plan already exists (the #500 shape)", async () => {

@@ -418,6 +418,55 @@ test("parseExecutionPlan: no Plan Index comment at all fails explicitly rather t
   assert.ok(result.errors.some((e) => e.includes("Execution Plan Index")));
 });
 
+// ---------------------------------------------------------------------------------------
+// Stage 1 review finding on PR #521 (ready-dispatch-gate.mjs P1): a Plan Index with a
+// valid Shared Contract but an empty "- **Units:**" block and missing plan-state/parent/
+// dependency bullets used to return ok:true with zero units, which let checkReadyDispatch
+// treat an unstarted plan as already-complete and project PLAN_READY/ROUTED without any
+// worker unit ever dispatched (the #500 shape).
+// ---------------------------------------------------------------------------------------
+
+test("parseExecutionPlan: a Plan Index with a Shared Contract but zero units fails explicitly, not ok:true with an empty plan", () => {
+  const sharedContractId = 300;
+  const planIndexId = 301;
+  const comments = [
+    { id: sharedContractId, html_url: commentUrl(sharedContractId), body: sharedContractBody() },
+    {
+      id: planIndexId,
+      html_url: commentUrl(planIndexId),
+      body: planIndexBody({ sharedContractLine: commentUrl(sharedContractId), unitsLines: [] }),
+    },
+  ];
+  const result = parseExecutionPlan(comments, { executionIssue: EXECUTION_ISSUE });
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => e.includes("lists no worker units")));
+});
+
+test("parseExecutionPlan: a Plan Index missing Plan state / Parent execution issue / Dependencies bullets fails explicitly", () => {
+  const sharedContractId = 310;
+  const unitAId = 311;
+  const planIndexId = 312;
+  const body = [
+    "## Execution Plan Index (v1)",
+    "",
+    `- **Shared contract:** ${commentUrl(sharedContractId)}`,
+    "- **Units:**",
+    `  - 294-A: PLANNED — first unit outcome (${commentUrl(unitAId)})`,
+    "- **Dispatch manifest:** none",
+    "- **Integration/PR route:** none",
+  ].join("\n");
+  const comments = [
+    { id: sharedContractId, html_url: commentUrl(sharedContractId), body: sharedContractBody() },
+    { id: unitAId, html_url: commentUrl(unitAId), body: workerUnitBody("294-A") },
+    { id: planIndexId, html_url: commentUrl(planIndexId), body },
+  ];
+  const result = parseExecutionPlan(comments, { executionIssue: EXECUTION_ISSUE });
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => e.includes("Plan state")));
+  assert.ok(result.errors.some((e) => e.includes("Parent execution issue")));
+  assert.ok(result.errors.some((e) => e.includes("Dependencies")));
+});
+
 test("runParseExecutionPlan: a malformed plan reports exit 2 and ok: false with the full errors array", async () => {
   const result = await runParseExecutionPlan(
     { repo: REPO, executionIssue: EXECUTION_ISSUE },
