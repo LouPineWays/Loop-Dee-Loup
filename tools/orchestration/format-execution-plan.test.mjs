@@ -448,6 +448,46 @@ test("validatePlanIndexInput rejects a sharedContractUrl/commentUrl that is not 
   assert.deepEqual(validatePlanIndexInput(validInput().planIndex), []);
 });
 
+test("validatePlanIndexInput rejects a fragment-bearing non-URL and a malformed permalink path (Stage 2 audit #506 finding)", () => {
+  // Stage 2 audit #506: `isCommentPermalink` previously delegated straight to
+  // `extractCommentIdFromUrl`, which only regex-matches "#issuecomment-<id>" anywhere in
+  // the string — so a non-URL that merely contains the fragment (e.g.
+  // "garbage#issuecomment-1") incorrectly passed. It must require a real
+  // ".../issues/<N>#issuecomment-<id>" permalink.
+  const notAUrlButHasFragment = "garbage#issuecomment-1";
+  const sharedErrors = validatePlanIndexInput({
+    ...validInput().planIndex,
+    sharedContractUrl: notAUrlButHasFragment,
+  });
+  assert.ok(
+    sharedErrors.some((e) => /sharedContractUrl/.test(e) && /permalink/.test(e)),
+    `expected a permalink rejection for a fragment-bearing non-URL, got: ${JSON.stringify(sharedErrors)}`,
+  );
+
+  // A real URL missing the required "/issues/<N>" path (e.g. a "/pull/<N>" URL) must also
+  // be rejected, not just a bare non-URL string.
+  const pullRequestUrl = `https://github.com/${REPO}/pull/${EXECUTION_ISSUE}#issuecomment-1`;
+  const unitErrors = validatePlanIndexInput({
+    ...validInput().planIndex,
+    units: [validPlanIndexUnit("999-A", { commentUrl: pullRequestUrl })],
+  });
+  assert.ok(
+    unitErrors.some((e) => /commentUrl/.test(e) && /permalink/.test(e)),
+    `expected a permalink rejection for a malformed (pull-request) path, got: ${JSON.stringify(unitErrors)}`,
+  );
+
+  // A well-formed host/path but with a scheme other than http(s) must also be rejected.
+  const nonHttpScheme = `ftp://github.com/${REPO}/issues/${EXECUTION_ISSUE}#issuecomment-1`;
+  const schemeErrors = validatePlanIndexInput({
+    ...validInput().planIndex,
+    sharedContractUrl: nonHttpScheme,
+  });
+  assert.ok(
+    schemeErrors.some((e) => /sharedContractUrl/.test(e) && /permalink/.test(e)),
+    `expected a permalink rejection for a non-http(s) scheme, got: ${JSON.stringify(schemeErrors)}`,
+  );
+});
+
 // ---------------------------------------------------------------------------------------
 // Formatting shape: exact headings and field order
 // ---------------------------------------------------------------------------------------

@@ -140,14 +140,28 @@ function isExecutionScopedUnitId(unitId, executionIssue) {
 }
 
 // Pure. A Plan Index `sharedContractUrl` / unit `commentUrl` must be an actual GitHub issue
-// comment permalink (`...#issuecomment-<numeric id>`) — the exact shape
-// `parse-execution-plan.mjs`'s own `extractCommentIdFromUrl` requires to resolve the
-// referenced comment. A merely whitespace-free string (e.g. "not-a-comment-url") is not
-// sufficient: it would pass this writer's own compose-only validation yet fail to parse
-// once read back for real, since nothing here re-derives the comment ID a live `gh` read
-// would need.
+// comment permalink — a real `http(s)://<host>/<owner>/<repo>/issues/<N>#issuecomment-<id>`
+// URL, not merely a string that happens to contain an "#issuecomment-<id>" fragment
+// somewhere in it. Delegating straight to `parse-execution-plan.mjs`'s own
+// `extractCommentIdFromUrl` (Stage 2 audit #506 finding) under-validates: that helper exists
+// to extract a comment ID from an already-known-good URL when resolving a comment, so it
+// only regex-matches the fragment anywhere in the string — a non-URL such as
+// "garbage#issuecomment-1" satisfies it. This parses `value` as a real URL first and
+// requires an http(s) scheme and an "/<owner>/<repo>/issues/<N>" path before accepting the
+// extracted comment ID, so a fragment-bearing non-URL or a malformed path (e.g. missing
+// "/issues/", or a "/pull/<N>" path) is rejected the same way a merely whitespace-free
+// string already was.
 function isCommentPermalink(value) {
-  return typeof value === "string" && extractCommentIdFromUrl(value) !== null;
+  if (typeof value !== "string") return false;
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (!/^https?:$/.test(parsed.protocol)) return false;
+  if (!/^\/[^/]+\/[^/]+\/issues\/\d+\/?$/.test(parsed.pathname)) return false;
+  return extractCommentIdFromUrl(parsed.hash) !== null;
 }
 
 // Pure. Returns the canonical token (in the table's own casing) matching `value`
