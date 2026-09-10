@@ -448,6 +448,92 @@ test("validatePlanIndexInput rejects a sharedContractUrl/commentUrl that is not 
   assert.deepEqual(validatePlanIndexInput(validInput().planIndex), []);
 });
 
+test("validatePlanIndexInput rejects a fragment-bearing non-URL and a malformed permalink path (Stage 2 audit #506 finding)", () => {
+  // Stage 2 audit #506: `isCommentPermalink` previously delegated straight to
+  // `extractCommentIdFromUrl`, which only regex-matches "#issuecomment-<id>" anywhere in
+  // the string — so a non-URL that merely contains the fragment (e.g.
+  // "garbage#issuecomment-1") incorrectly passed. It must require a real
+  // ".../issues/<N>#issuecomment-<id>" permalink.
+  const notAUrlButHasFragment = "garbage#issuecomment-1";
+  const sharedErrors = validatePlanIndexInput({
+    ...validInput().planIndex,
+    sharedContractUrl: notAUrlButHasFragment,
+  });
+  assert.ok(
+    sharedErrors.some((e) => /sharedContractUrl/.test(e) && /permalink/.test(e)),
+    `expected a permalink rejection for a fragment-bearing non-URL, got: ${JSON.stringify(sharedErrors)}`,
+  );
+
+  // A real URL missing the required "/issues/<N>" path (e.g. a "/pull/<N>" URL) must also
+  // be rejected, not just a bare non-URL string.
+  const pullRequestUrl = `https://github.com/${REPO}/pull/${EXECUTION_ISSUE}#issuecomment-1`;
+  const unitErrors = validatePlanIndexInput({
+    ...validInput().planIndex,
+    units: [validPlanIndexUnit("999-A", { commentUrl: pullRequestUrl })],
+  });
+  assert.ok(
+    unitErrors.some((e) => /commentUrl/.test(e) && /permalink/.test(e)),
+    `expected a permalink rejection for a malformed (pull-request) path, got: ${JSON.stringify(unitErrors)}`,
+  );
+
+  // A well-formed host/path but with a scheme other than http(s) must also be rejected.
+  const nonHttpScheme = `ftp://github.com/${REPO}/issues/${EXECUTION_ISSUE}#issuecomment-1`;
+  const schemeErrors = validatePlanIndexInput({
+    ...validInput().planIndex,
+    sharedContractUrl: nonHttpScheme,
+  });
+  assert.ok(
+    schemeErrors.some((e) => /sharedContractUrl/.test(e) && /permalink/.test(e)),
+    `expected a permalink rejection for a non-http(s) scheme, got: ${JSON.stringify(schemeErrors)}`,
+  );
+});
+
+test("validatePlanInput rejects a non-exact fragment and a cross-issue/cross-repo permalink (#507 Stage 1 review finding)", () => {
+  // A shape-valid GitHub URL whose fragment carries trailing characters after the numeric
+  // comment id (e.g. "#issuecomment-1junk") previously still resolved a comment id via a
+  // non-anchored regex match and passed.
+  const trailingJunkFragment = `https://github.com/${REPO}/issues/${EXECUTION_ISSUE}#issuecomment-1junk`;
+  const junkResult = validatePlanInput(validInput({ planIndex: { ...validInput().planIndex, sharedContractUrl: trailingJunkFragment } }));
+  assert.equal(junkResult.ok, false);
+  assert.ok(
+    junkResult.errors.some((e) => /sharedContractUrl/.test(e) && /permalink/.test(e)),
+    `expected a permalink rejection for a non-exact fragment, got: ${JSON.stringify(junkResult.errors)}`,
+  );
+
+  // A real GitHub permalink for a completely different repo/issue must be rejected when
+  // executionIssue/repo context is known (validatePlanInput always knows executionIssue from
+  // the input itself, and repo when the caller supplies it) — not merely accepted because it
+  // happens to still be a well-formed GitHub issue-comment URL.
+  const crossRepoUrl = "https://github.com/attacker/other-repo/issues/123#issuecomment-1";
+  const crossRepoResult = validatePlanInput(
+    validInput({ planIndex: { ...validInput().planIndex, sharedContractUrl: crossRepoUrl } }),
+    { repo: REPO },
+  );
+  assert.equal(crossRepoResult.ok, false);
+  assert.ok(
+    crossRepoResult.errors.some((e) => /sharedContractUrl/.test(e) && /permalink/.test(e)),
+    `expected a permalink rejection for a cross-repo URL, got: ${JSON.stringify(crossRepoResult.errors)}`,
+  );
+
+  // A real GitHub permalink for the right repo but the wrong issue number must also be
+  // rejected — executionIssue identity is always known (it comes from input.executionIssue
+  // itself), so this check applies even when `repo` context is not supplied.
+  const crossIssueUrl = `https://github.com/${REPO}/issues/${EXECUTION_ISSUE + 1}#issuecomment-1`;
+  const crossIssueResult = validatePlanInput(
+    validInput({ planIndex: { ...validInput().planIndex, sharedContractUrl: crossIssueUrl } }),
+  );
+  assert.equal(crossIssueResult.ok, false);
+  assert.ok(
+    crossIssueResult.errors.some((e) => /sharedContractUrl/.test(e) && /permalink/.test(e)),
+    `expected a permalink rejection for a cross-issue URL, got: ${JSON.stringify(crossIssueResult.errors)}`,
+  );
+
+  // The real permalink shape, for the correct issue and repo, still passes both with and
+  // without repo context supplied.
+  assert.equal(validatePlanInput(validInput()).ok, true);
+  assert.equal(validatePlanInput(validInput(), { repo: REPO }).ok, true);
+});
+
 // ---------------------------------------------------------------------------------------
 // Formatting shape: exact headings and field order
 // ---------------------------------------------------------------------------------------
@@ -538,12 +624,30 @@ test("publishPlanArtifacts posts Shared Contract, then Worker Units, then Plan I
   assert.ok(posted[2].body.includes(posted[1].url), "Plan Index must reference the freshly-posted Worker Unit URL");
 });
 
-test("publishPlanArtifacts surfaces a failed live round-trip verification as a non-ok result", async () => {
+test("publishPlanArtifacts surfaces a failed live round-trip verification as a non-ok, operational-error result (#507 Stage 1 review finding)", async () => {
   const postImpl = async ({ body }) => ({ html_url: commentUrl(300), body });
   const verifyImpl = async () => ({ ok: false, errors: ["synthetic failure for this test"] });
   const result = await publishPlanArtifacts(validInput(), { repo: REPO, postImpl, verifyImpl });
   assert.equal(result.ok, false);
   assert.ok(result.errors.some((e) => /live round-trip verification failed/.test(e)));
+  // A post-write verification failure happens after the input was already validated, so it
+  // is an operational failure the CLI must map to exit 2 — distinct from a validated-but-
+  // rejected plan input (exit 1) — not the generic exit-1 rejection status.
+  assert.equal(result.operationalError, true);
+});
+
+test("publishPlanArtifacts converts a thrown gh write failure into a non-ok, operational-error result instead of an uncaught exception (#507 Stage 1 review finding)", async () => {
+  // A prior version left `await postImpl(...)` unguarded, so a `gh api` failure (network,
+  // permission, or any other error `execFileSync` throws for) propagated straight through
+  // this function and the CLI's `main()` as an uncaught exception -- a bare Node stack trace
+  // on exit 1, indistinguishable from a genuine invalid-plan rejection.
+  const postImpl = async () => {
+    throw new Error("simulated gh api failure (e.g. network or permission error)");
+  };
+  const result = await publishPlanArtifacts(validInput(), { repo: REPO, postImpl });
+  assert.equal(result.ok, false);
+  assert.equal(result.operationalError, true);
+  assert.ok(result.errors.some((e) => /GitHub write failed/.test(e) && /simulated gh api failure/.test(e)));
 });
 
 test("publishPlanArtifacts writes nothing when Shared Contract and Worker Units are valid but the Plan Index is malformed (#497 Stage 1 review finding)", async () => {

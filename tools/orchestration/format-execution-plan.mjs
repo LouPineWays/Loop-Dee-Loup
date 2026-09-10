@@ -100,7 +100,6 @@ import {
   parseUnitListItem,
   runParseExecutionPlan,
   WORKER_UNIT_FIELDS,
-  extractCommentIdFromUrl,
 } from "./parse-execution-plan.mjs";
 import { CAPABILITY_CLASS_ROUTE_TABLE } from "./prepare-dispatch-manifest.mjs";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
@@ -140,14 +139,51 @@ function isExecutionScopedUnitId(unitId, executionIssue) {
 }
 
 // Pure. A Plan Index `sharedContractUrl` / unit `commentUrl` must be an actual GitHub issue
-// comment permalink (`...#issuecomment-<numeric id>`) — the exact shape
-// `parse-execution-plan.mjs`'s own `extractCommentIdFromUrl` requires to resolve the
-// referenced comment. A merely whitespace-free string (e.g. "not-a-comment-url") is not
-// sufficient: it would pass this writer's own compose-only validation yet fail to parse
-// once read back for real, since nothing here re-derives the comment ID a live `gh` read
-// would need.
-function isCommentPermalink(value) {
-  return typeof value === "string" && extractCommentIdFromUrl(value) !== null;
+// comment permalink naming the current execution issue — a real
+// `https://github.com/<owner>/<repo>/issues/<N>#issuecomment-<id>` URL, not merely a string
+// that happens to contain an "#issuecomment-<id>" fragment somewhere in it. Two escalating
+// fixes, both from live review findings on this same validator:
+//
+// Stage 2 audit #506: delegating straight to `parse-execution-plan.mjs`'s own
+// `extractCommentIdFromUrl` under-validated — that helper exists to extract a comment ID
+// from an already-known-good URL when resolving a comment, so it only regex-matched the
+// fragment anywhere in the string, and a non-URL such as "garbage#issuecomment-1" satisfied
+// it.
+//
+// #507 Stage 1 review finding: shape validation alone still accepted a permalink for *any*
+// origin/repo/issue, and a non-exact fragment (e.g. "#issuecomment-1junk"). For a
+// compose-only or Plan-Index-only `--publish` input, that string is persisted verbatim as
+// the durable Plan Index pointer — nothing downstream re-derives it, since the real reader's
+// own comment lookup resolves only the numeric fragment among the *current* issue's
+// comments, so a copied cross-issue/cross-repo permalink would still happen to "work" by
+// accident while remaining a wrong, misleading durable pointer. This now requires the exact
+// "github.com" host, an exact `#issuecomment-<digits>` fragment (no trailing characters),
+// and — whenever the caller supplies `executionIssue`/`repo` context — that the URL's own
+// issue number and owner/repo match it. `repo` is optional here: only the real `--publish`
+// path knows the target repo up front (compose-only calls do not), so omitting it does not
+// weaken the checks that are always possible (host, scheme, path shape, exact fragment, and
+// issue-number match whenever `executionIssue` itself is known).
+function isCommentPermalink(value, { executionIssue, repo } = {}) {
+  if (typeof value !== "string") return false;
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (!/^https?:$/.test(parsed.protocol)) return false;
+  if (parsed.hostname.toLowerCase() !== "github.com") return false;
+  const pathMatch = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/issues\/(\d+)\/?$/);
+  if (!pathMatch) return false;
+  if (!/^#issuecomment-\d+$/.test(parsed.hash)) return false;
+
+  if (Number.isInteger(executionIssue) && executionIssue > 0 && Number(pathMatch[3]) !== executionIssue) {
+    return false;
+  }
+  if (isNonEmptyString(repo) && `${pathMatch[1]}/${pathMatch[2]}`.toLowerCase() !== repo.trim().toLowerCase()) {
+    return false;
+  }
+  return true;
 }
 
 // Pure. Returns the canonical token (in the table's own casing) matching `value`
@@ -229,7 +265,7 @@ export function validateSharedContractInput(sharedContract) {
 // invocation composes, and a Plan Index bullet/entry with no URL is not a valid artifact —
 // the `--publish` CLI path resolves real URLs from what it just posted before ever calling
 // this validator, rather than this function itself growing a "URLs optional" mode.
-export function validatePlanIndexInput(planIndex, { executionIssue } = {}) {
+export function validatePlanIndexInput(planIndex, { executionIssue, repo } = {}) {
   const errors = [];
   if (!planIndex) return errors;
 
@@ -254,10 +290,11 @@ export function validatePlanIndexInput(planIndex, { executionIssue } = {}) {
     errors.push('Plan Index: missing required field "sharedContractUrl"');
   } else if (hasWhitespace(planIndex.sharedContractUrl.trim())) {
     errors.push('Plan Index: "sharedContractUrl" must not contain whitespace');
-  } else if (!isCommentPermalink(planIndex.sharedContractUrl.trim())) {
+  } else if (!isCommentPermalink(planIndex.sharedContractUrl.trim(), { executionIssue, repo })) {
     errors.push(
-      'Plan Index: "sharedContractUrl" must be a real GitHub issue comment permalink ' +
-        '(".../issues/<N>#issuecomment-<id>"), not merely a whitespace-free string',
+      'Plan Index: "sharedContractUrl" must be a real GitHub issue comment permalink for this execution issue ' +
+        '("https://github.com/<owner>/<repo>/issues/<N>#issuecomment-<id>"), not merely a whitespace-free string, ' +
+        'a non-exact fragment, or a permalink for a different issue/repo',
     );
   }
 
@@ -307,10 +344,11 @@ export function validatePlanIndexInput(planIndex, { executionIssue } = {}) {
       errors.push(`${where}: missing required field "commentUrl"`);
     } else if (hasWhitespace(unit.commentUrl.trim())) {
       errors.push(`${where}: "commentUrl" must not contain whitespace`);
-    } else if (!isCommentPermalink(unit.commentUrl.trim())) {
+    } else if (!isCommentPermalink(unit.commentUrl.trim(), { executionIssue, repo })) {
       errors.push(
-        `${where}: "commentUrl" must be a real GitHub issue comment permalink ` +
-          `(".../issues/<N>#issuecomment-<id>"), not merely a whitespace-free string`,
+        `${where}: "commentUrl" must be a real GitHub issue comment permalink for this execution issue ` +
+          `("https://github.com/<owner>/<repo>/issues/<N>#issuecomment-<id>"), not merely a whitespace-free ` +
+          `string, a non-exact fragment, or a permalink for a different issue/repo`,
       );
     }
   });
@@ -321,8 +359,10 @@ export function validatePlanIndexInput(planIndex, { executionIssue } = {}) {
 // Pure. Validates the whole structured plan input across every artifact type present in
 // `input`, accumulating every problem found — never stopping at the first — per the Shared
 // Contract's "Validation-before-publish contract". Returns `{ ok: true, errors: [] }` or
-// `{ ok: false, errors: [...] }`.
-export function validatePlanInput(input) {
+// `{ ok: false, errors: [...] }`. `repo` is optional context (the real `--publish` path
+// knows it; compose-only callers do not) threaded through to `validatePlanIndexInput`'s
+// permalink identity check — see `isCommentPermalink`.
+export function validatePlanInput(input, { repo } = {}) {
   if (!input || typeof input !== "object") {
     return { ok: false, errors: ["input must be a JSON object"] };
   }
@@ -357,7 +397,7 @@ export function validatePlanInput(input) {
   }
 
   if (input.planIndex) {
-    errors.push(...validatePlanIndexInput(input.planIndex, { executionIssue: input.executionIssue }));
+    errors.push(...validatePlanIndexInput(input.planIndex, { executionIssue: input.executionIssue, repo }));
     if (input.workerUnits !== undefined && Array.isArray(input.planIndex.units)) {
       const planIndexUnitIds = new Set(
         input.planIndex.units.filter((u) => isNonEmptyString(u?.unitId)).map((u) => u.unitId),
@@ -526,8 +566,8 @@ export function verifyFullRoundTrip(input, { executionIssue }) {
 // `{ ok: false, errors }` — on failure, `artifacts` is never populated, matching the
 // "writes nothing on invalid input" contract (the CLI layer performs the actual GitHub write
 // only after this returns ok:true).
-export function buildPlanArtifacts(input) {
-  const validation = validatePlanInput(input);
+export function buildPlanArtifacts(input, { repo } = {}) {
+  const validation = validatePlanInput(input, { repo });
   if (!validation.ok) return { ok: false, errors: validation.errors };
 
   const { executionIssue } = input;
@@ -639,48 +679,66 @@ export async function publishPlanArtifacts(
   // in this same call, those placeholder values are never actually persisted (they are
   // overwritten below with the freshly-posted real URLs) — they exist only to satisfy this
   // validation contract up front, matching every existing caller/test convention.
-  const preValidation = validatePlanInput(input);
+  const preValidation = validatePlanInput(input, { repo });
   if (!preValidation.ok) return { ok: false, errors: preValidation.errors };
 
   const { executionIssue } = input;
   const persisted = {};
 
-  if (input.sharedContract) {
-    const body = formatSharedContractBody(input.sharedContract, { executionIssue });
-    const posted = await postImpl({ repo, executionIssue, body });
-    persisted.sharedContractUrl = posted.html_url;
-  }
-
-  if (input.workerUnits) {
-    persisted.workerUnitUrls = {};
-    for (const unit of input.workerUnits) {
-      const body = formatWorkerUnitBody(unit, { executionIssue });
+  // Everything past this point operates on already-validated input, so any failure from
+  // here on is an operational failure (a `gh api` write that failed, e.g. network/permission
+  // error, or a live post-publish verification mismatch) rather than a rejection of the
+  // input itself — `main()`'s CLI layer maps `operationalError: true` to exit code 2,
+  // distinct from exit code 1 for `preValidation` rejection above (#507 Stage 1 review
+  // finding). Previously an unguarded `await postImpl(...)` let a `gh api` failure throw
+  // straight through this function and `main()` as an uncaught exception — a bare Node stack
+  // trace on exit 1, indistinguishable from a genuine invalid-plan rejection to any
+  // automation reading the exit code alone, the same class of defect the #497 Stage 1
+  // correction already fixed for the CLI's own input-reading paths.
+  try {
+    if (input.sharedContract) {
+      const body = formatSharedContractBody(input.sharedContract, { executionIssue });
       const posted = await postImpl({ repo, executionIssue, body });
-      persisted.workerUnitUrls[unit.unitId] = posted.html_url;
+      persisted.sharedContractUrl = posted.html_url;
     }
-  }
 
-  if (input.planIndex) {
-    const resolvedPlanIndex = {
-      ...input.planIndex,
-      sharedContractUrl: persisted.sharedContractUrl ?? input.planIndex.sharedContractUrl,
-      units: input.planIndex.units.map((u) => ({
-        ...u,
-        commentUrl: persisted.workerUnitUrls?.[u.unitId] ?? u.commentUrl,
-      })),
-    };
-    const finalInput = { ...input, planIndex: resolvedPlanIndex };
-    const built = buildPlanArtifacts(finalInput);
-    if (!built.ok) return { ok: false, errors: built.errors };
-
-    const posted = await postImpl({ repo, executionIssue, body: built.artifacts.planIndexBody });
-    persisted.planIndexUrl = posted.html_url;
-
-    const reparsed = await verifyImpl({ repo, executionIssue });
-    if (!reparsed.ok) {
-      const detail = (reparsed.errors ?? []).join(" | ") || reparsed.message || "unknown verification failure";
-      return { ok: false, errors: [`live round-trip verification failed after publish: ${detail}`] };
+    if (input.workerUnits) {
+      persisted.workerUnitUrls = {};
+      for (const unit of input.workerUnits) {
+        const body = formatWorkerUnitBody(unit, { executionIssue });
+        const posted = await postImpl({ repo, executionIssue, body });
+        persisted.workerUnitUrls[unit.unitId] = posted.html_url;
+      }
     }
+
+    if (input.planIndex) {
+      const resolvedPlanIndex = {
+        ...input.planIndex,
+        sharedContractUrl: persisted.sharedContractUrl ?? input.planIndex.sharedContractUrl,
+        units: input.planIndex.units.map((u) => ({
+          ...u,
+          commentUrl: persisted.workerUnitUrls?.[u.unitId] ?? u.commentUrl,
+        })),
+      };
+      const finalInput = { ...input, planIndex: resolvedPlanIndex };
+      const built = buildPlanArtifacts(finalInput, { repo });
+      if (!built.ok) return { ok: false, operationalError: true, errors: built.errors };
+
+      const posted = await postImpl({ repo, executionIssue, body: built.artifacts.planIndexBody });
+      persisted.planIndexUrl = posted.html_url;
+
+      const reparsed = await verifyImpl({ repo, executionIssue });
+      if (!reparsed.ok) {
+        const detail = (reparsed.errors ?? []).join(" | ") || reparsed.message || "unknown verification failure";
+        return {
+          ok: false,
+          operationalError: true,
+          errors: [`live round-trip verification failed after publish: ${detail}`],
+        };
+      }
+    }
+  } catch (err) {
+    return { ok: false, operationalError: true, errors: [`GitHub write failed during publish: ${err.message}`] };
   }
 
   return { ok: true, persisted };
@@ -759,8 +817,16 @@ async function main() {
     }
     const result = await publishPlanArtifacts(input, { repo });
     if (!result.ok) {
+      // A pre-validation rejection (exit 1, same as compose-only `buildPlanArtifacts`
+      // below) is distinct from an operational failure during/after an actual write — a
+      // `gh api` failure or a live post-publish round-trip mismatch — which
+      // `publishPlanArtifacts` flags via `operationalError: true` and this CLI maps to exit
+      // 2, the same status already used for a missing/unreadable input file, unparseable
+      // JSON, and unresolvable repo identity above (#507 Stage 1 review finding: this
+      // previously always exited 1, so automation could not distinguish invalid plan input
+      // from a GitHub/network failure).
       process.stderr.write(`${JSON.stringify({ ok: false, errors: result.errors })}\n`);
-      process.exit(1);
+      process.exit(result.operationalError ? 2 : 1);
       return;
     }
     process.stdout.write(`${JSON.stringify({ ok: true, persisted: result.persisted })}\n`);
