@@ -14,6 +14,8 @@ import {
   isNoneSentinel,
   parseExecutionPointer,
   readExecutionBulletField,
+  findNearDuplicateBulletLabels,
+  describeExecutionConflict,
   evaluateReadyDispatchGate,
   classifyAuditIssue,
   checkReadyDispatch,
@@ -1018,6 +1020,107 @@ test("readExecutionBulletField: both spellings present naming the same issue is 
 test("readExecutionBulletField: both spellings present naming different issues is a conflict", () => {
   const result = readExecutionBulletField("- **Execution:** #310\n- **Execution issue:** #407\n");
   assert.deepEqual(result, { conflict: true, legacy: "#310", liveSpelling: "#407" });
+});
+
+// -- Issue #493: near-duplicate control bullet labels (the #440 regression) ------------------
+
+test("findNearDuplicateBulletLabels: detects Stage 2 (current)/(updated)/note lookalikes coexisting with the canonical field", () => {
+  const body = "- **Stage 2:** #480\n- **Stage 2 (current):** #492\n- **Stage 2 (updated):** #493\n- **Stage 2 note:** see below\n";
+  const conflicts = findNearDuplicateBulletLabels(body, "Stage 2");
+  assert.deepEqual(
+    conflicts.map((c) => c.label).sort(),
+    ["Stage 2 (current)", "Stage 2 (updated)", "Stage 2 note"].sort(),
+  );
+});
+
+test("findNearDuplicateBulletLabels: exact canonical match alone is never flagged", () => {
+  assert.deepEqual(findNearDuplicateBulletLabels("- **Stage 2:** #480\n", "Stage 2"), []);
+});
+
+// Stage 1 review finding on this PR: the original boundary recognized only whitespace/"("
+// and missed punctuation-delimited qualifiers, which could still leave a stale canonical
+// field authoritative (e.g. "Stage 2-current" beside canonical "Stage 2").
+test("findNearDuplicateBulletLabels: punctuation-delimited Stage 2 lookalikes (hyphen, slash, bracket, em-dash) are each flagged", () => {
+  const body =
+    "- **Stage 2:** #480\n" +
+    "- **Stage 2-current:** #492\n" +
+    "- **Stage 2/current:** #493\n" +
+    "- **Stage 2[current]:** #494\n" +
+    "- **Stage 2—current:** #495\n";
+  const conflicts = findNearDuplicateBulletLabels(body, "Stage 2");
+  assert.deepEqual(
+    conflicts.map((c) => c.label).sort(),
+    ["Stage 2-current", "Stage 2/current", "Stage 2[current]", "Stage 2—current"].sort(),
+  );
+});
+
+test("findNearDuplicateBulletLabels: the punctuation-boundary rule applies equally to PR and Execution", () => {
+  assert.equal(findNearDuplicateBulletLabels("- **PR:** #376\n- **PR-current:** #400\n", "PR").length, 1);
+  assert.equal(
+    findNearDuplicateBulletLabels("- **Execution:** #310\n- **Execution-current:** #999\n", "Execution", [
+      "Execution issue",
+    ]).length,
+    1,
+  );
+});
+
+test("findNearDuplicateBulletLabels: a longer alphanumeric word/token sharing only a character prefix is never a near-duplicate", () => {
+  assert.deepEqual(findNearDuplicateBulletLabels("- **Stage 20:** #480\n", "Stage 2"), []);
+  assert.deepEqual(findNearDuplicateBulletLabels("- **PR:** #376\n- **Precondition:** #400\n", "PR"), []);
+});
+
+test("findNearDuplicateBulletLabels: an allowed alias is recognized, never flagged as a near-duplicate of the canonical label", () => {
+  const body = "- **Execution:** #310\n- **Execution issue:** #310\n";
+  assert.deepEqual(findNearDuplicateBulletLabels(body, "Execution", ["Execution issue"]), []);
+});
+
+test("findNearDuplicateBulletLabels: false-positive control -- unrelated bold bullets and prose merely containing the word do not trigger the guard", () => {
+  const body =
+    "- **Previous Stage 2:** #100\n" +
+    "- **Parent execution issue:** #200\n" +
+    "Some ordinary prose mentioning PR review and Execution planning does not use the bullet shape at all.\n" +
+    "- **Route:** implementation worker\n";
+  assert.deepEqual(findNearDuplicateBulletLabels(body, "Stage 2"), []);
+  assert.deepEqual(findNearDuplicateBulletLabels(body, "PR"), []);
+  assert.deepEqual(findNearDuplicateBulletLabels(body, "Execution", ["Execution issue"]), []);
+});
+
+test("readExecutionBulletField: a recognized Execution bullet coexisting with an unrecognized near-duplicate label is a conflict", () => {
+  const result = readExecutionBulletField("- **Execution:** #310\n- **Execution (current):** #407\n");
+  assert.equal(result.conflict, true);
+  assert.equal(result.nearDuplicate, true);
+  assert.equal(result.matches.length, 1);
+  assert.equal(result.matches[0].label, "Execution (current)");
+});
+
+test("readExecutionBulletField: an unrecognized near-duplicate of the live 'Execution issue' spelling is also a conflict", () => {
+  const result = readExecutionBulletField("- **Execution issue:** #407\n- **Execution issue (updated):** #408\n");
+  assert.equal(result.conflict, true);
+  assert.equal(result.nearDuplicate, true);
+});
+
+test("describeExecutionConflict: composes a distinct reason for the near-duplicate-label shape vs. the alias-mismatch shape", () => {
+  const aliasMismatch = describeExecutionConflict({ conflict: true, legacy: "#310", liveSpelling: "#407" });
+  assert.match(aliasMismatch, /#310/);
+  assert.match(aliasMismatch, /#407/);
+
+  const nearDup = describeExecutionConflict({
+    conflict: true,
+    nearDuplicate: true,
+    matches: [{ label: "Execution (current)", raw: "#407" }],
+  });
+  assert.match(nearDup, /Execution \(current\)/);
+  assert.match(nearDup, /#407/);
+  assert.match(nearDup, /near-duplicate/i);
+});
+
+test("evaluateReadyDispatchGate: an unrecognized Execution near-duplicate label fails closed to NOT_READY, never silently dispatching against the canonical value", () => {
+  const body =
+    "- **Lifecycle:** READY\n- **Execution:** #310\n- **Execution (current):** #999\n- **Route:** implementation worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "NOT_READY");
+  assert.ok(!("executionIssue" in result));
+  assert.ok(result.reasons.some((r) => r.toLowerCase().includes("near-duplicate")));
 });
 
 test("evaluateReadyDispatchGate: conflicting 'Execution:'/'Execution issue:' pointers fail closed to NOT_READY with an explicit conflict reason, never silently picking one (397-E)", () => {

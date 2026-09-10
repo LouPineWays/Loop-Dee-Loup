@@ -423,6 +423,93 @@ export function parseExecutionPointer(value) {
   return { ok: true, issue: refs[0] };
 }
 
+// Pure. Extracts every bold-bullet label appearing in the body as "- **Label:** value" (the
+// same line shape parseControlBullet reads), returning { label, raw } for each matching
+// line regardless of what label text it carries. Used only to scan for near-duplicate
+// labels of one specific parser-sensitive field below — never to interpret arbitrary body
+// prose, and never applied to plain paragraphs or "### Heading" template fields (issue
+// #493 is scoped to the ad hoc bold-bullet convention only, the shape #440's own
+// reproduction used).
+function extractBoldBulletLabels(body) {
+  const pattern = /^-\s*\*\*(.+?):\*\*\s*(.*)$/;
+  const result = [];
+  for (const line of (body ?? "").split("\n")) {
+    const m = pattern.exec(line);
+    if (m) result.push({ label: m[1].trim(), raw: m[2].trim() });
+  }
+  return result;
+}
+
+// Pure. True when `label` is a near-duplicate of `canonical`: it begins with the canonical
+// label text (case-insensitive) followed by a non-word boundary and additional non-empty
+// qualifier content before the colon — a parenthetical like "(current)"/"(updated)", a bare
+// trailing word like "note", or a punctuation-delimited qualifier like "-current"/"/current"/
+// "[current]"/an em-dash form — while not itself being an exact (case-insensitive) match for
+// `canonical`. Issue #493's #440 regression: "Stage 2 (current):" and "Stage 2 (updated):"
+// both take this shape relative to canonical "Stage 2". Stage 1 review finding on this PR:
+// the original boundary recognized only whitespace/"(" and missed punctuation-delimited
+// qualifiers such as "Stage 2-current" or "Stage 2/current", which could still leave a stale
+// canonical field authoritative. Deliberately a structural prefix-plus-leftover-content rule,
+// not a fixed whitelist of qualifier words or separator spellings — the issue explicitly
+// rejects special-casing only the literal observed spellings, so any future lookalike
+// qualifier is caught the same way. The boundary requirement (the character immediately after
+// the canonical prefix must be a non-word character — i.e. not a letter, digit, or
+// underscore) keeps an unrelated label that merely shares a character prefix — e.g. canonical
+// "PR" against a hypothetical "Precondition", or canonical "Stage 2" against a hypothetical
+// "Stage 20" — from being misread as a near-duplicate, while still catching any punctuation or
+// whitespace separator as a genuine qualifier boundary.
+function isNearDuplicateLabel(label, canonical) {
+  const normalizedLabel = label.trim().toLowerCase();
+  const normalizedCanonical = canonical.trim().toLowerCase();
+  if (normalizedLabel === normalizedCanonical) return false;
+  if (!normalizedLabel.startsWith(normalizedCanonical)) return false;
+  const remainder = normalizedLabel.slice(normalizedCanonical.length);
+  if (!/^\W/.test(remainder)) return false;
+  return remainder.trim().length > 0;
+}
+
+// Pure. Scans the body for every bold-bullet label that is a near-duplicate (per
+// isNearDuplicateLabel) of `canonical` or of any of `allowedAliases`, while not itself being
+// an exact match for `canonical` or any allowed alias — the recognized/unrecognized-label
+// split issue #493 requires. `allowedAliases` preserves intentionally supported alternate
+// spellings (e.g. "Execution issue" alongside "Execution") as recognized fields in their own
+// right, never themselves flagged as near-duplicates. Returns the list of near-duplicate
+// labels found (each with its own raw value), or [] when none exist.
+export function findNearDuplicateBulletLabels(body, canonical, allowedAliases = []) {
+  const recognized = new Set([canonical, ...allowedAliases].map((s) => s.trim().toLowerCase()));
+  const seen = new Set();
+  const conflicts = [];
+  for (const { label, raw } of extractBoldBulletLabels(body)) {
+    const normalized = label.trim().toLowerCase();
+    if (recognized.has(normalized)) continue;
+    const isNearDup = [canonical, ...allowedAliases].some((c) => isNearDuplicateLabel(label, c));
+    if (!isNearDup) continue;
+    const key = `${normalized}::${raw}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    conflicts.push({ label, raw });
+  }
+  return conflicts;
+}
+
+// Pure. Composes a human-readable ambiguity reason from a `readExecutionBulletField`
+// conflict result — shared by both callers (evaluateReadyDispatchGate below, and
+// next-review-transition-gate.mjs's own Execution-pointer resolution) so the two reason
+// strings can never silently drift apart.
+export function describeExecutionConflict(executionField) {
+  if (executionField.nearDuplicate) {
+    return (
+      "Execution reference is ambiguous: a recognized Execution bullet coexists with unrecognized near-duplicate " +
+      `label(s) ${executionField.matches.map((m) => `"- **${m.label}:**" (${JSON.stringify(m.raw)})`).join(", ")} that ` +
+      "could represent the same live field — refusing to select the canonical value as authoritative"
+    );
+  }
+  return (
+    `Execution pointer is ambiguous: "- **Execution:**" names ${JSON.stringify(executionField.legacy)} ` +
+    `while "- **Execution issue:**" names ${JSON.stringify(executionField.liveSpelling)} — these must resolve to the same execution Issue`
+  );
+}
+
 // Pure. Reads the control Issue's execution-pointer bullet under either observed spelling
 // as one field: the legacy ad hoc "- **Execution:**" bullet (control Issues #311/#322) and
 // the live "- **Execution issue:**" spelling real thin controls #398/#408 actually use.
@@ -435,6 +522,14 @@ export function parseExecutionPointer(value) {
 // dispatching against a guess. Malformed values on one side (e.g. "none") do not by
 // themselves trigger a conflict — parseExecutionPointer's own missing/multi-valued
 // handling still applies to whichever value is selected.
+//
+// Issue #493 (the #440 regression): when a recognized "Execution"/"Execution issue" bullet
+// is present at all, an unrecognized near-duplicate label that could represent the same
+// live field (e.g. "- **Execution (current):**") also produces { conflict: true } —
+// `nearDuplicate: true` plus the offending `matches` — before the recognized value, possibly
+// stale, is ever selected. This is a distinct conflict shape from the alias-mismatch one
+// above (kept separate rather than merged, so existing callers/tests that destructure the
+// alias-mismatch shape verbatim are unaffected).
 export function readExecutionBulletField(body) {
   const legacy = parseControlBullet(body, "Execution");
   const liveSpelling = parseControlBullet(body, "Execution issue");
@@ -443,6 +538,12 @@ export function readExecutionBulletField(body) {
     const livePointer = parseExecutionPointer(liveSpelling);
     if (legacyPointer.ok && livePointer.ok && legacyPointer.issue !== livePointer.issue) {
       return { conflict: true, legacy, liveSpelling };
+    }
+  }
+  if (legacy !== null || liveSpelling !== null) {
+    const nearDuplicates = findNearDuplicateBulletLabels(body, "Execution", ["Execution issue"]);
+    if (nearDuplicates.length > 0) {
+      return { conflict: true, nearDuplicate: true, matches: nearDuplicates };
     }
   }
   return { conflict: false, value: liveSpelling ?? legacy };
@@ -565,12 +666,7 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   }
 
   const execution = executionField.conflict
-    ? {
-        ok: false,
-        reason:
-          `Execution pointer is ambiguous: "- **Execution:**" names ${JSON.stringify(executionField.legacy)} ` +
-          `while "- **Execution issue:**" names ${JSON.stringify(executionField.liveSpelling)} — these must resolve to the same execution Issue`,
-      }
+    ? { ok: false, reason: describeExecutionConflict(executionField) }
     : parseExecutionPointer(executionRaw);
   if (!execution.ok) {
     reasons.push(execution.reason);

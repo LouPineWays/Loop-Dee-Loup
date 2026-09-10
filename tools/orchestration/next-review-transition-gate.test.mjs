@@ -14,6 +14,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   parseOptionalIssueRef,
+  parseOptionalIssueRefGuarded,
   resolvePreMergeVerdict,
   resolvePostMergeVerdict,
   runNextReviewTransitionGate,
@@ -35,6 +36,62 @@ test("parseOptionalIssueRef: 'none' sentinel, a settled #N reference, missing, a
   assert.match(invalid.reason, /#400/);
   const empty = parseOptionalIssueRef("", "PR");
   assert.equal(empty.kind, "invalid");
+});
+
+// -- parseOptionalIssueRefGuarded (issue #493, the #440 near-duplicate-label regression) ----
+
+test("parseOptionalIssueRefGuarded: the exact #440 regression -- stale canonical 'Stage 2: #480' coexisting with live 'Stage 2 (current): #492' fails closed as ambiguous", () => {
+  const body = "- **Stage 2:** #480\n- **Stage 2 (current):** #492\n";
+  const result = parseOptionalIssueRefGuarded(body, "Stage 2");
+  assert.equal(result.kind, "ambiguous");
+  assert.match(result.reason, /#480/);
+  assert.match(result.reason, /#492/);
+  assert.match(result.reason, /Stage 2 \(current\)/);
+});
+
+test("parseOptionalIssueRefGuarded: representative (current)/(updated) Stage 2 lookalikes are each rejected", () => {
+  assert.equal(parseOptionalIssueRefGuarded("- **Stage 2:** #480\n- **Stage 2 (current):** #492\n", "Stage 2").kind, "ambiguous");
+  assert.equal(parseOptionalIssueRefGuarded("- **Stage 2:** #480\n- **Stage 2 (updated):** #492\n", "Stage 2").kind, "ambiguous");
+});
+
+test("parseOptionalIssueRefGuarded: PR equivalent -- canonical PR pointer plus an unrecognized near-duplicate PR label cannot silently route through the canonical pointer", () => {
+  const result = parseOptionalIssueRefGuarded("- **PR:** #376\n- **PR (current):** #400\n", "PR");
+  assert.equal(result.kind, "ambiguous");
+  assert.match(result.reason, /#376/);
+  assert.match(result.reason, /#400/);
+});
+
+// Stage 1 review finding on this PR: a punctuation-delimited qualifier (not just "("-style
+// or whitespace) must also be caught, or a stale canonical field stays authoritative.
+test("parseOptionalIssueRefGuarded: punctuation-delimited Stage 2 lookalikes (hyphen, slash) fail closed beside the canonical field", () => {
+  assert.equal(parseOptionalIssueRefGuarded("- **Stage 2:** #480\n- **Stage 2-current:** #492\n", "Stage 2").kind, "ambiguous");
+  assert.equal(parseOptionalIssueRefGuarded("- **Stage 2:** #480\n- **Stage 2/current:** #492\n", "Stage 2").kind, "ambiguous");
+});
+
+test("parseOptionalIssueRefGuarded: a punctuation-delimited PR near-duplicate cannot silently route through a stale canonical pointer", () => {
+  const result = parseOptionalIssueRefGuarded("- **PR:** #376\n- **PR-current:** #400\n", "PR");
+  assert.equal(result.kind, "ambiguous");
+  assert.match(result.reason, /#376/);
+  assert.match(result.reason, /#400/);
+});
+
+test("parseOptionalIssueRefGuarded: normal control -- exactly one canonical value for Stage 2 and PR resolves unchanged", () => {
+  assert.deepEqual(parseOptionalIssueRefGuarded("- **Stage 2:** #480\n", "Stage 2"), { kind: "issue", issue: 480 });
+  assert.deepEqual(parseOptionalIssueRefGuarded("- **PR:** #376\n", "PR"), { kind: "issue", issue: 376 });
+  assert.deepEqual(parseOptionalIssueRefGuarded("- **Stage 2:** none\n", "Stage 2"), { kind: "none" });
+});
+
+test("parseOptionalIssueRefGuarded: false-positive control -- unrelated bold bullets/prose containing similar words do not trigger the guard", () => {
+  const body =
+    "- **PR:** #376\n" +
+    "- **Previous PR:** #100\n" +
+    "Some prose about Stage 2 review timing does not use the bullet shape.\n";
+  assert.deepEqual(parseOptionalIssueRefGuarded(body, "PR"), { kind: "issue", issue: 376 });
+});
+
+test("parseOptionalIssueRefGuarded: missing/malformed-value fields retain their existing fail-closed behavior", () => {
+  assert.equal(parseOptionalIssueRefGuarded("", "PR").kind, "missing");
+  assert.equal(parseOptionalIssueRefGuarded("- **PR:** #376 and also #400\n", "PR").kind, "invalid");
 });
 
 // -- resolvePreMergeVerdict ------------------------------------------------------------------
@@ -961,6 +1018,42 @@ test("runNextReviewTransitionGate: control-Issue mode honors an explicit --head,
   );
   assert.equal(prHeadReadCalls, 0);
   assert.equal(result.exitCode, 0);
+});
+
+test("runNextReviewTransitionGate: the exact #440 regression -- stale 'Stage 2: #480' plus live 'Stage 2 (current): #492' fails closed as AMBIGUOUS before either audit reference can select a Stage 2 transition, never calling checkPostAudit", async () => {
+  const body = CONTROL_BODY_POST_MERGE.replace("- **Stage 2:** #378", "- **Stage 2:** #480\n- **Stage 2 (current):** #492");
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      checkPostAuditImpl: async () => {
+        throw new Error("should never be called -- the near-duplicate guard must fail closed first");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /#480/);
+  assert.match(result.reason, /#492/);
+});
+
+// Stage 1 review finding on this PR: the same #440 shape recurs with a punctuation-delimited
+// qualifier instead of a parenthetical, and must fail closed the same way end to end.
+test("runNextReviewTransitionGate: a punctuation-delimited Stage 2 near-duplicate ('Stage 2-current') fails closed as AMBIGUOUS the same way as the parenthetical form", async () => {
+  const body = CONTROL_BODY_POST_MERGE.replace("- **Stage 2:** #378", "- **Stage 2:** #480\n- **Stage 2-current:** #492");
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      checkPostAuditImpl: async () => {
+        throw new Error("should never be called -- the near-duplicate guard must fail closed first");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /#480/);
+  assert.match(result.reason, /#492/);
 });
 
 test("runNextReviewTransitionGate: control-Issue mode with a settled Stage 2 (Audit) reference resolves the post-merge phase", async () => {
