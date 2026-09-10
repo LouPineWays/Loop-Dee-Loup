@@ -1422,6 +1422,53 @@ export async function checkReadyDispatch(
   // Dispatch manifest pointer yet — the ordinary case for a genuine fresh PLAN_READY control
   // Issue) falls through to READY_TO_RUN_DISPATCH_MANIFEST below, unchanged.
   if (result.status === "READY_TO_RUN_DISPATCH_MANIFEST") {
+    // Stage 1 review finding on this PR (P2): a REPLAN_REQUIRED correction publishes a *new*
+    // canonical Execution Plan Index comment (`format-execution-plan.mjs --publish` always
+    // creates a new comment rather than patching the rejected one) while the control Issue's
+    // own "- **Plan:**" bullet still names the rejected plan. Every routing computation below
+    // (`verifyRoutedDispatchManifest`, `probeReplanRequired`) already reads the *canonical*
+    // latest plan straight off the execution Issue via `parseExecutionPlanImpl` — so routing
+    // itself never targets stale content — but nothing previously re-projected that corrected
+    // reference into the control Issue's own durable snapshot before advancing. That leaves
+    // "Plan:" contradicting the plan routing is actually using throughout manifest preparation
+    // and unit dispatch, violating the same "produce -> verify -> project -> stop" invariant
+    // unit 498-A's READY_FOR_PLAN -> PLAN_READY convergence already established above.
+    //
+    // Gated on an *existing, non-null* "- **Plan:**" bullet, not merely "canonical plan found":
+    // a PLAN_READY control Issue that has never carried a "Plan:" bullet at all (every fixture
+    // predating unit 498-A's own convergence work, and the #498 Live reproduction C /
+    // READY_TO_PROJECT_ROUTED test below, which has an already-verified manifest and a body with
+    // no "Plan:" bullet) is not stale — there is nothing to reconcile, and treating "absent" the
+    // same as "stale" would force every such Issue through a spurious extra projection stop
+    // before it could ever reach ROUTED, or loop back to the same projection forever if nothing
+    // ever adds the bullet. Only a control Issue that already recorded a canonical Plan
+    // reference and now disagrees with the execution Issue's current latest plan is stale.
+    const currentPlanRaw = parseControlBullet(data.body ?? "", "Plan");
+    if (currentPlanRaw != null) {
+      const canonicalPlanProbe = await probeExistingPlan({ repo: resolvedRepo, executionIssue: result.executionIssue }, { parseExecutionPlanImpl });
+      if (canonicalPlanProbe.operationalError) {
+        return {
+          exitCode: 1,
+          message:
+            `Operational failure reading the canonical Execution Plan Index for ${resolvedRepo}#${result.executionIssue} ` +
+            `while evaluating PLAN_READY: ${canonicalPlanProbe.reason}`,
+        };
+      }
+      if (canonicalPlanProbe.alreadyPlanned && currentPlanRaw !== canonicalPlanProbe.planIndexUrl) {
+        const proposedBody = upsertControlBullet(data.body ?? "", "Plan", canonicalPlanProbe.planIndexUrl);
+        return {
+          exitCode: EXIT_CODES_BY_STATUS.READY_TO_PROJECT_PLAN_READY,
+          state: "READY_TO_PROJECT_PLAN_READY",
+          stopAfter: true,
+          controlIssue: Number(controlIssue),
+          repo: resolvedRepo,
+          executionIssue: result.executionIssue,
+          planIndexUrl: canonicalPlanProbe.planIndexUrl,
+          proposedBody,
+        };
+      }
+    }
+
     const manifestProbe = await verifyRoutedDispatchManifest(
       { repo: resolvedRepo, executionIssue: result.executionIssue },
       { parseExecutionPlanImpl, ghCommentViewImpl },

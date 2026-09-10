@@ -177,7 +177,7 @@ test("formatPlanningWorkerDispatchPrompt never contains restated AGENTS.md contr
 
 // -- issue #498 unit 498-B: "Planning-correction worker dispatch" -----------------------------
 
-test("formatPlanningCorrectionWorkerDispatchPrompt includes control/execution issue references, plan index URL, and failing unit ids", () => {
+test("formatPlanningCorrectionWorkerDispatchPrompt includes control/execution issue references and plan index URL, and points the worker at re-running the gate rather than restating failing unit ids", () => {
   const prompt = formatPlanningCorrectionWorkerDispatchPrompt({
     controlIssue: 500,
     executionIssue: 498,
@@ -188,15 +188,25 @@ test("formatPlanningCorrectionWorkerDispatchPrompt includes control/execution is
   assert.match(prompt, /#498/);
   assert.match(prompt, /#500/);
   assert.match(prompt, /https:\/\/github\.com\/LouPineWays\/Loop-Dee-Loup\/issues\/498#issuecomment-5624721353/);
-  assert.match(prompt, /498-A, 498-B/);
+  assert.match(prompt, /ready-dispatch-gate\.mjs --control-issue 500/);
+  // Stage 1 finding P1: the failing unit set must never be interpolated as prose — the
+  // worker recovers it deterministically by re-running the gate instead.
+  assert.ok(!prompt.includes("498-A, 498-B"));
 });
 
-test("formatPlanningCorrectionWorkerDispatchPrompt stays well under the reference-only threshold even for several failing units", () => {
+test("formatPlanningCorrectionWorkerDispatchPrompt stays well under the reference-only threshold regardless of how many units are failing or how long the plan index permalink is", () => {
+  const manyUnits = Array.from({ length: 40 }, (_, i) => `498-${String.fromCharCode(65 + (i % 26))}${i}`);
+  // A permalink at GitHub's own structural limits — 39-char max username, 100-char max repo
+  // name — rather than an arbitrary made-up long string: this proves the bound holds for the
+  // longest URL GitHub itself can ever produce, not just for a plausible-looking one.
+  const longOwner = "a".repeat(39);
+  const longRepo = "b".repeat(100);
+  const longPlanIndexUrl = `https://github.com/${longOwner}/${longRepo}/issues/498#issuecomment-5624721626`;
   const prompt = formatPlanningCorrectionWorkerDispatchPrompt({
     controlIssue: 500,
     executionIssue: 498,
-    planIndexUrl: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-5624721353",
-    replanRequiredUnitIds: ["498-A", "498-B", "498-C", "498-D"],
+    planIndexUrl: longPlanIndexUrl,
+    replanRequiredUnitIds: manyUnits,
   });
   assert.ok(prompt.length < 700, `expected < 700 chars, got ${prompt.length}`);
 });
@@ -307,7 +317,7 @@ test("CLI: piped REPLAN_REQUIRED selects the planning-correction template", asyn
   assert.match(result.stdout, /^Planning-correction worker dispatch\./);
   assert.match(result.stdout, /#498/);
   assert.match(result.stdout, /#500/);
-  assert.match(result.stdout, /498-A/);
+  assert.match(result.stdout, /ready-dispatch-gate\.mjs --control-issue 500/);
   // The verdict's own `reason` text must never be retransmitted into the dispatch prompt --
   // it is for the controller's compact chat/handoff record, not the worker prompt.
   assert.ok(!result.stdout.includes("does not resolve"));
@@ -364,7 +374,7 @@ test("CLI: explicit --kind planning-correction selects the planning-correction t
   );
   assert.equal(result.status, 0);
   assert.match(result.stdout, /^Planning-correction worker dispatch\./);
-  assert.match(result.stdout, /498-A, 498-B/);
+  assert.match(result.stdout, /ready-dispatch-gate\.mjs --control-issue 500/);
 });
 
 test("CLI: an unknown --kind fails closed with exit 2", async () => {

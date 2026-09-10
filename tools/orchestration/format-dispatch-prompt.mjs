@@ -126,17 +126,32 @@ export function formatPlanningWorkerDispatchPrompt({ controlIssue, executionIssu
 // issue #498 unit 498-B's new REPLAN_REQUIRED verdict (`ready-dispatch-gate.mjs`'s
 // `probeReplanRequired`). Modeled on `formatPlanningWorkerDispatchPrompt` above — a
 // planning-correction is the same planning capability revisiting its own prior output, not a
-// new worker role — but additionally carries the reference-scoped fields the REPLAN_REQUIRED
-// verdict itself supplies (`planIndexUrl`, `replanRequiredUnitIds`) so the dispatched worker
-// knows exactly which units to fix without the controller reading Worker Unit Contract bodies,
-// the Shared Contract body, or router/parser source to characterize the failure first
-// (Required behavior 3, #407/#408 and #454/#455's own reproduction). Deliberately omits the
-// verdict's own `reason` text from the prompt itself — that string is for the controller's
-// compact chat/handoff record, not the worker prompt; the dispatched worker reads the
-// authoritative routing failure directly off the Plan Index/unit contracts it is pointed at,
-// exactly as every other dispatch template in this file hands over references rather than
-// restated content. Keeping `reason` out of the template also keeps this prompt's length
-// bounded independent of how verbose a given unit's own escalation note happens to be.
+// new worker role.
+//
+// Stage 1 review finding on this PR (P1): the first version of this template interpolated
+// every `replanRequiredUnitIds` entry verbatim into the prompt text. That makes the prompt's
+// length a function of how many units a given plan has failing at once — unbounded by
+// construction, not merely by a route string's length the way `assertReferenceOnly`'s own doc
+// comment above describes. A plan with enough failing units (or a longer realistic repository
+// permalink) pushes the rendered prompt past the 700-char reference-only threshold,
+// `assertReferenceOnly` throws, and the mandatory planning-correction dispatch cannot happen at
+// all — exactly the liveness failure REPLAN_REQUIRED exists to avoid. Rather than raise the
+// threshold (which only postpones the same failure at a larger plan size), this template no
+// longer carries the failing unit set as prose at all: it points the dispatched worker at
+// `ready-dispatch-gate.mjs` itself, re-run with the same `controlIssue`, to recover the current
+// failing unit(s) and reason from durable authority. That is the exact same deterministic
+// computation `probeReplanRequired` already performed to produce this verdict, so the worker
+// gets identical information without the controller ever having to fit an open-ended list into
+// a fixed-size template. `planIndexUrl` and `replanRequiredUnitIds` remain required inputs here
+// (the caller must hold a genuine REPLAN_REQUIRED result, not merely `controlIssue`), but only
+// `planIndexUrl` is rendered — the prompt's length is now bounded by the fixed template text
+// plus one issue-comment permalink, independent of plan/unit-set size.
+//
+// Deliberately omits the verdict's own `reason` text from the prompt itself — that string is
+// for the controller's compact chat/handoff record, not the worker prompt; the dispatched
+// worker reads the authoritative routing failure directly off the Plan Index/unit contracts
+// (and, now, the gate's own re-run output) it is pointed at, exactly as every other dispatch
+// template in this file hands over references rather than restated content.
 export function formatPlanningCorrectionWorkerDispatchPrompt({ controlIssue, executionIssue, planIndexUrl, replanRequiredUnitIds }) {
   if (
     !isPositiveInteger(controlIssue) ||
@@ -153,12 +168,12 @@ export function formatPlanningCorrectionWorkerDispatchPrompt({ controlIssue, exe
   }
   return (
     `Planning-correction worker dispatch. Execution Issue: #${executionIssue}. Controlling Issue: ` +
-    `#${controlIssue}. Plan Index: ${planIndexUrl}. Unit(s) requiring replan: ${replanRequiredUnitIds.join(", ")}.\n\n` +
-    `Read the Plan Index and named unit(s)' own Worker Unit Contract comments directly from GitHub for the ` +
-    `routing failure — not restated here on purpose. Correct the plan per AGENTS.md and ` +
-    `docs/operating-model.md, using tools/orchestration/format-execution-plan.mjs (#497) to persist the fix. ` +
-    `Return only a compact confirmation and stop — do not prepare the Dispatch Manifest, advance Lifecycle, or ` +
-    `dispatch implementation units in this same invocation.`
+    `#${controlIssue}. Plan Index: ${planIndexUrl}.\n\n` +
+    `Run \`ready-dispatch-gate.mjs --control-issue ${controlIssue}\` for the failing unit(s)/reason — not ` +
+    `restated here. Read the Plan Index and each failing unit's Worker Unit Contract on GitHub. Correct ` +
+    `per AGENTS.md/docs/operating-model.md via format-execution-plan.mjs (#497). Return a compact ` +
+    `confirmation and stop — do not prepare the Dispatch Manifest, advance Lifecycle, or dispatch units ` +
+    `this invocation.`
   );
 }
 

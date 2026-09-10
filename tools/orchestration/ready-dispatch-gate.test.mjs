@@ -1998,6 +1998,89 @@ test("checkReadyDispatch: a corrected plan (no unit routes to REPLAN_REQUIRED an
   assert.equal(result.executionIssue, 498);
 });
 
+// Stage 1 review finding on this PR (P2): once a REPLAN_REQUIRED correction publishes a new
+// canonical Plan Index comment, the control Issue's own "- **Plan:**" bullet -- set the first
+// time this same Issue converged PLAN_READY, now naming the *rejected* plan -- must be
+// reconciled before routing/manifest preparation continues, mirroring the
+// produce -> verify -> project -> stop invariant unit 498-A already established.
+const PLAN_READY_BODY_498_STALE_PLAN =
+  "- **Lifecycle:** PLAN_READY\n" +
+  "- **Plan:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-1\n" +
+  "- **Execution:** #498\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+
+test("checkReadyDispatch: PLAN_READY with a stale 'Plan:' bullet reconverges to READY_TO_PROJECT_PLAN_READY (exit 10) instead of routing off the rejected plan", async () => {
+  let manifestRunCalls = 0;
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 500 },
+    {
+      ghIssueViewImpl: async () => ({ body: PLAN_READY_BODY_498_STALE_PLAN, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        plan: { planIndex: { url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-2", dispatchManifest: "none" } },
+      }),
+      // Proves the stale-pointer reconvergence stops before manifest preparation/routing ever
+      // runs in this same invocation -- exactly the correction contract's "only a later fresh
+      // invocation may continue to manifest preparation/routing" requirement.
+      runPrepareDispatchManifestImpl: async () => {
+        manifestRunCalls++;
+        throw new Error("must not run Route/Prepare while the control Issue's Plan bullet is still stale");
+      },
+    },
+  );
+  assert.equal(manifestRunCalls, 0);
+  assert.equal(result.exitCode, 10);
+  assert.equal(result.state, "READY_TO_PROJECT_PLAN_READY");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.executionIssue, 498);
+  assert.equal(result.planIndexUrl, "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-2");
+  assert.equal(
+    result.proposedBody,
+    "- **Lifecycle:** PLAN_READY\n" +
+      "- **Plan:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-2\n" +
+      "- **Execution:** #498\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n",
+  );
+});
+
+test("checkReadyDispatch: PLAN_READY with a 'Plan:' bullet that already matches the canonical plan proceeds through the ordinary manifest-preparation path unchanged (idempotent)", async () => {
+  const body =
+    "- **Lifecycle:** PLAN_READY\n" +
+    "- **Plan:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-100\n" +
+    "- **Execution:** #498\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 500 },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        plan: { planIndex: { url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-100", dispatchManifest: "none" } },
+      }),
+      runPrepareDispatchManifestImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        plan: { planIndex: { url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/498#issuecomment-100" } },
+        entries: [{ unitId: "498-A", route: "stronger/general worker", dispatchReady: true, note: "no prerequisites" }],
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 6);
+  assert.equal(result.state, "READY_TO_RUN_DISPATCH_MANIFEST");
+});
+
+test("checkReadyDispatch: PLAN_READY with a 'Plan:' bullet reports ERROR (exit 1), not a false projection, when reading the canonical plan for staleness comparison fails operationally", async () => {
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 500 },
+    {
+      ghIssueViewImpl: async () => ({ body: PLAN_READY_BODY_498_STALE_PLAN, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({ exitCode: 1, message: "gh api call failed: network error" }),
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.notEqual(result.state, "READY_TO_PROJECT_PLAN_READY");
+  assert.match(result.message, /operational failure/i);
+});
+
 test("checkReadyDispatch: PLAN_READY reports ERROR (exit 1), not a false REPLAN_REQUIRED/dispatch verdict, when computing unit routes itself fails operationally", async () => {
   const result = await checkReadyDispatch(
     { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 500 },
