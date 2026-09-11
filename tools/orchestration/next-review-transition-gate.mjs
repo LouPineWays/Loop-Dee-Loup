@@ -189,6 +189,8 @@ import {
 // side only reads the others' bindings from inside function bodies, never at module-top-level,
 // so this remains safe under ESM's live-binding semantics regardless of load order.
 import { combineMergeReadyResult } from "../review-watch/merge-ready-gate.mjs";
+// Issue #486: the deterministic action-envelope table every verdict below is stamped with.
+import { getActionEnvelope } from "./action-envelope.mjs";
 
 // Pure. Reads one optional "- **Label:** value" control-Issue bullet that is expected to
 // hold either the explicit "none" sentinel or exactly one "#N" issue reference (the same
@@ -726,7 +728,10 @@ function defaultGhPrHead({ repo, number }) {
 // stage1-correction-gate.mjs in main(). Direct-reference mode (`auditIssue`, or `pr`+`head`)
 // takes precedence over control-Issue mode when both are supplied, mirroring
 // format-unit-dispatch-prompt.mjs's own explicit-fields-first convention.
-export async function runNextReviewTransitionGate(
+// Named "...Core" and wrapped below (issue #486) so every verdict this returns picks up its
+// `actionEnvelope` field in exactly one place, mirroring ready-dispatch-gate.mjs's identical
+// checkReadyDispatchCore/checkReadyDispatch split.
+async function runNextReviewTransitionGateCore(
   args,
   {
     resolveRepoIdentityImpl = resolveRepoIdentity,
@@ -904,6 +909,16 @@ export async function runNextReviewTransitionGate(
       `(PR: ${JSON.stringify(parseControlBullet(body, "PR"))}, Stage 2: ${JSON.stringify(parseControlBullet(body, "Stage 2"))}) ` +
       "-- this gate only applies once at least one of them is settled",
   };
+}
+
+// Issue #486: attaches the deterministic `actionEnvelope` (see action-envelope.mjs) to every
+// verdict this gate returns, keyed off the verdict's own `state`. A result with no `state`
+// (an exitCode-1 operational-error shape) is left untouched — not a verdict on durable
+// evidence at all, so it must not carry an envelope that could be mistaken for one.
+export async function runNextReviewTransitionGate(args, impls) {
+  const result = await runNextReviewTransitionGateCore(args, impls);
+  if (typeof result.state !== "string") return result;
+  return { ...result, actionEnvelope: getActionEnvelope(result.state) };
 }
 
 function parseArgs(argv) {

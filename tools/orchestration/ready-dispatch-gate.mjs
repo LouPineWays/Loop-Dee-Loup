@@ -186,6 +186,8 @@ import { execFileSync } from "node:child_process";
 // own field parsers rather than re-deriving a second, competing reading of the
 // audit-control-issue template's rendered shape.
 import { parseStage2Verdict, parseFormField } from "../review-watch/lifecycle-gate.mjs";
+// Issue #486: the deterministic action-envelope table every verdict below is stamped with.
+import { getActionEnvelope } from "./action-envelope.mjs";
 
 const KNOWN_LIFECYCLE_STATES = [
   "READY",
@@ -1265,7 +1267,11 @@ export async function probeReplanRequired(
 // real network or `gh` CLI. This function always starts from one control-Issue read; when
 // lifecycle is ROUTED it then performs deterministic durable manifest verification reads
 // through verifyRoutedDispatchManifest before authorizing unit dispatch.
-export async function checkReadyDispatch(
+//
+// Named "...Core" and wrapped below (issue #486) so every verdict this returns picks up its
+// `actionEnvelope` field in exactly one place, rather than at each of this function's many
+// individual return sites.
+async function checkReadyDispatchCore(
   { repo, controlIssue },
   {
     ghIssueViewImpl = defaultGhIssueView,
@@ -1596,6 +1602,17 @@ export async function checkReadyDispatch(
     executionIssue: result.executionIssue,
     route: result.route,
   };
+}
+
+// Issue #486: attaches the deterministic `actionEnvelope` (see action-envelope.mjs) to every
+// verdict this gate returns, keyed off the verdict's own `state`. A result with no `state`
+// (the exitCode-1 operational-error shape) is left untouched — that is not a verdict on
+// control-Issue content at all, per AGENTS.md § Session execution, so it must not carry an
+// envelope that could be mistaken for one.
+export async function checkReadyDispatch(args, impls) {
+  const result = await checkReadyDispatchCore(args, impls);
+  if (typeof result.state !== "string") return result;
+  return { ...result, actionEnvelope: getActionEnvelope(result.state) };
 }
 
 function parseArgs(argv) {
