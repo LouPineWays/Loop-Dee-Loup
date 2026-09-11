@@ -137,6 +137,21 @@
 // NOT_REQUESTED evidence at that new head is exactly the correct signal (a fresh Stage 1
 // round is required), not a gap this gate needs to paper over.
 //
+// Issue #537 (the #487/#535/#536 incident): a settled "Stage 2" bullet is not, by itself,
+// authority to select the post-merge phase. When both "PR" and "Stage 2" resolve to settled
+// Issue references, this gate resolves one more piece of live PR state (`state`, alongside the
+// existing head read) before choosing a route:
+//   - PR state OPEN    -> the pre-merge PR/Stage 1 phase owns the transition, even though a
+//                          (possibly historical/predecessor) Stage 2 reference also durably
+//                          exists on the control Issue -- that reference is provenance, not a
+//                          live post-merge pointer, until the PR it precedes actually merges.
+//   - PR state MERGED  -> the existing post-merge Stage 2 phase applies, exactly as before.
+//   - anything else (e.g. CLOSED without merging) -> AMBIGUOUS; a closed-but-unmerged PR is
+//     never treated as merged merely because a Stage 2 reference happens to be present.
+// When "PR" has no settled reference at all ("none", or the bullet is simply absent), a settled
+// "Stage 2" reference continues to select the post-merge phase directly, with no live-PR-state
+// read at all -- unchanged from before #537.
+//
 // Direct-reference mode (skips the control-Issue read entirely; "the PR/Audit numbers
 // directly" per the Shared Contract):
 //   node tools/orchestration/next-review-transition-gate.mjs --pr 376 --head <sha> --issue 375
@@ -708,6 +723,53 @@ async function resolvePostMerge({ repo, auditIssue, controlIssue }, { checkPostA
   return { exitCode: exitCodeFor(verdict.state), ...verdict };
 }
 
+// Control-Issue mode's shared pre-merge composition step: resolves the gated work/execution
+// Issue from the control Issue body's own "Execution" bullet *before* resolving `head` (a
+// malformed Execution reference must fail closed without ever spending a live PR-head read --
+// the original, still-required ordering), reads the "Stage 1" disposition bullet, and delegates
+// to resolvePreMerge. Issue #537 factors this out so both control-Issue mode's PR-only branch
+// and its PR-open-alongside-a-settled-Stage-2 branch share exactly one Execution-resolution/
+// composition path rather than two copies that could drift. Pass an already-known `head`
+// (e.g. from a live-PR-state read the caller already made, or an explicit --head) to skip the
+// lazy `ghPrHeadImpl` read entirely; otherwise supply `ghPrHeadImpl` and this function fetches
+// the head itself, only once the Execution reference has already checked out.
+async function resolvePreMergeFromControlBody(
+  { repo, body, prIssue, controlIssueNumber, head, ghPrHeadImpl },
+  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
+) {
+  const executionField = readExecutionBulletField(body);
+  const executionRef = executionField.conflict
+    ? { ok: false, reason: describeExecutionConflict(executionField) }
+    : parseExecutionPointer(executionField.value);
+  if (!executionRef.ok) {
+    return {
+      exitCode: 4,
+      state: "AMBIGUOUS",
+      stopAfter: true,
+      repo,
+      controlIssue: controlIssueNumber,
+      reason:
+        `Execution reference required to resolve the gated work issue for the pre-merge check is malformed: ` +
+        `${executionRef.reason}`,
+    };
+  }
+
+  let resolvedHead = head;
+  if (!resolvedHead) {
+    try {
+      resolvedHead = await ghPrHeadImpl({ repo, number: prIssue });
+    } catch (err) {
+      return { exitCode: 1, message: `gh pr view failed for ${repo}#${prIssue}: ${err.message}` };
+    }
+  }
+
+  const stage1Disposition = parseControlBullet(body, "Stage 1");
+  return resolvePreMerge(
+    { repo, pr: prIssue, head: resolvedHead, issue: executionRef.issue, stage1Disposition, controlIssue: controlIssueNumber },
+    { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
+  );
+}
+
 function defaultGhIssueView({ repo, number }) {
   const raw = execFileSync("gh", ["issue", "view", String(number), "--repo", repo, "--json", "body,state"], {
     encoding: "utf8",
@@ -720,6 +782,20 @@ function defaultGhPrHead({ repo, number }) {
     encoding: "utf8",
   });
   return JSON.parse(raw).headRefOid;
+}
+
+// Issue #537: control-Issue mode's own live-PR-state read, used only when a settled "PR" and a
+// settled "Stage 2" reference coexist and this gate must therefore decide which phase currently
+// owns the transition (see the module comment above). `gh pr view --json state` reports exactly
+// one of "OPEN", "CLOSED", or "MERGED". A sibling of defaultGhPrHead (its own injectable,
+// mirroring this module's existing ghIssueViewImpl/ghPrHeadImpl/checkPostAuditImpl convention)
+// rather than a change to defaultGhPrHead's own return shape, so every existing caller of
+// ghPrHeadImpl (direct-reference mode, and control-Issue mode's PR-only branch) is unaffected.
+function defaultGhPrState({ repo, number }) {
+  const raw = execFileSync("gh", ["pr", "view", String(number), "--repo", repo, "--json", "headRefOid,state"], {
+    encoding: "utf8",
+  });
+  return JSON.parse(raw);
 }
 
 // The whole composed gate, wired for tests: every I/O dependency (control-Issue read, PR
@@ -737,6 +813,7 @@ async function runNextReviewTransitionGateCore(
     resolveRepoIdentityImpl = resolveRepoIdentity,
     ghIssueViewImpl = defaultGhIssueView,
     ghPrHeadImpl = defaultGhPrHead,
+    ghPrStateImpl = defaultGhPrState,
     stage1RunImpl = stage1Run,
     checkMergeReadyImpl = checkMergeReady,
     checkPostAuditImpl = checkPostAudit,
@@ -826,9 +903,6 @@ async function runNextReviewTransitionGateCore(
       reason: auditRef.reason,
     };
   }
-  if (auditRef.kind === "issue") {
-    return resolvePostMerge({ repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber }, { checkPostAuditImpl });
-  }
   if (auditRef.kind === "invalid") {
     return {
       exitCode: 4,
@@ -851,39 +925,6 @@ async function runNextReviewTransitionGateCore(
       reason: prRef.reason,
     };
   }
-  if (prRef.kind === "issue") {
-    const executionField = readExecutionBulletField(body);
-    const executionRef = executionField.conflict
-      ? { ok: false, reason: describeExecutionConflict(executionField) }
-      : parseExecutionPointer(executionField.value);
-    if (!executionRef.ok) {
-      return {
-        exitCode: 4,
-        state: "AMBIGUOUS",
-        stopAfter: true,
-        repo,
-        controlIssue: controlIssueNumber,
-        reason:
-          `Execution reference required to resolve the gated work issue for the pre-merge check is malformed: ` +
-          `${executionRef.reason}`,
-      };
-    }
-
-    let head = args.head;
-    if (!head) {
-      try {
-        head = await ghPrHeadImpl({ repo, number: prRef.issue });
-      } catch (err) {
-        return { exitCode: 1, message: `gh pr view failed for ${repo}#${prRef.issue}: ${err.message}` };
-      }
-    }
-    const stage1Disposition = parseControlBullet(body, "Stage 1");
-
-    return resolvePreMerge(
-      { repo, pr: prRef.issue, head, issue: executionRef.issue, stage1Disposition, controlIssue: controlIssueNumber },
-      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
-    );
-  }
   if (prRef.kind === "invalid") {
     return {
       exitCode: 4,
@@ -893,6 +934,63 @@ async function runNextReviewTransitionGateCore(
       controlIssue: controlIssueNumber,
       reason: `PR reference is malformed: ${prRef.reason}`,
     };
+  }
+
+  // Issue #537 (the #487/#535/#536 incident): both a settled "PR" and a settled "Stage 2"
+  // reference are present. Field presence/order is not phase authority — live PR state is.
+  // Resolve one more piece of live PR state (alongside the existing head read) before deciding
+  // whether the pre-merge or post-merge phase currently owns the transition.
+  if (prRef.kind === "issue" && auditRef.kind === "issue") {
+    let prState;
+    try {
+      prState = await ghPrStateImpl({ repo, number: prRef.issue });
+    } catch (err) {
+      return { exitCode: 1, message: `gh pr view failed for ${repo}#${prRef.issue}: ${err.message}` };
+    }
+    if (prState.state === "MERGED") {
+      // The relevant PR is merged: the settled Stage 2 reference owns the transition, exactly
+      // as it did before #537.
+      return resolvePostMerge({ repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber }, { checkPostAuditImpl });
+    }
+    if (prState.state === "OPEN") {
+      // The PR is still open: the pre-merge PR/Stage 1 phase owns the transition even though a
+      // (possibly historical/predecessor) Stage 2 reference also durably exists — that
+      // reference is provenance, not a live post-merge pointer, until this PR actually merges.
+      // Reuse the head this same call already read unless an explicit --head overrides it.
+      const head = args.head || prState.headRefOid;
+      return resolvePreMergeFromControlBody(
+        { repo, body, prIssue: prRef.issue, controlIssueNumber, head, ghPrHeadImpl },
+        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
+      );
+    }
+    // CLOSED without merging (or any other state gh might report): a genuinely contradictory
+    // phase. A closed-but-unmerged PR must never be silently treated as merged merely because a
+    // Stage 2 reference happens to be present (#537 constraint 5) — fail closed instead of
+    // guessing which phase applies.
+    return {
+      exitCode: 4,
+      state: "AMBIGUOUS",
+      stopAfter: true,
+      repo,
+      controlIssue: controlIssueNumber,
+      reason:
+        `PR ${repo}#${prRef.issue} is ${JSON.stringify(prState.state)} (neither OPEN nor MERGED) while control ` +
+        `Issue #${controlIssueNumber} also references Stage 2 #${auditRef.issue}; refusing to select a phase for ` +
+        "this contradictory PR/Stage 2 combination",
+    };
+  }
+
+  if (auditRef.kind === "issue") {
+    // No settled "PR" reference at all ("none", or the bullet is simply absent): the settled
+    // Stage 2 reference remains the only active post-review pointer, exactly as before #537.
+    return resolvePostMerge({ repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber }, { checkPostAuditImpl });
+  }
+
+  if (prRef.kind === "issue") {
+    return resolvePreMergeFromControlBody(
+      { repo, body, prIssue: prRef.issue, controlIssueNumber, head: args.head, ghPrHeadImpl },
+      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
+    );
   }
 
   // Neither "Stage 2" nor "PR" names a settled issue reference: a post-PR-lifecycle control
