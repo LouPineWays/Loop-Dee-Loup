@@ -664,6 +664,46 @@ test("run: refuses atomically, writing nothing, when installing a hard importer 
   );
 });
 
+test("run: a repeat run refusing a hard-dependency collision must not first delete a superseded bridge template (Stage 2 audit #531 P2 finding)", async (t) => {
+  // Deliberately built WITHOUT the hard-dependency fixture files yet, so the first run below
+  // has nothing to collide on and can succeed normally.
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "AGENTS.md"), "MY PROJECT'S OWN AGENTS.md\n");
+
+  const first = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(first.exitCode, 0);
+  assert.ok(existsSync(join(dest, ".ldl", "AGENTS.template.md")), "first run must park the derived template");
+  const manifestAfterFirst = readManifest(dest);
+
+  // Between runs: the LDL source root gains the hard-import pair (as if updating to a newer
+  // LDL revision); the consumer removes their own AGENTS.md (so this run would supersede the
+  // parked template by installing AGENTS.md directly); and the consumer separately already owns
+  // an unmanaged tools/orchestration/dependency-grammar.mjs (so this same run must also refuse on
+  // the hard-dependency collision).
+  addHardDependencyFixtureFiles(root);
+  rmSync(join(dest, "AGENTS.md"));
+  mkdirSync(join(dest, "tools", "orchestration"), { recursive: true });
+  writeFileSync(
+    join(dest, "tools", "orchestration", "dependency-grammar.mjs"),
+    "// consumer-owned file, predates LDL's own dependency-grammar.mjs, exports nothing LDL needs\n",
+  );
+
+  const second = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(second.exitCode, 1);
+  assert.match(second.message, /dependency-grammar\.mjs/);
+  assert.ok(
+    existsSync(join(dest, ".ldl", "AGENTS.template.md")),
+    "the refused run must not delete the still-referenced, superseded template",
+  );
+  assert.deepEqual(
+    readManifest(dest),
+    manifestAfterFirst,
+    "the refused run must leave the existing manifest completely unchanged",
+  );
+});
+
 test("run: still installs normally when the consumer has no pre-existing dependency-grammar.mjs at all", async (t) => {
   const root = makeFixtureRoot(t);
   addHardDependencyFixtureFiles(root);
