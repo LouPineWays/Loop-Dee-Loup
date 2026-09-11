@@ -1071,21 +1071,229 @@ test("runNextReviewTransitionGate: a punctuation-delimited Stage 2 near-duplicat
   assert.match(result.reason, /#492/);
 });
 
-test("runNextReviewTransitionGate: control-Issue mode with a settled Stage 2 (Audit) reference resolves the post-merge phase", async () => {
+// Issue #537, verification case 4: once the relevant PR is actually MERGED, a settled Stage 2
+// reference continues to own the transition exactly as before -- CONTROL_BODY_POST_MERGE has
+// both a settled "PR" (#376) and a settled "Stage 2" (#378) bullet, so this now also exercises
+// the new live-PR-state read (ghPrStateImpl) that decides between the pre-merge and post-merge
+// phase when both references coexist.
+test("runNextReviewTransitionGate: control-Issue mode with a settled Stage 2 (Audit) reference resolves the post-merge phase once the PR is MERGED", async () => {
+  let prStateReadFor = null;
   const result = await runNextReviewTransitionGate(
     { repo: "o/r", controlIssue: "322" },
     {
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async ({ number }) => {
+        prStateReadFor = number;
+        return { headRefOid: "mergedhead", state: "MERGED" };
+      },
       checkPostAuditImpl: async (args) => {
         assert.equal(args["audit-issue"], 378);
         return { exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN" };
       },
     },
   );
+  assert.equal(prStateReadFor, 376);
   assert.equal(result.exitCode, 3);
   assert.equal(result.state, "STAGE2_CORRECTION_REQUIRED");
   assert.equal(result.controlIssue, 322);
   assert.equal(result.auditIssue, 378);
+});
+
+// -- Issue #537: control-Issue mode phase selection when PR and Stage 2 coexist -------------
+//
+// The #487/#535/#536 incident: control #487 carried a still-open correction PR (#536), a
+// correction-satisfied Stage 1 disposition for that PR's corrected head, and a prior NOT CLEAN
+// Stage 2 audit (#535) that predated the correction PR. Control-Issue mode used to select the
+// post-merge Stage 2 branch as soon as "Stage 2" parsed as a valid Issue reference, regardless
+// of PR #536 still being open -- these cases lock in the fix's live-PR-state precedence.
+
+const CONTROL_BODY_OPEN_PR_WITH_PRIOR_STAGE2 = `## Current state
+
+- **Lifecycle:** CORRECTION
+- **Execution:** #375
+- **Route:** implementation worker
+- **PR:** #536
+- **Stage 1:** correction-satisfied at 0009c54b18 (reviewed 30b36035c9)
+- **Stage 2:** #535
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("runNextReviewTransitionGate: issue #537 verification case 1 -- exact #487/#536 regression: an open PR with a correction-satisfied Stage 1 disposition resolves the merge-and-trigger-Stage-2 transition, never routing through the stale prior Stage 2 audit", async () => {
+  let postAuditCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "487" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        assert.equal(number, "487");
+        return { body: CONTROL_BODY_OPEN_PR_WITH_PRIOR_STAGE2, state: "OPEN" };
+      },
+      ghPrStateImpl: async ({ number }) => {
+        assert.equal(number, 536);
+        return { headRefOid: "0009c54b18", state: "OPEN" };
+      },
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async (args) => {
+        assert.equal(args.pr, 536);
+        return { exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: "0009c54b18" };
+      },
+      checkPostAuditImpl: async () => {
+        postAuditCalls++;
+        throw new Error("should never be called -- the still-open PR #536 owns the transition, not stale Stage 2 #535");
+      },
+    },
+  );
+  assert.equal(postAuditCalls, 0);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+  assert.equal(result.controlIssue, 487);
+});
+
+const CONTROL_BODY_OPEN_PR_FINDINGS_WITH_PRIOR_STAGE2 = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #375
+- **Route:** implementation worker
+- **PR:** #536
+- **Stage 1:** requested
+- **Stage 2:** #535
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("runNextReviewTransitionGate: issue #537 verification case 2 -- an open PR with a findings-bearing Stage 1 response reaches STAGE1_CORRECTION_REQUIRED despite a prior Stage 2 reference remaining on the control Issue", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "487" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_OPEN_PR_FINDINGS_WITH_PRIOR_STAGE2, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "livehead", state: "OPEN" }),
+      stage1RunImpl: async () =>
+        stage1("RESPONSE_RECEIVED", {
+          matches: [
+            { body_excerpt: "### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request." },
+          ],
+        }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkPostAuditImpl: async () => {
+        throw new Error("should never be called -- the still-open PR owns the transition");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE1_CORRECTION_REQUIRED");
+});
+
+test("runNextReviewTransitionGate: issue #537 verification case 3 -- an open PR with Stage 1 still PENDING resolves NO_ACTION_YET, never falling through to a prior Stage 2 reference", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "487" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_OPEN_PR_FINDINGS_WITH_PRIOR_STAGE2, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "livehead", state: "OPEN" }),
+      stage1RunImpl: async () => ({ exitCode: 2, state: "PENDING", triggerTimestamp: "2026-09-01T00:00:00Z" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkPostAuditImpl: async () => {
+        throw new Error("should never be called -- the still-open PR owns the transition");
+      },
+    },
+  );
+  assert.equal(result.state, "NO_ACTION_YET");
+});
+
+const CONTROL_BODY_STAGE2_ONLY_NO_PR = `## Current state
+
+- **Lifecycle:** AUDIT
+- **Execution:** #375
+- **Route:** implementation worker
+- **PR:** none
+- **Stage 1:** none
+- **Stage 2:** #480
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("runNextReviewTransitionGate: issue #537 verification case 5 -- no live PR pointer (PR: none) plus a valid active Stage 2 pointer retains post-merge routing, with no live-PR-state read at all", async () => {
+  let prStateCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_STAGE2_ONLY_NO_PR, state: "OPEN" }),
+      ghPrStateImpl: async () => {
+        prStateCalls++;
+        throw new Error("should never be called -- no settled PR reference exists");
+      },
+      checkPostAuditImpl: async (args) => {
+        assert.equal(args["audit-issue"], 480);
+        return { exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN" };
+      },
+    },
+  );
+  assert.equal(prStateCalls, 0);
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE2_CORRECTION_REQUIRED");
+});
+
+test("runNextReviewTransitionGate: issue #537 verification case 6 -- a closed-but-unmerged PR is never silently treated as merged merely because a Stage 2 reference exists; fails closed to AMBIGUOUS", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "487" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_OPEN_PR_WITH_PRIOR_STAGE2, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "0009c54b18", state: "CLOSED" }),
+      checkPostAuditImpl: async () => {
+        throw new Error("should never be called -- a closed-unmerged PR must not be treated as merged");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /CLOSED/);
+  assert.match(result.reason, /536/);
+});
+
+test("runNextReviewTransitionGate: issue #537 verification case 7 -- a malformed PR reference fails closed to AMBIGUOUS even when Stage 2 also parses as a valid reference, without ever performing a live-PR-state read", async () => {
+  const body = CONTROL_BODY_POST_MERGE.replace("- **PR:** #376", "- **PR:** #376 and also #400");
+  let prStateCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      ghPrStateImpl: async () => {
+        prStateCalls++;
+        throw new Error("should never be called for a malformed PR reference");
+      },
+      checkPostAuditImpl: async () => {
+        throw new Error("should never be called for a malformed PR reference");
+      },
+    },
+  );
+  assert.equal(prStateCalls, 0);
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /PR reference is malformed/);
+});
+
+test("runNextReviewTransitionGate: issue #537 verification case 8 -- direct-reference parity: the same open-PR correction-satisfied inputs as case 1 reach the identical transition in direct-reference mode", async () => {
+  const result = await runNextReviewTransitionGate(
+    {
+      repo: "o/r",
+      pr: 536,
+      head: "0009c54b18",
+      issue: 375,
+      stage1Disposition: "correction-satisfied at 0009c54b18 (reviewed 30b36035c9)",
+    },
+    {
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => ({
+        exitCode: 0,
+        state: "CORRECTION_SATISFIED",
+        reviewedHead: "30b36035c9",
+        correctedHead: "0009c54b18",
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
 });
 
 test("runNextReviewTransitionGate: closed control Issues fail closed before transition resolution", async () => {
