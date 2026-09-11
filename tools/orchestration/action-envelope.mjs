@@ -129,19 +129,25 @@ const ENVELOPES = {
   },
   STAGE1_CORRECTION_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-correction-worker"] },
   STAGE2_CORRECTION_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-correction-worker"] },
-  // This table row is the superset (real gated work issue exists) shape, kept here only as the
-  // documentation default for this state. Stage 1 finding on PR #534: for
-  // `ACCEPTED_NO_WORK_ISSUE` or an already-closed work issue, next-review-transition-gate.mjs's
-  // own `nextCommand` deliberately names only `close-audit` — there is no work issue to close,
-  // so authorizing `run-lifecycle-gate-close-work-issue` unconditionally let the compliance
-  // checker accept a mutation the concrete verdict never authorized. `getActionEnvelope` below
-  // derives the actual authorized actions from the verdict's own `nextCommand` (present on
-  // every STAGE2_CLOSE_READY verdict) and fails closed to the audit-only subset — never this
-  // wider row — when no `nextCommand` context is supplied at all, consistent with
-  // `FAIL_CLOSED_DEFAULT` below: never guess the wider authority from an absent context.
+  // This table row is the superset (real gated work issue exists, plus a real thin control
+  // Issue to terminalize) shape, kept here only as the documentation default for this state.
+  // Stage 1 finding on PR #534: for `ACCEPTED_NO_WORK_ISSUE` or an already-closed work issue,
+  // next-review-transition-gate.mjs's own `nextCommand` deliberately names only `close-audit` —
+  // there is no work issue to close, so authorizing `run-lifecycle-gate-close-work-issue`
+  // unconditionally let the compliance checker accept a mutation the concrete verdict never
+  // authorized. Issue #542 extends the same "actual nextCommand, never a guessed superset"
+  // discipline to thin-control terminalization: `run-close-control`
+  // (`tools/orchestration/close-control.mjs`) is authorized only when the concrete verdict's own
+  // `nextCommand` was built in control-Issue mode (a real `--control-issue` on the *gate*
+  // invocation, never guessed or searched for) — a direct-reference invocation
+  // (`--audit-issue`/`--pr`) never chains it, so a no-thin-control flow's envelope is unaffected.
+  // `getActionEnvelope` below derives the actual authorized actions from the verdict's own
+  // `nextCommand` (present on every STAGE2_CLOSE_READY verdict) and fails closed to the narrowest
+  // subset — never this wider row — when no `nextCommand` context is supplied at all, consistent
+  // with `FAIL_CLOSED_DEFAULT` below: never guess wider authority from an absent context.
   STAGE2_CLOSE_READY: {
     mode: ENVELOPE_MODES.BOUNDED,
-    authorizedActions: ["run-lifecycle-gate-close-work-issue", "run-lifecycle-gate-close-audit"],
+    authorizedActions: ["run-lifecycle-gate-close-work-issue", "run-lifecycle-gate-close-audit", "run-close-control"],
   },
   STAGE2_REPORT_READY_TO_RECORD: {
     mode: ENVELOPE_MODES.BOUNDED,
@@ -172,6 +178,10 @@ const FAIL_CLOSED_DEFAULT = Object.freeze({
 //   - `STAGE2_CLOSE_READY` derives its actual authorized actions from `context.nextCommand`
 //     (always present on this verdict — see next-review-transition-gate.mjs) rather than the
 //     table's superset row, per the Stage 1 finding on PR #534 documented above the table entry.
+//     Issue #542 extends this same context-sensitive derivation to `run-close-control`: it is
+//     authorized only when `nextCommand` itself names `close-control.mjs`, which
+//     next-review-transition-gate.mjs's own `appendCloseControlCommand` only ever does when that
+//     gate was invoked in control-Issue mode (never guessed from `state` alone).
 export function getActionEnvelope(state, context = {}) {
   const entry = typeof state === "string" ? ENVELOPES[state] : undefined;
   if (!entry) return { mode: FAIL_CLOSED_DEFAULT.mode, authorizedActions: [], reason: FAIL_CLOSED_DEFAULT.reason };
@@ -182,12 +192,12 @@ export function getActionEnvelope(state, context = {}) {
 
   if (state === "STAGE2_CLOSE_READY") {
     const hasWorkIssue = typeof context.nextCommand === "string" && context.nextCommand.includes("close-work-issue");
-    return {
-      mode: entry.mode,
-      authorizedActions: hasWorkIssue
-        ? ["run-lifecycle-gate-close-work-issue", "run-lifecycle-gate-close-audit"]
-        : ["run-lifecycle-gate-close-audit"],
-    };
+    const hasCloseControl = typeof context.nextCommand === "string" && context.nextCommand.includes("close-control.mjs");
+    const authorizedActions = [];
+    if (hasWorkIssue) authorizedActions.push("run-lifecycle-gate-close-work-issue");
+    authorizedActions.push("run-lifecycle-gate-close-audit");
+    if (hasCloseControl) authorizedActions.push("run-close-control");
+    return { mode: entry.mode, authorizedActions };
   }
 
   return { mode: entry.mode, authorizedActions: [...entry.authorizedActions] };

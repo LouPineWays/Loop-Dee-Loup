@@ -471,6 +471,30 @@ test("resolvePostMergeVerdict: ACCEPTED_NO_WORK_ISSUE carries only the audit-onl
   );
 });
 
+// Issue #542: resolvePostMergeVerdict's own pure-function-level coverage of the close-control
+// chaining, independent of the full runNextReviewTransitionGate end-to-end tests above.
+test("resolvePostMergeVerdict: READY_TO_CLOSE with a controlIssue in context chains close-control after close-work-issue/close-audit", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("READY_TO_CLOSE", { verdict: "CLEAN", workIssue: 486 }) },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 538, controlIssue: 487 },
+  );
+  assert.equal(v.state, "STAGE2_CLOSE_READY");
+  assert.equal(
+    v.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo LouPineWays/Loop-Dee-Loup --work-issue 486 --audit-issue 538 && " +
+      "node tools/review-watch/lifecycle-gate.mjs close-audit --repo LouPineWays/Loop-Dee-Loup --audit-issue 538 && " +
+      "node tools/orchestration/close-control.mjs --repo LouPineWays/Loop-Dee-Loup --control-issue 487 --audit-issue 538 --work-issue 486",
+  );
+});
+
+test("resolvePostMergeVerdict: READY_TO_CLOSE with controlIssue explicitly null (direct-reference mode) never chains close-control", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("READY_TO_CLOSE", { verdict: "CLEAN", workIssue: 486 }) },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 538, controlIssue: null },
+  );
+  assert.ok(!v.nextCommand.includes("close-control"));
+});
+
 test("resolvePostMergeVerdict: OK with rawVerdict NOT CLEAN -> STAGE2_CORRECTION_REQUIRED", () => {
   const v = resolvePostMergeVerdict({ postAudit: postAudit("OK", { rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN" }) });
   assert.equal(v.state, "STAGE2_CORRECTION_REQUIRED");
@@ -1097,6 +1121,99 @@ test("runNextReviewTransitionGate: control-Issue mode with a settled Stage 2 (Au
   assert.equal(result.state, "STAGE2_CORRECTION_REQUIRED");
   assert.equal(result.controlIssue, 322);
   assert.equal(result.auditIssue, 378);
+});
+
+// -- Issue #542: thin-control terminalization chained onto a control-Issue-mode
+// STAGE2_CLOSE_READY verdict — the #486/#487/#538 reproduction: work and audit terminalize
+// correctly, but without this chaining the founder-facing thin control Issue itself was left
+// open with stale fields. --------------------------------------------------------------------
+
+test("runNextReviewTransitionGate: control-Issue mode with a backed CLEAN Stage 2 (real gated work issue) chains close-work-issue, close-audit, then close-control in nextCommand, and the actionEnvelope authorizes exactly that chain in order", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      checkPostAuditImpl: async (args) => {
+        assert.equal(args["audit-issue"], 378);
+        return { exitCode: 0, state: "READY_TO_CLOSE", verdict: "CLEAN", workIssue: 375 };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_CLOSE_READY");
+  assert.equal(result.controlIssue, 322);
+  assert.equal(
+    result.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo o/r --work-issue 375 --audit-issue 378 && " +
+      "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 378 && " +
+      "node tools/orchestration/close-control.mjs --repo o/r --control-issue 322 --audit-issue 378 --work-issue 375",
+  );
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["run-lifecycle-gate-close-work-issue", "run-lifecycle-gate-close-audit", "run-close-control"],
+  });
+});
+
+test("runNextReviewTransitionGate: control-Issue mode with ACCEPTED_NO_WORK_ISSUE chains only close-audit then close-control (no work issue to close)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "ACCEPTED_NO_WORK_ISSUE", verdict: "CLEAN", workIssue: null }),
+    },
+  );
+  assert.equal(result.state, "STAGE2_CLOSE_READY");
+  assert.equal(
+    result.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 378 && " +
+      "node tools/orchestration/close-control.mjs --repo o/r --control-issue 322 --audit-issue 378",
+  );
+});
+
+test("runNextReviewTransitionGate: control-Issue mode with the already-consumed-CLEAN OK shape (work issue already closed) still chains close-audit then close-control", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      checkPostAuditImpl: async () => ({
+        exitCode: 0,
+        state: "OK",
+        rawVerdict: "CLEAN",
+        verdict: "CLEAN",
+        workIssueState: "CLOSED",
+        workIssue: 375,
+      }),
+    },
+  );
+  assert.equal(result.state, "STAGE2_CLOSE_READY");
+  assert.equal(
+    result.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 378 && " +
+      "node tools/orchestration/close-control.mjs --repo o/r --control-issue 322 --audit-issue 378 --work-issue 375",
+  );
+});
+
+test("runNextReviewTransitionGate: direct --audit-issue mode (no control Issue at all) never chains close-control -- fail-closed on control identity (issue #542 requirement 3)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", auditIssue: "378" },
+    {
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "READY_TO_CLOSE", verdict: "CLEAN", workIssue: 375 }),
+    },
+  );
+  assert.equal(result.state, "STAGE2_CLOSE_READY");
+  assert.equal(
+    result.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo o/r --work-issue 375 --audit-issue 378 && " +
+      "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 378",
+  );
+  assert.ok(!result.nextCommand.includes("close-control"), "a direct-reference invocation has no control Issue and must never guess or chain one");
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["run-lifecycle-gate-close-work-issue", "run-lifecycle-gate-close-audit"],
+  });
 });
 
 // -- Issue #537: control-Issue mode phase selection when PR and Stage 2 coexist -------------

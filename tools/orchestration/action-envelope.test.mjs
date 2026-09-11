@@ -458,6 +458,65 @@ test("STAGE2_CLOSE_READY (ACCEPTED_NO_WORK_ISSUE / already-closed work issue): c
   assert.ok(violated.reasons[0].includes("run-lifecycle-gate-close-work-issue"));
 });
 
+// -- Issue #542: thin-control terminalization chained onto STAGE2_CLOSE_READY -----------------
+
+const CLOSE_READY_WITH_WORK_ISSUE_AND_CONTROL = {
+  nextCommand:
+    "node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo o/r --work-issue 1 --audit-issue 2 && " +
+    "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 2 && " +
+    "node tools/orchestration/close-control.mjs --repo o/r --control-issue 3 --audit-issue 2 --work-issue 1",
+};
+const CLOSE_READY_AUDIT_ONLY_WITH_CONTROL = {
+  nextCommand:
+    "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 2 && " +
+    "node tools/orchestration/close-control.mjs --repo o/r --control-issue 3 --audit-issue 2",
+};
+
+test("STAGE2_CLOSE_READY (control-Issue mode, real work issue): performing the full work/audit/control chain in the nextCommand's own order is compliant", () => {
+  const result = classifyEnvelopeCompliance(
+    "STAGE2_CLOSE_READY",
+    ["run-lifecycle-gate-close-work-issue", "run-lifecycle-gate-close-audit", "run-close-control"],
+    CLOSE_READY_WITH_WORK_ISSUE_AND_CONTROL,
+  );
+  assert.equal(result.status, "compliant");
+  assert.deepEqual(result.envelope.authorizedActions, [
+    "run-lifecycle-gate-close-work-issue",
+    "run-lifecycle-gate-close-audit",
+    "run-close-control",
+  ]);
+});
+
+test("STAGE2_CLOSE_READY (control-Issue mode, audit-only): close-audit then close-control, in order, is compliant", () => {
+  const result = classifyEnvelopeCompliance(
+    "STAGE2_CLOSE_READY",
+    ["run-lifecycle-gate-close-audit", "run-close-control"],
+    CLOSE_READY_AUDIT_ONLY_WITH_CONTROL,
+  );
+  assert.equal(result.status, "compliant");
+  assert.deepEqual(result.envelope.authorizedActions, ["run-lifecycle-gate-close-audit", "run-close-control"]);
+});
+
+test("STAGE2_CLOSE_READY: run-close-control is not authorized when nextCommand never names close-control.mjs (direct-reference / no-thin-control invocation)", () => {
+  const result = classifyEnvelopeCompliance(
+    "STAGE2_CLOSE_READY",
+    ["run-lifecycle-gate-close-audit", "run-close-control"],
+    CLOSE_READY_AUDIT_ONLY,
+  );
+  assert.equal(result.status, "violation");
+  assert.equal(result.reasons.length, 1);
+  assert.ok(result.reasons[0].includes("run-close-control"));
+});
+
+test("STAGE2_CLOSE_READY: run-close-control out of order (before close-audit) is a violation, not silently reordered", () => {
+  const result = classifyEnvelopeCompliance(
+    "STAGE2_CLOSE_READY",
+    ["run-close-control", "run-lifecycle-gate-close-audit"],
+    CLOSE_READY_AUDIT_ONLY_WITH_CONTROL,
+  );
+  assert.equal(result.status, "violation");
+  assert.ok(result.reasons.some((r) => r.includes("run-lifecycle-gate-close-audit") && r.includes("out of order")));
+});
+
 // -- Never-authorized deny-list applies under every mode, not just "none" -----------------
 
 test("NEVER_AUTHORIZED action kinds are rejected even inside an otherwise-bounded envelope", () => {

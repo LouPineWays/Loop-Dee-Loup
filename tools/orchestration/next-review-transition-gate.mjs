@@ -76,13 +76,21 @@
 //       prose reminder to close the audit issue "where policy requires it". Stage 1 review
 //       finding on PR #435: when a real gated work issue exists (READY_TO_CLOSE), `nextCommand`
 //       also chains `close-work-issue` first — `close-audit` alone never touches it — so
-//       ACCEPTED_NO_WORK_ISSUE, which has no work issue at all, keeps its audit-only shape.)
+//       ACCEPTED_NO_WORK_ISSUE, which has no work issue at all, keeps its audit-only shape.
+//       Issue #542: when this gate itself was invoked in control-Issue mode (a real thin
+//       control Issue — never a direct-reference `--audit-issue`/`--pr` invocation, which has
+//       none), `nextCommand` also chains `tools/orchestration/close-control.mjs` last, so the
+//       founder-facing thin control Issue's compact lifecycle fields are rewritten to a
+//       truthful terminal state and the Issue is closed inside this same bounded transition —
+//       closing the #486/#487/#538 gap where that step was left for manual founder repair.)
 //     - lifecycle-gate post-audit OK with verdict "CLEAN" and workIssueState "CLOSED" (the
 //       motivating resume case: work issue already closed, backed-CLEAN audit never consumed
 //       — the exact #380/#384 shape) -> STAGE2_CLOSE_READY, audit-only `nextCommand` (Stage 1
 //       review finding on PR #435: this combination reaches checkPostAudit's generic `OK`
 //       branch, never `READY_TO_CLOSE`, since that branch requires the work issue to still be
-//       open — it previously fell through to `NO_ACTION_YET` below instead)
+//       open — it previously fell through to `NO_ACTION_YET` below instead; issue #542: this
+//       branch's `nextCommand` also chains `close-control.mjs` last in control-Issue mode,
+//       exactly like the `READY_TO_CLOSE`/`ACCEPTED_NO_WORK_ISSUE` branch above)
 //     - lifecycle-gate post-audit OK with rawVerdict "NOT CLEAN"           -> STAGE2_CORRECTION_REQUIRED
 //     - lifecycle-gate post-audit REPORT_READY_TO_RECORD (issue #439: a completed Stage 2
 //       report already exists on the thread, of either verdict, but the audit issue's own
@@ -487,6 +495,27 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
   };
 }
 
+// Issue #542: appends the deterministic thin-control terminalization command
+// (`tools/orchestration/close-control.mjs`) to a `STAGE2_CLOSE_READY` `nextCommand` chain,
+// but only when `controlIssue` is a real number — i.e. only when *this gate itself* was
+// invoked in control-Issue mode (a real `--control-issue` on the current invocation). Direct-
+// reference mode (`--audit-issue`, or `--pr`/`--head`) always sets `context.controlIssue` to
+// `null` (see resolvePostMerge/runNextReviewTransitionGateCore below), so this never chains for
+// a no-thin-control flow — satisfying #542 requirement 3 ("fail closed on control identity")
+// structurally: this function never searches for or guesses a control Issue, it only reacts to
+// one the caller already resolved from its own explicit argument. This closes the #486/#487/
+// #538 gap: work and audit terminalized correctly, the controller correctly stopped per #486's
+// action-envelope boundary, but the founder-facing thin control Issue was left open with stale
+// lifecycle fields, requiring manual repair.
+function appendCloseControlCommand(baseCommand, { repo, controlIssue, auditIssue, workIssue }) {
+  if (controlIssue === null || controlIssue === undefined) return baseCommand;
+  const workIssueArg = typeof workIssue === "number" && Number.isFinite(workIssue) ? ` --work-issue ${workIssue}` : "";
+  return (
+    `${baseCommand} && node tools/orchestration/close-control.mjs --repo ${repo} --control-issue ${controlIssue} ` +
+    `--audit-issue ${auditIssue}${workIssueArg}`
+  );
+}
+
 // Pure core of the post-merge phase: derives one verdict from an already-computed
 // lifecycle-gate `checkPostAudit` result. See the module comment's verdict-derivation table.
 export function resolvePostMergeVerdict({ postAudit }, context = {}) {
@@ -531,9 +560,18 @@ export function resolvePostMergeVerdict({ postAudit }, context = {}) {
     // audit-only behavior unchanged, since there is no work issue for it to close.
     const closeAuditCommand = `node tools/review-watch/lifecycle-gate.mjs close-audit --repo ${context.repo} --audit-issue ${context.auditIssue}`;
     const hasWorkIssue = typeof postAudit.workIssue === "number" && Number.isFinite(postAudit.workIssue);
-    const nextCommand = hasWorkIssue
+    const baseCommand = hasWorkIssue
       ? `node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo ${context.repo} --work-issue ${postAudit.workIssue} --audit-issue ${context.auditIssue} && ${closeAuditCommand}`
       : closeAuditCommand;
+    // Issue #542: chain the thin-control terminalization command last, but only for a
+    // control-Issue-mode invocation (context.controlIssue is a real number) — see
+    // appendCloseControlCommand's own comment above.
+    const nextCommand = appendCloseControlCommand(baseCommand, {
+      repo: context.repo,
+      controlIssue: context.controlIssue,
+      auditIssue: context.auditIssue,
+      workIssue: hasWorkIssue ? postAudit.workIssue : null,
+    });
     return { state: "STAGE2_CLOSE_READY", stopAfter: true, ...context, postAudit, nextCommand };
   }
 
@@ -594,12 +632,22 @@ export function resolvePostMergeVerdict({ postAudit }, context = {}) {
     // exists to fix. Route it to `STAGE2_CLOSE_READY` too, audit-only (the work issue is
     // already closed, so only `close-audit` is needed -- never re-attempt closing it).
     if (postAudit.verdict === "CLEAN" && postAudit.workIssueState === "CLOSED") {
+      const baseCommand = `node tools/review-watch/lifecycle-gate.mjs close-audit --repo ${context.repo} --audit-issue ${context.auditIssue}`;
+      // Issue #542: the work issue here is already closed (workIssueState "CLOSED"), so it is
+      // still passed through to close-control's own --work-issue (for its informational
+      // "Terminal result" text only — close-control never re-closes it) when known.
+      const nextCommand = appendCloseControlCommand(baseCommand, {
+        repo: context.repo,
+        controlIssue: context.controlIssue,
+        auditIssue: context.auditIssue,
+        workIssue: typeof postAudit.workIssue === "number" && Number.isFinite(postAudit.workIssue) ? postAudit.workIssue : null,
+      });
       return {
         state: "STAGE2_CLOSE_READY",
         stopAfter: true,
         ...context,
         postAudit,
-        nextCommand: `node tools/review-watch/lifecycle-gate.mjs close-audit --repo ${context.repo} --audit-issue ${context.auditIssue}`,
+        nextCommand,
       };
     }
     if (postAudit.rawVerdict === "NOT CLEAN") {
