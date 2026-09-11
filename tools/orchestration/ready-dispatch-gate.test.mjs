@@ -1769,6 +1769,48 @@ test("upsertControlBullet: chained Lifecycle-then-Plan on a template-shaped body
   assert.ok(planLineIdx > currentStateIdx && planLineIdx < settledDecisionsIdx);
 });
 
+// Stage 1 review finding on PR #544 (issue #542's close-control.mjs correction): a
+// template-shaped body's "Blocker"/"Founder decision" updates used to fall through to the
+// generic "insert a new ad hoc bullet inside ### Current state" branch instead of the
+// template's own dedicated "### Current blocker"/"### Founder interrupt" heading fields --
+// leaving those headings' own stale, contradictory text in place even after terminalization
+// claimed a truthful "none" state.
+
+test("upsertControlBullet: on a template-shaped body, a Blocker update replaces the ### Current blocker heading's own value in place", () => {
+  const body = templateShapedBody().replace("### Current blocker\n\nNone.", "### Current blocker\n\nWaiting on founder input.");
+  const next = upsertControlBullet(body, "Blocker", "none");
+  const lines = next.split("\n");
+  const headingIdx = lines.indexOf("### Current blocker");
+  assert.equal(lines[headingIdx + 2], "none");
+  // No stray ad hoc "- **Blocker:**" bullet was introduced anywhere in the body.
+  assert.ok(!lines.some((l) => /^-\s*\*\*Blocker:\*\*/i.test(l)));
+});
+
+test("upsertControlBullet: on a template-shaped body, a Founder decision update replaces the ### Founder interrupt heading's own value in place", () => {
+  const body = templateShapedBody().replace("### Founder interrupt\n\nNone.", "### Founder interrupt\n\nPricing model TBD.");
+  const next = upsertControlBullet(body, "Founder decision", "none");
+  const lines = next.split("\n");
+  const headingIdx = lines.indexOf("### Founder interrupt");
+  assert.equal(lines[headingIdx + 2], "none");
+  assert.ok(!lines.some((l) => /^-\s*\*\*Founder decision:\*\*/i.test(l)));
+});
+
+test("upsertControlBullet: chained Lifecycle/Blocker/Founder-decision updates on a template-shaped body converge every dedicated heading, none stray into ### Current state", () => {
+  const body = templateShapedBody()
+    .replace("### Current blocker\n\nNone.", "### Current blocker\n\nWaiting on founder input.")
+    .replace("### Founder interrupt\n\nNone.", "### Founder interrupt\n\nPricing model TBD.");
+  const next = upsertControlBullet(
+    upsertControlBullet(upsertControlBullet(body, "Lifecycle", "DONE"), "Blocker", "none"),
+    "Founder decision",
+    "none",
+  );
+  const lines = next.split("\n");
+  assert.equal(lines[lines.indexOf("### State") + 2], "DONE");
+  assert.equal(lines[lines.indexOf("### Current blocker") + 2], "none");
+  assert.equal(lines[lines.indexOf("### Founder interrupt") + 2], "none");
+  assert.ok(!lines.some((l) => /^-\s*\*\*(Blocker|Founder decision):\*\*/i.test(l)));
+});
+
 test("probeExistingPlan: alreadyPlanned true with the canonical Plan Index URL when a valid plan already exists (the #500 shape)", async () => {
   const result = await probeExistingPlan(
     { repo: "LouPineWays/Loop-Dee-Loup", executionIssue: 500 },

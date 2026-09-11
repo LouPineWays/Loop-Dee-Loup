@@ -507,6 +507,18 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
 // #538 gap: work and audit terminalized correctly, the controller correctly stopped per #486's
 // action-envelope boundary, but the founder-facing thin control Issue was left open with stale
 // lifecycle fields, requiring manual repair.
+//
+// Stage 1 review finding on PR #544: the `&&` chain below joins this command after
+// `lifecycle-gate.mjs close-audit`, but that command's own CLI exits 0 even for its normal,
+// non-error `NOT_TERMINAL_YET` result (the audit correctly stayed open) — a 0-exit code alone is
+// never proof the audit actually closed, so a shell chain gated only on exit codes cannot itself
+// keep `close-control.mjs` from running against a still-open audit if evidence changed between
+// this gate's own read-only check and `nextCommand`'s later execution. This is deliberately not
+// fixed by restructuring the chain to parse `close-audit`'s JSON output between steps;
+// `close-control.mjs` independently re-fetches and revalidates the named audit issue's own live
+// GitHub state (`state === "CLOSED"`) before ever mutating the control, so it fails closed
+// (REJECTED) regardless of what produced its `--audit-issue` argument or that argument's own
+// exit code. See close-control.mjs's `checkCloseControl` for that independent check.
 function appendCloseControlCommand(baseCommand, { repo, controlIssue, auditIssue, workIssue }) {
   if (controlIssue === null || controlIssue === undefined) return baseCommand;
   const workIssueArg = typeof workIssue === "number" && Number.isFinite(workIssue) ? ` --work-issue ${workIssue}` : "";
