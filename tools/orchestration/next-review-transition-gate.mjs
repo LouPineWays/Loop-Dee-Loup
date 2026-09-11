@@ -918,7 +918,7 @@ async function runNextReviewTransitionGateCore(
 export async function runNextReviewTransitionGate(args, impls) {
   const result = await runNextReviewTransitionGateCore(args, impls);
   if (typeof result.state !== "string") return result;
-  return { ...result, actionEnvelope: getActionEnvelope(result.state) };
+  return { ...result, actionEnvelope: getActionEnvelope(result.state, result) };
 }
 
 function parseArgs(argv) {

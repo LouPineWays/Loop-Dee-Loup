@@ -605,6 +605,26 @@ test("checkReadyDispatch: an ordinary NOT_READY control Issue (mid-cycle lifecyc
   );
   assert.equal(result.exitCode, 3);
   assert.equal(result.state, "NOT_READY");
+  // Stage 1 finding on PR #534 (issue #486): a post-PR mid-cycle NOT_READY carries
+  // `postPrLifecycle` so action-envelope.mjs classifies it as `chain` (must route through
+  // next-review-transition-gate.mjs), never AGENTS.md's ordinary unpoliced NOT_READY fallthrough.
+  assert.equal(result.postPrLifecycle, "EXECUTING");
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "chain",
+    authorizedActions: ["run-next-review-transition-gate"],
+  });
+});
+
+test("checkReadyDispatch: NOT_READY for a genuinely pre-PR/unrecognized reason (not one of the five post-PR mid-cycle Lifecycle values) stays plain fallthrough", async () => {
+  const body = "- **Lifecycle:** SOMETHING_ELSE\n- **Execution:** #5\n- **Route:** implementation worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 401 },
+    { ghIssueViewImpl: async () => ({ body, state: "OPEN" }) },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "NOT_READY");
+  assert.ok(!("postPrLifecycle" in result));
+  assert.deepEqual(result.actionEnvelope, { mode: "fallthrough", authorizedActions: [] });
 });
 
 // --- Issue #407 unit 407-B: AUDIT_ISSUE_DETECTED (the #432 direct-Stage-2-dispatch fix) ----

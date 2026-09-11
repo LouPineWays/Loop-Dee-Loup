@@ -17,12 +17,34 @@
 import { readFileSync } from "node:fs";
 import { classifyEnvelopeCompliance } from "./action-envelope.mjs";
 
+// Stage 1 finding on PR #534: the previous version consumed the next token unconditionally,
+// whether or not it was actually present or was itself another `--option`. That let a malformed
+// invocation silently certify compliance instead of failing — `--state --actions rerun-gate`
+// read as state `"--actions"` (unrecognized, so `getActionEnvelope` failed closed to
+// zero-authorized-actions) with the real actions list dropped entirely, and
+// `--state READY_TO_DISPATCH --actions-file` (missing its value) silently fell back to an empty
+// actions list — both exited 0 (compliant) despite never checking the actions the caller
+// actually meant to supply. Every option now requires a real value: a following token that is
+// absent, or itself starts with "--", is a usage error, not a silently-accepted empty value.
+const KNOWN_OPTIONS = new Set(["state", "actions", "actions-file"]);
+
 function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (!a.startsWith("--")) continue;
-    args[a.slice(2)] = argv[++i];
+    if (!a.startsWith("--")) {
+      throw new Error(`unexpected positional argument "${a}"`);
+    }
+    const name = a.slice(2);
+    if (!KNOWN_OPTIONS.has(name)) {
+      throw new Error(`unknown option "--${name}"`);
+    }
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error(`option "--${name}" requires a value`);
+    }
+    args[name] = value;
+    i++;
   }
   return args;
 }
@@ -43,7 +65,14 @@ function loadActions(args) {
 }
 
 function main() {
-  const args = parseArgs(process.argv.slice(2));
+  let args;
+  try {
+    args = parseArgs(process.argv.slice(2));
+  } catch (err) {
+    process.stderr.write(`verify-action-envelope.mjs: ${err.message}\n`);
+    process.exit(1);
+    return;
+  }
   if (!args.state) {
     process.stderr.write("verify-action-envelope.mjs: --state <VERDICT_STATE> is required\n");
     process.exit(1);

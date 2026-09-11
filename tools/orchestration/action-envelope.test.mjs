@@ -46,7 +46,46 @@ test("getActionEnvelope: returns a fresh array each call (callers cannot mutate 
   const a = getActionEnvelope("READY_TO_DISPATCH_PLANNING");
   a.authorizedActions.push("something-else");
   const b = getActionEnvelope("READY_TO_DISPATCH_PLANNING");
-  assert.deepEqual(b.authorizedActions, ["dispatch-planning-worker", "write-control-snapshot"]);
+  assert.deepEqual(b.authorizedActions, ["dispatch-planning-worker"]);
+});
+
+// -- Stage 1 finding on PR #534: READY_TO_DISPATCH_PLANNING must not authorize a same-context
+// projection write ------------------------------------------------------------------------
+
+test("READY_TO_DISPATCH_PLANNING: dispatching the planning worker and stopping is compliant; also persisting a control snapshot in the same context is a violation", () => {
+  assert.equal(
+    classifyEnvelopeCompliance("READY_TO_DISPATCH_PLANNING", ["dispatch-planning-worker"]).status,
+    "compliant",
+  );
+  // Projecting PLAN_READY/ROUTED into the control Issue body belongs to a later fresh
+  // READY_TO_PROJECT_PLAN_READY/READY_TO_PROJECT_ROUTED invocation, never this same context.
+  const result = classifyEnvelopeCompliance("READY_TO_DISPATCH_PLANNING", [
+    "dispatch-planning-worker",
+    "write-control-snapshot",
+  ]);
+  assert.equal(result.status, "violation");
+  assert.equal(result.reasons.length, 1);
+  assert.ok(result.reasons[0].includes("write-control-snapshot"));
+});
+
+// -- Stage 1 finding on PR #534: duplicate/reordered authorized actions must be violations ---
+
+test("duplicating an authorized action within one bounded transition is a violation (two dispatch-unit-wave calls)", () => {
+  const result = classifyEnvelopeCompliance("READY_TO_DISPATCH_UNITS", ["dispatch-unit-wave", "dispatch-unit-wave"]);
+  assert.equal(result.status, "violation");
+  assert.equal(result.reasons.length, 1);
+  assert.ok(result.reasons[0].includes("already performed once"));
+});
+
+test("performing an envelope's own authorized actions out of its declared order is a violation (write-control-snapshot, trigger-stage2, merge-pr)", () => {
+  const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
+    "write-control-snapshot",
+    "trigger-stage2",
+    "merge-pr",
+  ]);
+  assert.equal(result.status, "violation");
+  assert.equal(result.reasons.length, 2);
+  assert.ok(result.reasons.every((r) => r.includes("ran out of order")));
 });
 
 // -- classifyEnvelopeCompliance: no-action verdicts --------------------------------------
@@ -189,15 +228,16 @@ test("#514 shape: crossing PLAN_READY -> ROUTED -> unit dispatch -> wait in one 
     "wait-for-completion",
   ]);
   assert.equal(result.status, "violation");
-  // rerun-gate x2, prepare-dispatch-manifest, dispatch-unit-wave, wait-for-completion = 5
-  assert.equal(result.reasons.length, 5);
+  // READY_TO_DISPATCH_PLANNING authorizes only dispatch-planning-worker (issue #486/PR #534
+  // Stage 1 finding: it never authorizes write-control-snapshot in this same context), so both
+  // write-control-snapshot occurrences are also violations here: write-control-snapshot x2,
+  // rerun-gate x2 (never-authorized), prepare-dispatch-manifest, dispatch-unit-wave,
+  // wait-for-completion (never-authorized) = 7
+  assert.equal(result.reasons.length, 7);
 });
 
-test("#514 planning breakpoint: dispatch planner, record PLAN_READY, then end is compliant", () => {
-  const result = classifyEnvelopeCompliance("READY_TO_DISPATCH_PLANNING", [
-    "dispatch-planning-worker",
-    "write-control-snapshot",
-  ]);
+test("#514 planning breakpoint: dispatch the planning worker by reference and stop is compliant (no projection write in the same context)", () => {
+  const result = classifyEnvelopeCompliance("READY_TO_DISPATCH_PLANNING", ["dispatch-planning-worker"]);
   assert.equal(result.status, "compliant");
 });
 
@@ -278,27 +318,106 @@ test("NOT_READY: fallthrough mode is always compliant regardless of actions take
   assert.equal(getActionEnvelope("NOT_READY").mode, ENVELOPE_MODES.FALLTHROUGH);
 });
 
+// -- Stage 1 finding on PR #534: a post-PR mid-cycle NOT_READY is AGENTS.md's explicit
+// fallthrough exception and must chain to next-review-transition-gate.mjs, never fall through
+// unpoliced the way an ordinary pre-PR NOT_READY does --------------------------------------
+
+test("NOT_READY with postPrLifecycle (EXECUTING/VERIFYING/REVIEW/AUDIT/CORRECTION) is chain mode, not fallthrough", () => {
+  for (const lifecycle of ["EXECUTING", "VERIFYING", "REVIEW", "AUDIT", "CORRECTION"]) {
+    const envelope = getActionEnvelope("NOT_READY", { postPrLifecycle: lifecycle });
+    assert.deepEqual(
+      envelope,
+      { mode: ENVELOPE_MODES.CHAIN, authorizedActions: ["run-next-review-transition-gate"] },
+      `expected chain mode for postPrLifecycle ${lifecycle}`,
+    );
+  }
+});
+
+test("NOT_READY with postPrLifecycle: running the review gate and stopping is compliant; repository reconnaissance or self-implementation instead is a violation", () => {
+  const context = { postPrLifecycle: "EXECUTING" };
+  assert.equal(
+    classifyEnvelopeCompliance("NOT_READY", ["run-next-review-transition-gate"], context).status,
+    "compliant",
+  );
+  const violated = classifyEnvelopeCompliance(
+    "NOT_READY",
+    ["repository-reconnaissance", "self-authorized-implementation"],
+    context,
+  );
+  assert.equal(violated.status, "violation");
+  assert.equal(violated.reasons.length, 2);
+});
+
+test("NOT_READY without postPrLifecycle is still ordinary unpoliced fallthrough", () => {
+  assert.deepEqual(getActionEnvelope("NOT_READY", {}), { mode: ENVELOPE_MODES.FALLTHROUGH, authorizedActions: [] });
+  assert.deepEqual(getActionEnvelope("NOT_READY", { postPrLifecycle: "" }), {
+    mode: ENVELOPE_MODES.FALLTHROUGH,
+    authorizedActions: [],
+  });
+});
+
 // -- Independent-defect temptation ---------------------------------------------------------
 // Verification class 11.
 
+// Stage 1 finding on PR #534: STAGE2_CLOSE_READY's authorized actions depend on whether the
+// concrete verdict's own `nextCommand` actually chains a work-issue close first — a real gated
+// work issue exists (`nextCommand` includes "close-work-issue") vs. ACCEPTED_NO_WORK_ISSUE /
+// an already-closed work issue (`nextCommand` is `close-audit` alone). Tests below pass
+// `nextCommand` as context so `getActionEnvelope` derives the actual authorized subset instead
+// of falling back to the table's superset row.
+const CLOSE_READY_WITH_WORK_ISSUE = {
+  nextCommand:
+    "node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo o/r --work-issue 1 --audit-issue 2 && node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 2",
+};
+const CLOSE_READY_AUDIT_ONLY = {
+  nextCommand: "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 2",
+};
+
 test("independent-defect temptation: a bounded breakpoint never authorizes self-authorized intake or implementation of a newly noticed bug", () => {
-  const result = classifyEnvelopeCompliance("STAGE2_CLOSE_READY", [
-    "run-lifecycle-gate-close-work-issue",
-    "run-lifecycle-gate-close-audit",
-    "self-authorized-issue-creation",
-    "self-authorized-implementation",
-  ]);
+  const result = classifyEnvelopeCompliance(
+    "STAGE2_CLOSE_READY",
+    [
+      "run-lifecycle-gate-close-work-issue",
+      "run-lifecycle-gate-close-audit",
+      "self-authorized-issue-creation",
+      "self-authorized-implementation",
+    ],
+    CLOSE_READY_WITH_WORK_ISSUE,
+  );
   assert.equal(result.status, "violation");
   assert.equal(result.reasons.length, 2);
   assert.ok(result.reasons.every((r) => r.includes("never authorized")));
 });
 
-test("STAGE2_CLOSE_READY: performing only the recorded chained close command is compliant", () => {
-  const result = classifyEnvelopeCompliance("STAGE2_CLOSE_READY", [
-    "run-lifecycle-gate-close-work-issue",
-    "run-lifecycle-gate-close-audit",
-  ]);
+test("STAGE2_CLOSE_READY (real gated work issue): performing only the recorded chained close command is compliant", () => {
+  const result = classifyEnvelopeCompliance(
+    "STAGE2_CLOSE_READY",
+    ["run-lifecycle-gate-close-work-issue", "run-lifecycle-gate-close-audit"],
+    CLOSE_READY_WITH_WORK_ISSUE,
+  );
   assert.equal(result.status, "compliant");
+});
+
+test("STAGE2_CLOSE_READY (ACCEPTED_NO_WORK_ISSUE / already-closed work issue): close-audit alone is authorized; close-work-issue is not", () => {
+  const compliant = classifyEnvelopeCompliance(
+    "STAGE2_CLOSE_READY",
+    ["run-lifecycle-gate-close-audit"],
+    CLOSE_READY_AUDIT_ONLY,
+  );
+  assert.equal(compliant.status, "compliant");
+  assert.deepEqual(compliant.envelope.authorizedActions, ["run-lifecycle-gate-close-audit"]);
+
+  // Stage 1 finding on PR #534: the concrete verdict never authorized closing a work issue in
+  // this audit-only shape, so performing it anyway must be a violation, not silently accepted
+  // because the table's superset row happens to list it.
+  const violated = classifyEnvelopeCompliance(
+    "STAGE2_CLOSE_READY",
+    ["run-lifecycle-gate-close-work-issue", "run-lifecycle-gate-close-audit"],
+    CLOSE_READY_AUDIT_ONLY,
+  );
+  assert.equal(violated.status, "violation");
+  assert.equal(violated.reasons.length, 1);
+  assert.ok(violated.reasons[0].includes("run-lifecycle-gate-close-work-issue"));
 });
 
 // -- Never-authorized deny-list applies under every mode, not just "none" -----------------
