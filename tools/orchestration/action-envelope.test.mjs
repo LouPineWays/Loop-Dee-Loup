@@ -383,7 +383,11 @@ test("NOT_READY with postPrLifecycle: running the review gate and stopping is co
     context,
   );
   assert.equal(violated.status, "violation");
-  assert.equal(violated.reasons.length, 2);
+  // Issue #542 correction (PR #544 Stage 1 finding, P1): three reasons, not two -- neither
+  // observed action is authorized under this chain envelope, AND the one required chained
+  // action ("run-next-review-transition-gate") was never observed at all.
+  assert.equal(violated.reasons.length, 3);
+  assert.ok(violated.reasons.some((r) => r.includes("run-next-review-transition-gate") && r.includes("required action")));
 });
 
 test("NOT_READY without postPrLifecycle is still ordinary unpoliced fallthrough", () => {
@@ -458,6 +462,65 @@ test("STAGE2_CLOSE_READY (ACCEPTED_NO_WORK_ISSUE / already-closed work issue): c
   assert.ok(violated.reasons[0].includes("run-lifecycle-gate-close-work-issue"));
 });
 
+// -- Issue #542: thin-control terminalization chained onto STAGE2_CLOSE_READY -----------------
+
+const CLOSE_READY_WITH_WORK_ISSUE_AND_CONTROL = {
+  nextCommand:
+    "node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo o/r --work-issue 1 --audit-issue 2 && " +
+    "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 2 && " +
+    "node tools/orchestration/close-control.mjs --repo o/r --control-issue 3 --audit-issue 2 --work-issue 1",
+};
+const CLOSE_READY_AUDIT_ONLY_WITH_CONTROL = {
+  nextCommand:
+    "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 2 && " +
+    "node tools/orchestration/close-control.mjs --repo o/r --control-issue 3 --audit-issue 2",
+};
+
+test("STAGE2_CLOSE_READY (control-Issue mode, real work issue): performing the full work/audit/control chain in the nextCommand's own order is compliant", () => {
+  const result = classifyEnvelopeCompliance(
+    "STAGE2_CLOSE_READY",
+    ["run-lifecycle-gate-close-work-issue", "run-lifecycle-gate-close-audit", "run-close-control"],
+    CLOSE_READY_WITH_WORK_ISSUE_AND_CONTROL,
+  );
+  assert.equal(result.status, "compliant");
+  assert.deepEqual(result.envelope.authorizedActions, [
+    "run-lifecycle-gate-close-work-issue",
+    "run-lifecycle-gate-close-audit",
+    "run-close-control",
+  ]);
+});
+
+test("STAGE2_CLOSE_READY (control-Issue mode, audit-only): close-audit then close-control, in order, is compliant", () => {
+  const result = classifyEnvelopeCompliance(
+    "STAGE2_CLOSE_READY",
+    ["run-lifecycle-gate-close-audit", "run-close-control"],
+    CLOSE_READY_AUDIT_ONLY_WITH_CONTROL,
+  );
+  assert.equal(result.status, "compliant");
+  assert.deepEqual(result.envelope.authorizedActions, ["run-lifecycle-gate-close-audit", "run-close-control"]);
+});
+
+test("STAGE2_CLOSE_READY: run-close-control is not authorized when nextCommand never names close-control.mjs (direct-reference / no-thin-control invocation)", () => {
+  const result = classifyEnvelopeCompliance(
+    "STAGE2_CLOSE_READY",
+    ["run-lifecycle-gate-close-audit", "run-close-control"],
+    CLOSE_READY_AUDIT_ONLY,
+  );
+  assert.equal(result.status, "violation");
+  assert.equal(result.reasons.length, 1);
+  assert.ok(result.reasons[0].includes("run-close-control"));
+});
+
+test("STAGE2_CLOSE_READY: run-close-control out of order (before close-audit) is a violation, not silently reordered", () => {
+  const result = classifyEnvelopeCompliance(
+    "STAGE2_CLOSE_READY",
+    ["run-close-control", "run-lifecycle-gate-close-audit"],
+    CLOSE_READY_AUDIT_ONLY_WITH_CONTROL,
+  );
+  assert.equal(result.status, "violation");
+  assert.ok(result.reasons.some((r) => r.includes("run-lifecycle-gate-close-audit") && r.includes("out of order")));
+});
+
 // -- Never-authorized deny-list applies under every mode, not just "none" -----------------
 
 test("NEVER_AUTHORIZED action kinds are rejected even inside an otherwise-bounded envelope", () => {
@@ -465,4 +528,66 @@ test("NEVER_AUTHORIZED action kinds are rejected even inside an otherwise-bounde
   assert.equal(result.status, "violation");
   assert.equal(result.reasons.length, 1);
   assert.ok(result.reasons[0].includes("wait-for-completion"));
+});
+
+// -- Issue #542 correction (PR #544 Stage 1 finding P1): every required action in a bounded/
+// chain envelope's own authorizedActions must actually be observed, not merely "whatever was
+// observed happened to be permitted and in order" -----------------------------------------
+
+test("STAGE2_CLOSE_READY (control-Issue mode): omitting run-close-control entirely is a violation even though every observed action was itself permitted and in order", () => {
+  const result = classifyEnvelopeCompliance(
+    "STAGE2_CLOSE_READY",
+    ["run-lifecycle-gate-close-audit"],
+    CLOSE_READY_AUDIT_ONLY_WITH_CONTROL,
+  );
+  assert.equal(result.status, "violation");
+  assert.equal(result.reasons.length, 1);
+  assert.ok(result.reasons[0].includes("run-close-control"));
+  assert.ok(result.reasons[0].includes("required action"));
+});
+
+test("STAGE2_CLOSE_READY (control-Issue mode, real work issue): omitting run-close-control after a real close-work-issue+close-audit pair is still a violation", () => {
+  const result = classifyEnvelopeCompliance(
+    "STAGE2_CLOSE_READY",
+    ["run-lifecycle-gate-close-work-issue", "run-lifecycle-gate-close-audit"],
+    CLOSE_READY_WITH_WORK_ISSUE_AND_CONTROL,
+  );
+  assert.equal(result.status, "violation");
+  assert.equal(result.reasons.length, 1);
+  assert.ok(result.reasons[0].includes("run-close-control"));
+});
+
+test("a bounded multi-action envelope reports every action never attempted at all as missing, distinct from an out-of-order/duplicated attempt", () => {
+  const missingBoth = classifyEnvelopeCompliance("READY_TO_RUN_DISPATCH_MANIFEST", []);
+  assert.equal(missingBoth.status, "violation");
+  assert.equal(missingBoth.reasons.length, 1);
+  assert.ok(missingBoth.reasons[0].includes("prepare-dispatch-manifest"));
+  assert.ok(missingBoth.reasons[0].includes("write-control-snapshot"));
+});
+
+// -- Issue #542 correction (PR #544 Stage 1 finding P2): run-close-control authority is derived
+// from a structural parse of the chained command's own script token, never a raw substring
+// search that could match unrelated argument text -------------------------------------------
+
+test("STAGE2_CLOSE_READY: a --repo value that happens to contain the close-control.mjs substring never manufactures run-close-control authority", () => {
+  const trickyRepoSlug = {
+    nextCommand: "node tools/review-watch/lifecycle-gate.mjs close-audit --repo owner/close-control.mjs --audit-issue 2",
+  };
+  const envelope = getActionEnvelope("STAGE2_CLOSE_READY", trickyRepoSlug);
+  assert.deepEqual(envelope.authorizedActions, ["run-lifecycle-gate-close-audit"]);
+  const result = classifyEnvelopeCompliance(
+    "STAGE2_CLOSE_READY",
+    ["run-lifecycle-gate-close-audit", "run-close-control"],
+    trickyRepoSlug,
+  );
+  assert.equal(result.status, "violation");
+  assert.ok(result.reasons.some((r) => r.includes("run-close-control") && r.includes("not in the authorized envelope")));
+});
+
+test("STAGE2_CLOSE_READY: a --work-issue or --audit-issue value containing the close-work-issue substring never manufactures run-lifecycle-gate-close-work-issue authority", () => {
+  const trickyArgValue = {
+    nextCommand: "node tools/review-watch/lifecycle-gate.mjs close-audit --repo owner/close-work-issue-fixture --audit-issue 2",
+  };
+  const envelope = getActionEnvelope("STAGE2_CLOSE_READY", trickyArgValue);
+  assert.deepEqual(envelope.authorizedActions, ["run-lifecycle-gate-close-audit"]);
 });

@@ -346,6 +346,18 @@ function insertIntoHeadingBlock(lines, label, newLine) {
   return next;
 }
 
+// Every ad hoc bullet label that corresponds to one of `.github/ISSUE_TEMPLATE/
+// parent-execution.yml`'s own dedicated "### Heading" fields (see parseHeadingField's read-side
+// fallback table above) -- keyed lower-case since upsertControlBullet's own label matching is
+// case-insensitive. Stage 1 review finding on PR #544: kept as one small table rather than a
+// second `/^lifecycle$/i`-style special case per label, so a future template field added here
+// only needs one new entry, not a new branch.
+const HEADING_FIELD_LABELS = {
+  lifecycle: "State",
+  blocker: "Current blocker",
+  "founder decision": "Founder interrupt",
+};
+
 export function upsertControlBullet(body, label, value) {
   const lines = (body ?? "").split("\n");
   const pattern = new RegExp(`^-\\s*\\*\\*${label}:\\*\\*`, "i");
@@ -372,11 +384,23 @@ export function upsertControlBullet(body, label, value) {
   // (readExecutionBulletField's own Lifecycle read already falls back to
   // parseHeadingField(body, "State") for exactly this case). Updating "Lifecycle" here used
   // to always append a brand-new bullet past every template field instead, leaving "### State"
-  // stale and contradictory. For the Lifecycle label, update "### State" in place; for any
-  // other ad hoc label (e.g. "Plan"), the template's own "### Current state" field
-  // description names itself as where such bullets belong for a thin control Issue.
-  if (/^lifecycle$/i.test(label)) {
-    const headingUpdated = replaceHeadingFieldValue(lines, "State", value);
+  // stale and contradictory. For the Lifecycle label, update "### State" in place.
+  //
+  // Stage 1 review finding on PR #544: the same template renders "Blocker" and "Founder
+  // decision" as their own dedicated heading fields too ("### Current blocker", "### Founder
+  // interrupt" -- see parseHeadingField's own read-side fallback for these exact same three
+  // labels above). Before this, only "Lifecycle" got this heading-in-place treatment; updating
+  // "Blocker" or "Founder decision" on a template-shaped body instead inserted a brand-new ad
+  // hoc bullet into "### Current state", leaving the template's own "### Current blocker"/
+  // "### Founder interrupt" text unchanged -- e.g. a control Issue terminalized by
+  // `close-control.mjs` kept a stale, contradictory unresolved blocker/founder-interrupt block
+  // even though its truthful terminal snapshot promises "none". `HEADING_FIELD_LABELS` names
+  // every label with a dedicated template heading; any other ad hoc label (e.g. "Plan") still
+  // falls to the template's own "### Current state" field, which its own field description
+  // names as where such bullets belong for a thin control Issue.
+  const headingLabel = HEADING_FIELD_LABELS[label.toLowerCase()];
+  if (headingLabel) {
+    const headingUpdated = replaceHeadingFieldValue(lines, headingLabel, value);
     if (headingUpdated) return headingUpdated.join("\n");
   } else {
     const blockInserted = insertIntoHeadingBlock(lines, "Current state", `- **${label}:** ${value}`);

@@ -129,19 +129,25 @@ const ENVELOPES = {
   },
   STAGE1_CORRECTION_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-correction-worker"] },
   STAGE2_CORRECTION_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-correction-worker"] },
-  // This table row is the superset (real gated work issue exists) shape, kept here only as the
-  // documentation default for this state. Stage 1 finding on PR #534: for
-  // `ACCEPTED_NO_WORK_ISSUE` or an already-closed work issue, next-review-transition-gate.mjs's
-  // own `nextCommand` deliberately names only `close-audit` — there is no work issue to close,
-  // so authorizing `run-lifecycle-gate-close-work-issue` unconditionally let the compliance
-  // checker accept a mutation the concrete verdict never authorized. `getActionEnvelope` below
-  // derives the actual authorized actions from the verdict's own `nextCommand` (present on
-  // every STAGE2_CLOSE_READY verdict) and fails closed to the audit-only subset — never this
-  // wider row — when no `nextCommand` context is supplied at all, consistent with
-  // `FAIL_CLOSED_DEFAULT` below: never guess the wider authority from an absent context.
+  // This table row is the superset (real gated work issue exists, plus a real thin control
+  // Issue to terminalize) shape, kept here only as the documentation default for this state.
+  // Stage 1 finding on PR #534: for `ACCEPTED_NO_WORK_ISSUE` or an already-closed work issue,
+  // next-review-transition-gate.mjs's own `nextCommand` deliberately names only `close-audit` —
+  // there is no work issue to close, so authorizing `run-lifecycle-gate-close-work-issue`
+  // unconditionally let the compliance checker accept a mutation the concrete verdict never
+  // authorized. Issue #542 extends the same "actual nextCommand, never a guessed superset"
+  // discipline to thin-control terminalization: `run-close-control`
+  // (`tools/orchestration/close-control.mjs`) is authorized only when the concrete verdict's own
+  // `nextCommand` was built in control-Issue mode (a real `--control-issue` on the *gate*
+  // invocation, never guessed or searched for) — a direct-reference invocation
+  // (`--audit-issue`/`--pr`) never chains it, so a no-thin-control flow's envelope is unaffected.
+  // `getActionEnvelope` below derives the actual authorized actions from the verdict's own
+  // `nextCommand` (present on every STAGE2_CLOSE_READY verdict) and fails closed to the narrowest
+  // subset — never this wider row — when no `nextCommand` context is supplied at all, consistent
+  // with `FAIL_CLOSED_DEFAULT` below: never guess wider authority from an absent context.
   STAGE2_CLOSE_READY: {
     mode: ENVELOPE_MODES.BOUNDED,
-    authorizedActions: ["run-lifecycle-gate-close-work-issue", "run-lifecycle-gate-close-audit"],
+    authorizedActions: ["run-lifecycle-gate-close-work-issue", "run-lifecycle-gate-close-audit", "run-close-control"],
   },
   STAGE2_REPORT_READY_TO_RECORD: {
     mode: ENVELOPE_MODES.BOUNDED,
@@ -161,6 +167,30 @@ const FAIL_CLOSED_DEFAULT = Object.freeze({
   reason: "unrecognized or absent verdict state; fails closed to zero further authorized action",
 });
 
+// Splits a `nextCommand` chain string ("cmd1 && cmd2 && ...") into each chained segment's own
+// script basename and (if present) its first non-flag argument -- a real, structural parse of
+// the command's own identity tokens, never a raw substring search over the whole command text.
+// Stage 1 review finding on PR #544 (issue #542's close-control.mjs correction, P2): the prior
+// `context.nextCommand.includes("close-control.mjs")` check matched that text anywhere in the
+// command, including inside an unrelated argument's own *value* -- e.g. a `--repo` value of
+// `owner/close-control.mjs` would misclassify an audit-only command as authorizing
+// `run-close-control` despite naming no control Issue at all. Only the token immediately after
+// `node` (the script path) is ever treated as "the script being invoked"; only the first
+// non-flag token after that is ever treated as "the subcommand" -- an argument's own value is
+// never inspected for either purpose.
+function parseChainedCommands(commandText) {
+  if (typeof commandText !== "string" || commandText.length === 0) return [];
+  return commandText.split("&&").map((segment) => {
+    const tokens = segment.trim().split(/\s+/).filter(Boolean);
+    const nodeIdx = tokens.indexOf("node");
+    const scriptPath = nodeIdx !== -1 ? tokens[nodeIdx + 1] ?? "" : "";
+    const scriptName = scriptPath.split(/[\\/]/).pop() ?? "";
+    const rest = nodeIdx !== -1 ? tokens.slice(nodeIdx + 2) : [];
+    const subcommand = rest.find((token) => !token.startsWith("--")) ?? null;
+    return { scriptName, subcommand };
+  });
+}
+
 // `context` is the verdict object itself (or an equivalent shape) — optional, and safe to omit
 // for a plain table lookup by state alone. Only two states currently read anything from it:
 //
@@ -172,6 +202,11 @@ const FAIL_CLOSED_DEFAULT = Object.freeze({
 //   - `STAGE2_CLOSE_READY` derives its actual authorized actions from `context.nextCommand`
 //     (always present on this verdict — see next-review-transition-gate.mjs) rather than the
 //     table's superset row, per the Stage 1 finding on PR #534 documented above the table entry.
+//     Issue #542 extends this same context-sensitive derivation to `run-close-control`: it is
+//     authorized only when `nextCommand` itself *invokes* `close-control.mjs` as a chained
+//     segment's own script (via `parseChainedCommands` above, never a raw substring match) —
+//     the shape `next-review-transition-gate.mjs`'s own `appendCloseControlCommand` produces only
+//     when that gate was invoked in control-Issue mode (never guessed from `state` alone).
 export function getActionEnvelope(state, context = {}) {
   const entry = typeof state === "string" ? ENVELOPES[state] : undefined;
   if (!entry) return { mode: FAIL_CLOSED_DEFAULT.mode, authorizedActions: [], reason: FAIL_CLOSED_DEFAULT.reason };
@@ -181,13 +216,14 @@ export function getActionEnvelope(state, context = {}) {
   }
 
   if (state === "STAGE2_CLOSE_READY") {
-    const hasWorkIssue = typeof context.nextCommand === "string" && context.nextCommand.includes("close-work-issue");
-    return {
-      mode: entry.mode,
-      authorizedActions: hasWorkIssue
-        ? ["run-lifecycle-gate-close-work-issue", "run-lifecycle-gate-close-audit"]
-        : ["run-lifecycle-gate-close-audit"],
-    };
+    const commands = parseChainedCommands(context.nextCommand);
+    const hasWorkIssue = commands.some((c) => c.scriptName === "lifecycle-gate.mjs" && c.subcommand === "close-work-issue");
+    const hasCloseControl = commands.some((c) => c.scriptName === "close-control.mjs");
+    const authorizedActions = [];
+    if (hasWorkIssue) authorizedActions.push("run-lifecycle-gate-close-work-issue");
+    authorizedActions.push("run-lifecycle-gate-close-audit");
+    if (hasCloseControl) authorizedActions.push("run-close-control");
+    return { mode: entry.mode, authorizedActions };
   }
 
   return { mode: entry.mode, authorizedActions: [...entry.authorizedActions] };
@@ -264,6 +300,11 @@ export function classifyEnvelopeCompliance(state, actionsTaken = [], context = {
   // authorized action already performed once, or one performed out of the envelope's own
   // declared order, is a violation exactly like an action absent from the list entirely.
   const seenAuthorized = new Set();
+  // Every non-deny-listed action actually observed, regardless of whether it was ultimately
+  // accepted (authorized, unique, in order) below -- used only to decide which required actions
+  // were never attempted at all (see the "missing" check after this loop), so an action that was
+  // attempted but rejected for being out of order or duplicated is never also reported "missing".
+  const attemptedActions = new Set();
   let lastAuthorizedIndex = -1;
 
   for (const action of actions) {
@@ -271,6 +312,7 @@ export function classifyEnvelopeCompliance(state, actionsTaken = [], context = {
       // Already recorded in the unconditional deny-list pass above.
       continue;
     }
+    attemptedActions.add(action);
     if (envelope.mode === ENVELOPE_MODES.NONE) {
       reasons.push(`no-action verdict "${state}" authorizes zero further operational actions; observed "${action}"`);
       continue;
@@ -299,6 +341,24 @@ export function classifyEnvelopeCompliance(state, actionsTaken = [], context = {
     }
     seenAuthorized.add(action);
     lastAuthorizedIndex = authorizedIndex;
+  }
+
+  // Stage 1 review finding on PR #544 (issue #542's close-control.mjs correction, P1): the loop
+  // above only ever checked that each *observed* action was permitted, unique, and in order --
+  // it never checked the reverse, that every action the envelope's own `authorizedActions`
+  // names was actually observed at all. For a bounded/chain envelope whose authorized sequence
+  // is itself the required terminal sequence (e.g. STAGE2_CLOSE_READY with `run-close-control`
+  // required), omitting a required action entirely passed as "compliant" as long as whatever was
+  // observed happened to be a permitted, in-order subset. Every action named in the envelope must
+  // now actually have been attempted (whether or not that attempt was itself accepted above) —
+  // BOUNDED and CHAIN both authorize the complete named sequence, not a permitted-superset menu.
+  if (envelope.mode === ENVELOPE_MODES.BOUNDED || envelope.mode === ENVELOPE_MODES.CHAIN) {
+    const missing = envelope.authorizedActions.filter((action) => !attemptedActions.has(action));
+    if (missing.length > 0) {
+      reasons.push(
+        `required action(s) not observed for "${state}": ${missing.join(", ")} (authorized: ${envelope.authorizedActions.join(", ")})`,
+      );
+    }
   }
 
   return reasons.length > 0 ? { status: "violation", envelope, reasons } : { status: "compliant", envelope, reasons: [] };
