@@ -549,6 +549,8 @@ test("checkReadyDispatch: never calls gh more than once, and never for anything 
   assert.equal(result.stopAfter, true);
   assert.equal(result.executionIssue, 310);
   assert.equal(result.route, "implementation worker");
+  // Issue #486: every verdict this gate returns carries its deterministic action envelope.
+  assert.deepEqual(result.actionEnvelope, { mode: "bounded", authorizedActions: ["dispatch-execution-worker"] });
 });
 
 test("checkReadyDispatch: a closed control Issue is NOT_READY regardless of body content", async () => {
@@ -558,6 +560,9 @@ test("checkReadyDispatch: a closed control Issue is NOT_READY regardless of body
   );
   assert.equal(result.exitCode, 3);
   assert.equal(result.state, "NOT_READY");
+  // Issue #486: NOT_READY's envelope is "fallthrough" — it hands off to the Decomposition
+  // boundary rather than being policed by the bounded/none action-envelope mechanism.
+  assert.deepEqual(result.actionEnvelope, { mode: "fallthrough", authorizedActions: [] });
 });
 
 test("checkReadyDispatch: a BLOCKED control Issue (control #301 reproduction shape) reports exit 4 with reasons, from a single read, never dispatches (issue #368)", async () => {
@@ -577,6 +582,8 @@ test("checkReadyDispatch: a BLOCKED control Issue (control #301 reproduction sha
   assert.notEqual(result.exitCode, 3);
   assert.ok(result.reasons.length > 0);
   assert.ok(!("executionIssue" in result));
+  // Issue #486: BLOCKED authorizes zero further operational tool calls.
+  assert.deepEqual(result.actionEnvelope, { mode: "none", authorizedActions: [] });
 });
 
 test("checkReadyDispatch: a BLOCKED control Issue (real #322 fixture) reports exit 4 with reasons, never dispatches (issue #368)", async () => {
@@ -598,6 +605,26 @@ test("checkReadyDispatch: an ordinary NOT_READY control Issue (mid-cycle lifecyc
   );
   assert.equal(result.exitCode, 3);
   assert.equal(result.state, "NOT_READY");
+  // Stage 1 finding on PR #534 (issue #486): a post-PR mid-cycle NOT_READY carries
+  // `postPrLifecycle` so action-envelope.mjs classifies it as `chain` (must route through
+  // next-review-transition-gate.mjs), never AGENTS.md's ordinary unpoliced NOT_READY fallthrough.
+  assert.equal(result.postPrLifecycle, "EXECUTING");
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "chain",
+    authorizedActions: ["run-next-review-transition-gate"],
+  });
+});
+
+test("checkReadyDispatch: NOT_READY for a genuinely pre-PR/unrecognized reason (not one of the five post-PR mid-cycle Lifecycle values) stays plain fallthrough", async () => {
+  const body = "- **Lifecycle:** SOMETHING_ELSE\n- **Execution:** #5\n- **Route:** implementation worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 401 },
+    { ghIssueViewImpl: async () => ({ body, state: "OPEN" }) },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "NOT_READY");
+  assert.ok(!("postPrLifecycle" in result));
+  assert.deepEqual(result.actionEnvelope, { mode: "fallthrough", authorizedActions: [] });
 });
 
 // --- Issue #407 unit 407-B: AUDIT_ISSUE_DETECTED (the #432 direct-Stage-2-dispatch fix) ----
@@ -699,11 +726,17 @@ test("checkReadyDispatch: a directly-dispatched Audit Issue that is already CLOS
   assert.equal(result.state, "AUDIT_ISSUE_DETECTED");
   assert.equal(result.auditIssue, 9006);
   assert.equal(result.nextCommand, "node tools/orchestration/next-review-transition-gate.mjs --audit-issue 9006");
+  // Issue #486: AUDIT_ISSUE_DETECTED's envelope is "chain" — it authorizes exactly one
+  // further gate invocation, whose own verdict then governs everything after that.
+  assert.deepEqual(result.actionEnvelope, { mode: "chain", authorizedActions: ["run-next-review-transition-gate"] });
 });
 
 test("checkReadyDispatch: missing required args fails closed with exit 1", async () => {
   const result = await checkReadyDispatch({ repo: null, controlIssue: null });
   assert.equal(result.exitCode, 1);
+  // Issue #486: an operational error is not a verdict on control-Issue content at all, so it
+  // must never carry an actionEnvelope that could be mistaken for one.
+  assert.ok(!("actionEnvelope" in result));
 });
 
 test("checkReadyDispatch: a gh failure (e.g. issue not found) fails closed with exit 1, not a false NOT_READY", async () => {

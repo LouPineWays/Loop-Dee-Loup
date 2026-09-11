@@ -186,6 +186,8 @@ import { execFileSync } from "node:child_process";
 // own field parsers rather than re-deriving a second, competing reading of the
 // audit-control-issue template's rendered shape.
 import { parseStage2Verdict, parseFormField } from "../review-watch/lifecycle-gate.mjs";
+// Issue #486: the deterministic action-envelope table every verdict below is stamped with.
+import { getActionEnvelope } from "./action-envelope.mjs";
 
 const KNOWN_LIFECYCLE_STATES = [
   "READY",
@@ -228,6 +230,15 @@ const KNOWN_LIFECYCLE_STATES = [
 // against durable execution-plan/manifest state before returning READY_TO_DISPATCH_UNITS.
 const PRE_PR_DISPATCH_LIFECYCLE_VALUES = new Set(["READY_FOR_PLAN", "PLAN_READY", "ROUTED", "EXECUTION_COMPLETE"]);
 const DISPATCH_MANIFEST_HEADING = /^## Dispatch Manifest \(v1\)$/;
+
+// Stage 1 finding on PR #534 (issue #486's own action-envelope table): a NOT_READY verdict
+// produced because Lifecycle holds one of these five values is AGENTS.md § Session execution's
+// explicit post-PR exception — it must route through next-review-transition-gate.mjs, never
+// fall through to free reasoning the way an ordinary NOT_READY does. Tagging the verdict with
+// which value triggered it (see the `postPrLifecycle` field below) lets action-envelope.mjs's
+// `getActionEnvelope` classify this case as `chain`, not `fallthrough`, without this script and
+// that module maintaining two competing copies of "which lifecycle values are post-PR."
+const POST_PR_MID_CYCLE_LIFECYCLE_VALUES = new Set(["EXECUTING", "VERIFYING", "REVIEW", "AUDIT", "CORRECTION"]);
 
 // Issue #370 (Stage 1 finding on #368's PR): the ad hoc "- **Lifecycle:**" bullet
 // convention uses the bare word "BLOCKED", but `.github/ISSUE_TEMPLATE/parent-execution.yml`'s
@@ -830,6 +841,9 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   // validated, exactly mirroring how the pre-existing READY path already defers its own
   // verdict construction to the end of this function.
   let dispatchLifecycle = null;
+  // Set only when the unrecognized-lifecycle branch below fires with one of the five post-PR
+  // mid-cycle values — see POST_PR_MID_CYCLE_LIFECYCLE_VALUES's own comment above.
+  let postPrLifecycle = null;
 
   if (lifecycleRaw === null) {
     reasons.push('no "- **Lifecycle:**" bullet or "### State" heading found in the control Issue body');
@@ -843,9 +857,13 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   } else if (PRE_PR_DISPATCH_LIFECYCLE_VALUES.has(lifecycleRaw.toUpperCase())) {
     dispatchLifecycle = lifecycleRaw.toUpperCase();
   } else {
+    const upperLifecycle = lifecycleRaw.toUpperCase();
+    if (POST_PR_MID_CYCLE_LIFECYCLE_VALUES.has(upperLifecycle)) {
+      postPrLifecycle = upperLifecycle;
+    }
     reasons.push(
       `lifecycle is "${lifecycleRaw}", not READY` +
-        (KNOWN_LIFECYCLE_STATES.includes(lifecycleRaw.toUpperCase())
+        (KNOWN_LIFECYCLE_STATES.includes(upperLifecycle)
           ? " — this control Issue is already mid-cycle and should continue its own current step, not receive a fresh immediate dispatch"
           : ""),
     );
@@ -894,7 +912,7 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   }
 
   if (reasons.length > 0) {
-    return { status: "NOT_READY", reasons };
+    return { status: "NOT_READY", reasons, ...(postPrLifecycle ? { postPrLifecycle } : {}) };
   }
 
   // Every field required for dispatchLifecycle's own path has already been validated above
@@ -1265,7 +1283,11 @@ export async function probeReplanRequired(
 // real network or `gh` CLI. This function always starts from one control-Issue read; when
 // lifecycle is ROUTED it then performs deterministic durable manifest verification reads
 // through verifyRoutedDispatchManifest before authorizing unit dispatch.
-export async function checkReadyDispatch(
+//
+// Named "...Core" and wrapped below (issue #486) so every verdict this returns picks up its
+// `actionEnvelope` field in exactly one place, rather than at each of this function's many
+// individual return sites.
+async function checkReadyDispatchCore(
   { repo, controlIssue },
   {
     ghIssueViewImpl = defaultGhIssueView,
@@ -1355,7 +1377,14 @@ export async function checkReadyDispatch(
     return { exitCode: 4, state: "BLOCKED", controlIssue: Number(controlIssue), repo: resolvedRepo, reasons: result.reasons };
   }
   if (result.status === "NOT_READY") {
-    return { exitCode: 3, state: "NOT_READY", controlIssue: Number(controlIssue), repo: resolvedRepo, reasons: result.reasons };
+    return {
+      exitCode: 3,
+      state: "NOT_READY",
+      controlIssue: Number(controlIssue),
+      repo: resolvedRepo,
+      reasons: result.reasons,
+      ...(result.postPrLifecycle ? { postPrLifecycle: result.postPrLifecycle } : {}),
+    };
   }
 
   // #397's four new pre-PR pipeline verdicts each get their own exit code, distinct from
@@ -1596,6 +1625,17 @@ export async function checkReadyDispatch(
     executionIssue: result.executionIssue,
     route: result.route,
   };
+}
+
+// Issue #486: attaches the deterministic `actionEnvelope` (see action-envelope.mjs) to every
+// verdict this gate returns, keyed off the verdict's own `state`. A result with no `state`
+// (the exitCode-1 operational-error shape) is left untouched — that is not a verdict on
+// control-Issue content at all, per AGENTS.md § Session execution, so it must not carry an
+// envelope that could be mistaken for one.
+export async function checkReadyDispatch(args, impls) {
+  const result = await checkReadyDispatchCore(args, impls);
+  if (typeof result.state !== "string") return result;
+  return { ...result, actionEnvelope: getActionEnvelope(result.state, result) };
 }
 
 function parseArgs(argv) {

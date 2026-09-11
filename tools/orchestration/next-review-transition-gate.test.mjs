@@ -726,6 +726,12 @@ test("runNextReviewTransitionGate: direct --audit-issue mode resolves REPORT_REA
   assert.equal(result.state, "STAGE2_REPORT_READY_TO_RECORD");
   assert.equal(result.stopAfter, true);
   assert.equal(result.nextCommand, "node tools/review-watch/lifecycle-gate.mjs record-verdict --repo o/r --audit-issue 436");
+  // Issue #486: this verdict authorizes exactly its recorded nextCommand and nothing else —
+  // never a same-context re-resolution into STAGE2_CLOSE_READY (the #494 incident shape).
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["run-lifecycle-gate-record-verdict"],
+  });
 });
 
 test("runNextReviewTransitionGate: direct --audit-issue mode resolves RESPONSE_UNUSABLE to STAGE2_RESPONSE_UNUSABLE, exit 4, a distinct fail-closed stop (issue #447)", async () => {
@@ -747,6 +753,9 @@ test("runNextReviewTransitionGate: direct --audit-issue mode resolves RESPONSE_U
   assert.equal(result.exitCode, 4);
   assert.equal(result.state, "STAGE2_RESPONSE_UNUSABLE");
   assert.equal(result.stopAfter, true);
+  // Issue #486: this no-action verdict (the #440 incident shape) authorizes zero further
+  // operational tool calls — never diagnosis, issue creation, source edits, or a PR.
+  assert.deepEqual(result.actionEnvelope, { mode: "none", authorizedActions: [] });
 });
 
 test("runNextReviewTransitionGate: --audit-issue takes precedence over --control-issue when both are given", async () => {
@@ -842,6 +851,12 @@ test("runNextReviewTransitionGate: control-Issue mode with a settled PR (no Stag
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
   assert.equal(result.controlIssue, 322);
+  // Issue #486: authorizes exactly the merge + Stage 2 trigger + persisting refs, then
+  // stops — not Stage 2 waiting/result handling in the same context.
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["merge-pr", "trigger-stage2", "write-control-snapshot"],
+  });
 });
 
 test("runNextReviewTransitionGate: Stage 1 satisfied text does not override NOT_REQUESTED at a different live head", async () => {
@@ -1146,6 +1161,9 @@ test("runNextReviewTransitionGate: missing every required arg fails closed with 
   const result = await runNextReviewTransitionGate({ repo: "o/r" });
   assert.equal(result.exitCode, 1);
   assert.match(result.message, /--control-issue/);
+  // Issue #486: an operational error is not a verdict on durable evidence at all, so it must
+  // never carry an actionEnvelope that could be mistaken for one.
+  assert.ok(!("actionEnvelope" in result));
 });
 
 test("runNextReviewTransitionGate: a gh issue view failure for --control-issue fails closed with exit 1", async () => {
