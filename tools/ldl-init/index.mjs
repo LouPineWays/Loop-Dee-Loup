@@ -938,21 +938,6 @@ export async function run(args, deps = {}) {
   }
   ops.push(...bridgeOps);
 
-  // If a prior run parked a bridge's derived template at its templateDestRel (because the
-  // consumer had its own file at the time) and this run is now installing straight to the
-  // bridge's own destRel instead (the consumer's own file is gone, or its content now matches
-  // the target — see planBridgeOp's resolvedByContentMatch), the old template is superseded —
-  // remove it so it doesn't linger on disk unrecorded by the new manifest.
-  for (const { bridge, op } of bridgePlans) {
-    const previousTemplateFile = existingManifest?.files?.some((f) => f.dest === bridge.templateDestRel);
-    if (op.destRel === bridge.destRel && previousTemplateFile) {
-      const staleTemplatePath = join(destRoot, ...bridge.templateDestRel.split("/"));
-      if (existsSync(staleTemplatePath)) {
-        rmSync(staleTemplatePath);
-      }
-    }
-  }
-
   // Bridges planBridgeOp resolved by content match must be treated as LDL-managed by
   // planInstall's own ownership check even though existingManifest doesn't yet record them —
   // see withResolvedBridgesManaged's own comment. Only affects this local copy; existingManifest
@@ -973,6 +958,25 @@ export async function run(args, deps = {}) {
       exitCode: 1,
       message: `Refusing to install: ${hardDependencyCollisions.length} managed hard-import dependency collision(s) would leave the managed set unusable: ${detail}`,
     };
+  }
+
+  // If a prior run parked a bridge's derived template at its templateDestRel (because the
+  // consumer had its own file at the time) and this run is now installing straight to the
+  // bridge's own destRel instead (the consumer's own file is gone, or its content now matches
+  // the target — see planBridgeOp's resolvedByContentMatch), the old template is superseded —
+  // remove it so it doesn't linger on disk unrecorded by the new manifest. Deferred until after
+  // the hard-dependency collision refusal above (Stage 2 audit #531 P2 finding): this removal is
+  // a mutation of existing consumer state, so it must not happen on a run this function is about
+  // to refuse — otherwise a refused run could still delete the stale template and leave the
+  // manifest referencing a now-missing file.
+  for (const { bridge, op } of bridgePlans) {
+    const previousTemplateFile = existingManifest?.files?.some((f) => f.dest === bridge.templateDestRel);
+    if (op.destRel === bridge.destRel && previousTemplateFile) {
+      const staleTemplatePath = join(destRoot, ...bridge.templateDestRel.split("/"));
+      if (existsSync(staleTemplatePath)) {
+        rmSync(staleTemplatePath);
+      }
+    }
   }
 
   const installedFiles = applyInstall(toInstall, destRoot).sort((a, b) => a.dest.localeCompare(b.dest));
