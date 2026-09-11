@@ -495,6 +495,34 @@ export function validatePlanInput(input, { repo } = {}) {
         }
         errors.push(...validateWorkerUnitInput(unit, { unitId: unit?.unitId, executionIssue: input.executionIssue }));
       }
+
+      // #522 Stage 1 review finding: `validateDependsOn` (called per-unit above, inside
+      // `validateWorkerUnitInput`) only checks each `dependsOn` entry's own shape in
+      // isolation — it cannot know the full sibling-unit set until every `workerUnits` entry
+      // has been collected into `workerUnitIds` above. A shape-valid dependency edge to a
+      // unit ID absent from this same plan submission (e.g. "999-Z" when only "999-A"/"999-B"
+      // are actually submitted) would otherwise publish successfully, and
+      // `prepare-dispatch-manifest.mjs`'s `computeDispatchReady` would then treat the missing
+      // sibling as permanently not DONE — an unsatisfiable durable graph indistinguishable
+      // from the live #498/#500 class this issue exists to prevent, requiring the same manual
+      // Worker Unit Contract repair. Reject any such edge here, before anything publishes,
+      // rather than only guarding well-formed-but-dangling shapes.
+      for (const unit of input.workerUnits) {
+        if (!isNonEmptyString(unit?.unitId) || !Array.isArray(unit?.dependsOn)) continue;
+        for (const depId of unit.dependsOn) {
+          if (
+            isNonEmptyString(depId) &&
+            isExecutionScopedUnitId(depId, input.executionIssue) &&
+            !workerUnitIds.has(depId)
+          ) {
+            errors.push(
+              `worker unit "${unit.unitId}": "dependsOn" entry ${JSON.stringify(depId)} does not match any unit ` +
+                `in this plan's own submitted "workerUnits" — a dependency must name a sibling unit that is ` +
+                `actually part of this submission, never a unit ID that merely has the right shape`,
+            );
+          }
+        }
+      }
     }
   }
 

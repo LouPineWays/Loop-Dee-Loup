@@ -382,6 +382,63 @@ test("validateDependsOn rejects a non-array, self-dependency, duplicates, whites
   assert.ok(validateDependsOn(["not-a-unit-id"], ctx).some((e) => /execution-scoped/.test(e)));
 });
 
+test("validatePlanInput rejects a dependsOn edge to a unit ID absent from this plan's own workerUnits, even though it has valid shape (Stage 1 review finding on PR #530)", () => {
+  // "999-Z" has the right execution-scoped shape -- validateDependsOn's own per-unit checks
+  // (exercised above) pass it -- but no such sibling unit is actually part of this
+  // submission. Publishing it would create an unsatisfiable durable dependency graph:
+  // prepare-dispatch-manifest.mjs's computeDispatchReady would treat "999-Z" as permanently
+  // not DONE, leaving "999-B" non-dispatchable forever, exactly the #498/#500 class this
+  // issue exists to prevent -- just discovered one layer later, once the full sibling-unit
+  // set is reconciled, rather than at the single-unit shape check.
+  const unitA = validWorkerUnit("999-A", { dependsOn: [] });
+  const unitB = validWorkerUnit("999-B", { dependsOn: ["999-Z"] });
+  const input = validInput({
+    workerUnits: [unitA, unitB],
+    planIndex: {
+      ...validInput().planIndex,
+      units: [validPlanIndexUnit("999-A"), validPlanIndexUnit("999-B", { commentUrl: commentUrl(102) })],
+    },
+  });
+  const result = validatePlanInput(input);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => /999-B/.test(e) && /999-Z/.test(e) && /dependsOn/.test(e)),
+    `expected a dangling-dependency rejection, got: ${JSON.stringify(result.errors)}`,
+  );
+});
+
+test("buildPlanArtifacts refuses to publish anything when a dependsOn edge is dangling", () => {
+  const input = validInput({
+    workerUnits: [validWorkerUnit("999-A", { dependsOn: [] }), validWorkerUnit("999-B", { dependsOn: ["999-Z"] })],
+    planIndex: {
+      ...validInput().planIndex,
+      units: [validPlanIndexUnit("999-A"), validPlanIndexUnit("999-B", { commentUrl: commentUrl(102) })],
+    },
+  });
+  const result = buildPlanArtifacts(input);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => /999-Z/.test(e)));
+});
+
+test("validatePlanInput still accepts valid no-dependency, single-dependency, and multi-dependency plans once every named unit is actually part of workerUnits", () => {
+  const unitA = validWorkerUnit("999-A", { dependsOn: [] });
+  const unitB = validWorkerUnit("999-B", { dependsOn: ["999-A"] });
+  const unitC = validWorkerUnit("999-C", { dependsOn: ["999-A", "999-B"] });
+  const input = validInput({
+    workerUnits: [unitA, unitB, unitC],
+    planIndex: {
+      ...validInput().planIndex,
+      units: [
+        validPlanIndexUnit("999-A"),
+        validPlanIndexUnit("999-B", { commentUrl: commentUrl(102) }),
+        validPlanIndexUnit("999-C", { commentUrl: commentUrl(103) }),
+      ],
+    },
+  });
+  const result = validatePlanInput(input);
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+});
+
 test("formatPrerequisitesDependencies canonical forms round-trip through the router's own extractDependencyUnitIds/hasUnrecognizedDependencyWording", () => {
   const noneBody = formatWorkerUnitBody(validWorkerUnit("999-A", { dependsOn: [] }), { executionIssue: EXECUTION_ISSUE });
   const noneField = parseBulletBlock(noneBody, "Prerequisites/dependencies");
