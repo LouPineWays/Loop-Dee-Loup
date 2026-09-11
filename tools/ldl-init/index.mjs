@@ -637,6 +637,54 @@ export function planInstall({ ops, destRoot, existingManifest }) {
   return { toInstall, toSkip };
 }
 
+// #522 Stage 1 review finding on PR #530: a per-file managed-path skip (an unmanaged
+// consumer file already occupying the destination, preserved per planInstall's/planUpdate's
+// own "never overwrite unmanaged content" contract above) was always safe in isolation,
+// because every MANAGED_ITEMS file was historically independently runnable. That stopped
+// being universally true the moment tools/orchestration/format-execution-plan.mjs and
+// tools/orchestration/prepare-dispatch-manifest.mjs gained a hard
+// `import ... from "./dependency-grammar.mjs"` (issue #522's shared dependency-grammar
+// extraction): if a consumer repository already owns an unmanaged
+// tools/orchestration/dependency-grammar.mjs, this script preserves it and still
+// installs/updates its hard importers, so install/update reports success while the
+// just-written importer immediately fails to load (it does not export the names those
+// importers require). Declaring known hard-import edges here lets both tools/ldl-init and
+// tools/ldl-update detect this specific hazard and refuse the whole operation atomically —
+// before anything is written — rather than reporting a partially usable managed set. This is
+// deliberately a short, explicit list of known edges, not a generalized import-graph
+// scanner: MANAGED_ITEMS is small and this hazard only exists where one managed file hard-
+// imports another.
+export const HARD_MODULE_DEPENDENCIES = [
+  { dest: "tools/orchestration/format-execution-plan.mjs", dependsOnDest: "tools/orchestration/dependency-grammar.mjs" },
+  { dest: "tools/orchestration/prepare-dispatch-manifest.mjs", dependsOnDest: "tools/orchestration/dependency-grammar.mjs" },
+];
+
+// Pure. Given one install/update run's final toInstall/toSkip classification, returns one
+// `{ dest, reason }` entry (the same shape as a toSkip/conflicts entry) per
+// HARD_MODULE_DEPENDENCIES edge whose dependency path is being skipped (left as unmanaged
+// consumer content) while its importer is about to be written as managed content in this
+// same run — the exact unresolvable-import hazard described above. Returns `[]` when no such
+// edge applies. Pure and synchronous so tools/ldl-init's run() and tools/ldl-update's run()
+// can each call it identically, right before any file is written, and refuse atomically
+// instead of writing a broken managed set.
+export function findHardDependencyCollisions({ toInstall, toSkip }) {
+  const installingDests = new Set(toInstall.map((op) => op.destRel));
+  const skippedDests = new Set(toSkip.map((s) => s.dest));
+  const collisions = [];
+  for (const { dest, dependsOnDest } of HARD_MODULE_DEPENDENCIES) {
+    if (installingDests.has(dest) && skippedDests.has(dependsOnDest)) {
+      collisions.push({
+        dest: dependsOnDest,
+        reason:
+          `an existing unmanaged file at this path would be preserved while ${dest} is (re)installed hard-` +
+          `importing it — refusing the whole operation rather than installing a hard importer that would ` +
+          `immediately fail to load`,
+      });
+    }
+  }
+  return collisions;
+}
+
 function applyInstall(ops, destRoot) {
   const installed = [];
   for (const op of ops) {
@@ -914,6 +962,19 @@ export async function run(args, deps = {}) {
     destRoot,
     existingManifest: withResolvedBridgesManaged(existingManifest, resolvedManifestPatch),
   });
+
+  // #522: refuse atomically, before any file is written, rather than reporting a successful
+  // install that leaves a hard importer unable to load — see findHardDependencyCollisions'
+  // own comment.
+  const hardDependencyCollisions = findHardDependencyCollisions({ toInstall, toSkip });
+  if (hardDependencyCollisions.length > 0) {
+    const detail = hardDependencyCollisions.map((c) => `${c.dest} (${c.reason})`).join("; ");
+    return {
+      exitCode: 1,
+      message: `Refusing to install: ${hardDependencyCollisions.length} managed hard-import dependency collision(s) would leave the managed set unusable: ${detail}`,
+    };
+  }
+
   const installedFiles = applyInstall(toInstall, destRoot).sort((a, b) => a.dest.localeCompare(b.dest));
 
   // Computed from the actual install outcome (toSkip), not merely from planBridgeOp's

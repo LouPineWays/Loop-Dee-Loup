@@ -351,6 +351,75 @@ test("run: never overwrites a pre-existing unmanaged file that happens to collid
   assert.ok(!after.files.some((f) => f.dest === "docs/decision-forms.md"));
 });
 
+// Adds real filenames matching HARD_MODULE_DEPENDENCIES (tools/orchestration/*.mjs) on top
+// of makeFixtureRoot's generic SKILL.md/extra.md placeholders, so buildOps/planUpdate
+// produce ops shaped like the real tools/orchestration hard-import hazard (#522 Stage 1
+// review finding on PR #530) rather than only the generic dir-item content.
+function addHardDependencyFixtureFiles(root, revisionTag) {
+  mkdirSync(join(root, "tools", "orchestration"), { recursive: true });
+  writeFileSync(
+    join(root, "tools", "orchestration", "dependency-grammar.mjs"),
+    `export function extractDependencyUnitIds() { return []; } // ${revisionTag}\n`,
+  );
+  writeFileSync(
+    join(root, "tools", "orchestration", "format-execution-plan.mjs"),
+    `import { extractDependencyUnitIds } from "./dependency-grammar.mjs"; // ${revisionTag}\n`,
+  );
+}
+
+test("run: refuses the whole update, as a conflict, when updating would install a hard importer unable to load its unmanaged, preserved dependency (#522 Stage 1 review finding on PR #530)", async (t) => {
+  // rev-1 (bootstrapped) predates the dependency-grammar.mjs extraction entirely -- neither
+  // file exists yet, mirroring a consumer who installed before #522 shipped.
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, rootV1, "rev-1");
+
+  // The consumer independently created their own tools/orchestration/dependency-grammar.mjs
+  // before ever updating to a Loop-Dee-Loup revision that manages that path.
+  writeFileSync(
+    join(dest, "tools", "orchestration", "dependency-grammar.mjs"),
+    "// consumer-owned file, exports nothing LDL needs\n",
+  );
+
+  // rev-2 introduces both the shared dependency-grammar module and its hard importer.
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  addHardDependencyFixtureFiles(rootV2, "rev-2");
+
+  const result = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /dependency-grammar\.mjs/);
+  assert.match(result.message, /format-execution-plan\.mjs/);
+  assert.equal(
+    readFileSync(join(dest, "tools", "orchestration", "dependency-grammar.mjs"), "utf8"),
+    "// consumer-owned file, exports nothing LDL needs\n",
+    "the consumer's own file must be left untouched",
+  );
+  assert.ok(
+    !existsSync(join(dest, "tools", "orchestration", "format-execution-plan.mjs")),
+    "the hard importer must not be written either -- the whole update is refused atomically",
+  );
+  const after = readManifest(dest);
+  assert.equal(after.ldlSourceRevision, "rev-1", "the manifest must not advance when the update is refused");
+});
+
+test("run: still updates normally when the consumer has no pre-existing dependency-grammar.mjs collision", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, rootV1, "rev-1");
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  addHardDependencyFixtureFiles(rootV2, "rev-2");
+
+  const result = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+
+  assert.equal(result.exitCode, 0);
+  const after = readManifest(dest);
+  assert.equal(after.ldlSourceRevision, "rev-2");
+  assert.ok(after.files.some((f) => f.dest === "tools/orchestration/dependency-grammar.mjs"));
+  assert.ok(after.files.some((f) => f.dest === "tools/orchestration/format-execution-plan.mjs"));
+});
+
 test("run: rewritten manifest reflects the new revision and lists both updated and already-matching managed files", async (t) => {
   const rootV1 = makeFixtureRoot(t, "rev-1");
   const dest = tempDir(t);

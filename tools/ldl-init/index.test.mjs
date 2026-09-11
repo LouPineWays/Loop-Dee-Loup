@@ -23,6 +23,8 @@ import {
   derivePendingManualIntegration,
   deriveSyncPrerequisiteWarnings,
   findBridgeByDestRel,
+  findHardDependencyCollisions,
+  HARD_MODULE_DEPENDENCIES,
   isValidManifest,
   looksBinary,
   normalizeLineEndings,
@@ -585,6 +587,94 @@ test("run: skips a destination colliding with a pre-existing unmanaged file insi
     { dest: ".claude/skills/context-clearing/SKILL.md", reason: "destination already exists and is not LDL-managed" },
   ]);
   assert.ok(!manifest.files.some((f) => f.dest === ".claude/skills/context-clearing/SKILL.md"));
+});
+
+test("findHardDependencyCollisions: flags a skipped hard-import dependency whose importer is about to be (re)installed", () => {
+  const toInstall = [{ destRel: "tools/orchestration/format-execution-plan.mjs", content: Buffer.from("x") }];
+  const toSkip = [{ dest: "tools/orchestration/dependency-grammar.mjs", reason: "destination already exists and is not LDL-managed" }];
+  const collisions = findHardDependencyCollisions({ toInstall, toSkip });
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].dest, "tools/orchestration/dependency-grammar.mjs");
+  assert.match(collisions[0].reason, /format-execution-plan\.mjs/);
+});
+
+test("findHardDependencyCollisions: no collision when the dependency isn't skipped, or the importer isn't being installed", () => {
+  assert.deepEqual(
+    findHardDependencyCollisions({
+      toInstall: [{ destRel: "tools/orchestration/format-execution-plan.mjs", content: Buffer.from("x") }],
+      toSkip: [],
+    }),
+    [],
+  );
+  assert.deepEqual(
+    findHardDependencyCollisions({
+      toInstall: [],
+      toSkip: [{ dest: "tools/orchestration/dependency-grammar.mjs", reason: "destination already exists and is not LDL-managed" }],
+    }),
+    [],
+  );
+});
+
+test("HARD_MODULE_DEPENDENCIES: every declared importer/dependency pair is a real path this repository actually ships", () => {
+  for (const { dest, dependsOnDest } of HARD_MODULE_DEPENDENCIES) {
+    assert.ok(existsSync(join(REPO_ROOT, dest)), `${dest} does not exist in this repository`);
+    assert.ok(existsSync(join(REPO_ROOT, dependsOnDest)), `${dependsOnDest} does not exist in this repository`);
+  }
+});
+
+// Extends makeFixtureRoot's generic dir-item content with the two real filenames
+// HARD_MODULE_DEPENDENCIES names, so buildOps/planInstall produce ops shaped like the real
+// tools/orchestration hazard rather than only the generic SKILL.md/extra.md placeholders.
+function addHardDependencyFixtureFiles(root) {
+  mkdirSync(join(root, "tools", "orchestration"), { recursive: true });
+  writeFileSync(
+    join(root, "tools", "orchestration", "dependency-grammar.mjs"),
+    "export function extractDependencyUnitIds() { return []; }\n",
+  );
+  writeFileSync(
+    join(root, "tools", "orchestration", "format-execution-plan.mjs"),
+    'import { extractDependencyUnitIds } from "./dependency-grammar.mjs";\n',
+  );
+}
+
+test("run: refuses atomically, writing nothing, when installing a hard importer would leave it unable to load its unmanaged, preserved dependency (#522 Stage 1 review finding on PR #530)", async (t) => {
+  const root = makeFixtureRoot(t);
+  addHardDependencyFixtureFiles(root);
+  const dest = tempDir(t);
+  mkdirSync(join(dest, "tools", "orchestration"), { recursive: true });
+  writeFileSync(
+    join(dest, "tools", "orchestration", "dependency-grammar.mjs"),
+    "// consumer-owned file, predates LDL's own dependency-grammar.mjs, exports nothing LDL needs\n",
+  );
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /dependency-grammar\.mjs/);
+  assert.match(result.message, /format-execution-plan\.mjs/);
+  assert.ok(!existsSync(join(dest, ".ldl", "manifest.json")), "no manifest must be written when the operation is refused");
+  assert.equal(
+    readFileSync(join(dest, "tools", "orchestration", "dependency-grammar.mjs"), "utf8"),
+    "// consumer-owned file, predates LDL's own dependency-grammar.mjs, exports nothing LDL needs\n",
+    "the consumer's own file must be left untouched",
+  );
+  assert.ok(
+    !existsSync(join(dest, "tools", "orchestration", "format-execution-plan.mjs")),
+    "the hard importer must not be written either -- the whole operation is refused atomically",
+  );
+});
+
+test("run: still installs normally when the consumer has no pre-existing dependency-grammar.mjs at all", async (t) => {
+  const root = makeFixtureRoot(t);
+  addHardDependencyFixtureFiles(root);
+  const dest = tempDir(t);
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  const manifest = readManifest(dest);
+  assert.ok(manifest.files.some((f) => f.dest === "tools/orchestration/dependency-grammar.mjs"));
+  assert.ok(manifest.files.some((f) => f.dest === "tools/orchestration/format-execution-plan.mjs"));
 });
 
 test("run: skips, without crashing, a destination whose parent already exists as a plain file", async (t) => {
