@@ -197,13 +197,22 @@ export function getActionEnvelope(state, context = {}) {
 // so a future edit to the table above cannot silently legitimize one of these via a copy/paste
 // mistake. Each corresponds to a concrete behavior named as prohibited in issue #486's Required
 // behavior sections 1 and 3: re-running a gate to consume a further transition in the same
-// context, remaining alive waiting for asynchronous completion, doing repository/execution-plane
-// reconnaissance a no-action verdict never authorized, or converting a newly noticed defect into
-// self-authorized intake/implementation.
+// context, remaining alive waiting for asynchronous completion, or converting a newly noticed
+// defect into self-authorized intake/implementation.
+//
+// Stage 1 finding on PR #536 (reviewed at c3c3a24): "repository-reconnaissance" deliberately
+// does NOT belong in this unconditional set. AGENTS.md § Session execution's own NOT_READY
+// fallthrough ("reason normally, including reading the issue's own body directly") and §
+// Decomposition boundary both require exactly this action under ordinary NOT_READY fallthrough
+// — it is authorized reasoning, not archaeology, so an unconditional deny-list entry for it
+// contradicted the fallthrough carve-out it was checked "before". Ordinary FALLTHROUGH mode is
+// the only envelope shape this exclusion changes: NONE, BOUNDED, and CHAIN modes still reject
+// "repository-reconnaissance" exactly as before, via the normal "not in this verdict's own
+// authorizedActions" path below (it never appears in any authorizedActions list), so #440's and
+// #500's no-action/bounded-mode reconnaissance violations are unaffected.
 const NEVER_AUTHORIZED = new Set([
   "rerun-gate",
   "wait-for-completion",
-  "repository-reconnaissance",
   "self-authorized-issue-creation",
   "self-authorized-implementation",
 ]);
@@ -222,10 +231,28 @@ export function classifyEnvelopeCompliance(state, actionsTaken = [], context = {
   const actions = Array.isArray(actionsTaken) ? actionsTaken : [];
   const reasons = [];
 
+  // Stage 2 audit finding on PR #534 (issue #535): the fixed deny-list below is documented as
+  // unconditional — "regardless of mode" — so it must be checked before the fallthrough
+  // short-circuit, not after it. Checking it first, for every mode, closes the gap where a
+  // deny-listed action taken under ordinary NOT_READY fallthrough was never evaluated at all.
+  // "repository-reconnaissance" is deliberately not a member of NEVER_AUTHORIZED (see that
+  // constant's own comment, Stage 1 finding on PR #536) — it is authorized, expected behavior
+  // under ordinary NOT_READY fallthrough, so it is left to the mode-specific checks below
+  // (which still reject it for every non-fallthrough mode, since it never appears in any
+  // verdict's own authorizedActions list).
+  for (const action of actions) {
+    if (NEVER_AUTHORIZED.has(action)) {
+      reasons.push(`action "${action}" is never authorized by any verdict envelope`);
+    }
+  }
+
   if (envelope.mode === ENVELOPE_MODES.FALLTHROUGH) {
     // NOT_READY deliberately hands off to normal reasoning (AGENTS.md § Session execution,
-    // Decomposition boundary) — this mechanism does not police what happens after it.
-    return { status: "compliant", envelope, reasons: [] };
+    // Decomposition boundary) — this mechanism does not police what happens after it, beyond the
+    // fixed deny-list checked unconditionally above.
+    return reasons.length > 0
+      ? { status: "violation", envelope, reasons }
+      : { status: "compliant", envelope, reasons: [] };
   }
 
   // Stage 1 finding on PR #534: checking `authorizedActions.includes(action)` alone treats the
@@ -241,7 +268,7 @@ export function classifyEnvelopeCompliance(state, actionsTaken = [], context = {
 
   for (const action of actions) {
     if (NEVER_AUTHORIZED.has(action)) {
-      reasons.push(`action "${action}" is never authorized by any verdict envelope`);
+      // Already recorded in the unconditional deny-list pass above.
       continue;
     }
     if (envelope.mode === ENVELOPE_MODES.NONE) {
