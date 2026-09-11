@@ -307,15 +307,39 @@ test("AUDIT_ISSUE_DETECTED: performing the chained action plus extra work in the
   assert.equal(result.reasons.length, 1);
 });
 
-// -- NOT_READY: fallthrough is deliberately unpoliced --------------------------------------
+// -- NOT_READY: fallthrough is unpoliced beyond the unconditional deny-list ----------------
 
-test("NOT_READY: fallthrough mode is always compliant regardless of actions taken (hands off to Decomposition boundary)", () => {
+test("NOT_READY: fallthrough mode is compliant for actions outside the deny-list (hands off to Decomposition boundary)", () => {
   assert.equal(classifyEnvelopeCompliance("NOT_READY", []).status, "compliant");
-  assert.equal(
-    classifyEnvelopeCompliance("NOT_READY", ["repository-reconnaissance", "implementation-edit"]).status,
-    "compliant",
-  );
+  assert.equal(classifyEnvelopeCompliance("NOT_READY", ["implementation-edit"]).status, "compliant");
   assert.equal(getActionEnvelope("NOT_READY").mode, ENVELOPE_MODES.FALLTHROUGH);
+});
+
+// Stage 2 audit finding on PR #534 (issue #535): the deny-list check previously ran only after
+// the fallthrough short-circuit, so `classifyEnvelopeCompliance` returned "compliant" for every
+// one of the five deny-listed action kinds under ordinary NOT_READY fallthrough — contradicting
+// the module's own claim that the deny-list applies "regardless of mode". The deny-list must be
+// checked before the fallthrough short-circuit, for fallthrough exactly like every other mode.
+test("NOT_READY: fallthrough mode still rejects every NEVER_AUTHORIZED deny-listed action", () => {
+  for (const action of [
+    "rerun-gate",
+    "wait-for-completion",
+    "repository-reconnaissance",
+    "self-authorized-issue-creation",
+    "self-authorized-implementation",
+  ]) {
+    const result = classifyEnvelopeCompliance("NOT_READY", [action]);
+    assert.equal(result.status, "violation", `expected "${action}" to violate fallthrough's deny-list`);
+    assert.equal(result.reasons.length, 1);
+    assert.ok(result.reasons[0].includes("never authorized"));
+  }
+
+  // A deny-listed action alongside an otherwise-unpoliced one still reports only the deny-list
+  // violation — fallthrough does not additionally police the non-deny-listed action.
+  const mixed = classifyEnvelopeCompliance("NOT_READY", ["repository-reconnaissance", "implementation-edit"]);
+  assert.equal(mixed.status, "violation");
+  assert.equal(mixed.reasons.length, 1);
+  assert.ok(mixed.reasons[0].includes("repository-reconnaissance"));
 });
 
 // -- Stage 1 finding on PR #534: a post-PR mid-cycle NOT_READY is AGENTS.md's explicit

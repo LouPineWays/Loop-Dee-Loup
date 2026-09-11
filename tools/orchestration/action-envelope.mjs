@@ -222,10 +222,23 @@ export function classifyEnvelopeCompliance(state, actionsTaken = [], context = {
   const actions = Array.isArray(actionsTaken) ? actionsTaken : [];
   const reasons = [];
 
+  // Stage 2 audit finding on PR #534 (issue #535): the fixed deny-list below is documented as
+  // unconditional — "regardless of mode" — so it must be checked before the fallthrough
+  // short-circuit, not after it. Checking it first, for every mode, closes the gap where a
+  // deny-listed action taken under ordinary NOT_READY fallthrough was never evaluated at all.
+  for (const action of actions) {
+    if (NEVER_AUTHORIZED.has(action)) {
+      reasons.push(`action "${action}" is never authorized by any verdict envelope`);
+    }
+  }
+
   if (envelope.mode === ENVELOPE_MODES.FALLTHROUGH) {
     // NOT_READY deliberately hands off to normal reasoning (AGENTS.md § Session execution,
-    // Decomposition boundary) — this mechanism does not police what happens after it.
-    return { status: "compliant", envelope, reasons: [] };
+    // Decomposition boundary) — this mechanism does not police what happens after it, beyond the
+    // fixed deny-list checked unconditionally above.
+    return reasons.length > 0
+      ? { status: "violation", envelope, reasons }
+      : { status: "compliant", envelope, reasons: [] };
   }
 
   // Stage 1 finding on PR #534: checking `authorizedActions.includes(action)` alone treats the
@@ -241,7 +254,7 @@ export function classifyEnvelopeCompliance(state, actionsTaken = [], context = {
 
   for (const action of actions) {
     if (NEVER_AUTHORIZED.has(action)) {
-      reasons.push(`action "${action}" is never authorized by any verdict envelope`);
+      // Already recorded in the unconditional deny-list pass above.
       continue;
     }
     if (envelope.mode === ENVELOPE_MODES.NONE) {
