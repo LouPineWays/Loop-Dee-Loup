@@ -116,6 +116,7 @@ import { tmpdir } from "node:os";
 import path, { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runParseExecutionPlan, parseBulletBlock } from "./parse-execution-plan.mjs";
+import { extractDependencyUnitIds, hasUnrecognizedDependencyWording } from "./dependency-grammar.mjs";
 
 const REPO_ROOT = path.resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -305,15 +306,15 @@ export function resolveUnitRoute(unit, { fileExists, skillNames = [], personaNam
   };
 }
 
-const DEPENDS_ON_CLAUSE = /depends on\s+(.*?)(?:\.\s|\.$|\bindependent\b|$)/is;
-const UNIT_ID_TOKEN = /\d+-[A-Za-z]+/g;
-const UNIT_ID_TOKEN_EXISTS = /\d+-[A-Za-z]+/;
-// A unit-ID mention inside one of these clauses is an explicit non-dependency mention this
-// plan's own established prose vocabulary already uses (every real "no dependency" Worker
-// Unit Contract field in this plan reads "none. Parallel with <ID>." and a genuine
-// dependency field excludes a sibling with "Independent of <ID>.") -- neither is
-// "unrecognized" wording.
-const EXCLUDED_MENTION_CLAUSE = /\b(?:independent of|parallel with)\s+[^.]*\.?/gi;
+// Dependency-declaration grammar (extractDependencyUnitIds, hasUnrecognizedDependencyWording)
+// moved to ./dependency-grammar.mjs under issue #522 -- imported above, and re-exported
+// below unchanged so existing callers/tests importing them from this module keep working.
+// See that module's own header for the full grammar/round-trip contract; this file now
+// only consumes them, and `format-execution-plan.mjs`'s canonical serializer
+// (`formatPrerequisitesDependencies`, same module) is the only place that writes a
+// "Prerequisites/dependencies" field this parsing grammar might fail to recognize --
+// closing the writer/router drift class the #498/#500 live plan hit.
+export { extractDependencyUnitIds, hasUnrecognizedDependencyWording };
 
 // Pure. A unit's own "State" field is DONE when it *starts with* the literal word "DONE"
 // -- real Worker Unit Contract comments append a one-line completion note and commit range
@@ -324,40 +325,6 @@ const EXCLUDED_MENTION_CLAUSE = /\b(?:independent of|parallel with)\s+[^.]*\.?/g
 // REPLAN_REQUIRED, or a state carrying one of those as its own prefix) is not DONE.
 export function isDoneState(state) {
   return typeof state === "string" && /^DONE\b/.test(state.trim());
-}
-
-// Pure. Extracts the list of unit IDs a unit's own "Prerequisites/dependencies" field
-// names as genuine dependencies -- only unit IDs appearing inside a "depends on ..."
-// clause, stopping at the first following period or the word "independent" (so a trailing
-// "Independent of 294-X" clause in the same field is correctly excluded, per real fields
-// like 294-C's "depends on 294-B (imports its parser). Independent of 294-A."). Returns an
-// empty array when no "depends on" clause is present at all (e.g. "none. Parallel with
-// 294-B.") -- a mention elsewhere in the field is never treated as a dependency.
-export function extractDependencyUnitIds(prerequisitesField) {
-  const text = prerequisitesField ?? "";
-  const match = DEPENDS_ON_CLAUSE.exec(text);
-  if (!match) return [];
-  return [...match[1].matchAll(UNIT_ID_TOKEN)].map((m) => m[0]);
-}
-
-// Pure. True when `prerequisitesField` names a unit-ID-shaped token that this file's own
-// "depends on ..." grammar does not capture and that is not explicitly excluded by an
-// "independent of ..." clause -- i.e. prose this parser cannot deterministically resolve
-// into a dependency list. Recognized-but-empty fields (e.g. "none.", "Parallel with 294-B.")
-// return false here; only a field naming a unit ID this parser fails to recognize as a
-// dependency clause is unrecognized.
-export function hasUnrecognizedDependencyWording(prerequisitesField) {
-  const text = prerequisitesField ?? "";
-  if (!text.trim()) return false;
-
-  let remaining = text;
-  const dependsMatch = DEPENDS_ON_CLAUSE.exec(text);
-  if (dependsMatch) {
-    remaining = remaining.slice(0, dependsMatch.index) + remaining.slice(dependsMatch.index + dependsMatch[0].length);
-  }
-  remaining = remaining.replace(EXCLUDED_MENTION_CLAUSE, "");
-
-  return UNIT_ID_TOKEN_EXISTS.test(remaining);
 }
 
 // Pure. Computes whether `unit` is currently dispatch-ready: always true (trivially) once

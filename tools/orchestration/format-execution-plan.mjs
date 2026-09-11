@@ -36,6 +36,19 @@
 // — and returns every problem found, never just the first. Nothing is serialized, and the
 // CLI performs no GitHub write, when validation fails.
 //
+// Dependency declarations are structured input, never hand-authored prose (#522, closing a
+// regression the live #498/#500 plan demonstrated against #497/#499's own writer): a Worker
+// Unit's "Prerequisites/dependencies" bullet is never accepted as a free-form string field.
+// Instead each unit supplies `dependsOn` — an array of sibling unit IDs it depends on, `[]`
+// for none — and this writer deterministically serializes it via
+// `dependency-grammar.mjs`'s `formatPrerequisitesDependencies`, the same shared module
+// `prepare-dispatch-manifest.mjs` imports its own `extractDependencyUnitIds`/
+// `hasUnrecognizedDependencyWording` from. `validateWorkerUnitInput` additionally
+// round-trips every canonicalized value back through those same router-side functions
+// before publish, so a plan can never durably carry a "Prerequisites/dependencies" clause
+// the router itself would classify as unrecognized — the writer and router share one
+// authority rather than risking independent drift.
+//
 // Round-trip self-check: `buildPlanArtifacts` additionally feeds its own freshly serialized
 // Plan Index Units-list entries back through the real `parse-execution-plan.mjs` functions
 // (`parseUnitListItem`, and — once a Shared Contract and every Worker Unit are also present
@@ -67,7 +80,7 @@
 //       "unitId": "497-A",
 //       "requiredBoundedOutcome": "...", "applicableRoleCapability": "bounded coding worker",
 //       "authorityInputPointers": "...", "relevantSharedContractPointer": "...",
-//       "prerequisitesDependencies": "...", "filesSurfacesExpectedToChange": "...",
+//       "dependsOn": [], "filesSurfacesExpectedToChange": "...",
 //       "observableCompletionCondition": "...", "verificationRequired": "...",
 //       "durableOutputStateExpected": "...", "interruptEscalationConditions": "...",
 //       "state": "PLANNED"
@@ -102,6 +115,11 @@ import {
   WORKER_UNIT_FIELDS,
 } from "./parse-execution-plan.mjs";
 import { CAPABILITY_CLASS_ROUTE_TABLE } from "./prepare-dispatch-manifest.mjs";
+import {
+  extractDependencyUnitIds,
+  hasUnrecognizedDependencyWording,
+  formatPrerequisitesDependencies,
+} from "./dependency-grammar.mjs";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 
 // The Plan Index's "Plan state" bullet and every unit's "State" field share this fixed
@@ -221,7 +239,7 @@ export function validateWorkerUnitInput(unit, { unitId, executionIssue } = {}) {
   }
 
   for (const key of WORKER_UNIT_INPUT_KEYS) {
-    if (key === "applicableRoleCapability" || key === "state") continue;
+    if (key === "applicableRoleCapability" || key === "state" || key === "prerequisitesDependencies") continue;
     if (!isNonEmptyString(unit?.[key])) {
       errors.push(`${label}: missing required field "${key}"`);
     } else if (hasEmbeddedNewline(unit[key])) {
@@ -245,6 +263,90 @@ export function validateWorkerUnitInput(unit, { unitId, executionIssue } = {}) {
         `canonical token (must be exactly one of: ${CANONICAL_CAPABILITY_TOKENS.join(", ")}) — descriptive ` +
         `role/expertise/access prose belongs in "Authority/input pointers" or "Required bounded outcome" instead`,
     );
+  }
+
+  errors.push(...validateDependsOn(unit?.dependsOn, { unitId, executionIssue, label }));
+
+  return errors;
+}
+
+// Pure. Validates a unit's structured `dependsOn` input — #522's replacement for a
+// hand-authored "Prerequisites/dependencies" prose field. `dependsOn` must be an array
+// (possibly empty — that is the canonical "no dependencies" declaration); every entry must
+// be a bare, whitespace-free, execution-scoped sibling unit ID (the same convention
+// `isExecutionScopedUnitId` already enforces for a unit's own `unitId`), distinct from this
+// unit's own `unitId` (no self-dependency), and not repeated. As defense in depth this also
+// round-trips the value `formatPrerequisitesDependencies` would serialize it to back
+// through `dependency-grammar.mjs`'s own `extractDependencyUnitIds`/
+// `hasUnrecognizedDependencyWording` — the exact functions `prepare-dispatch-manifest.mjs`
+// uses to interpret the published field — so a shape that passed every check above but
+// still somehow serialized into something the router would flag as unrecognized is caught
+// here, before publish, rather than surfacing later as a live `dispatch_ready=false`.
+export function validateDependsOn(dependsOn, { unitId, executionIssue, label }) {
+  const errors = [];
+
+  if (!Array.isArray(dependsOn)) {
+    errors.push(
+      `${label}: missing required field "dependsOn" (must be an array of sibling unit IDs this unit depends ` +
+        `on, or [] when it has none — never hand-authored "Prerequisites/dependencies" prose)`,
+    );
+    return errors;
+  }
+
+  const seen = new Set();
+  let allEntriesValid = true;
+  for (const depId of dependsOn) {
+    if (!isNonEmptyString(depId)) {
+      errors.push(`${label}: "dependsOn" entries must be non-empty strings (found ${JSON.stringify(depId)})`);
+      allEntriesValid = false;
+      continue;
+    }
+    if (/[\s:]/.test(depId)) {
+      errors.push(`${label}: "dependsOn" entry ${JSON.stringify(depId)} must not contain whitespace or ":"`);
+      allEntriesValid = false;
+      continue;
+    }
+    if (isNonEmptyString(unitId) && depId === unitId) {
+      errors.push(`${label}: "dependsOn" must not include the unit's own unitId ${JSON.stringify(unitId)} (no self-dependency)`);
+      allEntriesValid = false;
+      continue;
+    }
+    if (!isExecutionScopedUnitId(depId, executionIssue)) {
+      errors.push(
+        `${label}: "dependsOn" entry ${JSON.stringify(depId)} must match the execution-scoped convention ` +
+          `"<executionIssue>-<Letter>" for execution issue #${executionIssue} ` +
+          `(docs/operating-model.md § Durable plan artifacts, Unit-ID convention)`,
+      );
+      allEntriesValid = false;
+      continue;
+    }
+    if (seen.has(depId)) {
+      errors.push(`${label}: duplicate "dependsOn" entry ${JSON.stringify(depId)}`);
+      allEntriesValid = false;
+      continue;
+    }
+    seen.add(depId);
+  }
+
+  if (allEntriesValid) {
+    const serialized = formatPrerequisitesDependencies(dependsOn);
+    if (hasUnrecognizedDependencyWording(serialized)) {
+      errors.push(
+        `${label}: internal error — the canonical "dependsOn" serialization ${JSON.stringify(serialized)} was ` +
+          `flagged as unrecognized by prepare-dispatch-manifest.mjs's own grammar; this should be unreachable ` +
+          `for valid "dependsOn" input (dependency-grammar.mjs drift?)`,
+      );
+    } else {
+      const roundTripped = extractDependencyUnitIds(serialized);
+      const expected = [...seen];
+      if (JSON.stringify(roundTripped) !== JSON.stringify(expected)) {
+        errors.push(
+          `${label}: internal error — the canonical "dependsOn" serialization ${JSON.stringify(serialized)} did ` +
+            `not round-trip cleanly through extractDependencyUnitIds (got ${JSON.stringify(roundTripped)}, ` +
+            `expected ${JSON.stringify(expected)})`,
+        );
+      }
+    }
   }
 
   return errors;
@@ -442,11 +544,26 @@ export function formatSharedContractBody(sharedContract, { executionIssue }) {
 // rendered from the validated canonical token plus the fixed "(see Shared Contract)."
 // reference — never the caller's raw string — so this field can never carry decorative
 // prose even if a caller's validated-away-by-construction input somehow tried to smuggle it.
+// "Prerequisites/dependencies" is likewise never the caller's raw string (#522): it is
+// always `dependency-grammar.mjs`'s own `formatPrerequisitesDependencies(unit.dependsOn)` —
+// the one shared serializer `prepare-dispatch-manifest.mjs`'s router is proven to recognize
+// (see `validateDependsOn`'s own round-trip check, run before this function is ever
+// reached).
 export function formatWorkerUnitBody(unit, { executionIssue }) {
   const canonicalToken = findCanonicalCapabilityToken(unit.applicableRoleCapability);
   if (!canonicalToken) {
     throw new Error(
       `formatWorkerUnitBody: "${unit.unitId}" has a non-canonical applicableRoleCapability — call validatePlanInput first`,
+    );
+  }
+  if (!Array.isArray(unit.dependsOn)) {
+    // Mirrors the capability check above: `formatPrerequisitesDependencies` itself treats a
+    // non-array as "no dependencies" (see its own module comment), but silently accepting
+    // that here would let a caller who forgot to set `dependsOn` at all get a quietly wrong
+    // "None." dependency declaration instead of a loud failure — the same class of mistake
+    // #522 exists to close, just at the writer's own call boundary instead of the router's.
+    throw new Error(
+      `formatWorkerUnitBody: "${unit.unitId}" has a non-array dependsOn — call validatePlanInput first`,
     );
   }
   const values = {
@@ -456,7 +573,7 @@ export function formatWorkerUnitBody(unit, { executionIssue }) {
     applicableRoleCapability: `${canonicalToken} (see Shared Contract).`,
     authorityInputPointers: unit.authorityInputPointers.trim(),
     relevantSharedContractPointer: unit.relevantSharedContractPointer.trim(),
-    prerequisitesDependencies: unit.prerequisitesDependencies.trim(),
+    prerequisitesDependencies: formatPrerequisitesDependencies(unit.dependsOn),
     filesSurfacesExpectedToChange: unit.filesSurfacesExpectedToChange.trim(),
     observableCompletionCondition: unit.observableCompletionCondition.trim(),
     verificationRequired: unit.verificationRequired.trim(),

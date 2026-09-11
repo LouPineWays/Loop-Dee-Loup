@@ -18,6 +18,7 @@ import {
   CANONICAL_CAPABILITY_TOKENS,
   findCanonicalCapabilityToken,
   validateWorkerUnitInput,
+  validateDependsOn,
   validateSharedContractInput,
   validatePlanIndexInput,
   validatePlanInput,
@@ -30,7 +31,8 @@ import {
   publishPlanArtifacts,
 } from "./format-execution-plan.mjs";
 import { parseExecutionPlan, parseUnitListItem, parseBulletBlock } from "./parse-execution-plan.mjs";
-import { CAPABILITY_CLASS_ROUTE_TABLE, resolveUnitRoute, extractCapabilityClassLabel } from "./prepare-dispatch-manifest.mjs";
+import { CAPABILITY_CLASS_ROUTE_TABLE, resolveUnitRoute, extractCapabilityClassLabel, buildManifestEntries } from "./prepare-dispatch-manifest.mjs";
+import { extractDependencyUnitIds, hasUnrecognizedDependencyWording } from "./dependency-grammar.mjs";
 
 const REPO = "example/example";
 const EXECUTION_ISSUE = 999;
@@ -46,7 +48,7 @@ function validWorkerUnit(unitId, overrides = {}) {
     applicableRoleCapability: "bounded coding worker",
     authorityInputPointers: "Issue #999.",
     relevantSharedContractPointer: "this Issue's Shared Contract comment.",
-    prerequisitesDependencies: "none.",
+    dependsOn: [],
     filesSurfacesExpectedToChange: "tools/orchestration/example.mjs.",
     observableCompletionCondition: "the script exists and works.",
     verificationRequired: "node --test passes.",
@@ -341,6 +343,131 @@ test("validatePlanInput rejects a workerUnits entry absent from the Plan Index U
     result.errors.some((e) => /999-B/.test(e) && /Plan Index/.test(e)),
     `expected a reverse-direction mismatch error, got: ${JSON.stringify(result.errors)}`,
   );
+});
+
+// ---------------------------------------------------------------------------------------
+// Dependency declarations (#522): structured `dependsOn` replaces hand-authored
+// "Prerequisites/dependencies" prose, closing the live #498/#500 regression where a
+// planner-authored dependency clause was not recognized by prepare-dispatch-manifest.mjs's
+// own grammar and required manual Worker Unit Contract repair.
+// ---------------------------------------------------------------------------------------
+
+test("validateWorkerUnitInput requires dependsOn as an array; a hand-authored prose string is rejected, not silently accepted", () => {
+  const unit = validWorkerUnit("999-A");
+  delete unit.dependsOn;
+  unit.prerequisitesDependencies = "depends on 999-B (imports its parser).";
+  const errors = validateWorkerUnitInput(unit, { unitId: "999-A", executionIssue: EXECUTION_ISSUE });
+  assert.ok(
+    errors.some((e) => /dependsOn/.test(e) && /missing required field/.test(e)),
+    `expected a missing-dependsOn rejection, got: ${JSON.stringify(errors)}`,
+  );
+});
+
+test("validateDependsOn accepts [] (no dependencies) and a canonical execution-scoped sibling list", () => {
+  assert.deepEqual(validateDependsOn([], { unitId: "999-A", executionIssue: EXECUTION_ISSUE, label: "unit" }), []);
+  assert.deepEqual(
+    validateDependsOn(["999-B", "999-C"], { unitId: "999-A", executionIssue: EXECUTION_ISSUE, label: "unit" }),
+    [],
+  );
+});
+
+test("validateDependsOn rejects a non-array, self-dependency, duplicates, whitespace, and out-of-convention IDs", () => {
+  const ctx = { unitId: "999-A", executionIssue: EXECUTION_ISSUE, label: "unit" };
+  assert.ok(validateDependsOn("999-B", ctx).some((e) => /must be an array/.test(e)));
+  assert.ok(validateDependsOn(undefined, ctx).some((e) => /missing required field "dependsOn"/.test(e)));
+  assert.ok(validateDependsOn(["999-A"], ctx).some((e) => /self-dependency/.test(e)));
+  assert.ok(validateDependsOn(["999-B", "999-B"], ctx).some((e) => /duplicate/.test(e)));
+  assert.ok(validateDependsOn(["999 B"], ctx).some((e) => /whitespace/.test(e)));
+  assert.ok(validateDependsOn(["1000-B"], ctx).some((e) => /execution-scoped/.test(e)));
+  assert.ok(validateDependsOn(["not-a-unit-id"], ctx).some((e) => /execution-scoped/.test(e)));
+});
+
+test("formatPrerequisitesDependencies canonical forms round-trip through the router's own extractDependencyUnitIds/hasUnrecognizedDependencyWording", () => {
+  const noneBody = formatWorkerUnitBody(validWorkerUnit("999-A", { dependsOn: [] }), { executionIssue: EXECUTION_ISSUE });
+  const noneField = parseBulletBlock(noneBody, "Prerequisites/dependencies");
+  assert.equal(noneField, "None.");
+  assert.deepEqual(extractDependencyUnitIds(noneField), []);
+  assert.equal(hasUnrecognizedDependencyWording(noneField), false);
+
+  const oneDepBody = formatWorkerUnitBody(validWorkerUnit("999-B", { dependsOn: ["999-A"] }), {
+    executionIssue: EXECUTION_ISSUE,
+  });
+  const oneDepField = parseBulletBlock(oneDepBody, "Prerequisites/dependencies");
+  assert.equal(oneDepField, "Depends on 999-A.");
+  assert.deepEqual(extractDependencyUnitIds(oneDepField), ["999-A"]);
+  assert.equal(hasUnrecognizedDependencyWording(oneDepField), false);
+
+  const multiDepBody = formatWorkerUnitBody(validWorkerUnit("999-D", { dependsOn: ["999-A", "999-B", "999-C"] }), {
+    executionIssue: EXECUTION_ISSUE,
+  });
+  const multiDepField = parseBulletBlock(multiDepBody, "Prerequisites/dependencies");
+  assert.equal(multiDepField, "Depends on 999-A, 999-B, 999-C.");
+  assert.deepEqual(extractDependencyUnitIds(multiDepField), ["999-A", "999-B", "999-C"]);
+  assert.equal(hasUnrecognizedDependencyWording(multiDepField), false);
+});
+
+test("a plan authored through dependsOn never publishes a Worker Unit dependency field prepare-dispatch-manifest.mjs classifies as unrecognized (#522 acceptance criterion)", () => {
+  // Every dependsOn-derived unit across this whole test file, not just a hand-picked
+  // sample, must be unrecognized-proof -- confirm no unit input anywhere in this file's own
+  // fixtures could ever have produced the #498/#500 "unrecognized prerequisites wording"
+  // note by construction.
+  for (const deps of [[], ["999-A"], ["999-A", "999-B"], ["999-A", "999-B", "999-C"]]) {
+    const serialized = formatPrerequisitesDependenciesLike(deps);
+    assert.equal(hasUnrecognizedDependencyWording(serialized), false, `dependsOn=${JSON.stringify(deps)}`);
+  }
+
+  function formatPrerequisitesDependenciesLike(dependsOn) {
+    const unit = validWorkerUnit("999-Z", { dependsOn });
+    const body = formatWorkerUnitBody(unit, { executionIssue: EXECUTION_ISSUE });
+    return parseBulletBlock(body, "Prerequisites/dependencies");
+  }
+});
+
+test("regression (#498/#500 failure class): a dependsOn-authored plan resolves dispatch_ready correctly through the real router, with no manual Worker Unit Contract repair", () => {
+  // Reproduces the live #498/#500 shape: unit B depends on sibling unit A. Previously a
+  // planner hand-authoring "Prerequisites/dependencies" prose could produce wording
+  // prepare-dispatch-manifest.mjs's own grammar did not recognize, yielding
+  // dispatch_ready=false with an "unrecognized prerequisites wording" note even once A was
+  // DONE. Authored via dependsOn instead, the writer's own canonical serialization must
+  // always be recognized, and readiness must correctly track A's own State.
+  const unitA = validWorkerUnit("999-A", { dependsOn: [], state: "PLANNED" });
+  const unitB = validWorkerUnit("999-B", { dependsOn: ["999-A"], state: "PLANNED" });
+  const input = validInput({
+    workerUnits: [unitA, unitB],
+    planIndex: {
+      ...validInput().planIndex,
+      units: [
+        validPlanIndexUnit("999-A", { commentUrl: commentUrl(101) }),
+        validPlanIndexUnit("999-B", { outcome: "Second unit outcome.", commentUrl: commentUrl(102) }),
+      ],
+    },
+  });
+  const built = buildPlanArtifacts(input);
+  assert.equal(built.ok, true, JSON.stringify(built.errors));
+
+  const comments = [
+    { id: 100, html_url: commentUrl(100), body: built.artifacts.sharedContractBody },
+    { id: 101, html_url: commentUrl(101), body: built.artifacts.workerUnitBodies["999-A"] },
+    { id: 102, html_url: commentUrl(102), body: built.artifacts.workerUnitBodies["999-B"] },
+    { id: 103, html_url: commentUrl(103), body: built.artifacts.planIndexBody },
+  ];
+  const parsed = parseExecutionPlan(comments, { executionIssue: EXECUTION_ISSUE });
+  assert.equal(parsed.ok, true, JSON.stringify(parsed.errors));
+
+  // A is still PLANNED (not DONE): B must not be dispatch_ready, and — the actual #498/#500
+  // defect — must never be flagged as "unrecognized prerequisites wording".
+  const notYetReady = buildManifestEntries(parsed.plan, { fileExists: () => false });
+  const bEntryNotYetReady = notYetReady.find((e) => e.unitId === "999-B");
+  assert.equal(bEntryNotYetReady.dispatchReady, false);
+  assert.doesNotMatch(bEntryNotYetReady.note, /unrecognized prerequisites wording/);
+  assert.match(bEntryNotYetReady.note, /blocked on: 999-A/);
+
+  // Once A is DONE, B becomes dispatch_ready with no manual edit to either comment.
+  parsed.plan.units["999-A"].state = "DONE";
+  const nowReady = buildManifestEntries(parsed.plan, { fileExists: () => false });
+  const bEntryNowReady = nowReady.find((e) => e.unitId === "999-B");
+  assert.equal(bEntryNowReady.dispatchReady, true);
+  assert.doesNotMatch(bEntryNowReady.note, /unrecognized prerequisites wording/);
 });
 
 // ---------------------------------------------------------------------------------------
