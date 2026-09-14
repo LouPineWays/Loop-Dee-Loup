@@ -25,6 +25,9 @@ import {
   upsertControlBullet,
   probeExistingPlan,
   probeReplanRequired,
+  findExecutionLinkedPr,
+  reconcileReadyPrBreakpoint,
+  referencesExecutionIssue,
 } from "./ready-dispatch-gate.mjs";
 
 // Issue #311's real body (control Issue for execution Issue #310) — a genuine
@@ -530,20 +533,28 @@ test("checkReadyDispatch: rejects a self-referential Execution pointer end to en
   assert.equal(result.state, "NOT_READY");
 });
 
-test("checkReadyDispatch: never calls gh more than once, and never for anything but the control Issue itself", async () => {
-  let calls = 0;
+test("checkReadyDispatch: reads the control Issue exactly once, plus exactly one narrow execution-linked PR lookup before authorizing READY_TO_DISPATCH (issue #456 unit 456-B)", async () => {
+  let issueCalls = 0;
+  let prListCalls = 0;
   const result = await checkReadyDispatch(
     { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 311 },
     {
       ghIssueViewImpl: async ({ repo, number }) => {
-        calls++;
+        issueCalls++;
         assert.equal(repo, "LouPineWays/Loop-Dee-Loup");
         assert.equal(number, 311);
         return { body: ISSUE_311_BODY, state: "OPEN" };
       },
+      ghPrListImpl: async ({ repo, executionIssue }) => {
+        prListCalls++;
+        assert.equal(repo, "LouPineWays/Loop-Dee-Loup");
+        assert.equal(executionIssue, 310);
+        return [];
+      },
     },
   );
-  assert.equal(calls, 1);
+  assert.equal(issueCalls, 1);
+  assert.equal(prListCalls, 1);
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "READY_TO_DISPATCH");
   assert.equal(result.stopAfter, true);
@@ -890,6 +901,7 @@ test("checkReadyDispatch: the normal path (no explicit repo) resolves repository
         assert.equal(number, 311);
         return { body: ISSUE_311_BODY, state: "OPEN" };
       },
+      ghPrListImpl: async () => [],
     },
   );
   assert.equal(sawRepo, "LouPineWays/Loop-Dee-Loup");
@@ -908,6 +920,7 @@ test("checkReadyDispatch: a consumer repository's derived identity is used as-is
         sawRepo = repo;
         return { body: ISSUE_311_BODY, state: "OPEN" };
       },
+      ghPrListImpl: async () => [],
     },
   );
   assert.equal(sawRepo, "SomeConsumer/YouTubery");
@@ -924,6 +937,7 @@ test("checkReadyDispatch: an explicit --repo override is used verbatim and never
         return { ok: true, repo: "should-never-be-used/should-never-be-used" };
       },
       ghIssueViewImpl: async () => ({ body: ISSUE_311_BODY, state: "OPEN" }),
+      ghPrListImpl: async () => [],
     },
   );
   assert.equal(resolveCalls, 0);
@@ -2197,4 +2211,307 @@ test("checkReadyDispatch: PLAN_READY's REPLAN_REQUIRED probe reuses the already-
   assert.ok(parseCalls >= 1, "the injected parseExecutionPlanImpl must have been used at least once");
   assert.equal(result.exitCode, 6);
   assert.equal(result.state, "READY_TO_RUN_DISPATCH_MANIFEST");
+});
+
+// --- Issue #456 unit 456-B: PR-breakpoint reconciliation --------------------------------
+//
+// Two independent live reproductions this unit closes:
+//   #448 shape (#456 Verification scenario 1) — a plain READY control Issue whose own "PR"
+//     bullet says "none" even though execution Issue #447 already produced PR #453.
+//   #539/#540 shape (#456 Verification scenario 2) — a ROUTED control Issue whose Dispatch
+//     Manifest still marks unit 537-A dispatch_ready=true even though that unit's own Worker
+//     Unit Contract already recorded State: DONE with PR #540.
+// Plus the manifest negative control (scenario 3), the true pre-PR negative control
+// (scenario 7 — already covered above by the updated "reads the control Issue exactly once
+// ... " test and its siblings, which inject a `ghPrListImpl` finding nothing and still reach
+// READY_TO_DISPATCH), and the #444 separation negative control (scenario 8).
+
+test("findExecutionLinkedPr: matches a PR via the branch-name linkage convention", () => {
+  const prList = [
+    { number: 453, url: "https://github.com/LouPineWays/Loop-Dee-Loup/pull/453", state: "OPEN", headRefName: "issue-447-stage2-response-unusable", body: "unrelated body" },
+  ];
+  const pr = findExecutionLinkedPr(prList, 447);
+  assert.equal(pr.number, 453);
+});
+
+test("findExecutionLinkedPr: matches a PR via the PR-body '#N' linkage convention", () => {
+  const prList = [{ number: 540, url: "https://github.com/LouPineWays/Loop-Dee-Loup/pull/540", state: "MERGED", headRefName: "some-other-branch", body: "Addresses #537" }];
+  const pr = findExecutionLinkedPr(prList, 537);
+  assert.equal(pr.number, 540);
+});
+
+test("findExecutionLinkedPr: never matches a longer number sharing the same leading digits (issue 447 vs PR body '#4470' or branch 'issue-4470-')", () => {
+  const prList = [
+    { number: 1, url: "u1", state: "OPEN", headRefName: "issue-4470-unrelated", body: "unrelated" },
+    { number: 2, url: "u2", state: "OPEN", headRefName: "some-branch", body: "Addresses #4470" },
+  ];
+  assert.equal(findExecutionLinkedPr(prList, 447), null);
+});
+
+test("referencesExecutionIssue: Stage 1 finding on PR #547 — a bare '#N' mention that is not the Addresses/Implements marker does not count as linkage", () => {
+  assert.equal(referencesExecutionIssue({ headRefName: "some-other-branch", body: "See also #447 for background; unrelated to this change." }, 447), false);
+});
+
+test("referencesExecutionIssue: still matches the documented 'Addresses #N' and 'Implements #N' markers", () => {
+  assert.equal(referencesExecutionIssue({ headRefName: "b", body: "Addresses #447." }, 447), true);
+  assert.equal(referencesExecutionIssue({ headRefName: "b", body: "Implements #447 per the Shared Contract." }, 447), true);
+});
+
+test("findExecutionLinkedPr: a bare '#N' background mention does not misclassify an unrelated PR as execution-linked (Stage 1 finding on PR #547)", () => {
+  const prList = [{ number: 999, url: "u999", state: "OPEN", headRefName: "some-other-branch", body: "See also #447 for background; unrelated to this change." }];
+  assert.equal(findExecutionLinkedPr(prList, 447), null);
+});
+
+test("findExecutionLinkedPr: returns null when nothing references the execution Issue (the ordinary pre-PR case)", () => {
+  assert.equal(findExecutionLinkedPr([], 447), null);
+  assert.equal(findExecutionLinkedPr([{ number: 1, url: "u1", state: "OPEN", headRefName: "unrelated-branch", body: "no reference here" }], 447), null);
+});
+
+test("findExecutionLinkedPr: prefers an OPEN PR over a CLOSED/MERGED one; ties break to the numerically highest number", () => {
+  const prList = [
+    { number: 100, url: "u100", state: "MERGED", headRefName: "issue-447-old-attempt", body: "" },
+    { number: 200, url: "u200", state: "OPEN", headRefName: "issue-447-current", body: "" },
+  ];
+  assert.equal(findExecutionLinkedPr(prList, 447).number, 200);
+
+  const bothOpen = [
+    { number: 300, url: "u300", state: "OPEN", headRefName: "issue-447-a", body: "" },
+    { number: 301, url: "u301", state: "OPEN", headRefName: "issue-447-b", body: "" },
+  ];
+  assert.equal(findExecutionLinkedPr(bothOpen, 447).number, 301);
+});
+
+test("reconcileReadyPrBreakpoint: crossed:true when a linked PR is found", async () => {
+  const result = await reconcileReadyPrBreakpoint(
+    { repo: "LouPineWays/Loop-Dee-Loup", executionIssue: 447 },
+    { ghPrListImpl: async () => [{ number: 453, url: "https://github.com/LouPineWays/Loop-Dee-Loup/pull/453", state: "OPEN", headRefName: "issue-447-x", body: "" }] },
+  );
+  assert.equal(result.crossed, true);
+  assert.equal(result.pr.number, 453);
+});
+
+test("reconcileReadyPrBreakpoint: crossed:false when the narrow lookup finds nothing (the ordinary pre-PR case)", async () => {
+  const result = await reconcileReadyPrBreakpoint(
+    { repo: "LouPineWays/Loop-Dee-Loup", executionIssue: 447 },
+    { ghPrListImpl: async () => [] },
+  );
+  assert.equal(result.crossed, false);
+  assert.ok(!result.operationalError);
+});
+
+test("reconcileReadyPrBreakpoint: an operational failure in the lookup itself is reported distinctly, never silently read as crossed:false", async () => {
+  const result = await reconcileReadyPrBreakpoint(
+    { repo: "LouPineWays/Loop-Dee-Loup", executionIssue: 447 },
+    { ghPrListImpl: async () => { throw new Error("gh api rate limited"); } },
+  );
+  assert.equal(result.crossed, false);
+  assert.equal(result.operationalError, true);
+  assert.match(result.reason, /gh api rate limited/);
+});
+
+test("checkReadyDispatch: #448 reproduction -- Lifecycle READY / PR none / Stage 1 none, but execution Issue #447 already has PR #453 -- reconciles to NOT_READY, never READY_TO_DISPATCH (#456 Verification scenario 1)", async () => {
+  const body =
+    "- **Lifecycle:** READY\n- **Execution:** #447\n- **Route:** implementation worker\n" +
+    "- **PR:** none\n- **Stage 1:** none\n- **Blocker:** none\n- **Founder decision:** none\n";
+  let prListCalls = 0;
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 448 },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      ghPrListImpl: async ({ repo, executionIssue }) => {
+        prListCalls++;
+        assert.equal(repo, "LouPineWays/Loop-Dee-Loup");
+        assert.equal(executionIssue, 447);
+        return [
+          {
+            number: 453,
+            url: "https://github.com/LouPineWays/Loop-Dee-Loup/pull/453",
+            state: "OPEN",
+            headRefName: "issue-447-stage2-response-unusable",
+            body: "Addresses #447",
+          },
+        ];
+      },
+    },
+  );
+  assert.equal(prListCalls, 1);
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "NOT_READY");
+  assert.ok(!("executionIssue" in result), "NOT_READY never authorizes a fresh dispatch reference");
+  assert.ok(result.reasons.some((r) => r.includes("pull/453") && r.includes("already")));
+  // A no-action/fallthrough verdict never becomes a bounded dispatch authorization.
+  assert.deepEqual(result.actionEnvelope, { mode: "fallthrough", authorizedActions: [] });
+});
+
+test("checkReadyDispatch: true pre-PR negative control -- Lifecycle READY / PR none, and no linked PR actually exists -- still dispatches normally (#456 Verification scenario 7)", async () => {
+  const body =
+    "- **Lifecycle:** READY\n- **Execution:** #447\n- **Route:** implementation worker\n" +
+    "- **PR:** none\n- **Stage 1:** none\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 448 },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      ghPrListImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "READY_TO_DISPATCH");
+  assert.equal(result.executionIssue, 447);
+});
+
+// Manifest-path fixture mirroring manifestFixture() above but allowing each unit's own live
+// Worker Unit Contract `state` to be specified — this reconciliation reads exactly that field
+// (parsed.plan.units[unitId].state), never the Plan Index's own possibly-stale `indexState`.
+function manifestFixtureWithUnitStates({ repo = "LouPineWays/Loop-Dee-Loup", executionIssue = 537, unitStates, manifestUnitLines }) {
+  const planIndexUrl = `https://github.com/${repo}/issues/${executionIssue}#issuecomment-100`;
+  const manifestUrl = `https://github.com/${repo}/issues/${executionIssue}#issuecomment-200`;
+  const units = Object.fromEntries(Object.entries(unitStates).map(([unitId, state]) => [unitId, { state }]));
+  return {
+    repo,
+    executionIssue,
+    parseExecutionPlanImpl: async () => ({
+      exitCode: 0,
+      ok: true,
+      repo,
+      executionIssue,
+      plan: {
+        planIndex: { commentId: 100, url: planIndexUrl, dispatchManifest: manifestUrl },
+        units,
+      },
+    }),
+    ghCommentViewImpl: async () => ({
+      id: 200,
+      html_url: manifestUrl,
+      issue_url: `https://api.github.com/repos/${repo}/issues/${executionIssue}`,
+      body:
+        `## Dispatch Manifest (v1)\n\n- **Plan index:** ${planIndexUrl}\n` +
+        manifestUnitLines.map((line) => `- ${line}\n`).join(""),
+    }),
+  };
+}
+
+test("verifyRoutedDispatchManifest: reconciles a dispatch_ready=true unit already recording State: DONE into alreadyDoneUnitIds, excluded from dispatchReadyUnitIds (#456 Verification scenario 2, the #537/#539/#540 shape)", async () => {
+  const fixture = manifestFixtureWithUnitStates({
+    unitStates: { "537-A": "DONE" },
+    manifestUnitLines: ["537-A: route=stronger/general worker dispatch_ready=true note=none"],
+  });
+  const { repo, executionIssue, ...impls } = fixture;
+  const result = await verifyRoutedDispatchManifest({ repo, executionIssue }, impls);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.dispatchReadyUnitIds, []);
+  assert.deepEqual(result.alreadyDoneUnitIds, ["537-A"]);
+});
+
+test("verifyRoutedDispatchManifest: reconciles State: DONE followed by a completion note (the real Worker Unit Contract shape, not the bare 'DONE' fixture) into alreadyDoneUnitIds", async () => {
+  const fixture = manifestFixtureWithUnitStates({
+    unitStates: { "537-A": "DONE — implemented the fix; node --test passes 12/12." },
+    manifestUnitLines: ["537-A: route=stronger/general worker dispatch_ready=true note=none"],
+  });
+  const { repo, executionIssue, ...impls } = fixture;
+  const result = await verifyRoutedDispatchManifest({ repo, executionIssue }, impls);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.dispatchReadyUnitIds, []);
+  assert.deepEqual(result.alreadyDoneUnitIds, ["537-A"]);
+});
+
+test("verifyRoutedDispatchManifest: a state merely starting with 'done' as a different word (e.g. 'DONESKIP') is not treated as DONE", async () => {
+  const fixture = manifestFixtureWithUnitStates({
+    unitStates: { "537-A": "DONESKIP — not a real state value" },
+    manifestUnitLines: ["537-A: route=stronger/general worker dispatch_ready=true note=none"],
+  });
+  const { repo, executionIssue, ...impls } = fixture;
+  const result = await verifyRoutedDispatchManifest({ repo, executionIssue }, impls);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.dispatchReadyUnitIds, ["537-A"]);
+  assert.deepEqual(result.alreadyDoneUnitIds, []);
+});
+
+test("verifyRoutedDispatchManifest: a genuinely non-DONE, dependency-ready unit stays in dispatchReadyUnitIds (#456 Verification scenario 3, manifest negative control)", async () => {
+  const fixture = manifestFixtureWithUnitStates({
+    unitStates: { "498-A": "IN_PROGRESS" },
+    manifestUnitLines: ["498-A: route=stronger/general worker dispatch_ready=true note=none"],
+  });
+  const { repo, executionIssue, ...impls } = fixture;
+  const result = await verifyRoutedDispatchManifest({ repo, executionIssue }, impls);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.dispatchReadyUnitIds, ["498-A"]);
+  assert.deepEqual(result.alreadyDoneUnitIds, []);
+});
+
+test("verifyRoutedDispatchManifest: a mixed wave excludes only the already-DONE unit, keeping the genuinely pending one dispatchable", async () => {
+  const fixture = manifestFixtureWithUnitStates({
+    unitStates: { "498-A": "DONE", "498-B": "PLANNED" },
+    manifestUnitLines: [
+      "498-A: route=stronger/general worker dispatch_ready=true note=none",
+      "498-B: route=stronger/general worker dispatch_ready=true note=none",
+    ],
+  });
+  const { repo, executionIssue, ...impls } = fixture;
+  const result = await verifyRoutedDispatchManifest({ repo, executionIssue }, impls);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.dispatchReadyUnitIds, ["498-B"]);
+  assert.deepEqual(result.alreadyDoneUnitIds, ["498-A"]);
+});
+
+test("checkReadyDispatch: #539/#540 reproduction -- Lifecycle ROUTED with a stale dispatch_ready=true manifest entry whose unit already recorded DONE -- reconciles to NOT_READY, never dispatches 537-A again (#456 Verification scenario 2)", async () => {
+  const body =
+    "- **Lifecycle:** ROUTED\n- **Execution:** #537\n- **Route:** planning worker\n" +
+    "- **PR:** none\n- **Stage 1:** none\n- **Stage 2:** none\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const fixture = manifestFixtureWithUnitStates({
+    executionIssue: 537,
+    unitStates: { "537-A": "DONE" },
+    manifestUnitLines: ["537-A: route=stronger/general worker dispatch_ready=true note=none"],
+  });
+  const { repo, executionIssue, ...impls } = fixture;
+  const result = await checkReadyDispatch(
+    { repo, controlIssue: 539 },
+    { ghIssueViewImpl: async () => ({ body, state: "OPEN" }), ...impls },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "NOT_READY");
+  assert.equal(result.executionIssue, undefined);
+  assert.ok(result.reasons.some((r) => r.includes("537-A") && r.includes("DONE")));
+  assert.deepEqual(result.actionEnvelope, { mode: "fallthrough", authorizedActions: [] });
+});
+
+test("checkReadyDispatch: ROUTED with a mixed wave still dispatches the genuinely pending unit, reporting the excluded DONE unit for transparency", async () => {
+  const body =
+    "- **Lifecycle:** ROUTED\n- **Execution:** #498\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const fixture = manifestFixtureWithUnitStates({
+    executionIssue: 498,
+    unitStates: { "498-A": "DONE", "498-B": "PLANNED" },
+    manifestUnitLines: [
+      "498-A: route=stronger/general worker dispatch_ready=true note=none",
+      "498-B: route=stronger/general worker dispatch_ready=true note=none",
+    ],
+  });
+  const { repo, executionIssue, ...impls } = fixture;
+  const result = await checkReadyDispatch(
+    { repo, controlIssue: 500 },
+    { ghIssueViewImpl: async () => ({ body, state: "OPEN" }), ...impls },
+  );
+  assert.equal(result.exitCode, 7);
+  assert.equal(result.state, "READY_TO_DISPATCH_UNITS");
+  assert.deepEqual(result.dispatchReadyUnitIds, ["498-B"]);
+  assert.deepEqual(result.alreadyDoneUnitIds, ["498-A"]);
+});
+
+test("checkReadyDispatch: EXECUTION_COMPLETE (#444/#445's own Integration-dispatch path) is unaffected by this unit's reconciliation -- no PR lookup, no manifest reconciliation (#456 Verification scenario 8, the #444 separation negative control)", async () => {
+  const body =
+    "- **Lifecycle:** EXECUTION_COMPLETE\n- **Execution:** #498\n- **Route:** integration worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  let prListCalls = 0;
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 500 },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      ghPrListImpl: async () => {
+        prListCalls++;
+        return [];
+      },
+    },
+  );
+  assert.equal(prListCalls, 0, "456-B's reconciliation must never run for the separate EXECUTION_COMPLETE/#444 path");
+  assert.equal(result.exitCode, 8);
+  assert.equal(result.state, "READY_TO_DISPATCH_INTEGRATION");
+  assert.equal(result.executionIssue, 498);
 });

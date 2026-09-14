@@ -50,13 +50,27 @@ test("formatDispatchPrompt's stop clause covers the recorded Stage 1 exemption b
   assert.match(prompt, /a recorded Stage 1 exemption for non-review-worthy work/);
 });
 
+// Issue #456 unit 456-A: the #447/#448/#453 live reproduction found a worker that opened a
+// PR, requested Stage 1, and stopped without ever projecting that transition into the thin
+// control Issue. This template must point the worker at the deterministic finalize step
+// before it stops, rather than leaving the durable handoff to a prose reminder alone.
+test("formatDispatchPrompt points the worker at finalize-pr-breakpoint.mjs before stopping, and names its fail-closed reference", () => {
+  const prompt = formatDispatchPrompt({ controlIssue: 322, executionIssue: 321, route: "implementation worker" });
+  assert.match(prompt, /tools\/orchestration\/finalize-pr-breakpoint\.mjs/);
+  assert.match(prompt, /PR_BREAKPOINT_UNVERIFIED/);
+});
+
 test("formatDispatchPrompt never contains restated AGENTS.md contract prose", () => {
   const prompt = formatDispatchPrompt({ controlIssue: 322, executionIssue: 321, route: "implementation worker" });
   // The regression this script exists to prevent: a dispatch prompt that restates whole
   // AGENTS.md sections (Session execution, Founder interrupt conditions, the Slice
   // handoff field list, bounded-review-cycle mechanics) instead of pointing at them.
+  // Word-boundary matched (issue #456 unit 456-A): this template's own fixed
+  // `PR_BREAKPOINT_UNVERIFIED` reference legitimately contains "VERIFIED" as a substring
+  // ("UN" immediately before it), which a bare `.includes` check would misreport as a
+  // restated Slice-handoff field.
   for (const forbidden of ["STATUS", "OUTCOME", "CHANGED", "VERIFIED", "DECISIONS", "NEW RISKS", "Founder interrupt conditions"]) {
-    assert.ok(!prompt.includes(forbidden), `prompt unexpectedly contains restated field "${forbidden}"`);
+    assert.ok(!new RegExp(`\\b${forbidden}\\b`).test(prompt), `prompt unexpectedly contains restated field "${forbidden}"`);
   }
 });
 
@@ -267,6 +281,15 @@ test("formatIntegrationWorkerDispatchPrompt includes the PR-open stop clause", (
   const prompt = formatIntegrationWorkerDispatchPrompt({ controlIssue: 408, executionIssue: 407 });
   assert.match(prompt, /stop/i);
   assert.match(prompt, /Watched lifecycle breakpoints/);
+});
+
+// Issue #456 unit 456-A: the Integration/PR-worker route is the second of the two
+// authorized PR-opening routes this durable-handoff enforcement must cover — the #539/#540
+// Plan/Manifest reproduction crossed the PR boundary through this exact route.
+test("formatIntegrationWorkerDispatchPrompt points the worker at finalize-pr-breakpoint.mjs before stopping, and names its fail-closed reference", () => {
+  const prompt = formatIntegrationWorkerDispatchPrompt({ controlIssue: 408, executionIssue: 407 });
+  assert.match(prompt, /tools\/orchestration\/finalize-pr-breakpoint\.mjs/);
+  assert.match(prompt, /PR_BREAKPOINT_UNVERIFIED/);
 });
 
 test("formatIntegrationWorkerDispatchPrompt throws for missing/invalid required fields", () => {
