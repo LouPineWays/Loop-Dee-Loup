@@ -845,6 +845,72 @@ export function classifyAuditIssue(body) {
   );
 }
 
+// Pure. Issue #444 unit 444-A — the #439/#440/#443 live reproduction: a control body's own
+// "- **PR:**"/"- **Stage 1:**" bullets already showing the execution crossed the PR/review
+// boundary must prevent a fresh `READY_TO_DISPATCH_INTEGRATION` verdict, even while
+// `Lifecycle` still literally reads `EXECUTION_COMPLETE` (Required behavior item 5 — "Stage 1
+// evidence is stronger than stale lifecycle text"). Scoped to the EXECUTION_COMPLETE path
+// only; called from evaluateReadyDispatchGate below, never from any other lifecycle branch.
+//
+// Field-parsing decisions (Shared Contract for #444):
+//   - "PR": `raw === null` (bullet absent) or `isNoneSentinel(raw)` is "not crossed". Any
+//     other value that resolves to exactly one #N/URL reference (parseExecutionPointer, the
+//     same primitive the "Execution" bullet already uses) is "crossed". A value that is
+//     present but neither "none" nor a single resolvable reference — including a recognized
+//     "PR" bullet coexisting with an unrecognized near-duplicate label that could hold the
+//     same live field (findNearDuplicateBulletLabels, the same ambiguity guard
+//     readExecutionBulletField already applies to "Execution") — is malformed and must also
+//     not authorize integration dispatch (fail closed on ambiguity).
+//   - "Stage 1": plain text (`requested`, `exempt: ...`, `correction-satisfied at ...`, or
+//     `none`), never an issue pointer — read with parseControlBullet only, never
+//     parseExecutionPointer. `raw === null` or `isNoneSentinel(raw)` is "not crossed"; any
+//     other non-empty value is "crossed".
+//
+// Returns { established: false } when neither field shows the boundary crossed (the genuine
+// no-PR path every existing EXECUTION_COMPLETE fixture already uses), or
+// { established: true, reason } otherwise — crossed and malformed both fail closed the same
+// way, since either must equally prevent a fresh Integration/PR worker. Mirrors
+// next-review-transition-gate.mjs's own parseOptionalIssueRefGuarded missing/none/issue/
+// invalid/ambiguous result shape as a small local helper, per the Shared Contract's
+// no-new-circular-import note, rather than importing it back from that module.
+function checkExecutionCompletePrBoundary(body) {
+  const prNearDuplicates = findNearDuplicateBulletLabels(body, "PR", []);
+  if (prNearDuplicates.length > 0) {
+    return {
+      established: true,
+      reason:
+        'PR reference is ambiguous: a recognized "- **PR:**" bullet coexists with unrecognized near-duplicate ' +
+        `label(s) ${prNearDuplicates.map((m) => `"- **${m.label}:**" (${JSON.stringify(m.raw)})`).join(", ")} that could ` +
+        "represent the same live field — refusing to treat the PR/review boundary as not-yet-crossed",
+    };
+  }
+
+  const prRaw = parseControlBullet(body, "PR");
+  if (prRaw !== null && !isNoneSentinel(prRaw)) {
+    const prPointer = parseExecutionPointer(prRaw);
+    if (prPointer.ok) {
+      return {
+        established: true,
+        reason: `PR is already recorded (#${prPointer.issue}) — a fresh Integration/PR worker must not be dispatched for an execution that already has a PR`,
+      };
+    }
+    return {
+      established: true,
+      reason: `"PR" bullet is present but neither "none" nor a single resolvable reference (found: ${JSON.stringify(prRaw)}) — failing closed rather than authorizing integration dispatch`,
+    };
+  }
+
+  const stage1Raw = parseControlBullet(body, "Stage 1");
+  if (stage1Raw !== null && !isNoneSentinel(stage1Raw)) {
+    return {
+      established: true,
+      reason: `Stage 1 is already "${stage1Raw}", not "none" — Stage 1 evidence is stronger than stale Lifecycle text and must not be re-authorized for integration dispatch`,
+    };
+  }
+
+  return { established: false };
+}
+
 // Pure core: evaluates AGENTS.md's immediate-dispatch gate against an already-fetched
 // control Issue body. `controlIssueNumber`, when given, rejects a self-referential
 // Execution pointer (Stage 1 review finding on this PR: a malformed control Issue #42
@@ -920,8 +986,15 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   // validated, exactly mirroring how the pre-existing READY path already defers its own
   // verdict construction to the end of this function.
   let dispatchLifecycle = null;
-  // Set only when the unrecognized-lifecycle branch below fires with one of the five post-PR
-  // mid-cycle values — see POST_PR_MID_CYCLE_LIFECYCLE_VALUES's own comment above.
+  // Set either when the unrecognized-lifecycle branch below fires with one of the five
+  // post-PR mid-cycle values (see POST_PR_MID_CYCLE_LIFECYCLE_VALUES's own comment above), or
+  // — issue #444 unit 444-A — when EXECUTION_COMPLETE's own PR/Stage 1 boundary guard fires
+  // with the literal "EXECUTION_COMPLETE_PR_ESTABLISHED" marker below. That literal is a
+  // marker for this guard only, never a member of POST_PR_MID_CYCLE_LIFECYCLE_VALUES itself
+  // (that Set stays exactly {EXECUTING, VERIFYING, REVIEW, AUDIT, CORRECTION}) — only the
+  // field's truthiness is ever inspected by action-envelope.mjs's chain classification, never
+  // its exact literal value, so introducing a second distinct literal here requires no change
+  // there.
   let postPrLifecycle = null;
 
   if (lifecycleRaw === null) {
@@ -984,6 +1057,24 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
     const msg = `Founder decision is not "none" (found: "${founderDecisionRaw}") — an unresolved founder decision must stop the invocation, not authorize execution reasoning`;
     reasons.push(msg);
     blockingReasons.push(msg);
+  }
+
+  // Issue #444 unit 444-A: EXECUTION_COMPLETE's own PR/Stage 1 boundary guard, evaluated only
+  // once every other field above has already resolved dispatchLifecycle to EXECUTION_COMPLETE
+  // specifically (never for READY/READY_FOR_PLAN/PLAN_READY/ROUTED — the Shared Contract's
+  // non-goals reiterate those paths stay untouched). Reuses the existing NOT_READY +
+  // postPrLifecycle shape below (action-envelope.mjs's existing chain classification already
+  // routes any NOT_READY verdict carrying a truthy postPrLifecycle to
+  // next-review-transition-gate.mjs — zero changes needed there) rather than inventing a new
+  // verdict shape. Set before the blockingReasons/reasons checks below run, so a boundary
+  // already crossed can never fall through to the switch's own
+  // `case "EXECUTION_COMPLETE": return { status: "READY_TO_DISPATCH_INTEGRATION", ... }`.
+  if (dispatchLifecycle === "EXECUTION_COMPLETE") {
+    const prBoundary = checkExecutionCompletePrBoundary(body);
+    if (prBoundary.established) {
+      postPrLifecycle = "EXECUTION_COMPLETE_PR_ESTABLISHED";
+      reasons.push(prBoundary.reason);
+    }
   }
 
   if (blockingReasons.length > 0) {

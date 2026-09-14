@@ -29,6 +29,7 @@ import {
   reconcileReadyPrBreakpoint,
   referencesExecutionIssue,
 } from "./ready-dispatch-gate.mjs";
+import { getActionEnvelope } from "./action-envelope.mjs";
 
 // Issue #311's real body (control Issue for execution Issue #310) — a genuine
 // READY-and-satisfied control Issue.
@@ -1650,6 +1651,117 @@ test("evaluateReadyDispatchGate: PLAN_READY/ROUTED/EXECUTION_COMPLETE still requ
     const selfRefResult = evaluateReadyDispatchGate(selfRef, 42);
     assert.equal(selfRefResult.status, "NOT_READY", `expected NOT_READY for ${lifecycle} with a self-referential Execution pointer`);
   }
+});
+
+// Issue #444 unit 444-A: the #439/#440/#443 live reproduction -- EXECUTION_COMPLETE must
+// never return READY_TO_DISPATCH_INTEGRATION once the control body's own "PR"/"Stage 1"
+// bullets already show the execution crossed the PR/review boundary. Covers #444's own
+// seven-item Verification list directly (scenarios 1-6 below; scenario 7, the broader
+// tools/orchestration/**.test.mjs run, is a suite-level verification step, not a unit test).
+
+test("evaluateReadyDispatchGate: EXECUTION_COMPLETE Verification scenario 1 -- PR: none, Stage 1: none still returns READY_TO_DISPATCH_INTEGRATION (both bullets present-and-none)", () => {
+  const body =
+    "- **Lifecycle:** EXECUTION_COMPLETE\n- **Execution:** #407\n- **Route:** integration worker\n- **PR:** none\n- **Stage 1:** none\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "READY_TO_DISPATCH_INTEGRATION");
+  assert.equal(result.executionIssue, 407);
+});
+
+test("evaluateReadyDispatchGate: EXECUTION_COMPLETE Verification scenario 2 -- PR already recorded (Stage 1: none) never returns integration dispatch", () => {
+  const body =
+    "- **Lifecycle:** EXECUTION_COMPLETE\n- **Execution:** #439\n- **Route:** integration worker\n- **PR:** #443\n- **Stage 1:** none\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "NOT_READY");
+  assert.equal(result.postPrLifecycle, "EXECUTION_COMPLETE_PR_ESTABLISHED");
+  assert.ok(result.reasons.some((r) => r.includes("PR is already recorded") && r.includes("#443")));
+});
+
+test("evaluateReadyDispatchGate: EXECUTION_COMPLETE Verification scenario 3 -- Stage 1: requested alone (Lifecycle still EXECUTION_COMPLETE, PR: none) never returns integration dispatch", () => {
+  const body =
+    "- **Lifecycle:** EXECUTION_COMPLETE\n- **Execution:** #439\n- **Route:** integration worker\n- **PR:** none\n- **Stage 1:** requested\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "NOT_READY");
+  assert.equal(result.postPrLifecycle, "EXECUTION_COMPLETE_PR_ESTABLISHED");
+  assert.ok(result.reasons.some((r) => r.includes("Stage 1 is already") && r.includes("requested")));
+});
+
+test("evaluateReadyDispatchGate: EXECUTION_COMPLETE Verification scenario 4 -- the real #440 fixture (PR #443 + Stage 1 requested at head 911cac6d6bd56059020574ad4de5ef3f54d552cd) returns a deterministic post-PR/non-integration result", () => {
+  const body =
+    "- **Execution issue:** #439\n" +
+    "- **Lifecycle:** EXECUTION_COMPLETE\n" +
+    "- **Route:** bounded implementation worker (unit 439-A) — DONE\n" +
+    "- **PR:** #443 (https://github.com/LouPineWays/Loop-Dee-Loup/pull/443), head 911cac6d6bd56059020574ad4de5ef3f54d552cd\n" +
+    "- **Stage 1:** requested\n" +
+    "- **Stage 2:** none\n" +
+    "- **Blocker:** none\n" +
+    "- **Founder decision:** none\n";
+  const result = evaluateReadyDispatchGate(body);
+  assert.notEqual(result.status, "READY_TO_DISPATCH_INTEGRATION");
+  assert.equal(result.status, "NOT_READY");
+  assert.equal(result.postPrLifecycle, "EXECUTION_COMPLETE_PR_ESTABLISHED");
+  const envelope = getActionEnvelope(result.status, result);
+  assert.equal(envelope.mode, "chain");
+  assert.deepEqual(envelope.authorizedActions, ["run-next-review-transition-gate"]);
+});
+
+test("checkReadyDispatch: the real #440 fixture never reports exit 8/READY_TO_DISPATCH_INTEGRATION", async () => {
+  const body =
+    "- **Execution issue:** #439\n" +
+    "- **Lifecycle:** EXECUTION_COMPLETE\n" +
+    "- **Route:** bounded implementation worker (unit 439-A) — DONE\n" +
+    "- **PR:** #443 (https://github.com/LouPineWays/Loop-Dee-Loup/pull/443), head 911cac6d6bd56059020574ad4de5ef3f54d552cd\n" +
+    "- **Stage 1:** requested\n" +
+    "- **Stage 2:** none\n" +
+    "- **Blocker:** none\n" +
+    "- **Founder decision:** none\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 440 },
+    { ghIssueViewImpl: async () => ({ body, state: "OPEN" }) },
+  );
+  assert.notEqual(result.exitCode, 8);
+  assert.notEqual(result.state, "READY_TO_DISPATCH_INTEGRATION");
+  assert.equal(result.state, "NOT_READY");
+  assert.equal(result.postPrLifecycle, "EXECUTION_COMPLETE_PR_ESTABLISHED");
+});
+
+test("evaluateReadyDispatchGate: EXECUTION_COMPLETE Verification scenario 5 -- a malformed/conflicting PR field fails closed, never integration dispatch", () => {
+  const notNoneNotReference =
+    "- **Lifecycle:** EXECUTION_COMPLETE\n- **Execution:** #439\n- **Route:** integration worker\n- **PR:** pending review\n- **Stage 1:** none\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result1 = evaluateReadyDispatchGate(notNoneNotReference);
+  assert.equal(result1.status, "NOT_READY");
+  assert.equal(result1.postPrLifecycle, "EXECUTION_COMPLETE_PR_ESTABLISHED");
+
+  const nearDuplicateLabel =
+    "- **Lifecycle:** EXECUTION_COMPLETE\n- **Execution:** #439\n- **Route:** integration worker\n- **PR:** none\n- **PR (current):** #443\n- **Stage 1:** none\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result2 = evaluateReadyDispatchGate(nearDuplicateLabel);
+  assert.equal(result2.status, "NOT_READY");
+  assert.equal(result2.postPrLifecycle, "EXECUTION_COMPLETE_PR_ESTABLISHED");
+  assert.ok(result2.reasons.some((r) => r.includes("ambiguous")));
+});
+
+test("evaluateReadyDispatchGate: EXECUTION_COMPLETE Verification scenario 6 -- READY_FOR_PLAN/PLAN_READY/ROUTED/READY ignore a present PR/Stage 1 bullet (scoped strictly to EXECUTION_COMPLETE)", () => {
+  const readyFor =
+    "- **Lifecycle:** READY_FOR_PLAN\n- **Execution:** #407\n- **Route:** planning worker\n- **PR:** #443\n- **Stage 1:** requested\n- **Blocker:** none\n- **Founder decision:** none\n";
+  assert.equal(evaluateReadyDispatchGate(readyFor).status, "READY_TO_DISPATCH_PLANNING");
+
+  const planReady =
+    "- **Lifecycle:** PLAN_READY\n- **Execution:** #407\n- **Route:** planning worker\n- **PR:** #443\n- **Stage 1:** requested\n- **Blocker:** none\n- **Founder decision:** none\n";
+  assert.equal(evaluateReadyDispatchGate(planReady).status, "READY_TO_RUN_DISPATCH_MANIFEST");
+
+  const routed =
+    "- **Lifecycle:** ROUTED\n- **Execution:** #407\n- **Route:** planning worker\n- **PR:** #443\n- **Stage 1:** requested\n- **Blocker:** none\n- **Founder decision:** none\n";
+  assert.equal(evaluateReadyDispatchGate(routed).status, "READY_TO_VERIFY_DISPATCH_MANIFEST");
+
+  const ready =
+    "- **Lifecycle:** READY\n- **Execution:** #407\n- **Route:** planning worker\n- **PR:** #443\n- **Stage 1:** requested\n- **Blocker:** none\n- **Founder decision:** none\n";
+  assert.equal(evaluateReadyDispatchGate(ready).status, "READY_TO_DISPATCH");
+});
+
+test("evaluateReadyDispatchGate: EXECUTION_COMPLETE with both PR and Stage 1 bullets simply absent still returns READY_TO_DISPATCH_INTEGRATION (existing fixture shape unaffected)", () => {
+  const body =
+    "- **Lifecycle:** EXECUTION_COMPLETE\n- **Execution:** #407\n- **Route:** integration worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "READY_TO_DISPATCH_INTEGRATION");
 });
 
 // Issue #498 unit 498-A: durable thin-control-state projection at the PLAN_READY/ROUTED
