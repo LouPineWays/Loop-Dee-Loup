@@ -153,10 +153,19 @@
 //     explicitly says to stop: wrong non-BLOCKED mid-cycle lifecycle state (EXECUTING,
 //     VERIFYING, REVIEW, AUDIT, CORRECTION), a missing/malformed/multi-valued field, or a
 //     control Issue shape the gate cannot classify at all (e.g. a legacy unsplit Issue).
-//     exit 3. Falls through to normal Decomposition-boundary / Direct-inspection
-//     reasoning — this script has no opinion on what to do next, only on whether the
-//     immediate-dispatch shortcut applies. See BLOCKED above for the narrower case where
-//     control state instead says to stop outright.
+//     exit 3. Also returned — issue #456 unit 456-B, the #447/#448/#453 and #537/#539/#540
+//     live reproductions — when a plain `Lifecycle: READY` or `ROUTED` control Issue's own
+//     durable state is stale: `reconcileReadyPrBreakpoint`'s narrow execution-linked PR
+//     lookup finds a PR already exists for a READY control Issue despite its own "PR" bullet
+//     saying otherwise, or `verifyRoutedDispatchManifest` finds every currently
+//     `dispatch_ready=true` manifest unit already records `State: DONE` on its own Worker
+//     Unit Contract. Neither case authorizes a fresh dispatch; both fall through to this same
+//     NOT_READY so a fresh controller's normal reasoning discovers and reconciles the real
+//     post-PR state, per AGENTS.md's Decomposition-boundary fallthrough below. Falls through
+//     to normal Decomposition-boundary / Direct-inspection reasoning — this script has no
+//     opinion on what to do next, only on whether the immediate-dispatch shortcut applies.
+//     See BLOCKED above for the narrower case where control state instead says to stop
+//     outright.
 //   ERROR — the control Issue could not be read, --control-issue was missing/invalid, or
 //     (issue #344) the current repository identity could not be established from the
 //     checkout (no configured `origin` remote, or a remote URL that isn't a recognizable
@@ -539,6 +548,38 @@ export function extractActiveExecutionRef(block) {
 // the two.
 export function isNoneSentinel(value) {
   return typeof value === "string" && /^none\b/i.test(value.trim());
+}
+
+// Pure. True when a raw `gh pr list` entry's own `headRefName`/`body` names execution Issue
+// `executionIssue` via the Shared Contract's PR-to-execution-Issue linkage convention (issue
+// #456's Shared Contract, "PR-to-execution-Issue linkage convention"): a branch name
+// containing "issue-<N>-" (the #447/#453 and #537/#540 organic shape), or a PR body
+// referencing "#<N>" as a whole issue number. The trailing `(?!\d)` on the body pattern keeps
+// executionIssue 447 from matching a body that merely names a longer number starting with
+// the same digits (e.g. "#4470"); the branch pattern's leading class keeps "issue-4470-" from
+// matching executionIssue 447 the same way.
+function referencesExecutionIssue({ headRefName, body }, executionIssue) {
+  const branchPattern = new RegExp(`(^|[^0-9A-Za-z])issue-${executionIssue}-`, "i");
+  if (typeof headRefName === "string" && branchPattern.test(headRefName)) return true;
+  const bodyPattern = new RegExp(`#${executionIssue}(?!\\d)`);
+  return typeof body === "string" && bodyPattern.test(body);
+}
+
+// Pure. Selects the single most relevant execution-linked PR out of a raw `gh pr list`
+// result (see `defaultGhPrList` below) — only the entries that actually reference
+// `executionIssue` per `referencesExecutionIssue` above. Prefers an OPEN PR (the live
+// in-flight case a fresh controller most needs to know about) over a closed/merged one;
+// among ties, the numerically highest (most recent) PR number — mirroring this repository's
+// existing deterministic "numerically highest wins" tie-break convention
+// (parse-execution-plan.mjs's `pickLatestComment`). Returns null when nothing in `prList`
+// references the execution Issue at all — the ordinary, ordinary-cost outcome for a
+// genuinely fresh pre-PR control Issue.
+export function findExecutionLinkedPr(prList, executionIssue) {
+  const candidates = (Array.isArray(prList) ? prList : []).filter((pr) => referencesExecutionIssue(pr ?? {}, executionIssue));
+  if (candidates.length === 0) return null;
+  const open = candidates.filter((pr) => String(pr?.state ?? "").toUpperCase() === "OPEN");
+  const pool = open.length > 0 ? open : candidates;
+  return pool.reduce((best, pr) => (Number(pr.number) > Number(best.number) ? pr : best), pool[0]);
 }
 
 function extractCommentIdFromUrl(url) {
@@ -1060,6 +1101,63 @@ function defaultGhCommentView({ repo, commentId }) {
   return JSON.parse(raw);
 }
 
+// Issue #456 unit 456-B: the one narrow, repo-scoped `gh pr list` this Shared Contract
+// authorizes as the READY-lifecycle recovery path's own evidence source — a single search
+// keyed to the exact execution Issue about to be dispatched, never an unscoped scan. GitHub's
+// PR search matches title/body text for a bare query term, so searching the literal
+// "#<executionIssue>" surfaces the "Addresses #N" convention 456-A's own finalize step is
+// required to leave on every PR it opens; `findExecutionLinkedPr` above still re-validates
+// every candidate this returns against the exact linkage convention rather than trusting
+// GitHub's own text-search relevance.
+function defaultGhPrList({ repo, executionIssue }) {
+  const raw = execFileSync(
+    "gh",
+    [
+      "pr",
+      "list",
+      "--repo",
+      repo,
+      "--search",
+      `#${executionIssue}`,
+      "--state",
+      "all",
+      "--json",
+      "number,url,state,headRefName,body",
+      "--limit",
+      "30",
+    ],
+    { encoding: "utf8" },
+  );
+  return JSON.parse(raw);
+}
+
+// Issue #456 unit 456-B (the #447/#448/#453 live reproduction): before authorizing
+// READY_TO_DISPATCH off a plain `Lifecycle: READY` control Issue, reconcile against one
+// narrow, execution-Issue-scoped PR lookup — the recovery safety net the Shared Contract
+// authorizes for exactly this route, since a direct/READY control Issue carries no plan/
+// unit machinery whose own durable state could otherwise prove the PR boundary was already
+// crossed. `ghPrListImpl` is injected so tests never touch the real network/`gh` CLI, matching
+// this file's existing injection convention. Returns `{ crossed: false }` for the ordinary,
+// genuinely pre-PR case (the expected outcome for a fresh READY control Issue), or
+// `{ crossed: true, pr }` when a linked PR already exists — the caller must not authorize a
+// fresh dispatch in that case, per Required behavior item 4's "route toward post-PR handling
+// instead of dispatching when reconciliation finds the boundary already crossed."
+export async function reconcileReadyPrBreakpoint({ repo, executionIssue }, { ghPrListImpl = defaultGhPrList } = {}) {
+  let prList;
+  try {
+    prList = await ghPrListImpl({ repo, executionIssue });
+  } catch (err) {
+    return {
+      crossed: false,
+      operationalError: true,
+      reason: `operational failure searching for an execution-linked PR for ${repo}#${executionIssue}: ${err.message}`,
+    };
+  }
+  const pr = findExecutionLinkedPr(prList, executionIssue);
+  if (!pr) return { crossed: false };
+  return { crossed: true, pr };
+}
+
 async function defaultParseExecutionPlanImpl({ repo, executionIssue }) {
   const { runParseExecutionPlan } = await import("./parse-execution-plan.mjs");
   return runParseExecutionPlan({ repo, executionIssue });
@@ -1199,12 +1297,39 @@ export async function verifyRoutedDispatchManifest(
     };
   }
 
+  // Issue #456 unit 456-B (the #537/#539/#540 live reproduction): a manifest entry's own
+  // `dispatch_ready=true` flag is dependency-readiness computed once at Route/Prepare time —
+  // it is never re-derived per wave — so it must never outrank a later authoritative `DONE`
+  // state on that same unit's own Worker Unit Contract. `parsed.plan.units[unitId].state` is
+  // parse-execution-plan.mjs's own fresh read of that live Worker Unit Contract comment (not
+  // the Plan Index's own possibly-stale `indexState`), so this reconciliation costs no
+  // additional `gh` call beyond the ones this function already performs. `dispatchReadyUnitIds`
+  // is the reconciled, currently-actionable subset the caller may dispatch; `alreadyDoneUnitIds`
+  // is the excluded subset — `dispatch_ready=true` entries whose own contract already recorded
+  // `DONE` — kept separate (not silently dropped) so the caller can report exactly what was
+  // reconciled away rather than authorizing a redispatch or staying silent about why a unit
+  // that looks dispatch_ready in the raw manifest text is absent from the dispatchable list.
+  const dispatchReadyManifestUnitIds = [...manifestEntries.entries()]
+    .filter(([, entry]) => entry.dispatchReady)
+    .map(([unitId]) => unitId);
+  // The State bullet's value is parseBulletBlock's full multi-line capture, not a bare
+  // token -- the established convention (AGENTS.md Parent snapshots edit-ownership rule)
+  // is "DONE — <completion note>", so an exact `=== "DONE"` equality never matches a real
+  // Worker Unit Contract and this reconciliation silently never fires. Match the leading
+  // "DONE" token instead, the same way a human skimming the bullet would.
+  const alreadyDoneUnitIds = dispatchReadyManifestUnitIds.filter((unitId) =>
+    /^done\b/i.test(String(parsed.plan.units?.[unitId]?.state ?? "").trim()),
+  );
+  const dispatchReadyUnitIds = dispatchReadyManifestUnitIds.filter((unitId) => !alreadyDoneUnitIds.includes(unitId));
+
   return {
     ok: true,
     executionIssue: Number(executionIssue),
     planIndexUrl: parsed.plan.planIndex.url,
     manifestCommentId,
     manifestUrl,
+    dispatchReadyUnitIds,
+    alreadyDoneUnitIds,
   };
 }
 
@@ -1318,6 +1443,10 @@ async function checkReadyDispatchCore(
     resolveRepoIdentityImpl = resolveRepoIdentity,
     parseExecutionPlanImpl = defaultParseExecutionPlanImpl,
     ghCommentViewImpl = defaultGhCommentView,
+    // Issue #456 unit 456-B: the READY-lifecycle PR-breakpoint reconciliation's own narrow
+    // lookup (reconcileReadyPrBreakpoint below) is injected the same way as every other
+    // `gh`-backed call in this file, so tests never touch the real network/`gh` CLI.
+    ghPrListImpl = defaultGhPrList,
     // Issue #498 unit 498-B: left un-defaulted here (rather than defaulting straight to
     // `defaultRunPrepareDispatchManifestImpl`) so the effective default below can thread this
     // invocation's own `parseExecutionPlanImpl` through to `probeReplanRequired`'s dry-run
@@ -1616,6 +1745,30 @@ async function checkReadyDispatchCore(
         reasons: [manifestCheck.reason],
       };
     }
+    // Issue #456 unit 456-B (the #537/#539/#540 live reproduction): verifyRoutedDispatchManifest
+    // has already reconciled every dispatch_ready=true manifest entry against that same unit's
+    // live Worker Unit Contract State. When every currently dispatch_ready=true entry already
+    // recorded DONE, there is nothing left in this wave to legitimately dispatch — the PR/
+    // Stage 1 breakpoint for that unit has already been crossed even though this control
+    // Issue's own Lifecycle is still "ROUTED". Falling back to ordinary NOT_READY (rather than
+    // authorizing READY_TO_DISPATCH_UNITS with an empty dispatch list) keeps this gate's
+    // existing contract intact: NOT_READY's own fallthrough is what routes the next fresh
+    // controller into the reasoning that discovers and reconciles the real post-PR state, per
+    // Required behavior item 4's "route toward post-PR handling instead of dispatching when
+    // reconciliation finds the boundary already crossed."
+    if (manifestCheck.dispatchReadyUnitIds.length === 0 && manifestCheck.alreadyDoneUnitIds.length > 0) {
+      return {
+        exitCode: 3,
+        state: "NOT_READY",
+        controlIssue: Number(controlIssue),
+        repo: resolvedRepo,
+        reasons: [
+          `every unit this Dispatch Manifest currently marks dispatch_ready=true (${manifestCheck.alreadyDoneUnitIds.join(", ")}) ` +
+            `already record "State: DONE" on their own Worker Unit Contract -- the PR/Stage 1 breakpoint for this wave has already been ` +
+            `crossed even though Lifecycle is still "ROUTED"; do not redispatch, reconcile toward post-PR handling instead`,
+        ],
+      };
+    }
     return {
       exitCode: EXIT_CODES_BY_STATUS.READY_TO_DISPATCH_UNITS,
       state: "READY_TO_DISPATCH_UNITS",
@@ -1626,6 +1779,8 @@ async function checkReadyDispatchCore(
       planIndexUrl: manifestCheck.planIndexUrl,
       manifestCommentId: manifestCheck.manifestCommentId,
       manifestUrl: manifestCheck.manifestUrl,
+      dispatchReadyUnitIds: manifestCheck.dispatchReadyUnitIds,
+      ...(manifestCheck.alreadyDoneUnitIds.length > 0 ? { alreadyDoneUnitIds: manifestCheck.alreadyDoneUnitIds } : {}),
     };
   }
   if (result.status in EXIT_CODES_BY_STATUS) {
@@ -1637,6 +1792,40 @@ async function checkReadyDispatchCore(
       repo: resolvedRepo,
       executionIssue: result.executionIssue,
       ...(result.route !== undefined ? { route: result.route } : {}),
+    };
+  }
+
+  // Issue #456 unit 456-B (the #447/#448/#453 live reproduction): the last remaining
+  // possibility once every branch above has been exhausted is the plain `Lifecycle: READY`
+  // direct-dispatch route (result.status === "READY_TO_DISPATCH", the one status
+  // evaluateReadyDispatchGate returns that is not itself a key of EXIT_CODES_BY_STATUS).
+  // Unlike the pre-PR pipeline's ROUTED path above, a direct/READY control Issue carries no
+  // plan/unit machinery whose own durable state could otherwise prove a PR already exists, so
+  // this reconciles against the one narrow execution-linked PR lookup the Shared Contract
+  // authorizes for exactly this route before ever authorizing a fresh dispatch.
+  const reconciliation = await reconcileReadyPrBreakpoint(
+    { repo: resolvedRepo, executionIssue: result.executionIssue },
+    { ghPrListImpl },
+  );
+  if (reconciliation.operationalError) {
+    return {
+      exitCode: 1,
+      message:
+        `Operational failure reconciling a possibly-already-crossed PR breakpoint for ${resolvedRepo}#${result.executionIssue} ` +
+        `while evaluating READY: ${reconciliation.reason}`,
+    };
+  }
+  if (reconciliation.crossed) {
+    return {
+      exitCode: 3,
+      state: "NOT_READY",
+      controlIssue: Number(controlIssue),
+      repo: resolvedRepo,
+      reasons: [
+        `execution Issue #${result.executionIssue} already has a linked PR (${reconciliation.pr.url}, state ${reconciliation.pr.state}) ` +
+          `even though this control Issue's own "PR" bullet does not record it -- the PR/Stage 1 breakpoint has already been crossed; ` +
+          `do not redispatch implementation, reconcile toward post-PR handling instead`,
+      ],
     };
   }
 
