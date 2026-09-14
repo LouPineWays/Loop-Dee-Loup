@@ -498,15 +498,18 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
 // Issue #542: appends the deterministic thin-control terminalization command
 // (`tools/orchestration/close-control.mjs`) to a `STAGE2_CLOSE_READY` `nextCommand` chain,
 // but only when `controlIssue` is a real number — i.e. only when *this gate itself* was
-// invoked in control-Issue mode (a real `--control-issue` on the current invocation). Direct-
-// reference mode (`--audit-issue`, or `--pr`/`--head`) always sets `context.controlIssue` to
-// `null` (see resolvePostMerge/runNextReviewTransitionGateCore below), so this never chains for
-// a no-thin-control flow — satisfying #542 requirement 3 ("fail closed on control identity")
-// structurally: this function never searches for or guesses a control Issue, it only reacts to
-// one the caller already resolved from its own explicit argument. This closes the #486/#487/
-// #538 gap: work and audit terminalized correctly, the controller correctly stopped per #486's
-// action-envelope boundary, but the founder-facing thin control Issue was left open with stale
-// lifecycle fields, requiring manual repair.
+// invoked in control-Issue mode (a real `--control-issue` on the current invocation), or (issue
+// #550 correction) when direct-reference mode's own `checkPostAudit` call redirected a mistaken
+// thin-control `auditIssue` input to the real Stage 2 Audit Issue it names — in which case that
+// original input is itself the thin control needing terminalization, and `resolvePostMerge`
+// populates `context.controlIssue` with it for exactly this reason. Absent either of those two
+// explicit sources, direct-reference mode leaves `context.controlIssue` `null`, so this never
+// chains for a no-thin-control flow — satisfying #542 requirement 3 ("fail closed on control
+// identity") structurally: this function never searches for or guesses a control Issue, it only
+// reacts to one the caller already resolved from its own explicit argument or its own bounded
+// redirect recovery. This closes the #486/#487/#538 gap: work and audit terminalized correctly,
+// the controller correctly stopped per #486's action-envelope boundary, but the founder-facing
+// thin control Issue was left open with stale lifecycle fields, requiring manual repair.
 //
 // Stage 1 review finding on PR #544: the `&&` chain below joins this command after
 // `lifecycle-gate.mjs close-audit`, but that command's own CLI exits 0 even for its normal,
@@ -778,7 +781,29 @@ async function resolvePostMerge({ repo, auditIssue, controlIssue }, { checkPostA
     postAudit = { exitCode: 1, message: `lifecycle-gate post-audit threw: ${err.message}` };
   }
 
-  const context = { repo, auditIssue, ...(controlIssue != null ? { controlIssue } : {}) };
+  // Issue #550 correction (Stage 1 finding P1): checkPostAudit may have redirected a mistaken
+  // thin-control `auditIssue` input to the real Stage 2 Audit Issue it names (at most one hop,
+  // per checkPostAudit's own bounded recovery — see lifecycle-gate.mjs's checkPostAudit comment).
+  // When a genuine resolved `postAudit.auditIssue` is present, it — not the original input — is
+  // the canonical audit identity for every downstream nextCommand this gate composes from here
+  // on (close-work-issue/close-audit/record-verdict, and the report-promotion path). The original
+  // input becomes the control identity instead, but only when this call did not already carry a
+  // distinct one of its own: control-Issue mode's `controlIssueNumber` (resolved from a real
+  // `--control-issue` argument at the top of this gate) must never be overwritten by a redirect
+  // origin discovered one layer down inside checkPostAudit. `postAudit.auditIssue` is absent on
+  // every operational-error result and on some test doubles that omit it deliberately — in either
+  // case this must fall back to the original input exactly as before, never invent a redirect.
+  const hasResolvedAuditIssue = typeof postAudit.auditIssue === "number";
+  const resolvedAuditIssue = hasResolvedAuditIssue ? postAudit.auditIssue : auditIssue;
+  const redirectedFrom =
+    hasResolvedAuditIssue && postAudit.auditIssue !== Number(auditIssue) ? Number(auditIssue) : null;
+  const effectiveControlIssue = controlIssue ?? redirectedFrom;
+
+  const context = {
+    repo,
+    auditIssue: resolvedAuditIssue,
+    ...(effectiveControlIssue != null ? { controlIssue: effectiveControlIssue } : {}),
+  };
   const verdict = resolvePostMergeVerdict({ postAudit }, context);
   return { exitCode: exitCodeFor(verdict.state), ...verdict };
 }
