@@ -48,6 +48,28 @@
 //                  silently accepting the
 //                  premature closure.
 //
+//                  Issue #550 (the #548/#457 incident): `--audit-issue` can be handed a thin
+//                  control Issue's own number by mistake instead of the real Stage 2 Audit
+//                  Issue it points to — observed live when `chatgpt-codex-connector[bot]`,
+//                  triggered on Audit Issue #548, picked up control Issue #457's number out of
+//                  the merged PR's own body text and checked #457's "Work issue" field instead
+//                  of #548's, replying "Stage 2 transition gate could not find a valid Work
+//                  issue field in #457" — a control-vs-audit schema confusion that risked being
+//                  "fixed" by adding a duplicate `Work issue` field to the thin control, which
+//                  AGENTS.md's schema separation forbids. `checkPostAudit` now checks the fetched
+//                  body's own shape *before* ever calling `parseWorkIssueRef`: a body carrying
+//                  none of the audit-control-issue.yml template's structural headings ("###
+//                  Verdict"/"### Merged PR"/"### Work issue") is never audit-shaped at all, so a
+//                  malformed/missing Work issue field is never reported against it. If that
+//                  non-audit-shaped body is a thin control carrying a settled "- **Stage 2:**"
+//                  bullet (the ad hoc bullet convention, not a GitHub form field), this
+//                  transparently redirects — up to one hop, cycle-guarded — to the real Audit
+//                  Issue it names and continues against that issue's own body instead. Only when
+//                  no such redirect exists does this fail closed, naming the artifact actually at
+//                  fault (see `looksLikeAuditIssueBody`/`parseThinControlStage2Ref` below). A
+//                  genuinely audit-shaped body with a malformed Work issue field is unaffected —
+//                  it still fails exactly as before, naming itself, never a linked thin control.
+//
 // Not every review-worthy PR has a gated work issue to protect: LDL's own recurring
 // consumer-sync PRs (issue #190) are review-worthy but have no per-update implementation
 // issue. `--issue none` (merge-ready) and the literal typed word "none" in the (still
@@ -804,22 +826,106 @@ async function evaluateAuditCloseReadiness(repo, auditIssueNumber, body, { ghApi
   );
 }
 
+// Pure. True when `body` renders at least one of the audit-control-issue.yml template's own
+// structural GitHub-form headings ("### Verdict", "### Merged PR", "### Work issue") —
+// literally, i.e. the heading *line* is present at all, independent of whether its own value
+// underneath happens to be missing or malformed. Checking heading presence rather than
+// `parseFormField`'s parsed value is deliberate: a genuinely malformed Audit Issue (e.g. the
+// "### Verdict" heading present but empty, or missing outright while "### Work issue" still
+// renders normally — both real fixtures exercised elsewhere in this file) must still classify
+// as audit-shaped so `parseWorkIssueRef`'s existing fail-closed error names it correctly,
+// never misreported as "not an Audit Issue at all." A thin control Issue's own ad hoc
+// "- **Label:**" bullet convention (parseControlBullet's shape, not GitHub form fields) never
+// renders any of these three headings, so this still reliably separates the two schemas
+// without importing tools/orchestration's own classifyAuditIssue (tools/review-watch does not
+// depend on tools/orchestration — see next-review-transition-gate.mjs's module comment for the
+// one documented, opposite-direction exception).
+function hasFormHeading(body, label) {
+  const heading = `### ${label}`;
+  return (body ?? "").split("\n").some((line) => line.trim() === heading);
+}
+
+function looksLikeAuditIssueBody(body) {
+  return hasFormHeading(body, "Verdict") || hasFormHeading(body, "Merged PR") || hasFormHeading(body, "Work issue");
+}
+
+// Pure. Reads a thin control Issue's own "- **Stage 2:**" bullet (ready-dispatch-gate.mjs's
+// `parseControlBullet` convention, duplicated narrowly here rather than imported, for the same
+// directional-dependency reason as `looksLikeAuditIssueBody` above) to recover the real Stage 2
+// Audit Issue a non-audit-shaped body points at. Case-insensitive on the label, last occurrence
+// wins (mirroring parseControlBullet exactly); returns null for a missing bullet, the explicit
+// "none" sentinel, or a value with no "#N" reference to extract.
+function parseThinControlStage2Ref(body) {
+  const pattern = /^-\s*\*\*Stage 2:\*\*\s*(.*)$/im;
+  let raw = null;
+  for (const line of (body ?? "").split("\n")) {
+    const m = pattern.exec(line);
+    if (m) raw = m[1].trim();
+  }
+  if (raw === null || /^none\b/i.test(raw)) return null;
+  const match = raw.match(/#(\d+)\b/);
+  return match ? Number(match[1]) : null;
+}
+
 // `ghIssueViewImpl` and `ghApiImpl` are injected so tests can drive this end-to-end without
 // touching the real network or `gh` CLI.
 export async function checkPostAudit(
   args,
   { ghIssueViewImpl = defaultGhIssueView, ghApiImpl = defaultGhApi, bot = DEFAULT_BOT } = {},
 ) {
-  const { repo, "audit-issue": auditIssue } = args;
+  const { repo } = args;
+  let auditIssue = args["audit-issue"];
   if (!repo || !auditIssue) {
     return { exitCode: 1, message: "Missing required args: --repo and --audit-issue are both required." };
   }
 
+  // Issue #550 (the #548/#457 incident): a thin control Issue's own number can be handed here in
+  // place of the real Stage 2 Audit Issue it points to — e.g. a reviewer that read "control #457"
+  // out of the merged PR's own body/description and treated that as the audit target instead of
+  // the freshly-opened Audit Issue it was actually triggered on. Resolve up to one redirect hop
+  // through a non-audit-shaped body's own "- **Stage 2:**" bullet *before* ever reaching
+  // `parseWorkIssueRef`, so this never misreports a control/audit schema mismatch as "audit issue
+  // #457 has a malformed Work issue field" — and never invites "fixing" it by adding a duplicate
+  // Work issue field to the thin control (docs/stage2-audit-contract.md and AGENTS.md deliberately
+  // keep these two schemas separate; #457 needs no field of its own to carry this correctly).
+  const visitedIssues = new Set();
+  const startingAuditIssue = auditIssue;
   let auditIssueData;
-  try {
-    auditIssueData = await ghIssueViewImpl({ repo, number: auditIssue });
-  } catch (err) {
-    return { exitCode: 1, message: `gh issue view failed for ${repo}#${auditIssue}: ${err.message}` };
+  for (;;) {
+    const key = Number(auditIssue);
+    if (visitedIssues.has(key)) {
+      return {
+        exitCode: 1,
+        message:
+          `Redirect cycle detected while resolving the real Stage 2 Audit Issue starting from ` +
+          `${repo}#${startingAuditIssue} (already visited: ${[...visitedIssues].map((n) => `#${n}`).join(", ")}); ` +
+          `refusing to loop.`,
+      };
+    }
+    visitedIssues.add(key);
+
+    try {
+      auditIssueData = await ghIssueViewImpl({ repo, number: auditIssue });
+    } catch (err) {
+      return { exitCode: 1, message: `gh issue view failed for ${repo}#${auditIssue}: ${err.message}` };
+    }
+
+    if (looksLikeAuditIssueBody(auditIssueData.body ?? "")) break;
+
+    const redirect = parseThinControlStage2Ref(auditIssueData.body ?? "");
+    if (redirect === null) {
+      return {
+        exitCode: 1,
+        message:
+          `${repo}#${auditIssue} does not look like a Stage 2 Audit Issue: neither a "### Verdict" nor a ` +
+          `"### Merged PR" heading (the audit-control-issue.yml template's own structural markers) was found in ` +
+          `its body — e.g. a thin control Issue's ad hoc "- **Label:**" bullets instead. It also carries no ` +
+          `settled "- **Stage 2:**" bullet naming the real Audit Issue to check, so the correct target cannot be ` +
+          `resolved automatically. Pass the actual Stage 2 Audit Issue number as --audit-issue; this schema must ` +
+          `never gain a duplicate "Work issue" field of its own.`,
+      };
+    }
+    auditIssue = redirect;
   }
 
   const workIssueRef = parseWorkIssueRef(auditIssueData.body ?? "");
