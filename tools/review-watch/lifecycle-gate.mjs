@@ -854,7 +854,15 @@ function looksLikeAuditIssueBody(body) {
 // directional-dependency reason as `looksLikeAuditIssueBody` above) to recover the real Stage 2
 // Audit Issue a non-audit-shaped body points at. Case-insensitive on the label, last occurrence
 // wins (mirroring parseControlBullet exactly); returns null for a missing bullet, the explicit
-// "none" sentinel, or a value with no "#N" reference to extract.
+// "none" sentinel, or a value naming no exactly-one issue reference to extract.
+//
+// Stage 1 review finding (issue #550 correction, P2): mirrors ready-dispatch-gate.mjs's
+// `parseExecutionPointer` ref-extraction exactly — both a bare "#N" reference and a full GitHub
+// issue URL ("https://github.com/owner/repo/issues/N") are accepted, preserving the repository's
+// existing control-pointer semantics rather than a second, narrower pointer language scoped only
+// to this recovery path. A value naming more than one distinct issue reference is ambiguous and
+// returns null, the same fail-closed "no settled bullet" outcome checkPostAudit already reports
+// for a genuinely absent bullet.
 function parseThinControlStage2Ref(body) {
   const pattern = /^-\s*\*\*Stage 2:\*\*\s*(.*)$/im;
   let raw = null;
@@ -863,8 +871,10 @@ function parseThinControlStage2Ref(body) {
     if (m) raw = m[1].trim();
   }
   if (raw === null || /^none\b/i.test(raw)) return null;
-  const match = raw.match(/#(\d+)\b/);
-  return match ? Number(match[1]) : null;
+  const hashRefs = [...raw.matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
+  const urlRefs = [...raw.matchAll(/\/issues\/(\d+)/g)].map((m) => Number(m[1]));
+  const refs = [...new Set([...hashRefs, ...urlRefs])];
+  return refs.length === 1 ? refs[0] : null;
 }
 
 // `ghIssueViewImpl` and `ghApiImpl` are injected so tests can drive this end-to-end without
@@ -882,36 +892,27 @@ export async function checkPostAudit(
   // Issue #550 (the #548/#457 incident): a thin control Issue's own number can be handed here in
   // place of the real Stage 2 Audit Issue it points to — e.g. a reviewer that read "control #457"
   // out of the merged PR's own body/description and treated that as the audit target instead of
-  // the freshly-opened Audit Issue it was actually triggered on. Resolve up to one redirect hop
+  // the freshly-opened Audit Issue it was actually triggered on. Resolve at most one redirect hop
   // through a non-audit-shaped body's own "- **Stage 2:**" bullet *before* ever reaching
   // `parseWorkIssueRef`, so this never misreports a control/audit schema mismatch as "audit issue
   // #457 has a malformed Work issue field" — and never invites "fixing" it by adding a duplicate
   // Work issue field to the thin control (docs/stage2-audit-contract.md and AGENTS.md deliberately
   // keep these two schemas separate; #457 needs no field of its own to carry this correctly).
-  const visitedIssues = new Set();
+  //
+  // Stage 1 review finding (issue #550 correction, P2/P3): deliberately bounded to *exactly one*
+  // hop, not an unbounded acyclic chain. If control A's own "- **Stage 2:**" bullet mistakenly
+  // names another thin control B instead of the real Audit Issue, B's own (unrelated) Stage 2
+  // pointer is never followed — a second non-audit-shaped target fails closed instead of silently
+  // adopting a second control's audit as A's own authority.
   const startingAuditIssue = auditIssue;
   let auditIssueData;
-  for (;;) {
-    const key = Number(auditIssue);
-    if (visitedIssues.has(key)) {
-      return {
-        exitCode: 1,
-        message:
-          `Redirect cycle detected while resolving the real Stage 2 Audit Issue starting from ` +
-          `${repo}#${startingAuditIssue} (already visited: ${[...visitedIssues].map((n) => `#${n}`).join(", ")}); ` +
-          `refusing to loop.`,
-      };
-    }
-    visitedIssues.add(key);
+  try {
+    auditIssueData = await ghIssueViewImpl({ repo, number: auditIssue });
+  } catch (err) {
+    return { exitCode: 1, message: `gh issue view failed for ${repo}#${auditIssue}: ${err.message}` };
+  }
 
-    try {
-      auditIssueData = await ghIssueViewImpl({ repo, number: auditIssue });
-    } catch (err) {
-      return { exitCode: 1, message: `gh issue view failed for ${repo}#${auditIssue}: ${err.message}` };
-    }
-
-    if (looksLikeAuditIssueBody(auditIssueData.body ?? "")) break;
-
+  if (!looksLikeAuditIssueBody(auditIssueData.body ?? "")) {
     const redirect = parseThinControlStage2Ref(auditIssueData.body ?? "");
     if (redirect === null) {
       return {
@@ -925,7 +926,26 @@ export async function checkPostAudit(
           `never gain a duplicate "Work issue" field of its own.`,
       };
     }
+
     auditIssue = redirect;
+    try {
+      auditIssueData = await ghIssueViewImpl({ repo, number: auditIssue });
+    } catch (err) {
+      return { exitCode: 1, message: `gh issue view failed for ${repo}#${auditIssue}: ${err.message}` };
+    }
+
+    if (!looksLikeAuditIssueBody(auditIssueData.body ?? "")) {
+      return {
+        exitCode: 1,
+        message:
+          `${repo}#${startingAuditIssue} redirected via its own "- **Stage 2:**" bullet to ${repo}#${auditIssue}, ` +
+          `but that target also does not look like a Stage 2 Audit Issue (neither a "### Verdict" nor a ` +
+          `"### Merged PR" heading was found in its body). Only one redirect hop through a thin control's own ` +
+          `Stage 2 bullet is ever followed, so a second non-audit-shaped target is never chased further — ` +
+          `refusing to redirect again from ${repo}#${auditIssue}. Pass the actual Stage 2 Audit Issue number ` +
+          `directly as --audit-issue.`,
+      };
+    }
   }
 
   const workIssueRef = parseWorkIssueRef(auditIssueData.body ?? "");

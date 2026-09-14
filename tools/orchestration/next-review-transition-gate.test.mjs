@@ -796,6 +796,73 @@ test("runNextReviewTransitionGate: --audit-issue takes precedence over --control
   assert.equal(result.state, "STAGE2_CLOSE_READY");
 });
 
+// -- runNextReviewTransitionGate: direct --audit-issue mode, checkPostAudit redirect propagation
+// (issue #550 correction, Stage 1 finding P1: the #548/#457 incident's own downstream half --
+// checkPostAudit can resolve a mistaken thin-control input to the real Audit Issue, but every
+// composed nextCommand must use *that* resolved Audit Issue, never the original control input,
+// while the original input survives separately as the control identity so close-control.mjs still
+// terminalizes the right thin control.) ----------------------------------------------------------
+
+test("runNextReviewTransitionGate: STAGE2_CLOSE_READY after a checkPostAudit redirect uses the resolved Audit Issue for every nextCommand and chains close-control against the original thin-control input (#457 -> #548)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", auditIssue: "457" },
+    {
+      checkPostAuditImpl: async (args) => {
+        assert.equal(args["audit-issue"], "457");
+        // Mirrors lifecycle-gate.mjs's real checkPostAudit contract: a redirected result
+        // reports the resolved Audit Issue as `auditIssue`, distinct from the "457" input.
+        return { exitCode: 0, state: "READY_TO_CLOSE", verdict: "CLEAN", workIssue: 456, auditIssue: 548 };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_CLOSE_READY");
+  assert.equal(result.auditIssue, 548, "the resolved Audit Issue, not the original control input, is the audit identity from here on");
+  assert.equal(result.controlIssue, 457, "the original input becomes the control identity so it can still be terminalized");
+  assert.equal(
+    result.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo o/r --work-issue 456 --audit-issue 548 && " +
+      "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 548 && " +
+      "node tools/orchestration/close-control.mjs --repo o/r --control-issue 457 --audit-issue 548 --work-issue 456",
+    "every command must act on Audit Issue #548, never #457, and close-control must terminalize #457",
+  );
+});
+
+test("runNextReviewTransitionGate: STAGE2_REPORT_READY_TO_RECORD report-promotion path also targets the resolved Audit Issue after a redirect (issue #550 correction, Stage 1 finding P1)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", auditIssue: "457" },
+    {
+      checkPostAuditImpl: async () => ({
+        exitCode: 0,
+        state: "REPORT_READY_TO_RECORD",
+        rawVerdict: "PENDING",
+        reportEvidence: { verdict: "CLEAN" },
+        auditIssue: 548,
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_REPORT_READY_TO_RECORD");
+  assert.equal(result.nextCommand, "node tools/review-watch/lifecycle-gate.mjs record-verdict --repo o/r --audit-issue 548");
+});
+
+test("runNextReviewTransitionGate: direct --audit-issue mode with no redirect (checkPostAudit's own resolved auditIssue equals the input) behaves exactly as before -- no spurious controlIssue is introduced", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", auditIssue: "548" },
+    {
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "READY_TO_CLOSE", verdict: "CLEAN", auditIssue: 548 }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.auditIssue, 548);
+  assert.equal(result.controlIssue, undefined, "no redirect occurred, so no control identity is invented");
+  assert.equal(
+    result.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 548",
+    "unchanged from before this correction -- no close-control chaining without a real thin-control identity",
+  );
+});
+
 // -- runNextReviewTransitionGate: control-Issue mode -------------------------------------------
 
 const CONTROL_BODY_PRE_MERGE = `## Current state

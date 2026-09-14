@@ -714,7 +714,53 @@ test("checkPostAudit: refuses to loop on a redirect cycle between two mutually-p
     },
   );
   assert.equal(result.exitCode, 1);
-  assert.match(result.message, /[Rr]edirect cycle/);
+  // Issue #550 correction (Stage 1 finding P3): the recovery is bounded to exactly one hop, not
+  // cycle detection over an unbounded chain, so #1 -> #2 fails closed after following #1's own
+  // redirect once and finding #2 also non-audit-shaped -- never by looping back to #1 again.
+  assert.match(result.message, /only one redirect hop/i);
+  assert.match(result.message, /owner\/repo#2/, "must name the second, un-followed hop, not loop back to #1");
+});
+
+test("checkPostAudit: rejects a second redirect hop -- control A -> control B is never followed to B's own (unrelated) Stage 2 audit (issue #550 correction, Stage 1 finding P3)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 100 },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        // #100 (control A) redirects to #101 (control B); #101 itself redirects to #548, a
+        // genuine, unrelated Stage 2 Audit Issue. Only #100 -> #101 may ever be followed.
+        if (number === 100) return { body: "- **Stage 2:** #101", state: "OPEN" };
+        if (number === 101) return { body: "- **Stage 2:** #548", state: "OPEN" };
+        if (number === 548) return { body: auditBodyWithCommit({ workIssue: 456, verdict: "PENDING" }), state: "OPEN" };
+        return { body: "", state: "OPEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /only one redirect hop/i);
+  assert.match(result.message, /owner\/repo#101/, "must name the un-followed second hop (#101), never silently adopt #548");
+});
+
+test('checkPostAudit: parseThinControlStage2Ref accepts a full GitHub issue URL in the "- **Stage 2:**" bullet, not only "#N" (issue #550 correction, Stage 1 finding P2)', async () => {
+  const bodyWithUrl = [
+    "- **Lifecycle:** AUDIT",
+    "- **Execution:** #456",
+    "- **PR:** #547",
+    "- **Stage 2:** https://github.com/owner/repo/issues/548",
+  ].join("\n");
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 457 },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number === 457) return { body: bodyWithUrl, state: "OPEN" };
+        if (number === 548) return { body: auditBodyWithCommit({ workIssue: 456, verdict: "PENDING" }), state: "OPEN" };
+        return { body: "", state: "OPEN" };
+      },
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.auditIssue, 548, "a full issue URL Stage 2 pointer must resolve identically to the equivalent #N form");
+  assert.equal(result.workIssue, 456);
 });
 
 test("checkPostAudit: OK — work issue open, verdict PENDING (verification #8)", async () => {
