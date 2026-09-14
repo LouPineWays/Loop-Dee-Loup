@@ -553,15 +553,29 @@ export function isNoneSentinel(value) {
 // Pure. True when a raw `gh pr list` entry's own `headRefName`/`body` names execution Issue
 // `executionIssue` via the Shared Contract's PR-to-execution-Issue linkage convention (issue
 // #456's Shared Contract, "PR-to-execution-Issue linkage convention"): a branch name
-// containing "issue-<N>-" (the #447/#453 and #537/#540 organic shape), or a PR body
-// referencing "#<N>" as a whole issue number. The trailing `(?!\d)` on the body pattern keeps
-// executionIssue 447 from matching a body that merely names a longer number starting with
-// the same digits (e.g. "#4470"); the branch pattern's leading class keeps "issue-4470-" from
-// matching executionIssue 447 the same way.
-function referencesExecutionIssue({ headRefName, body }, executionIssue) {
+// containing "issue-<N>-" (the #447/#453 and #537/#540 organic shape), or a PR body using the
+// documented non-auto-close reference marker (`docs/bounded-review-cycle.md`'s "Reference the
+// work issue non-auto-closing instead (e.g. `Addresses #N` or `Implements #N`)") naming
+// `executionIssue`. The trailing `(?!\d)` on the body pattern keeps executionIssue 447 from
+// matching a marker that merely names a longer number starting with the same digits (e.g.
+// "Addresses #4470"); the branch pattern's leading class keeps "issue-4470-" from matching
+// executionIssue 447 the same way.
+//
+// Stage 1 review finding on PR #547: the body pattern previously matched a bare "#<N>" (any
+// whole-number mention of the execution Issue) anywhere in the PR body, not only the
+// "Addresses #N"/"Implements #N" marker the Shared Contract actually requires workers to
+// leave. This repository's own PR descriptions routinely cross-reference several issues as
+// background/comparison (this very correction's dispatch prompt names #456, #457, and #547
+// together) — a bare mention risked misclassifying an unrelated open PR as "linked" to an
+// execution Issue it never touched, which could suppress a genuinely pre-PR READY control's
+// dispatch (`reconcileReadyPrBreakpoint`) on a false positive. Requiring the explicit
+// Addresses/Implements marker matches exactly what 456-A's own finalize step is required to
+// leave (Shared Contract: "must ensure this linkage is present/discoverable") and what
+// `defaultGhPrList`'s search below is already documented as keying off.
+export function referencesExecutionIssue({ headRefName, body }, executionIssue) {
   const branchPattern = new RegExp(`(^|[^0-9A-Za-z])issue-${executionIssue}-`, "i");
   if (typeof headRefName === "string" && branchPattern.test(headRefName)) return true;
-  const bodyPattern = new RegExp(`#${executionIssue}(?!\\d)`);
+  const bodyPattern = new RegExp(`\\b(?:Addresses|Implements)\\s*:?\\s*#${executionIssue}(?!\\d)`, "i");
   return typeof body === "string" && bodyPattern.test(body);
 }
 

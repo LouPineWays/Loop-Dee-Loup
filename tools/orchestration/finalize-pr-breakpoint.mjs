@@ -27,9 +27,10 @@
 //     performs the only write, validating the proposed body before it ever reaches `gh`
 //     (control-field-validator.mjs's field-local pointer checks).
 //   - `tools/orchestration/ready-dispatch-gate.mjs`'s `resolveRepoIdentity`,
-//     `parseControlBullet`, `upsertControlBullet`, `readExecutionBulletField`, and
-//     `parseExecutionPointer` supply every read/compose primitive on the control body —
-//     the same parser every other control-plane script already trusts.
+//     `parseControlBullet`, `upsertControlBullet`, `readExecutionBulletField`,
+//     `parseExecutionPointer`, and `referencesExecutionIssue` supply every read/compose
+//     primitive on the control body and the PR-to-execution-Issue linkage check — the same
+//     parser/convention every other control-plane script already trusts.
 //
 // What it persists, and why each piece is required (#456 Required behavior #1):
 //   - `- **PR:** #<pr>` — the PR reference itself.
@@ -63,6 +64,12 @@
 // ordinary success whenever the durable transition cannot be established or verified:
 //   - the control Issue's own Execution pointer does not resolve to `--execution-issue`
 //     (wrong control Issue targeted for this PR — never silently finalize against it);
+//   - `--pr` does not itself reference `--execution-issue` via the Shared Contract's own
+//     PR-to-execution-Issue linkage convention (branch name / "Addresses #N"/"Implements #N"
+//     body marker) — `verifyPrLinkage`, a Stage 1 review finding on PR #547: a coherent but
+//     incorrect PR number must never be persisted onto the control Issue unverified;
+//   - the given `--head` is not the PR's own live `headRefOid` — `verifyPrHeadIsCurrent`, a
+//     Stage 1 review finding on PR #547: a stale head must never be finalized as reviewed;
 //   - the control Issue's current Lifecycle is not one of the recognized pre-finalize
 //     values described above;
 //   - `stage1-gate.mjs` reports `NOT_REQUESTED` (the caller claims the PR crossed the
@@ -98,6 +105,7 @@ import {
   upsertControlBullet,
   readExecutionBulletField,
   parseExecutionPointer,
+  referencesExecutionIssue,
 } from "./ready-dispatch-gate.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 import { run as stage1GateRun } from "../review-watch/stage1-gate.mjs";
@@ -132,6 +140,47 @@ export function verifyExecutionMatches(body, executionIssue) {
     return {
       ok: false,
       reason: `control Issue's Execution pointer names #${parsed.issue}, not the given --execution-issue #${executionIssue}`,
+    };
+  }
+  return { ok: true };
+}
+
+// Pure. Stage 1 review finding on PR #547 (P2): a coherent-but-incorrect `--pr`/`--head` pair
+// — a typo, a stale value from an earlier step, or a caller pointed at an unrelated PR that
+// happens to also carry a Stage 1 trigger — previously reached `write-control-snapshot.mjs`
+// unverified: only the control-to-execution pointer was checked, never the PR-to-execution
+// linkage the Shared Contract actually requires ("Every PR an authorized worker opens for an
+// execution Issue must reference that execution Issue in its own PR body ... and use a branch
+// name containing issue-<executionIssue>- ... 456-A's finalize step must ensure this linkage
+// is present/discoverable before it reports success"). Reuses
+// `referencesExecutionIssue` — the exact same linkage convention `reconcileReadyPrBreakpoint`
+// already trusts — rather than a second, competing definition of "belongs to this execution
+// Issue".
+export function verifyPrLinkage({ headRefName, body }, executionIssue) {
+  if (!referencesExecutionIssue({ headRefName, body }, executionIssue)) {
+    return {
+      ok: false,
+      reason:
+        `PR does not reference execution Issue #${executionIssue} via the required linkage convention ` +
+        `(a branch name containing "issue-${executionIssue}-", or a PR body carrying "Addresses #${executionIssue}"/` +
+        `"Implements #${executionIssue}") — refusing to persist an unlinked PR onto the control Issue`,
+    };
+  }
+  return { ok: true };
+}
+
+// Pure. Stage 1 review finding on PR #547 (P2): `--head` was previously trusted as given and
+// only handed to `stage1-gate.mjs` as an evidence key, never compared against the PR's own
+// live `headRefOid`. A stale `--head` (e.g. a late push landed after Stage 1 was requested,
+// before this script ran) could still carry a genuine trigger/response at that older head,
+// letting this script persist `Stage 1: requested` / `Lifecycle: REVIEW` even though the PR's
+// actual current head was never reviewed at all.
+export function verifyPrHeadIsCurrent(prView, head) {
+  const liveHead = prView?.headRefOid;
+  if (typeof liveHead !== "string" || !liveHead || liveHead !== head) {
+    return {
+      ok: false,
+      reason: `the given --head (${JSON.stringify(head)}) does not match the PR's live head (${JSON.stringify(liveHead ?? null)}) — refusing to finalize Stage 1 evidence gathered at a stale head`,
     };
   }
   return { ok: true };
@@ -213,13 +262,18 @@ function unverified({ controlIssue, executionIssue, pr, reason }) {
   };
 }
 
-// `ghIssueViewImpl`, `stage1GateRunImpl`, and `writeControlSnapshotImpl` are injected so
-// tests can drive `run` end-to-end without touching the real network, `gh` CLI, or the
-// full stage1-gate.mjs `run` (which itself needs its own network injection) — see this
+// `ghIssueViewImpl`, `ghPrViewImpl`, `stage1GateRunImpl`, and `writeControlSnapshotImpl` are
+// injected so tests can drive `run` end-to-end without touching the real network, `gh` CLI, or
+// the full stage1-gate.mjs `run` (which itself needs its own network injection) — see this
 // script's own test file for the fixture shapes.
 export async function run(
   { repo, controlIssue, executionIssue, pr, head },
-  { ghIssueViewImpl = defaultGhIssueView, stage1GateRunImpl = stage1GateRun, writeControlSnapshotImpl = checkWriteControlSnapshot } = {},
+  {
+    ghIssueViewImpl = defaultGhIssueView,
+    ghPrViewImpl = defaultGhPrView,
+    stage1GateRunImpl = stage1GateRun,
+    writeControlSnapshotImpl = checkWriteControlSnapshot,
+  } = {},
 ) {
   if (!isPositiveInteger(controlIssue) || !isPositiveInteger(executionIssue) || !isPositiveInteger(pr)) {
     return { exitCode: 1, message: "Missing/invalid required args: --control-issue, --execution-issue, and --pr must all be positive integers." };
@@ -240,6 +294,27 @@ export async function run(
     return unverified({ controlIssue, executionIssue, pr, reason: executionCheck.reason });
   }
 
+  // Stage 1 review findings on PR #547 (both P2): verify the PR itself, before ever trusting
+  // it as evidence — that it actually belongs to `executionIssue` per the Shared Contract's own
+  // linkage convention, and that the caller's `--head` is still the PR's live head. One fetch
+  // covers both; `stage1-gate.mjs` below is never treated as this identity/freshness check
+  // (it only knows the PR body, not headRefName/headRefOid, and its own job is Stage 1
+  // evidence, not PR identity).
+  let prView;
+  try {
+    prView = await ghPrViewImpl({ repo, pr });
+  } catch (err) {
+    return unverified({ controlIssue, executionIssue, pr, reason: `gh pr view failed for PR #${pr}: ${err.message}` });
+  }
+  const linkageCheck = verifyPrLinkage(prView ?? {}, executionIssue);
+  if (!linkageCheck.ok) {
+    return unverified({ controlIssue, executionIssue, pr, reason: linkageCheck.reason });
+  }
+  const headCheck = verifyPrHeadIsCurrent(prView, head);
+  if (!headCheck.ok) {
+    return unverified({ controlIssue, executionIssue, pr, reason: headCheck.reason });
+  }
+
   let stage1Result;
   try {
     stage1Result = await stage1GateRunImpl({ repo, number: pr, head });
@@ -252,7 +327,26 @@ export async function run(
   }
   const { value: stage1Value } = stage1Determination;
 
-  const composed = composeFinalizedControlBody(body, { pr, stage1Value });
+  // Stage 1 review finding on PR #547 (P1): re-read the control Issue immediately before
+  // composing/writing rather than reusing the body fetched above, before the `gh pr view` and
+  // `stage1-gate.mjs` calls just above ran. Those calls narrow but do not eliminate a window
+  // in which a concurrent session could add a Blocker/Founder-decision note or otherwise edit
+  // the control Issue; `composeFinalizedControlBody`/`upsertControlBullet` only ever touch the
+  // PR/Stage 1/Lifecycle bullets and leave everything else in whatever body they're given
+  // untouched, so composing against the freshest available read (rather than the stale
+  // pre-fetch one) means an intervening edit to any other field survives into this write
+  // instead of being silently clobbered. This narrows the race window to
+  // `write-control-snapshot.mjs`'s own call latency; it is not a full optimistic-concurrency
+  // mechanism (no such primitive exists yet anywhere in this control-plane) — see this
+  // finding's own text for the residual gap.
+  let latestBody;
+  try {
+    latestBody = await ghIssueViewImpl({ repo, controlIssue });
+  } catch (err) {
+    return unverified({ controlIssue, executionIssue, pr, reason: `pre-write control re-read failed: ${err.message}` });
+  }
+
+  const composed = composeFinalizedControlBody(latestBody, { pr, stage1Value });
   if (!composed.ok) {
     return unverified({ controlIssue, executionIssue, pr, reason: composed.reason });
   }
@@ -299,6 +393,16 @@ function defaultGhIssueView({ repo, controlIssue }) {
   if (repo) args.push("--repo", repo);
   const raw = execFileSync("gh", args, { encoding: "utf8" });
   return JSON.parse(raw).body ?? "";
+}
+
+// Stage 1 review findings on PR #547: the PR-identity/head-freshness evidence source for
+// `verifyPrLinkage`/`verifyPrHeadIsCurrent` above — distinct from `stage1-gate.mjs`'s own
+// `gh pr view` call, which only ever reads `body` (Stage 1 evidence, not PR identity).
+function defaultGhPrView({ repo, pr }) {
+  const args = ["pr", "view", String(pr), "--json", "headRefName,headRefOid,body,state"];
+  if (repo) args.push("--repo", repo);
+  const raw = execFileSync("gh", args, { encoding: "utf8" });
+  return JSON.parse(raw);
 }
 
 function parseArgs(argv) {

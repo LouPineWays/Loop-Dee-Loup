@@ -27,6 +27,7 @@ import {
   probeReplanRequired,
   findExecutionLinkedPr,
   reconcileReadyPrBreakpoint,
+  referencesExecutionIssue,
 } from "./ready-dispatch-gate.mjs";
 
 // Issue #311's real body (control Issue for execution Issue #310) — a genuine
@@ -2244,6 +2245,20 @@ test("findExecutionLinkedPr: never matches a longer number sharing the same lead
     { number: 1, url: "u1", state: "OPEN", headRefName: "issue-4470-unrelated", body: "unrelated" },
     { number: 2, url: "u2", state: "OPEN", headRefName: "some-branch", body: "Addresses #4470" },
   ];
+  assert.equal(findExecutionLinkedPr(prList, 447), null);
+});
+
+test("referencesExecutionIssue: Stage 1 finding on PR #547 — a bare '#N' mention that is not the Addresses/Implements marker does not count as linkage", () => {
+  assert.equal(referencesExecutionIssue({ headRefName: "some-other-branch", body: "See also #447 for background; unrelated to this change." }, 447), false);
+});
+
+test("referencesExecutionIssue: still matches the documented 'Addresses #N' and 'Implements #N' markers", () => {
+  assert.equal(referencesExecutionIssue({ headRefName: "b", body: "Addresses #447." }, 447), true);
+  assert.equal(referencesExecutionIssue({ headRefName: "b", body: "Implements #447 per the Shared Contract." }, 447), true);
+});
+
+test("findExecutionLinkedPr: a bare '#N' background mention does not misclassify an unrelated PR as execution-linked (Stage 1 finding on PR #547)", () => {
+  const prList = [{ number: 999, url: "u999", state: "OPEN", headRefName: "some-other-branch", body: "See also #447 for background; unrelated to this change." }];
   assert.equal(findExecutionLinkedPr(prList, 447), null);
 });
 
