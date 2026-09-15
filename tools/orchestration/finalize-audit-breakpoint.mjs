@@ -29,6 +29,12 @@
 //     commit" field names the same commit the PR actually merged as, and its "Work issue"
 //     field names the same `--execution-issue` (or "none") — refusing to project the control
 //     onto an Audit Issue that does not actually correspond to this PR/execution pairing;
+//   - re-reads the control Issue immediately before composing/writing and re-runs the
+//     Execution-pointer, PR-pointer, and Lifecycle authority checks against *that* fresher body
+//     (and, when already `AUDIT`, additionally requires its existing Stage 2 pointer to already
+//     match `--audit-issue`) — so a concurrent edit landing after the initial read (a Blocker,
+//     a BLOCKED/CORRECTION lifecycle change, a different recorded audit issue) is refused
+//     rather than silently overwritten (Stage 1 review finding, P1, on PR #562);
 //   - composes and persists `- **Stage 2:** #<audit-issue>` and `- **Lifecycle:** AUDIT` via
 //     `write-control-snapshot.mjs`'s validated write path;
 //   - verifies the write with a fresh read-back before returning success — the actual
@@ -192,13 +198,55 @@ export function verifyAuditIssueMatches(auditView, { mergeCommitOid, executionIs
   return { ok: true };
 }
 
-// Pure. Composes the proposed control body: applies Stage 2/Lifecycle via
-// `upsertControlBullet` — every other field (Execution, PR, Stage 1, Route, Blocker, Founder
+// Pure. Re-validates the execution pointer, PR pointer, and lifecycle against `body` — the
+// exact same three authority checks `run()` performs against its *initial* control-Issue
+// read — and then composes the proposed body applying Stage 2/Lifecycle via
+// `upsertControlBullet`; every other field (Execution, PR, Stage 1, Route, Blocker, Founder
 // decision) is left exactly as-is.
-export function composeAuditFinalizedControlBody(body, { auditIssue }) {
+//
+// Stage 1 review finding (P1) on PR #562: the initial-read validation alone left a window, up
+// to and including the pre-write re-read itself, in which a concurrent controller could change
+// the control Issue's Lifecycle (e.g. to BLOCKED/CORRECTION), its Execution/PR pointer, or
+// (when already AUDIT) record a *different* Stage 2 audit issue — and this function would still
+// unconditionally overwrite Stage 2/Lifecycle from whatever `body` it was given, silently
+// clobbering that newer state and reporting `FINALIZED`. `run()` now calls this against
+// `latestBody` (the re-read taken immediately before compose/write) rather than trusting the
+// original pre-fetch body's already-passed checks, so an intervening edit is caught here
+// instead of surviving into the write.
+export function composeAuditFinalizedControlBody(body, { auditIssue, executionIssue, pr }) {
+  const executionCheck = verifyExecutionMatchesAudit(body, executionIssue);
+  if (!executionCheck.ok) {
+    return { ok: false, reason: `pre-write re-check: ${executionCheck.reason}` };
+  }
+  const prPointerCheck = verifyControlPrMatches(body, pr);
+  if (!prPointerCheck.ok) {
+    return { ok: false, reason: `pre-write re-check: ${prPointerCheck.reason}` };
+  }
+  const currentLifecycle = parseControlBullet(body, "Lifecycle");
+  if (currentLifecycle === null || !ALLOWED_PRE_FINALIZE_LIFECYCLE.has(currentLifecycle.trim())) {
+    return {
+      ok: false,
+      reason:
+        `pre-write re-check: control Issue's current Lifecycle (${JSON.stringify(currentLifecycle)}) is not one of ` +
+        `the recognized pre-finalize values (${[...ALLOWED_PRE_FINALIZE_LIFECYCLE].join(", ")}) — refusing to ` +
+        "overwrite Stage 2/Lifecycle state this script was not authorized to transition",
+    };
+  }
+  if (currentLifecycle.trim() === "AUDIT") {
+    const stage2Field = parseControlBullet(body, "Stage 2");
+    if (stage2Field === null || stage2Field.trim() !== `#${auditIssue}`) {
+      return {
+        ok: false,
+        reason:
+          `pre-write re-check: control Issue is already Lifecycle: AUDIT but its Stage 2 pointer is ` +
+          `${JSON.stringify(stage2Field)}, not the given --audit-issue #${auditIssue} — refusing to overwrite a ` +
+          "different already-recorded audit issue's breakpoint",
+      };
+    }
+  }
   let next = upsertControlBullet(body, "Stage 2", `#${auditIssue}`);
   next = upsertControlBullet(next, "Lifecycle", "AUDIT");
-  return next;
+  return { ok: true, body: next };
 }
 
 // Pure. Re-parses a freshly-read control body and confirms it actually carries the exact
@@ -320,10 +368,14 @@ export async function run(
     return unverified({ controlIssue, executionIssue, pr, auditIssue, reason: auditMatchCheck.reason });
   }
 
-  // Re-read the control Issue immediately before composing/writing (mirroring
-  // finalize-pr-breakpoint.mjs's own narrowing of the concurrent-edit race window): the checks
-  // above only ever touch the Stage 2/Lifecycle bullets this script composes, so an
-  // intervening edit to any other field survives into this write instead of being clobbered.
+  // Re-read the control Issue immediately before composing/writing, then re-validate the
+  // execution-pointer, PR-pointer, and lifecycle authority checks against *this* fresher body
+  // inside `composeAuditFinalizedControlBody` itself (Stage 1 review finding, P1, on PR #562) —
+  // not merely against the stale pre-fetch `body` read above. `composeAuditFinalizedControlBody`
+  // only ever touches the Stage 2/Lifecycle bullets it composes, so an intervening edit to any
+  // other field survives into this write instead of being clobbered, while an intervening edit
+  // to Lifecycle/Execution/PR/Stage 2 itself is now caught and refused here rather than
+  // silently overwritten.
   let latestBody;
   try {
     latestBody = await ghIssueViewImpl({ repo, controlIssue });
@@ -331,11 +383,14 @@ export async function run(
     return unverified({ controlIssue, executionIssue, pr, auditIssue, reason: `pre-write control re-read failed: ${err.message}` });
   }
 
-  const proposedBody = composeAuditFinalizedControlBody(latestBody, { auditIssue });
+  const composed = composeAuditFinalizedControlBody(latestBody, { auditIssue, executionIssue, pr });
+  if (!composed.ok) {
+    return unverified({ controlIssue, executionIssue, pr, auditIssue, reason: composed.reason });
+  }
 
   let writeResult;
   try {
-    writeResult = await writeControlSnapshotImpl({ repo, controlIssue, proposedBody });
+    writeResult = await writeControlSnapshotImpl({ repo, controlIssue, proposedBody: composed.body });
   } catch (err) {
     return unverified({ controlIssue, executionIssue, pr, auditIssue, reason: `write-control-snapshot.mjs threw: ${err.message}` });
   }

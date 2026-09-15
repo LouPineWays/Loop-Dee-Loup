@@ -171,11 +171,46 @@ test("verifyAuditIssueMatches: rejects a work-issue mismatch", () => {
 });
 
 test("composeAuditFinalizedControlBody / verifyAuditFinalizedBody round-trip", () => {
-  const composed = composeAuditFinalizedControlBody(REVIEW_BODY, { auditIssue: 559 });
-  assert.match(composed, /- \*\*Stage 2:\*\* #559/);
-  assert.match(composed, /- \*\*Lifecycle:\*\* AUDIT/);
-  assert.equal(verifyAuditFinalizedBody(composed, { auditIssue: 559 }).ok, true);
+  const composed = composeAuditFinalizedControlBody(REVIEW_BODY, { auditIssue: 559, executionIssue: 440, pr: 558 });
+  assert.equal(composed.ok, true);
+  assert.match(composed.body, /- \*\*Stage 2:\*\* #559/);
+  assert.match(composed.body, /- \*\*Lifecycle:\*\* AUDIT/);
+  assert.equal(verifyAuditFinalizedBody(composed.body, { auditIssue: 559 }).ok, true);
   assert.equal(verifyAuditFinalizedBody(REVIEW_BODY, { auditIssue: 559 }).ok, false);
+});
+
+test("composeAuditFinalizedControlBody: re-checks Lifecycle against the given body, not just its caller's earlier check — rejects a concurrently BLOCKED control Issue", () => {
+  const blockedBody = REVIEW_BODY.replace("Lifecycle:** REVIEW", "Lifecycle:** BLOCKED");
+  const result = composeAuditFinalizedControlBody(blockedBody, { auditIssue: 559, executionIssue: 440, pr: 558 });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /pre-write re-check:.*not one of the recognized/);
+});
+
+test("composeAuditFinalizedControlBody: re-checks the Execution pointer against the given body — rejects a concurrently changed pointer", () => {
+  const changedBody = REVIEW_BODY.replace("Execution:** #440", "Execution:** #999");
+  const result = composeAuditFinalizedControlBody(changedBody, { auditIssue: 559, executionIssue: 440, pr: 558 });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /pre-write re-check:.*names #999, not the given --execution-issue #440/);
+});
+
+test("composeAuditFinalizedControlBody: re-checks the PR pointer against the given body — rejects a concurrently changed pointer", () => {
+  const changedBody = REVIEW_BODY.replace("PR:** #558", "PR:** #777");
+  const result = composeAuditFinalizedControlBody(changedBody, { auditIssue: 559, executionIssue: 440, pr: 558 });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /pre-write re-check:.*names #777, not the given --pr #558/);
+});
+
+test("composeAuditFinalizedControlBody: already-AUDIT body with a different recorded Stage 2 pointer is refused, not overwritten", () => {
+  const differentAuditBody = ALREADY_AUDIT_BODY.replace("Stage 2:** #559", "Stage 2:** #12345");
+  const result = composeAuditFinalizedControlBody(differentAuditBody, { auditIssue: 559, executionIssue: 440, pr: 558 });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /already Lifecycle: AUDIT but its Stage 2 pointer is "#12345"/);
+});
+
+test("composeAuditFinalizedControlBody: already-AUDIT body with the matching Stage 2 pointer is accepted (idempotent rerun)", () => {
+  const result = composeAuditFinalizedControlBody(ALREADY_AUDIT_BODY, { auditIssue: 559, executionIssue: 440, pr: 558 });
+  assert.equal(result.ok, true);
+  assert.match(result.body, /- \*\*Stage 2:\*\* #559/);
 });
 
 // -- run(): end-to-end -----------------------------------------------------------------
@@ -310,6 +345,33 @@ test("run(): a control Issue whose current Lifecycle is neither REVIEW nor AUDIT
   );
   assert.equal(result.state, "AUDIT_BREAKPOINT_UNVERIFIED");
   assert.match(result.reason, /not one of the recognized/);
+});
+
+test("run(): a concurrent Lifecycle change landing between the initial read and the pre-write re-read is refused, not clobbered — Stage 1 review finding (P1) on PR #562", async () => {
+  // The initial `ghIssueViewImpl` call (used for the up-front authority checks) still returns
+  // REVIEW; the second call — the pre-write re-read — returns a body a concurrent controller
+  // has since moved to BLOCKED. Without re-validating against the fresher body, `run()` would
+  // otherwise still write Lifecycle: AUDIT over top of that newer BLOCKED state.
+  let calls = 0;
+  let writeAttempted = false;
+  const result = await run(
+    { repo: "o/r", controlIssue: 445, executionIssue: 440, pr: 558, auditIssue: 559 },
+    {
+      ghIssueViewImpl: async () => {
+        calls += 1;
+        return calls === 1 ? REVIEW_BODY : REVIEW_BODY.replace("Lifecycle:** REVIEW", "Lifecycle:** BLOCKED");
+      },
+      ghPrViewImpl: async () => MERGED_PR_VIEW,
+      ghAuditIssueViewImpl: async () => MATCHING_AUDIT_VIEW,
+      writeControlSnapshotImpl: async () => {
+        writeAttempted = true;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.state, "AUDIT_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /pre-write re-check:.*not one of the recognized/);
+  assert.equal(writeAttempted, false, "must never write once the pre-write re-check finds a concurrently changed Lifecycle");
 });
 
 test("run(): already-AUDIT control Issue with a matching Stage 2 bullet is a safe idempotent no-op success", async () => {
