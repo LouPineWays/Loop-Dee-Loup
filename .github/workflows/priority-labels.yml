@@ -2,13 +2,12 @@ name: Priority labels
 
 # Loop-Dee-Loup's own backlog lives on GitHub Issues as priority:now / priority:soon /
 # priority:later / priority:wishes labels rather than a separate ordinal file (see
-# docs/priority-horizons.md, which replaced the retired Burn Order in issue #192). GitHub
-# has no native mutually-exclusive label group, so this workflow is the "obvious detection"
-# mechanism: it fires whenever a label lands on an Issue and fails loudly if that Issue now
-# carries more than one priority:* label. workflow_dispatch allows an on-demand full scan.
+# docs/priority-horizons.md). Idea-intake issues expose that same choice as a structured
+# "Priority horizon" field; this workflow deterministically projects the selected value
+# into exactly one priority:* label, then runs the existing integrity check for every issue.
 on:
   issues:
-    types: [labeled]
+    types: [opened, edited, labeled, unlabeled]
   workflow_dispatch: {}
 
 concurrency:
@@ -17,7 +16,7 @@ concurrency:
 
 permissions:
   contents: read
-  issues: read
+  issues: write
 
 jobs:
   verify:
@@ -25,6 +24,53 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Project Idea intake priority horizon into its canonical label
+        if: >-
+          github.event.issue.number &&
+          contains(github.event.issue.labels.*.name, 'idea-intake')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const body = issue.body || "";
+            const match = body.match(/^### Priority horizon\s*\n+\s*(Now|Soon|Later|Wishes)\s*$/mi);
+
+            if (!match) {
+              core.setFailed(
+                'idea-intake issue is missing a canonical "Priority horizon" value (Now / Soon / Later / Wishes)'
+              );
+              return;
+            }
+
+            const desired = `priority:${match[1].toLowerCase()}`;
+            const current = issue.labels.map((label) =>
+              typeof label === "string" ? label : label.name
+            );
+            const priorityLabels = current.filter((name) => name.startsWith("priority:"));
+
+            for (const stale of priorityLabels) {
+              if (stale === desired) continue;
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  name: stale,
+                });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+            }
+
+            if (!current.includes(desired)) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: [desired],
+              });
+            }
 
       - name: Check for conflicting priority-horizon labels
         env:
