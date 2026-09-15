@@ -93,6 +93,7 @@ body:
     attributes:
       label: Current blocker
       description: Write None, or the current blocking condition — a failed gate, an external dependency, or a founder decision — regardless of whether it needs founder action.
+      value: "None"
     validations:
       required: true
   - type: textarea
@@ -100,6 +101,7 @@ body:
     attributes:
       label: Founder interrupt
       description: Write None, or one concise unresolved question/manual action and why existing authority cannot settle it.
+      value: "None"
     validations:
       required: true
   - type: textarea
@@ -115,5 +117,6 @@ body:
         traverse every child), and set State to DECOMPOSED — this issue then closes as the durable
         decomposition record, not as a sequential pointer to "the next" child. Do not name only the
         first known slice while leaving others uncreated.
+      value: "None"
     validations:
       required: true
