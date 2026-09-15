@@ -17,7 +17,7 @@ Four mutually exclusive labels express the founder's current execution horizon f
 - **`priority:later`** — more abstract work that is worth retaining for future consideration but whose benefit, mechanism, scope, or need is not yet concrete enough to place in the near-term mechanical queue. Research, design exploration, methodology refinement, and unproven optimization hypotheses normally begin here.
 - **`priority:wishes`** — optional nice-to-haves worth preserving but currently lower-value and lower-commitment than Later work. Wishes are typically abstract, externally oriented, convenience-oriented, or otherwise nonessential to the founder's current operating goals. They are not rejected ideas.
 
-An Issue carries at most one of these labels at a time. `tools/check-priority-labels.mjs`, run by `.github/workflows/priority-labels.yml` whenever a label lands on an Issue, fails loudly if that Issue now carries more than one `priority:*` label; run it with no arguments to scan every open issue on demand.
+An Issue carries at most one of these labels at a time. For an `idea-intake` Issue, the template's structured `Priority horizon` selection is projected deterministically by `.github/workflows/priority-labels.yml` into the matching canonical label (`Now` → `priority:now`, and likewise for Soon/Later/Wishes); editing the selection replaces any stale priority label rather than accumulating another one. The same workflow then runs `tools/check-priority-labels.mjs`, which fails loudly if any Issue still carries more than one `priority:*` label; run that script with no arguments to scan every open issue on demand.
 
 Within one horizon, relative order is intentionally unspecified by default. Two Issues carrying the same horizon label are peers unless the founder records a concrete local sequencing decision. A one-off instruction such as “this is the first Soon item after the current Now set” may be recorded in the relevant Issue/control state when it materially affects execution, but do not introduce ordinals, numbered labels, or a synchronized JSON rank file merely to rank an entire horizon.
 
@@ -31,7 +31,7 @@ Pure lifecycle-evidence/reference artifacts that are intentionally not executabl
 
 ## Intake
 
-The founder logs a raw idea with the `idea-intake` issue template (`.github/ISSUE_TEMPLATE/idea-intake.yml`) — a couple of short fields, fast to fill from a phone, no free-form issue writing required.
+The founder logs a raw idea with the `idea-intake` issue template (`.github/ISSUE_TEMPLATE/idea-intake.yml`) — short structured fields plus a required `Priority horizon` dropdown, fast to fill from a phone, no free-form issue writing required. The selected horizon is durable input: the priority-label workflow projects it into GitHub's canonical `priority:*` label automatically; the founder should not need a second bookkeeping step to add the matching label.
 
 ## Conversion
 
