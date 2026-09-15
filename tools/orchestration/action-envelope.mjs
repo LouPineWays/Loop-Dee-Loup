@@ -119,13 +119,25 @@ const ENVELOPES = {
   // -- next-review-transition-gate.mjs -----------------------------------------------------
   AMBIGUOUS: { mode: ENVELOPE_MODES.NONE, authorizedActions: [] },
   NO_ACTION_YET: { mode: ENVELOPE_MODES.NONE, authorizedActions: [] },
+  // Issue #561 (live #559/#445/PR #558 reproduction): the prior authorized order —
+  // merge-pr, trigger-stage2, write-control-snapshot — let the independent Stage 2 reviewer
+  // trigger race ahead of the durable AUDIT projection: PR #558 merged, Audit Issue #559 was
+  // created and triggered, and Codex read control #445 while it still said `Lifecycle:
+  // REVIEW`, returning BLOCKED. `trigger-stage2` is split into its own two ordered actions —
+  // `create-stage2-audit-issue` (open the fresh audit-control-issue and verify it by direct
+  // read, docs/bounded-review-cycle.md Stage 2 steps 2-3) and `post-stage2-reviewer-trigger`
+  // (post the `@codex review` trigger, step 4) — with `write-control-snapshot` (in practice,
+  // `tools/orchestration/finalize-audit-breakpoint.mjs`'s compose-write-verify sequence)
+  // required strictly between them. The reviewer trigger is authorized only after the control
+  // snapshot durably records the AUDIT state and the exact Stage 2 reference, and that write
+  // has been verified — never before.
   STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2: {
     mode: ENVELOPE_MODES.BOUNDED,
-    authorizedActions: ["merge-pr", "trigger-stage2", "write-control-snapshot"],
+    authorizedActions: ["merge-pr", "create-stage2-audit-issue", "write-control-snapshot", "post-stage2-reviewer-trigger"],
   },
   STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2: {
     mode: ENVELOPE_MODES.BOUNDED,
-    authorizedActions: ["merge-pr", "trigger-stage2", "write-control-snapshot"],
+    authorizedActions: ["merge-pr", "create-stage2-audit-issue", "write-control-snapshot", "post-stage2-reviewer-trigger"],
   },
   STAGE1_CORRECTION_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-correction-worker"] },
   STAGE2_CORRECTION_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-correction-worker"] },
@@ -293,8 +305,8 @@ export function classifyEnvelopeCompliance(state, actionsTaken = [], context = {
 
   // Stage 1 finding on PR #534: checking `authorizedActions.includes(action)` alone treats the
   // list as a set, so a duplicated action (two `dispatch-unit-wave` calls) or a reordered
-  // sequence (`write-control-snapshot, trigger-stage2, merge-pr` instead of the declared
-  // `merge-pr, trigger-stage2, write-control-snapshot`) both passed as compliant even though a
+  // sequence (e.g. `write-control-snapshot` before `merge-pr` instead of the declared order)
+  // both passed as compliant even though a
   // bounded/chain envelope authorizes exactly one occurrence of each named action, in the order
   // the envelope itself declares. `seenAuthorized` and `lastAuthorizedIndex` enforce both: an
   // authorized action already performed once, or one performed out of the envelope's own
