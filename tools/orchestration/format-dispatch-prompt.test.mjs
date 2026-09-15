@@ -352,6 +352,27 @@ test("formatStage1CorrectionWorkerDispatchPrompt throws for missing/invalid requ
   assert.throws(() => formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 12.5, issue: 570, pr: 569 }));
 });
 
+// Stage 1 review finding on this PR (P1): direct-reference mode's documented no-work-issue path
+// (next-review-transition-gate.mjs requires "--issue none" alongside "--pr"/"--head") produces a
+// genuine STAGE1_CORRECTION_REQUIRED verdict whose `issue` field is the literal string "none",
+// not a real issue number — e.g. a consumer-sync PR with no separate work Issue. The formatter
+// must accept that sentinel rather than throwing, and must not render an Execution Issue
+// reference (or "#NaN") when it is present.
+test('formatStage1CorrectionWorkerDispatchPrompt accepts the "none" sentinel for issue (direct-reference no-work-issue path) and omits the Execution Issue reference', () => {
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ issue: "none", pr: 569 });
+  assert.match(prompt, /^Stage 1 correction worker dispatch\./);
+  assert.match(prompt, /#569/);
+  assert.ok(!prompt.includes("Execution Issue"));
+  assert.ok(!prompt.includes("#NaN"));
+  assert.ok(!prompt.includes("none"), 'the literal sentinel text "none" must not leak into the rendered prompt');
+});
+
+test('formatStage1CorrectionWorkerDispatchPrompt still renders a Controlling Issue line alongside the "none" issue sentinel', () => {
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: "none", pr: 569 });
+  assert.match(prompt, /Controlling Issue: #571\./);
+  assert.ok(!prompt.includes("Execution Issue"));
+});
+
 test("formatStage2CorrectionWorkerDispatchPrompt includes the exact Audit Issue and controlling Issue references", () => {
   const prompt = formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: 559 });
   assert.match(prompt, /^Stage 2 correction worker dispatch\./);
@@ -470,6 +491,28 @@ test("CLI: piped STAGE1_CORRECTION_REQUIRED without a controlIssue (direct-refer
   assert.ok(!result.stdout.includes("Controlling Issue"));
 });
 
+// Stage 1 review finding on this PR (P1): the live shape next-review-transition-gate.mjs emits
+// for its documented "--issue none" no-work-issue path (direct-reference mode, e.g. a
+// consumer-sync PR review-worthy under Stage 1 with no separate work Issue) — `issue` is the
+// literal string "none", not a number. Previously `Number("none")` produced NaN and the
+// formatter threw, exiting 2 and stranding this exact authorized dispatch.
+test('CLI: piped STAGE1_CORRECTION_REQUIRED with issue "none" (direct-reference no-work-issue path) succeeds instead of stranding on NaN', async () => {
+  const result = await runCli({
+    state: "STAGE1_CORRECTION_REQUIRED",
+    stopAfter: true,
+    repo: "o/r",
+    pr: 569,
+    head: "abc1234",
+    issue: "none",
+    actionEnvelope: { mode: "bounded", authorizedActions: ["dispatch-correction-worker"] },
+  });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Stage 1 correction worker dispatch\./);
+  assert.match(result.stdout, /#569/);
+  assert.ok(!result.stdout.includes("Execution Issue"));
+  assert.ok(!result.stdout.includes("#NaN"));
+});
+
 test("CLI: piped STAGE2_CORRECTION_REQUIRED selects the Stage 2 correction template and succeeds, without the audit narrative", async () => {
   const result = await runCli({
     state: "STAGE2_CORRECTION_REQUIRED",
@@ -513,6 +556,21 @@ test("CLI: explicit --kind stage1-correction selects the Stage 1 correction temp
   );
   assert.equal(result.status, 0);
   assert.match(result.stdout, /^Stage 1 correction worker dispatch\./);
+});
+
+test('CLI: explicit --kind stage1-correction --issue none (direct-reference no-work-issue path) succeeds', async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const scriptPath = fileURLToPath(new URL("./format-dispatch-prompt.mjs", import.meta.url));
+  const result = spawnSync(
+    process.execPath,
+    [scriptPath, "--kind", "stage1-correction", "--issue", "none", "--pr", "569"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Stage 1 correction worker dispatch\./);
+  assert.ok(!result.stdout.includes("Execution Issue"));
+  assert.ok(!result.stdout.includes("#NaN"));
 });
 
 test("CLI: explicit --kind stage2-correction selects the Stage 2 correction template", async () => {

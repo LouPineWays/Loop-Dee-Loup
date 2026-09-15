@@ -246,21 +246,40 @@ export function formatIntegrationWorkerDispatchPrompt({ controlIssue, executionI
 // this verdict without a thin control Issue to name — the template renders the "Controlling
 // Issue" line only when one is actually present, never a fabricated placeholder.
 //
+// Stage 1 review finding on this PR (P1): direct-reference mode's `--issue` also accepts the
+// explicit "none" sentinel for the documented no-work-issue path (next-review-transition-gate.mjs
+// requires "--issue none" alongside "--pr"/"--head" precisely so a review-worthy PR with no
+// separate work Issue — e.g. a consumer-sync update — can still resolve). That sentinel string
+// flows straight through the gate's own `context` spread into the verdict's `issue` field
+// unmodified. Coercing it with `Number("none")` produces `NaN`, which `isPositiveInteger` rejects,
+// so this formatter previously threw for exactly that genuine, authorized verdict shape — the
+// only case `STAGE1_CORRECTION_REQUIRED` can validly carry a non-issue `issue` value. `issue` is
+// therefore accepted as either a positive integer or the literal string "none"; the Execution
+// Issue reference is rendered only when a real issue is present.
+//
 // Deliberately carries no finding text, review comment excerpts, or acceptance-criteria
-// restatement: the dispatched correction worker reads PR #<pr>'s own current Stage 1 review and
-// Execution Issue #<issue> directly from GitHub, exactly as every other template in this file
-// hands over durable references instead of restated content.
+// restatement: the dispatched correction worker reads PR #<pr>'s own current Stage 1 review (and,
+// when present, Execution Issue #<issue>) directly from GitHub, exactly as every other template
+// in this file hands over durable references instead of restated content.
 export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null, issue, pr }) {
-  if (!isPositiveInteger(issue) || !isPositiveInteger(pr)) {
-    throw new Error("formatStage1CorrectionWorkerDispatchPrompt requires issue and pr to be positive integers");
+  if (!isPositiveInteger(pr)) {
+    throw new Error("formatStage1CorrectionWorkerDispatchPrompt requires pr to be a positive integer");
+  }
+  const hasExecutionIssue = issue !== "none";
+  if (hasExecutionIssue && !isPositiveInteger(issue)) {
+    throw new Error(
+      'formatStage1CorrectionWorkerDispatchPrompt requires issue to be a positive integer or the literal "none" sentinel',
+    );
   }
   if (controlIssue !== null && controlIssue !== undefined && !isPositiveInteger(controlIssue)) {
     throw new Error("formatStage1CorrectionWorkerDispatchPrompt requires controlIssue to be a positive integer when present");
   }
+  const executionLine = hasExecutionIssue ? ` Execution Issue: #${issue}.` : "";
   const controlLine = controlIssue != null ? ` Controlling Issue: #${controlIssue}.` : "";
+  const executionReadClause = hasExecutionIssue ? ` and Execution Issue #${issue}` : "";
   return (
-    `Stage 1 correction worker dispatch. Execution Issue: #${issue}. PR: #${pr}.${controlLine}\n\n` +
-    `Read PR #${pr}'s current Stage 1 review and Execution Issue #${issue} directly from GitHub to recover the ` +
+    `Stage 1 correction worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
+    `Read PR #${pr}'s current Stage 1 review${executionReadClause} directly from GitHub to recover the ` +
     `findings and correction authority — they were not restated here on purpose. Verify and apply one ` +
     `consolidated correction per docs/bounded-review-cycle.md, push it, and stop: do not re-trigger review, ` +
     `merge, or begin Stage 2 in this context.`
@@ -390,8 +409,21 @@ const CLI_FLAG_BY_FIELD = {
 // JSON object, applying each field's own type coercion (issue numbers to Number,
 // replanRequiredUnitIds to an array — comma-split for the CLI flag, passed through as-is from
 // piped JSON where the gate already emits a real array).
+//
+// Stage 1 review finding on this PR (P1): `issue` is the one field of this group that can
+// legitimately carry the literal string "none" (next-review-transition-gate.mjs's
+// direct-reference no-work-issue path — see formatStage1CorrectionWorkerDispatchPrompt's own
+// comment). `Number("none")` is `NaN`, which is not a valid sentinel the formatter recognizes,
+// so "none" must pass through unchanged rather than being coerced. `controlIssue`/
+// `executionIssue`/`pr`/`auditIssue` have no such sentinel — a real GitHub reference or absent —
+// so they keep the plain Number coercion.
 function readField(field, source, { isCli }) {
-  if (field === "controlIssue" || field === "executionIssue" || field === "issue" || field === "pr" || field === "auditIssue") {
+  if (field === "issue") {
+    const raw = isCli ? source[CLI_FLAG_BY_FIELD[field]] : source[field];
+    if (raw == null) return null;
+    return raw === "none" ? "none" : Number(raw);
+  }
+  if (field === "controlIssue" || field === "executionIssue" || field === "pr" || field === "auditIssue") {
     const raw = isCli ? source[CLI_FLAG_BY_FIELD[field]] : source[field];
     return raw != null ? Number(raw) : null;
   }
