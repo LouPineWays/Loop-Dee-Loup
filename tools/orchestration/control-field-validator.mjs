@@ -52,6 +52,7 @@
 
 import {
   parseControlBullet,
+  parseHeadingField,
   parseExecutionPointer,
   isNoneSentinel,
   findNearDuplicateBulletLabels,
@@ -152,6 +153,40 @@ function exactDuplicateBulletConflict(body, label) {
   };
 }
 
+// Pure. Issue #581 (the #577 live reproduction): refuses a proposed control body that would
+// durably carry contradictory lifecycle truth across the canonical "### State" heading (the
+// Issue Form's own lifecycle field) and the legacy ad hoc "- **Lifecycle:**" bullet — the exact
+// #577 shape ("### State" stayed READY while "- **Lifecycle:**" alone advanced to REVIEW). Every
+// reader of lifecycle state (ready-dispatch-gate.mjs's own `parseControlBullet(body,
+// "Lifecycle") ?? parseHeadingField(body, "State")` fallback, reused identically by
+// finalize-pr-breakpoint.mjs and next-review-transition-gate.mjs) already treats these two
+// fields as synonyms for one meaning; this is the write-side half that keeps a proposed body
+// from ever asserting two different values for that one meaning. A body carrying only one
+// representation (the supported legacy-bullet-only or template-heading-only shapes) is not a
+// conflict — this only fires when both are present and disagree.
+//
+// upsertControlBullet's own hybrid-write fix (this same issue) is the earlier, preferred
+// correction point: a lifecycle transition composed through that helper always converges both
+// representations to the same new value before a body ever reaches this validator. This check
+// is the fail-closed backstop for a body that reached write-control-snapshot.mjs some other
+// way — e.g. a session hand-composing a proposed body directly — without ever going through
+// that canonicalizing helper.
+export function validateLifecycleStateCoherence(body) {
+  const bullet = parseControlBullet(body, "Lifecycle");
+  const heading = parseHeadingField(body, "State");
+  if (bullet === null || heading === null) return { ok: true };
+  if (bullet.trim() === heading.trim()) return { ok: true };
+  return {
+    ok: false,
+    label: "Lifecycle/State",
+    reason:
+      `"Lifecycle"/"State" lifecycle representations are contradictory: the ad hoc ` +
+      `"- **Lifecycle:**" bullet reads ${JSON.stringify(bullet)} while the canonical "### State" ` +
+      `heading reads ${JSON.stringify(heading)} — refusing to persist a hybrid body carrying two ` +
+      "different lifecycle values for the same control Issue",
+  };
+}
+
 // Pure. Validates one field spec against a proposed control-Issue body. Returns
 // { ok: true, label, ... } or { ok: false, label, reason }.
 export function validateControlField(body, spec) {
@@ -201,6 +236,8 @@ export function validateControlField(body, spec) {
 // built for.
 export function validateControlSnapshot(body, { fields = DEFAULT_CONTROL_FIELD_SPECS } = {}) {
   const errors = [];
+  const coherence = validateLifecycleStateCoherence(body);
+  if (!coherence.ok) errors.push(coherence.reason);
   for (const spec of fields) {
     const result = validateControlField(body, spec);
     if (!result.ok) errors.push(result.reason);

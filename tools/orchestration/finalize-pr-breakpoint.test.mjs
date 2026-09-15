@@ -78,6 +78,14 @@ None
 None
 `;
 
+// Issue #581's own #577 live reproduction: the exact hybrid shape naming both a `### State`
+// heading (READY) and a redundant ad hoc "- **Lifecycle:**" bullet (also READY, per #577's own
+// authored body) inside the template's "### Current state" field.
+const HYBRID_577_BODY = STATE_HEADING_BODY.replace(
+  "### Current state\n\n- **Execution:** #559",
+  "### Current state\n\n- **Lifecycle:** READY\n- **Execution:** #559",
+);
+
 const LINKED_PR_VIEW_559 = { headRefName: "issue-559-some-fix", headRefOid: "abc1234", body: "Addresses #559.", state: "OPEN" };
 
 // A `gh pr view` result satisfying the Shared Contract's PR-to-execution-Issue linkage
@@ -192,6 +200,18 @@ test("composeFinalizedControlBody: falls back to the '### State' heading when no
   // Every other field must survive untouched.
   assert.match(result.body, /- \*\*Execution:\*\* #559/);
   assert.match(result.body, /- \*\*Route:\*\* implementation worker/);
+});
+
+// -- Issue #581 (the #577 live reproduction): hybrid State/Lifecycle drift --------------------
+
+test("composeFinalizedControlBody: the exact #577 hybrid shape (State=READY, Lifecycle=READY) converges both representations to REVIEW, never leaving '### State' stale (Required check 1)", () => {
+  const result = composeFinalizedControlBody(HYBRID_577_BODY, { pr: 578, stage1Value: "requested" });
+  assert.equal(result.ok, true);
+  assert.match(result.body, /### State\n\nREVIEW/);
+  assert.doesNotMatch(result.body, /### State\n\nREADY/);
+  assert.match(result.body, /- \*\*Lifecycle:\*\* REVIEW/);
+  assert.match(result.body, /- \*\*PR:\*\* #578/);
+  assert.match(result.body, /- \*\*Execution:\*\* #559/);
 });
 
 // -- Issue #450 (the #428 live reproduction): canonicalizing the legacy pre-Stage-2 sentinel --
@@ -380,6 +400,34 @@ test("run(): issue #563 regression — a control Issue authored with '### State'
   assert.match(writeCalls[0], /- \*\*PR:\*\* #562/);
   assert.match(writeCalls[0], /- \*\*Stage 1:\*\* requested/);
   assert.match(writeCalls[0], /### State\n\nREVIEW/);
+});
+
+test("run(): issue #581 regression — replaying the exact #577 hybrid transition (State=READY, Lifecycle=READY -> REVIEW) end to end leaves one coherent durable value, never a stale '### State' (Required check 1)", async () => {
+  let currentBody = HYBRID_577_BODY;
+  const writeCalls = [];
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 560, executionIssue: 559, pr: 578, head: "abc1234" },
+    {
+      ghIssueViewImpl: async () => currentBody,
+      ghPrViewImpl: makePrViewStub(LINKED_PR_VIEW_559),
+      stage1GateRunImpl: makeStage1GateStub({ exitCode: 2, state: "PENDING" }),
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        writeCalls.push(proposedBody);
+        currentBody = proposedBody; // simulate the durable write actually landing
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "FINALIZED");
+  assert.equal(writeCalls.length, 1);
+  // Both lifecycle representations converge to REVIEW — the exact #577 drift (one advancing
+  // while the other stayed stale) can no longer occur.
+  assert.match(writeCalls[0], /### State\n\nREVIEW/);
+  assert.doesNotMatch(writeCalls[0], /### State\n\nREADY/);
+  assert.match(writeCalls[0], /- \*\*Lifecycle:\*\* REVIEW/);
+  assert.match(currentBody, /### State\n\nREVIEW/);
+  assert.match(currentBody, /- \*\*Lifecycle:\*\* REVIEW/);
 });
 
 test("run(): a caller claiming the PR crossed the breakpoint when no Stage 1 trigger actually exists fails closed, never reporting ordinary success", async () => {

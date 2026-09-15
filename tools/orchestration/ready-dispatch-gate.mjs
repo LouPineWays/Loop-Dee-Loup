@@ -378,7 +378,29 @@ export function upsertControlBullet(body, label, value) {
     }
     return line;
   });
-  if (replaced) return next.join("\n");
+  if (replaced) {
+    // Issue #581 (the #577 live reproduction): a hybrid body can carry *both* the ad hoc
+    // "- **Label:**" bullet just replaced above *and* this label's dedicated template heading
+    // (e.g. a control Issue authored with both "### State" and a redundant "- **Lifecycle:**"
+    // bullet). Updating only the bullet — the prior behavior — left the heading stale and
+    // durably contradictory the instant a lifecycle transition ran (#577: "### State" stayed
+    // READY while "- **Lifecycle:**" alone advanced to REVIEW). When the corresponding heading
+    // genuinely exists in the body too, this update is applied atomically to both
+    // representations so neither can be left behind — the same single call always converges
+    // both to the one new value, never silently updating only one and returning success. A body
+    // with only the bullet (the supported legacy-only shape) or only the heading (the supported
+    // template-only shape, handled further below) is unaffected: this branch only fires when
+    // both representations are actually present.
+    const headingLabel = HEADING_FIELD_LABELS[label.toLowerCase()];
+    if (headingLabel) {
+      const headingExists = lines.some((line) => line.trim() === `### ${headingLabel}`);
+      if (headingExists) {
+        const alsoUpdated = replaceHeadingFieldValue(next, headingLabel, value);
+        if (alsoUpdated) return alsoUpdated.join("\n");
+      }
+    }
+    return next.join("\n");
+  }
 
   const lifecycleIdx = lines.findIndex((line) => /^-\s*\*\*Lifecycle:\*\*/i.test(line));
   if (lifecycleIdx !== -1) {

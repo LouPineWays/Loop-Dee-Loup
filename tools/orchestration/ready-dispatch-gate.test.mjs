@@ -2000,6 +2000,61 @@ test("upsertControlBullet: chained Lifecycle/Blocker/Founder-decision updates on
   assert.ok(!lines.some((l) => /^-\s*\*\*(Blocker|Founder decision):\*\*/i.test(l)));
 });
 
+// Issue #581's own #577 live reproduction: a hybrid body carrying *both* the canonical
+// "### State" heading and a redundant ad hoc "- **Lifecycle:**" bullet. A lifecycle
+// transition run through upsertControlBullet must converge both representations to the same
+// new value, never silently update only one (the exact #577 drift: "### State" stayed READY
+// while "- **Lifecycle:**" alone advanced to REVIEW).
+
+function hybridTemplateShapedBody(lifecycleValue) {
+  return templateShapedBody()
+    .replace("READY_FOR_PLAN", lifecycleValue)
+    .replace("### Current state\n\n- **Execution:** #500", `### Current state\n\n- **Lifecycle:** ${lifecycleValue}\n- **Execution:** #500`);
+}
+
+test("upsertControlBullet: #577 hybrid equal values — a Lifecycle update converges both ### State and the ad hoc bullet to the new value", () => {
+  const body = hybridTemplateShapedBody("READY");
+  const next = upsertControlBullet(body, "Lifecycle", "REVIEW");
+  const lines = next.split("\n");
+  const stateHeadingIdx = lines.indexOf("### State");
+  assert.equal(lines[stateHeadingIdx + 2], "REVIEW");
+  const bulletLine = lines.find((l) => /^-\s*\*\*Lifecycle:\*\*/i.test(l));
+  assert.equal(bulletLine, "- **Lifecycle:** REVIEW");
+  // Still exactly one of each representation — no duplicate bullet/heading manufactured.
+  assert.equal(lines.filter((l) => l.trim() === "### State").length, 1);
+  assert.equal(lines.filter((l) => /^-\s*\*\*Lifecycle:\*\*/i.test(l)).length, 1);
+});
+
+test("upsertControlBullet: #577 exact reproduction — replaying the READY-to-REVIEW transition against the exact contradictory shape converges to one coherent value", () => {
+  // The literal #577 shape named in #581: "### State" reads READY while the redundant ad hoc
+  // bullet already reads REVIEW (i.e. the bullet had already drifted ahead before this
+  // transition runs again) -- proves the fix converges even a pre-existing disagreement to
+  // the transition's own new value, rather than only handling the equal-values case.
+  const body = hybridTemplateShapedBody("READY").replace("- **Lifecycle:** READY", "- **Lifecycle:** REVIEW");
+  const next = upsertControlBullet(body, "Lifecycle", "REVIEW");
+  const lines = next.split("\n");
+  const stateHeadingIdx = lines.indexOf("### State");
+  assert.equal(lines[stateHeadingIdx + 2], "REVIEW");
+  const bulletLine = lines.find((l) => /^-\s*\*\*Lifecycle:\*\*/i.test(l));
+  assert.equal(bulletLine, "- **Lifecycle:** REVIEW");
+});
+
+test("upsertControlBullet: hybrid body — repeated (idempotent) transition to the same value manufactures no duplicate fields", () => {
+  const once = upsertControlBullet(hybridTemplateShapedBody("READY"), "Lifecycle", "REVIEW");
+  const twice = upsertControlBullet(once, "Lifecycle", "REVIEW");
+  assert.equal(twice, once);
+  const lines = twice.split("\n");
+  assert.equal(lines.filter((l) => l.trim() === "### State").length, 1);
+  assert.equal(lines.filter((l) => /^-\s*\*\*Lifecycle:\*\*/i.test(l)).length, 1);
+});
+
+test("upsertControlBullet: a legacy Lifecycle-bullet-only body (no ### State heading at all) still updates only the bullet, unaffected by the hybrid fix", () => {
+  const body = "- **Lifecycle:** READY\n- **Execution:** #497\n- **Route:** implementation worker\n";
+  const next = upsertControlBullet(body, "Lifecycle", "REVIEW");
+  assert.equal(next, "- **Lifecycle:** REVIEW\n- **Execution:** #497\n- **Route:** implementation worker\n");
+  assert.ok(!next.includes("### State"));
+});
+
 test("probeExistingPlan: alreadyPlanned true with the canonical Plan Index URL when a valid plan already exists (the #500 shape)", async () => {
   const result = await probeExistingPlan(
     { repo: "LouPineWays/Loop-Dee-Loup", executionIssue: 500 },
