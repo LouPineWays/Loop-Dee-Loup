@@ -84,7 +84,36 @@ test("composeCorrectionControlBody: refuses a Lifecycle value this breakpoint is
 test("composeCorrectionControlBody: refuses when the control Issue's PR bullet does not match --pr", () => {
   const result = composeCorrectionControlBody(REVIEW_BODY, { pr: 999, correctedHead: CORRECTED, reviewedHead: REVIEWED });
   assert.equal(result.ok, false);
-  assert.match(result.reason, /PR bullet is "#573", expected "#999"/);
+  assert.match(result.reason, /PR bullet "#573" resolves to #573, expected #999/);
+});
+
+// Stage 1 review finding on PR #579 (P2): a raw "#<pr>" string comparison rejected two other
+// shapes control-field-validator.mjs's own write-time validator (and next-review-transition-
+// gate.mjs's read-time reader) already treat as a valid "PR" bullet.
+test("composeCorrectionControlBody: accepts a full pull-request URL as the PR bullet", () => {
+  const urlBody = REVIEW_BODY.replace("- **PR:** #573", "- **PR:** https://github.com/LouPineWays/Loop-Dee-Loup/pull/573");
+  const result = composeCorrectionControlBody(urlBody, { pr: 573, correctedHead: CORRECTED, reviewedHead: REVIEWED });
+  assert.equal(result.ok, true);
+});
+
+test("composeCorrectionControlBody: accepts \"#<pr>\" plus safe parenthetical annotation as the PR bullet", () => {
+  const annotatedBody = REVIEW_BODY.replace("- **PR:** #573", "- **PR:** #573 (retitled during review)");
+  const result = composeCorrectionControlBody(annotatedBody, { pr: 573, correctedHead: CORRECTED, reviewedHead: REVIEWED });
+  assert.equal(result.ok, true);
+});
+
+test("composeCorrectionControlBody: refuses a PR bullet expressed as an issue-kind URL", () => {
+  const wrongKindBody = REVIEW_BODY.replace("- **PR:** #573", "- **PR:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/573");
+  const result = composeCorrectionControlBody(wrongKindBody, { pr: 573, correctedHead: CORRECTED, reviewedHead: REVIEWED });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /names a issue-kind reference/);
+});
+
+test("composeCorrectionControlBody: refuses when the control Issue has no PR bullet at all", () => {
+  const noPrBody = REVIEW_BODY.replace("- **PR:** #573\n", "");
+  const result = composeCorrectionControlBody(noPrBody, { pr: 573, correctedHead: CORRECTED, reviewedHead: REVIEWED });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /has no "PR" bullet/);
 });
 
 test("composeCorrectionControlBody: idempotent — re-running against an already-finalized body reproduces the same bullet", () => {
@@ -246,8 +275,83 @@ test("run(): negative control — control tracks a different PR than --pr fails 
   );
   assert.equal(result.exitCode, 2);
   assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
-  assert.match(result.reason, /PR bullet is "#999", expected "#573"/);
+  assert.match(result.reason, /PR bullet "#999" resolves to #999, expected #573/);
   assert.equal(writeAttempted, false);
+});
+
+// Stage 1 review finding on PR #579 (P2): the original single `headCheck` ran before
+// `checkCorrectionDeltaImpl`'s own GitHub reads — a real window for a superseding push.
+test("run(): negative control — the PR head is superseded between the initial head check and the control write, fails closed before writing", async () => {
+  let prViewCalls = 0;
+  let writeAttempted = false;
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 571, executionIssue: 570, pr: 573, reviewedHead: REVIEWED, correctedHead: CORRECTED },
+    {
+      ghIssueViewImpl: async () => REVIEW_BODY,
+      ghPrViewImpl: async () => {
+        prViewCalls++;
+        // First read (the initial headCheck) still sees the corrected head as current; a
+        // second commit lands before the pre-finalize re-check runs.
+        return prViewCalls === 1 ? LINKED_PR_VIEW_570 : { ...LINKED_PR_VIEW_570, headRefOid: "superseded-head" };
+      },
+      checkCorrectionDeltaImpl: async () => correctionSatisfied(),
+      writeControlSnapshotImpl: async () => {
+        writeAttempted = true;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /does not match the PR's live head/);
+  assert.equal(writeAttempted, false, "a superseded head must never reach the control write");
+  assert.ok(prViewCalls >= 2, "the PR head must be re-checked immediately before finalizing, not trusted from the initial read alone");
+});
+
+test("run(): direct-reference mode also fails closed when the PR head is superseded before the pre-finalize re-check", async () => {
+  let prViewCalls = 0;
+  const result = await run(
+    { repo: "owner/repo", pr: 573, reviewedHead: REVIEWED, correctedHead: CORRECTED },
+    {
+      ghPrViewImpl: async () => {
+        prViewCalls++;
+        return prViewCalls === 1 ? LINKED_PR_VIEW_570 : { ...LINKED_PR_VIEW_570, headRefOid: "superseded-head" };
+      },
+      checkCorrectionDeltaImpl: async () => correctionSatisfied(),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /does not match the PR's live head/);
+});
+
+// Stage 1 review finding on PR #579 (P2): the original `executionCheck` ran only against the
+// body fetched before the pre-write re-read, never against `latestBody` itself.
+test("run(): negative control — the control Issue's Execution pointer changes between the initial read and the pre-write re-read, fails closed before writing", async () => {
+  let issueReadCalls = 0;
+  let writeAttempted = false;
+  const retargetedBody = REVIEW_BODY.replace("- **Execution:** #570", "- **Execution:** #999");
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 571, executionIssue: 570, pr: 573, reviewedHead: REVIEWED, correctedHead: CORRECTED },
+    {
+      ghIssueViewImpl: async () => {
+        issueReadCalls++;
+        // Initial read (verifyExecutionMatches) still names #570; the pre-write re-read sees a
+        // concurrent edit that retargeted Execution to #999.
+        return issueReadCalls === 1 ? REVIEW_BODY : retargetedBody;
+      },
+      ghPrViewImpl: makePrViewStub(LINKED_PR_VIEW_570),
+      checkCorrectionDeltaImpl: async () => correctionSatisfied(),
+      writeControlSnapshotImpl: async () => {
+        writeAttempted = true;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /names #999, not the given --execution-issue #570/);
+  assert.equal(writeAttempted, false, "a retargeted Execution pointer must never reach the control write");
 });
 
 test("run(): idempotency — re-running against an already-correctly-recorded disposition is a safe no-op success", async () => {

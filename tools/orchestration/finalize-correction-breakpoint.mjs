@@ -99,10 +99,12 @@ import {
   parseControlBullet,
   parseHeadingField,
   upsertControlBullet,
+  parseExecutionPointer,
 } from "./ready-dispatch-gate.mjs";
 import { verifyExecutionMatches, verifyPrLinkage, verifyPrHeadIsCurrent } from "./finalize-pr-breakpoint.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 import { checkCorrectionDelta } from "../review-watch/stage1-correction-gate.mjs";
+import { extractUrlPointerKinds } from "./control-field-validator.mjs";
 
 // Lifecycle values this script is authorized to write the `Stage 1` correction disposition
 // bullet over. `REVIEW` is the value `finalize-pr-breakpoint.mjs` itself establishes at the PR
@@ -143,12 +145,45 @@ export function composeCorrectionControlBody(body, { pr, correctedHead, reviewed
         `values this correction breakpoint is authorized to write over (${[...ALLOWED_LIFECYCLE_FOR_CORRECTION].join(", ")})`,
     };
   }
+  // Stage 1 review finding on PR #579 (P2): a raw-string comparison against the literal text
+  // "#<pr>" rejects two other shapes control-field-validator.mjs's own write-time validator
+  // (and next-review-transition-gate.mjs's read-time parseOptionalIssueRefGuarded) already
+  // treat as a valid "PR" bullet -- a full pull-request URL, and "#<pr>" followed by safe
+  // parenthetical annotation prose -- stranding an otherwise-valid correction because this
+  // function alone insists on canonical bare-hash text. Parse with the same pointer helper
+  // every other control-plane reader trusts and compare the *resolved* issue number, while
+  // still rejecting a URL-shaped reference of the wrong kind (an issue URL where a pull
+  // request is required).
   const prField = parseControlBullet(body, "PR");
-  if (prField === null || prField.trim() !== `#${pr}`) {
+  if (prField === null) {
     return {
       ok: false,
-      reason: `control Issue's PR bullet is ${JSON.stringify(prField)}, expected "#${pr}" -- refusing to persist a ` +
-        "correction disposition onto a control Issue that is not actually tracking this PR",
+      reason: `control Issue has no "PR" bullet to verify against (expected a reference to #${pr}) -- refusing to ` +
+        "persist a correction disposition onto a control Issue that is not actually tracking this PR",
+    };
+  }
+  const prPointer = parseExecutionPointer(prField);
+  if (!prPointer.ok) {
+    return {
+      ok: false,
+      reason: `control Issue's PR bullet ${JSON.stringify(prField)} is malformed: ${prPointer.reason}`,
+    };
+  }
+  const wrongKindRef = extractUrlPointerKinds(prField).find((p) => p.kind !== "pull");
+  if (wrongKindRef) {
+    return {
+      ok: false,
+      reason:
+        `control Issue's PR bullet ${JSON.stringify(prField)} names a ${wrongKindRef.kind}-kind reference ` +
+        `(#${wrongKindRef.number}), but the "PR" field requires a pull-kind reference`,
+    };
+  }
+  if (prPointer.issue !== pr) {
+    return {
+      ok: false,
+      reason:
+        `control Issue's PR bullet ${JSON.stringify(prField)} resolves to #${prPointer.issue}, expected #${pr} -- ` +
+        "refusing to persist a correction disposition onto a control Issue that is not actually tracking this PR",
     };
   }
   const stage1Value = correctionSatisfiedDispositionValue({ correctedHead, reviewedHead });
@@ -264,6 +299,24 @@ export async function run(
     });
   }
 
+  // Stage 1 review finding on PR #579 (P2): `headCheck` above ran once, before
+  // `checkCorrectionDeltaImpl`'s own GitHub reads (and, in control-Issue mode, before the
+  // Execution/PR-linkage reads too) -- a real window in which another commit can land on the
+  // PR. Re-fetch the PR's live head immediately before reporting success (direct-reference
+  // mode) or persisting the control write (control-Issue mode, right alongside the pre-write
+  // control re-read below) so a superseded head can never be finalized as CORRECTION_SATISFIED
+  // merely because it was still current when this run started.
+  let latestPrView;
+  try {
+    latestPrView = await ghPrViewImpl({ repo, pr });
+  } catch (err) {
+    return unverified({ pr, reason: `pre-finalize PR re-read failed: ${err.message}` });
+  }
+  const freshHeadCheck = verifyPrHeadIsCurrent(latestPrView, correctedHead);
+  if (!freshHeadCheck.ok) {
+    return unverified({ pr, reason: freshHeadCheck.reason });
+  }
+
   if (controlIssue === null) {
     return {
       exitCode: 0,
@@ -284,6 +337,16 @@ export async function run(
     latestBody = await ghIssueViewImpl({ repo, controlIssue });
   } catch (err) {
     return unverified({ pr, reason: `pre-write control re-read failed: ${err.message}` });
+  }
+
+  // Stage 1 review finding on PR #579 (P2): the original `executionCheck` above ran against the
+  // body fetched before this re-read -- if the control Issue's own Execution pointer changed in
+  // that window, this write would otherwise stamp Stage 1 correction evidence for
+  // `--execution-issue` onto a control Issue now tracking a *different* execution Issue.
+  // Re-verify against `latestBody` too, immediately before composing the write.
+  const latestExecutionCheck = verifyExecutionMatches(latestBody, executionIssue);
+  if (!latestExecutionCheck.ok) {
+    return unverified({ pr, reason: latestExecutionCheck.reason });
   }
 
   const composed = composeCorrectionControlBody(latestBody, { pr, correctedHead, reviewedHead });
