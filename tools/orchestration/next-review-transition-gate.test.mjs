@@ -58,6 +58,23 @@ test("parseOptionalIssueRef: the legacy 'not started' synonym is tolerated for t
   }
 });
 
+// Stage 1 review finding on PR #569: a "not started" value whose trailing explanation carries a
+// real issue/PR pointer is not mechanically unambiguous as pre-Stage-2 "none" -- it must fall
+// through to the ordinary reference parser (and resolve/invalidate exactly as any other Stage 2
+// value would) instead of being silently swallowed as "none".
+test("parseOptionalIssueRef: a 'not started' value contradicted by a real pointer in its suffix is never treated as 'none'", () => {
+  const hashForm = parseOptionalIssueRef("not started — previous audit #480", "Stage 2");
+  assert.notEqual(hashForm.kind, "none");
+  assert.deepEqual(hashForm, { kind: "issue", issue: 480 });
+
+  const urlForm = parseOptionalIssueRef(
+    "not started — see https://github.com/LouPineWays/Loop-Dee-Loup/issues/480",
+    "Stage 2",
+  );
+  assert.notEqual(urlForm.kind, "none");
+  assert.deepEqual(urlForm, { kind: "issue", issue: 480 });
+});
+
 // -- parseOptionalIssueRefGuarded (issue #493, the #440 near-duplicate-label regression) ----
 
 test("parseOptionalIssueRefGuarded: the exact #440 regression -- stale canonical 'Stage 2: #480' coexisting with live 'Stage 2 (current): #492' fails closed as ambiguous", () => {

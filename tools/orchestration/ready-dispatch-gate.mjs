@@ -569,9 +569,24 @@ export function isNoneSentinel(value) {
 // control-field-validator.mjs's write-time validator continues to reject this value outright
 // (it is not the canonical "none" sentinel and does not parse as a pointer), so a new write
 // cannot persist it and report success.
-const LEGACY_STAGE2_NOT_STARTED_PATTERN = /^not started\b/i;
+//
+// Stage 1 review finding on PR #569: the original pattern was a bare `^not started\b` prefix
+// test, so a contradictory value such as "not started — previous audit #480" also matched —
+// the trailing explanation was never inspected for a real pointer before the whole field was
+// treated as pre-Stage-2 `none`, letting `canonicalizePreStage2Bullet` erase a genuine audit
+// reference instead of leaving it to fail closed. The tolerated trailing explanation (e.g.
+// "not started — audit not yet triggered", #450's own demonstrated shape) is still accepted,
+// but only when it contains no parseable issue/PR reference — the same "#N" / ".../pull/N" /
+// ".../issues/N" shapes `parseExecutionPointer` above recognizes. A suffix carrying one of
+// those is no longer "mechanically unambiguous as Stage 2 has not started" (#450's own Required
+// Behavior #3), so it must not be canonicalized away.
+const LEGACY_STAGE2_NOT_STARTED_PATTERN = /^not started\b(.*)$/i;
+const SUFFIX_REFERENCE_PATTERN = /#\d+|\/(?:pull|issues)\/\d+/;
 export function isLegacyStage2NotStartedSentinel(value) {
-  return typeof value === "string" && LEGACY_STAGE2_NOT_STARTED_PATTERN.test(value.trim());
+  if (typeof value !== "string") return false;
+  const match = LEGACY_STAGE2_NOT_STARTED_PATTERN.exec(value.trim());
+  if (!match) return false;
+  return !SUFFIX_REFERENCE_PATTERN.test(match[1]);
 }
 
 // Pure. True when a raw `gh pr list` entry's own `headRefName`/`body` names execution Issue

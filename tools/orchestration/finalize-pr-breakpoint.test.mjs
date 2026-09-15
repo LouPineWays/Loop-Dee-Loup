@@ -210,6 +210,21 @@ test("canonicalizePreStage2Bullet: leaves an already-canonical 'none' value, a r
   assert.equal(canonicalizePreStage2Bullet("- **Stage 2:** pending\n"), "- **Stage 2:** pending\n");
 });
 
+// Stage 1 review finding on PR #569: a trailing explanation carrying a real issue/PR pointer
+// contradicts the "not started" reading and must not be erased by canonicalization.
+test("canonicalizePreStage2Bullet: leaves a contradictory 'not started' value carrying a real pointer untouched", () => {
+  assert.equal(
+    canonicalizePreStage2Bullet("- **Stage 2:** not started — previous audit #480\n"),
+    "- **Stage 2:** not started — previous audit #480\n",
+  );
+  assert.equal(
+    canonicalizePreStage2Bullet(
+      "- **Stage 2:** not started — see https://github.com/LouPineWays/Loop-Dee-Loup/issues/480\n",
+    ),
+    "- **Stage 2:** not started — see https://github.com/LouPineWays/Loop-Dee-Loup/issues/480\n",
+  );
+});
+
 const CONTROL_BODY_428_SHAPE_FOR_FINALIZE = `## Current state
 
 - **Lifecycle:** REVIEW
