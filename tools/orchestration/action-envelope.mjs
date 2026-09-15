@@ -131,9 +131,30 @@ const ENVELOPES = {
   // required strictly between them. The reviewer trigger is authorized only after the control
   // snapshot durably records the AUDIT state and the exact Stage 2 reference, and that write
   // has been verified — never before.
+  //
+  // Issue #586 (live #582/PR #583 reproduction): `next-review-transition-gate.mjs` proved
+  // ordinary Stage 1 satisfied and authorized this verdict, PR #583 merged, but the thin
+  // control Issue was never durably rewritten past `Stage 1: requested` — nothing mechanically
+  // required that write before `merge-pr` proceeded. `finalize-stage1-satisfied` (in practice,
+  // `tools/orchestration/finalize-stage1-satisfied-breakpoint.mjs`'s own compose-write-verify
+  // sequence) is authorized FIRST, strictly before `merge-pr`, so the durable `satisfied at
+  // <head>` disposition is persisted and verified before merge/Stage 2 setup can ever begin —
+  // the same "reorder the envelope itself, don't just add a prose reminder" fix issue #561
+  // already applied to the reviewer-trigger race above. The distinct
+  // `STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2` sibling verdict below deliberately
+  // does not gain an equivalent entry: its own `correction-satisfied at ...` disposition is
+  // already durably persisted earlier, at the correction worker's own breakpoint
+  // (`finalize-correction-breakpoint.mjs`, issue #576/#577), before that verdict is ever
+  // reachable at all.
   STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2: {
     mode: ENVELOPE_MODES.BOUNDED,
-    authorizedActions: ["merge-pr", "create-stage2-audit-issue", "write-control-snapshot", "post-stage2-reviewer-trigger"],
+    authorizedActions: [
+      "finalize-stage1-satisfied",
+      "merge-pr",
+      "create-stage2-audit-issue",
+      "write-control-snapshot",
+      "post-stage2-reviewer-trigger",
+    ],
   },
   STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2: {
     mode: ENVELOPE_MODES.BOUNDED,
