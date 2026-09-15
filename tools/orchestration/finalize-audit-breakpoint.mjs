@@ -68,6 +68,7 @@ import { execFileSync } from "node:child_process";
 import {
   resolveRepoIdentity,
   parseControlBullet,
+  parseHeadingField,
   upsertControlBullet,
   readExecutionBulletField,
   parseExecutionPointer,
@@ -222,7 +223,7 @@ export function composeAuditFinalizedControlBody(body, { auditIssue, executionIs
   if (!prPointerCheck.ok) {
     return { ok: false, reason: `pre-write re-check: ${prPointerCheck.reason}` };
   }
-  const currentLifecycle = parseControlBullet(body, "Lifecycle");
+  const currentLifecycle = parseControlBullet(body, "Lifecycle") ?? parseHeadingField(body, "State");
   if (currentLifecycle === null || !ALLOWED_PRE_FINALIZE_LIFECYCLE.has(currentLifecycle.trim())) {
     return {
       ok: false,
@@ -258,7 +259,7 @@ export function verifyAuditFinalizedBody(freshBody, { auditIssue }) {
   if (stage2Field === null || stage2Field.trim() !== `#${auditIssue}`) {
     return { ok: false, reason: `fresh read-back's Stage 2 bullet is ${JSON.stringify(stage2Field)}, expected "#${auditIssue}"` };
   }
-  const lifecycleField = parseControlBullet(freshBody, "Lifecycle");
+  const lifecycleField = parseControlBullet(freshBody, "Lifecycle") ?? parseHeadingField(freshBody, "State");
   if (lifecycleField === null || lifecycleField.trim() !== "AUDIT") {
     return { ok: false, reason: `fresh read-back's Lifecycle bullet is ${JSON.stringify(lifecycleField)}, expected "AUDIT"` };
   }
@@ -320,7 +321,7 @@ export async function run(
     return unverified({ controlIssue, executionIssue, pr, auditIssue, reason: prPointerCheck.reason });
   }
 
-  const currentLifecycle = parseControlBullet(body, "Lifecycle");
+  const currentLifecycle = parseControlBullet(body, "Lifecycle") ?? parseHeadingField(body, "State");
   if (currentLifecycle === null || !ALLOWED_PRE_FINALIZE_LIFECYCLE.has(currentLifecycle.trim())) {
     return unverified({
       controlIssue,

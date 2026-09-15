@@ -52,6 +52,24 @@ const ALREADY_AUDIT_BODY = `## Current state
 - **Founder decision:** none
 `;
 
+// Issue #585 (live blocker hit finalizing control #582): a template-shaped body
+// (`.github/ISSUE_TEMPLATE/parent-execution.yml`) carries no ad hoc "- **Lifecycle:**" bullet
+// at all — its lifecycle lives only in the canonical "### State" heading. PR #583's own
+// updated field guidance now actively tells new intake not to add a redundant Lifecycle
+// bullet, so this shape is the expected one going forward, not a rare edge case.
+const REVIEW_BODY_TEMPLATE_STATE_HEADING = `### State
+
+REVIEW
+
+### Current state
+
+- **Execution:** #440
+- **Route:** implementation worker
+- **PR:** #558
+- **Stage 1:** requested
+- **Stage 2:** none
+`;
+
 const MERGED_PR_VIEW = { state: "MERGED", mergeCommit: { oid: "d34db33fd34db33fd34db33fd34db33fd34db33f" } };
 
 const MATCHING_AUDIT_VIEW = {
@@ -179,6 +197,18 @@ test("composeAuditFinalizedControlBody / verifyAuditFinalizedBody round-trip", (
   assert.equal(verifyAuditFinalizedBody(REVIEW_BODY, { auditIssue: 559 }).ok, false);
 });
 
+test("composeAuditFinalizedControlBody: issue #585 — resolves Lifecycle via the canonical '### State' heading fallback when no ad hoc Lifecycle bullet exists", () => {
+  const composed = composeAuditFinalizedControlBody(REVIEW_BODY_TEMPLATE_STATE_HEADING, {
+    auditIssue: 559,
+    executionIssue: 440,
+    pr: 558,
+  });
+  assert.equal(composed.ok, true);
+  assert.match(composed.body, /- \*\*Stage 2:\*\* #559/);
+  assert.match(composed.body, /### State\s*\n\s*AUDIT/);
+  assert.equal(verifyAuditFinalizedBody(composed.body, { auditIssue: 559 }).ok, true);
+});
+
 test("composeAuditFinalizedControlBody: re-checks Lifecycle against the given body, not just its caller's earlier check — rejects a concurrently BLOCKED control Issue", () => {
   const blockedBody = REVIEW_BODY.replace("Lifecycle:** REVIEW", "Lifecycle:** BLOCKED");
   const result = composeAuditFinalizedControlBody(blockedBody, { auditIssue: 559, executionIssue: 440, pr: 558 });
@@ -243,6 +273,28 @@ test("run(): the happy path — merged PR, matching audit issue, write verified 
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "FINALIZED");
   assert.equal(result.message, "FINALIZED 445 558 559");
+});
+
+test("run(): issue #585 — a template State-heading-only control body (no ad hoc Lifecycle bullet at all) still finalizes to AUDIT, not AUDIT_BREAKPOINT_UNVERIFIED", async () => {
+  let controlBody = REVIEW_BODY_TEMPLATE_STATE_HEADING;
+  const result = await run(
+    { repo: "o/r", controlIssue: 445, executionIssue: 440, pr: 558, auditIssue: 559 },
+    {
+      ghIssueViewImpl: async () => controlBody,
+      ghPrViewImpl: async () => MERGED_PR_VIEW,
+      ghAuditIssueViewImpl: async () => MATCHING_AUDIT_VIEW,
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        controlBody = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "FINALIZED");
+  // upsertControlBullet's own hybrid-write convergence (PR #583) writes AUDIT onto the
+  // canonical "### State" heading here, since no ad hoc bullet exists to update instead.
+  assert.match(controlBody, /### State\s*\n\s*AUDIT/);
+  assert.match(controlBody, /- \*\*Stage 2:\*\* #559/);
 });
 
 test("run(): the #559/#445/PR #558 race shape — Audit Issue created but control still REVIEW, then a fresh session finalizes before any trigger is authorized", async () => {
