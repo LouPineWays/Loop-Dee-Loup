@@ -77,15 +77,41 @@ test("duplicating an authorized action within one bounded transition is a violat
   assert.ok(result.reasons[0].includes("already performed once"));
 });
 
-test("performing an envelope's own authorized actions out of its declared order is a violation (write-control-snapshot, trigger-stage2, merge-pr)", () => {
+test("performing an envelope's own authorized actions out of its declared order is a violation (write-control-snapshot, create-stage2-audit-issue, post-stage2-reviewer-trigger, merge-pr)", () => {
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
     "write-control-snapshot",
-    "trigger-stage2",
+    "create-stage2-audit-issue",
+    "post-stage2-reviewer-trigger",
     "merge-pr",
   ]);
   assert.equal(result.status, "violation");
   assert.equal(result.reasons.length, 2);
   assert.ok(result.reasons.every((r) => r.includes("ran out of order")));
+});
+
+// Issue #561 (live #559/#445/PR #558 reproduction): the reviewer trigger racing ahead of the
+// durable control projection is exactly an out-of-order `post-stage2-reviewer-trigger` before
+// `write-control-snapshot` — the old `merge-pr -> trigger-stage2 -> write-control-snapshot`
+// order this envelope used to authorize would be indistinguishable from this shape today.
+test("#559/#445/PR #558 shape: posting the Stage 2 reviewer trigger before the control snapshot is written is a violation", () => {
+  const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
+    "merge-pr",
+    "create-stage2-audit-issue",
+    "post-stage2-reviewer-trigger",
+    "write-control-snapshot",
+  ]);
+  assert.equal(result.status, "violation");
+  assert.ok(result.reasons.some((r) => r.includes("post-stage2-reviewer-trigger") && r.includes("ran out of order")));
+});
+
+test("#559/#445/PR #558 shape: the corrected order (merge, create audit issue, project+verify control, then trigger) is compliant", () => {
+  const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
+    "merge-pr",
+    "create-stage2-audit-issue",
+    "write-control-snapshot",
+    "post-stage2-reviewer-trigger",
+  ]);
+  assert.equal(result.status, "compliant");
 });
 
 // -- classifyEnvelopeCompliance: no-action verdicts --------------------------------------
@@ -161,29 +187,31 @@ test("STAGE2_REPORT_READY_TO_RECORD: performing only the record action and stopp
 // -- classifyEnvelopeCompliance: action-bearing merge -------------------------------------
 // Verification class 6.
 
-test("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2: merge + trigger + persisting refs is compliant; anything more is a violation", () => {
+test("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2: merge, create audit issue, project+verify control, then trigger is compliant; anything more is a violation", () => {
   assert.equal(
     classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
       "merge-pr",
-      "trigger-stage2",
+      "create-stage2-audit-issue",
       "write-control-snapshot",
+      "post-stage2-reviewer-trigger",
     ]).status,
     "compliant",
   );
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
     "merge-pr",
-    "trigger-stage2",
+    "create-stage2-audit-issue",
     "wait-for-completion",
   ]);
   assert.equal(result.status, "violation");
 });
 
-test("STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2: same bounded merge+trigger+persist envelope", () => {
+test("STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2: same bounded merge/create-audit/project-verify/trigger envelope", () => {
   assert.equal(
     classifyEnvelopeCompliance("STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
       "merge-pr",
-      "trigger-stage2",
+      "create-stage2-audit-issue",
       "write-control-snapshot",
+      "post-stage2-reviewer-trigger",
     ]).status,
     "compliant",
   );

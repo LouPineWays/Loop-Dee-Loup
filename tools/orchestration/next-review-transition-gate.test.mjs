@@ -876,10 +876,12 @@ test("runNextReviewTransitionGate: control-Issue mode with a settled PR (no Stag
   assert.equal(result.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
   assert.equal(result.controlIssue, 322);
   // Issue #486: authorizes exactly the merge + Stage 2 trigger + persisting refs, then
-  // stops — not Stage 2 waiting/result handling in the same context.
+  // stops — not Stage 2 waiting/result handling in the same context. Issue #561 (live
+  // #559/#445/PR #558 reproduction): the reviewer trigger is authorized only after the
+  // control snapshot is projected and verified, never before.
   assert.deepEqual(result.actionEnvelope, {
     mode: "bounded",
-    authorizedActions: ["merge-pr", "trigger-stage2", "write-control-snapshot"],
+    authorizedActions: ["merge-pr", "create-stage2-audit-issue", "write-control-snapshot", "post-stage2-reviewer-trigger"],
   });
 });
 
@@ -940,6 +942,12 @@ test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfie
   assert.equal(result.stopAfter, true);
   assert.equal(result.reviewedHead, "30b36035c9");
   assert.equal(result.correctedHead, "0009c54b18");
+  // Issue #561: the correction-satisfied path carries the same corrected merge/create-audit-
+  // issue/project-verify-control/trigger ordering as the ordinary satisfied path.
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["merge-pr", "create-stage2-audit-issue", "write-control-snapshot", "post-stage2-reviewer-trigger"],
+  });
 });
 
 test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfied disposition but BLOCKED_CLOSING_REFERENCE resolves to STAGE1_CORRECTION_REQUIRED", async () => {
