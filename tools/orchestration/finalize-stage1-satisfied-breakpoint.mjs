@@ -125,12 +125,20 @@
 //     response, never guessed at. EXEMPT carries no invented timestamp requirement — it is a
 //     structural PR-body marker, not a timestamped event — but is still only ever accepted via
 //     the same real, deterministic stage1-gate.mjs re-derivation, never assumed from
-//     present-day control state;
+//     present-day control state. Stage 1 review finding on PR #605: that timestamp must be
+//     derived only from the match(es) that actually carry the qualifying clean-pass disposition
+//     (`isCleanPassMatch`) — never the earliest across every bound match indiscriminately, since
+//     a generic pre-merge acknowledgement can otherwise stand in for a clean-pass reply that
+//     only arrived after merge;
 //   - admissible prestate — `checkAdmissibleRecoveryPrestate` refuses, before stage1-gate.mjs is
 //     ever consulted, unless the control Issue's existing "Stage 1" bullet is the documented
 //     stranded `requested` shape or the exact already-recovered `satisfied at <head>` value for
 //     this same head (idempotent success/no-op, still re-validated against current authority);
-//     `none`, malformed text, and an ordinary `satisfied at <different-head>` all fail closed;
+//     `none`, malformed text, and an ordinary `satisfied at <different-head>` all fail closed.
+//     Stage 1 review finding on PR #605: this admissibility is re-checked a second time against
+//     the fresh pre-write control-body read, immediately before composing -- the initial check
+//     alone cannot speak for a live "Stage 1" bullet that changed while stage1-gate.mjs's own
+//     recovery re-derivation was running;
 //   - field identity — `composeStage1SatisfiedControlBody`'s own near-duplicate-label guard
 //     (shared with the forward path, since both converge on that one composer) refuses to
 //     compose/persist when a canonical "Stage 1" bullet coexists with an unrecognized
@@ -169,7 +177,7 @@ import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 import { runNextReviewTransitionGate } from "./next-review-transition-gate.mjs";
 import { extractUrlPointerKinds } from "./control-field-validator.mjs";
 import { run as stage1GateRun } from "../review-watch/stage1-gate.mjs";
-import { isCleanStage1Response } from "../review-watch/consumer-sync-gate.mjs";
+import { isCleanStage1Response, isCleanPassMatch } from "../review-watch/consumer-sync-gate.mjs";
 
 // Lifecycle values this script is authorized to write the ordinary Stage 1 `satisfied at <head>`
 // disposition bullet over. `REVIEW` is the normal pre-merge value the forward path always sees
@@ -299,11 +307,17 @@ function parseTimestampMs(value) {
 }
 
 // Pure. Historical-provenance guard — original #596. Extracts the earliest `created_at` among
-// stage1-gate.mjs's own bound genuine `matches` -- the qualifying response's own timestamp --
-// or null when no match carries a usable timestamp (unknown ordering, which must fail closed
-// rather than being guessed at). Deliberately the *earliest* of possibly several matches (e.g.
-// an ack plus the actual clean-pass reply): if any bound genuine match predates merge, that is
-// durable evidence Stage 1 was genuinely satisfied before the merge boundary.
+// the given matches, or null when none carries a usable timestamp (unknown ordering, which must
+// fail closed rather than being guessed at). Stage 1 review finding on this PR (#605): this
+// helper stays a generic "earliest timestamp in this list" primitive -- it must never be handed
+// every one of stage1-gate.mjs's bound genuine `matches` indiscriminately, since
+// `isCleanStage1Response` deliberately tolerates a generic acknowledgement alongside the actual
+// clean-pass reply on the same thread. A pre-merge acknowledgement plus the real clean-pass
+// reply landing only after merge would otherwise select the acknowledgement's earlier timestamp
+// and wrongly authorize recovery from evidence that never made the round clean before the merge
+// boundary. Callers deriving historical provenance for a clean-pass disposition must first
+// filter to only the match(es) actually carrying the qualifying disposition (see
+// `isCleanPassMatch` and its use in `deriveRecoveredStage1Head`) before calling this.
 export function earliestMatchTimestampMs(matches) {
   const values = (matches ?? [])
     .map((m) => parseTimestampMs(m?.created_at))
@@ -445,7 +459,13 @@ async function deriveRecoveredStage1Head({ repo, pr, prView, existingStage1 }, {
           "Stage 1 satisfaction without provable pre-merge ordering (unknown ordering fails closed)",
       };
     }
-    const responseMs = earliestMatchTimestampMs(stage1Result.matches);
+    // Stage 1 review finding on this PR (#605): derive ordering only from the match(es) that
+    // actually carry the clean-pass disposition, never from every bound match indiscriminately
+    // -- a generic acknowledgement can land before merge while the real clean-pass reply that
+    // made the round clean arrives only after, and `isCleanStage1Response` above already
+    // confirmed at least one qualifying match exists, so this filter is never empty here.
+    const qualifyingCleanPassMatches = (stage1Result.matches ?? []).filter((m) => isCleanPassMatch(m));
+    const responseMs = earliestMatchTimestampMs(qualifyingCleanPassMatches);
     if (responseMs === null) {
       return {
         ok: false,
@@ -635,6 +655,30 @@ export async function run(
   }
   const latestExecutionCheck = verifyExecutionMatches(latestBody, executionIssue);
   if (!latestExecutionCheck.ok) return unverified({ pr, reason: latestExecutionCheck.reason });
+
+  // Prestate TOCTOU guard -- Stage 1 review finding on this PR (#605). The admissible-prestate
+  // check above (checkAdmissibleRecoveryPrestate / looksLikeCorrectionSatisfiedBullet) only ever
+  // saw the control body fetched before stage1-gate.mjs's own recovery re-derivation ran. If the
+  // live "Stage 1" bullet changed in the interim -- e.g. from `requested` to `none`, to a
+  // different-head `satisfied at`, or to a `correction-satisfied` disposition -- that earlier
+  // check can no longer speak for the body being composed/written right now, and
+  // composeStage1SatisfiedControlBody's own checks (Lifecycle, PR bullet, near-duplicate,
+  // correction-satisfied) do not themselves re-derive full recovery admissibility. Re-run the
+  // same admissibility check against this fresh read, immediately before composing, so a
+  // prestate this guard explicitly rejects can never be silently normalized into a write.
+  if (recover) {
+    const latestExistingStage1 = parseControlBullet(latestBody, "Stage 1");
+    if (looksLikeCorrectionSatisfiedBullet(latestExistingStage1)) {
+      return unverified({
+        pr,
+        reason:
+          `control Issue's "Stage 1" bullet ${JSON.stringify(latestExistingStage1)} already carries a distinct ` +
+          "correction-satisfied disposition -- --recover true never reconciles that stranded shape (it belongs to #576/#577's own recovery)",
+      });
+    }
+    const latestPrestateCheck = checkAdmissibleRecoveryPrestate(latestExistingStage1, { head: authorizedHead });
+    if (!latestPrestateCheck.ok) return unverified({ pr, reason: latestPrestateCheck.reason });
+  }
 
   const composed = composeStage1SatisfiedControlBody(latestBody, { pr, head: authorizedHead });
   if (!composed.ok) return unverified({ pr, reason: composed.reason });
