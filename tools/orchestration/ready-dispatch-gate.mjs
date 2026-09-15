@@ -550,6 +550,30 @@ export function isNoneSentinel(value) {
   return typeof value === "string" && /^none\b/i.test(value.trim());
 }
 
+// Pure. Issue #450 (the #428 live reproduction): the one specifically demonstrated legacy
+// pre-Stage-2 synonym this repository's own thin-control bodies have been observed to carry
+// ("Stage 2: not started") — distinct from, and narrower than, isNoneSentinel's own "none"
+// recognition above. Control #428 was durably `Stage 2: not started` when
+// `next-review-transition-gate.mjs`'s Execution-pointer-shaped bullet parser (which expects
+// either the canonical "none" sentinel or exactly one "#N"/URL reference) correctly rejected
+// it as malformed, stranding a genuine findings-bearing Stage 1 correction transition behind
+// an unrelated Stage-2-reference error.
+//
+// Deliberately scoped to exactly this one wording — never a broader set of natural-language
+// phrases such as "pending"/"later"/"not yet" (#450 Non-goals explicitly excludes those) — and
+// this predicate has no opinion on which field it is being checked against; callers gate its
+// use on the "Stage 2" label themselves (see next-review-transition-gate.mjs's
+// parseOptionalIssueRef and finalize-pr-breakpoint.mjs's canonicalizePreStage2Bullet). This is
+// read-time/normalization tolerance for state that predates finalize-pr-breakpoint.mjs's
+// write-time canonicalization fix, never a second, equally-valid way to author new state —
+// control-field-validator.mjs's write-time validator continues to reject this value outright
+// (it is not the canonical "none" sentinel and does not parse as a pointer), so a new write
+// cannot persist it and report success.
+const LEGACY_STAGE2_NOT_STARTED_PATTERN = /^not started\b/i;
+export function isLegacyStage2NotStartedSentinel(value) {
+  return typeof value === "string" && LEGACY_STAGE2_NOT_STARTED_PATTERN.test(value.trim());
+}
+
 // Pure. True when a raw `gh pr list` entry's own `headRefName`/`body` names execution Issue
 // `executionIssue` via the Shared Contract's PR-to-execution-Issue linkage convention (issue
 // #456's Shared Contract, "PR-to-execution-Issue linkage convention"): a branch name

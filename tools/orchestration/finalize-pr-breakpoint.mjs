@@ -37,6 +37,11 @@
 //   - `- **Stage 1:** requested` (or `exempt: <reason>`, read verbatim from the PR body's
 //     own `Stage 1 exemption: <reason>` line via stage1-gate.mjs's findExemption) —
 //     established from durable evidence, never from the caller's own claim.
+//   - `- **Stage 2:** none` — issue #450: canonicalized from the one demonstrated legacy
+//     pre-Stage-2 synonym ("not started") if that is what the control Issue's own Stage 2
+//     bullet currently carries; left untouched otherwise (a real reference, an absent bullet,
+//     or anything else `write-control-snapshot.mjs`'s own validator is the fail-closed
+//     backstop for). See `canonicalizePreStage2Bullet`'s own comment below.
 //   - `- **Lifecycle:** REVIEW` — the exact post-PR value `next-review-transition-gate.mjs`
 //     (`docs/operating-model.md` § "Deterministic post-PR transition resolution") expects,
 //     so a fresh controller resuming this control Issue routes through that gate instead
@@ -107,6 +112,7 @@ import {
   readExecutionBulletField,
   parseExecutionPointer,
   referencesExecutionIssue,
+  isLegacyStage2NotStartedSentinel,
 } from "./ready-dispatch-gate.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 import { run as stage1GateRun } from "../review-watch/stage1-gate.mjs";
@@ -210,10 +216,37 @@ export function determineStage1Value(stage1GateResult) {
   };
 }
 
+// Pure. Issue #450 (the #428 live reproduction): canonicalizes the control body's own
+// "Stage 2" bullet to the canonical "none" sentinel `next-review-transition-gate.mjs`'s
+// "Stage 2" bullet parsing (parseOptionalIssueRef) expects, when it currently carries the one
+// demonstrated legacy pre-Stage-2 synonym ("Stage 2: not started" — #428's own live control
+// Issue). This is Required Behavior #1's authoring-boundary half of the fix: the exact moment
+// Lifecycle enters REVIEW is the earliest point at which the Stage 2 field's value first
+// becomes load-bearing for the post-PR transition gate, so it is the correction point per
+// AGENTS.md's "correction at the earliest deterministic state-authoring boundary."
+//
+// Every Lifecycle value this script is authorized to transition from (READY,
+// EXECUTION_COMPLETE, or an idempotent re-run of REVIEW itself) genuinely precedes Stage 2,
+// so normalizing an already-present legacy sentinel here can never clobber a real Stage 2
+// reference. Any other existing value (a real #N/URL reference, an absent bullet — already
+// tolerated as equivalent to "none" by every reader — or something genuinely malformed) is
+// left exactly as this function found it: `write-control-snapshot.mjs`'s own field-local
+// validator (control-field-validator.mjs) remains the fail-closed backstop for a value that is
+// neither the canonical sentinel nor a valid pointer, per Required Behavior #2's "reject at
+// the state-authoring boundary" branch — it already rejects "not started" and any other
+// unsupported synonym outright, so this function's narrow normalization is strictly additive.
+export function canonicalizePreStage2Bullet(body) {
+  const raw = parseControlBullet(body, "Stage 2");
+  if (raw !== null && isLegacyStage2NotStartedSentinel(raw)) {
+    return upsertControlBullet(body, "Stage 2", "none");
+  }
+  return body;
+}
+
 // Pure. Composes the proposed control body: verifies the current Lifecycle is one this
-// script is authorized to transition from, then applies PR/Stage 1/Lifecycle via
-// `upsertControlBullet` — every other field (Execution, Route, Blocker, Founder decision)
-// is left exactly as-is.
+// script is authorized to transition from, then applies PR/Stage 1/Stage 2/Lifecycle via
+// `upsertControlBullet`/`canonicalizePreStage2Bullet` — every other field (Execution, Route,
+// Blocker, Founder decision) is left exactly as-is.
 export function composeFinalizedControlBody(body, { pr, stage1Value }) {
   // Issue #563: a control Issue authored from the shipped template
   // (`.github/ISSUE_TEMPLATE/parent-execution.yml`) never emits an ad hoc `- **Lifecycle:**`
@@ -234,6 +267,7 @@ export function composeFinalizedControlBody(body, { pr, stage1Value }) {
   }
   let next = upsertControlBullet(body, "PR", `#${pr}`);
   next = upsertControlBullet(next, "Stage 1", stage1Value);
+  next = canonicalizePreStage2Bullet(next);
   next = upsertControlBullet(next, "Lifecycle", "REVIEW");
   return { ok: true, body: next };
 }
@@ -250,6 +284,16 @@ export function verifyFinalizedBody(freshBody, { pr, stage1Value }) {
   const stage1Field = parseControlBullet(freshBody, "Stage 1");
   if (stage1Field === null || stage1Field.trim() !== stage1Value) {
     return { ok: false, reason: `fresh read-back's Stage 1 bullet is ${JSON.stringify(stage1Field)}, expected ${JSON.stringify(stage1Value)}` };
+  }
+  // Issue #450: a fresh read-back must never still carry the legacy pre-Stage-2 synonym this
+  // same write was supposed to canonicalize (canonicalizePreStage2Bullet) — a silent no-op
+  // write, or a concurrent edit reintroducing it, must not be mistaken for durable success.
+  const stage2Field = parseControlBullet(freshBody, "Stage 2");
+  if (stage2Field !== null && isLegacyStage2NotStartedSentinel(stage2Field)) {
+    return {
+      ok: false,
+      reason: `fresh read-back's Stage 2 bullet still carries the legacy pre-start sentinel ${JSON.stringify(stage2Field)}, expected it canonicalized to "none"`,
+    };
   }
   // Issue #563: `upsertControlBullet` updates the `### State` heading in place (rather than
   // inserting a new ad hoc bullet) when the control Issue never had a `- **Lifecycle:**`

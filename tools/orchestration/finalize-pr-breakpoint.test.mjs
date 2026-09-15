@@ -14,6 +14,7 @@ import {
   determineStage1Value,
   composeFinalizedControlBody,
   verifyFinalizedBody,
+  canonicalizePreStage2Bullet,
 } from "./finalize-pr-breakpoint.mjs";
 
 const READY_BODY = `## Current state
@@ -191,6 +192,54 @@ test("composeFinalizedControlBody: falls back to the '### State' heading when no
   // Every other field must survive untouched.
   assert.match(result.body, /- \*\*Execution:\*\* #559/);
   assert.match(result.body, /- \*\*Route:\*\* implementation worker/);
+});
+
+// -- Issue #450 (the #428 live reproduction): canonicalizing the legacy pre-Stage-2 sentinel --
+
+test("canonicalizePreStage2Bullet: normalizes the one demonstrated legacy synonym ('not started') to the canonical 'none' sentinel", () => {
+  const body = "- **Lifecycle:** REVIEW\n- **Stage 2:** not started\n";
+  const result = canonicalizePreStage2Bullet(body);
+  assert.match(result, /- \*\*Stage 2:\*\* none/);
+});
+
+test("canonicalizePreStage2Bullet: leaves an already-canonical 'none' value, a real #N reference, an absent bullet, and any other value untouched", () => {
+  assert.equal(canonicalizePreStage2Bullet("- **Stage 2:** none\n"), "- **Stage 2:** none\n");
+  assert.equal(canonicalizePreStage2Bullet("- **Stage 2:** #480\n"), "- **Stage 2:** #480\n");
+  assert.equal(canonicalizePreStage2Bullet("- **Lifecycle:** READY\n"), "- **Lifecycle:** READY\n");
+  // Not the legacy sentinel -- left for write-control-snapshot.mjs's own validator to reject.
+  assert.equal(canonicalizePreStage2Bullet("- **Stage 2:** pending\n"), "- **Stage 2:** pending\n");
+});
+
+const CONTROL_BODY_428_SHAPE_FOR_FINALIZE = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #447
+- **Route:** implementation worker
+- **PR:** #453
+- **Stage 1:** requested
+- **Stage 2:** not started
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("composeFinalizedControlBody: the exact #428 shape -- a legacy 'Stage 2: not started' bullet already present on the control Issue is canonicalized to 'none' as part of the REVIEW transition", () => {
+  const result = composeFinalizedControlBody(CONTROL_BODY_428_SHAPE_FOR_FINALIZE, { pr: 453, stage1Value: "requested" });
+  assert.equal(result.ok, true);
+  assert.match(result.body, /- \*\*Stage 2:\*\* none/);
+  assert.doesNotMatch(result.body, /not started/);
+});
+
+test("composeFinalizedControlBody: a real Stage 2 reference is never clobbered by the canonicalization step", () => {
+  const bodyWithRealStage2 = READY_BODY.replace("- **PR:** none", "- **PR:** #453") + "- **Stage 2:** #480\n";
+  const result = composeFinalizedControlBody(bodyWithRealStage2, { pr: 453, stage1Value: "requested" });
+  assert.equal(result.ok, true);
+  assert.match(result.body, /- \*\*Stage 2:\*\* #480/);
+});
+
+test("verifyFinalizedBody: rejects a fresh read-back that still carries the legacy pre-start sentinel (a silent write no-op)", () => {
+  const result = verifyFinalizedBody(CONTROL_BODY_428_SHAPE_FOR_FINALIZE, { pr: 453, stage1Value: "requested" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /legacy pre-start sentinel/);
 });
 
 test("composeFinalizedControlBody: refuses to overwrite a Lifecycle value it was not authorized to transition from (e.g. mid-cycle AUDIT)", () => {

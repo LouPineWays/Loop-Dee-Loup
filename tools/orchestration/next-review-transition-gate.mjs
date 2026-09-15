@@ -137,7 +137,10 @@
 // convention): "- **Execution:**" (the gated work/execution Issue -- reused verbatim, never
 // a second, separately-tracked work-issue field), "- **PR:**" (the PR number, or the "none"
 // sentinel before a PR exists), and "- **Stage 2:**" (the Stage 2 Audit Issue number, or
-// "none" before Stage 2 has started) to decide which phase applies and what to compose it
+// "none" before Stage 2 has started -- issue #450: the one demonstrated legacy synonym "not
+// started" is also tolerated here, read-time-only, for durable state that predates
+// finalize-pr-breakpoint.mjs's write-time canonicalization; see isLegacyStage2NotStartedSentinel
+// and parseOptionalIssueRef's own comment) to decide which phase applies and what to compose it
 // against. The PR's current head is derived live (one more `gh pr view` read) unless --head
 // is given explicitly -- this gate does not invent a new durable "frozen head" bullet; the
 // live current head is correct except in the narrow case where a fix commit landed after a
@@ -180,6 +183,7 @@ import {
   parseControlBullet,
   parseExecutionPointer,
   isNoneSentinel,
+  isLegacyStage2NotStartedSentinel,
   resolveRepoIdentity,
   readExecutionBulletField,
   describeExecutionConflict,
@@ -229,6 +233,15 @@ export function parseOptionalIssueRef(raw, label) {
     return { kind: "missing", reason: `no "- **${label}:**" bullet found in the control Issue body` };
   }
   if (isNoneSentinel(raw)) {
+    return { kind: "none" };
+  }
+  // Issue #450 (the #428 live reproduction): the "Stage 2" bullet specifically may still
+  // durably carry the one demonstrated legacy pre-Stage-2 synonym ("not started") from before
+  // finalize-pr-breakpoint.mjs's canonicalizePreStage2Bullet started normalizing new writes to
+  // the canonical "none" sentinel. Scoped to exactly this label — the "PR" bullet (and any
+  // other future caller of this function) gets no such tolerance, preserving fail-closed
+  // parsing everywhere else per #450 Required Behavior #3.
+  if (label === "Stage 2" && isLegacyStage2NotStartedSentinel(raw)) {
     return { kind: "none" };
   }
   const parsed = parseExecutionPointer(raw);
