@@ -38,6 +38,47 @@ const EXECUTION_COMPLETE_BODY = `## Current state
 - **Founder decision:** none
 `;
 
+// Issue #563 / #560's exact real-world shape: a control Issue authored from the shipped
+// `.github/ISSUE_TEMPLATE/parent-execution.yml` template, which renders Lifecycle as the
+// "### State" dropdown heading rather than an ad hoc "- **Lifecycle:**" bullet — no such
+// bullet exists anywhere in this body at all. The Execution/Route/PR/Stage 1 fields still use
+// the ad hoc bullet convention inside the template's own "### Current state" textarea, per
+// that field's own description ("also include explicit `- **Execution:** #N` ... bullet lines
+// here"). Discovered live blocking #560's PR #562 finalize.
+const STATE_HEADING_BODY = `### Source item
+
+https://github.com/LouPineWays/Loop-Dee-Loup/issues/559
+
+### State
+
+READY
+
+### Accepted outcome
+
+Some accepted outcome.
+
+### Current state
+
+- **Execution:** #559
+- **Route:** implementation worker
+- **PR:** none
+- **Stage 1:** none
+
+### Settled decisions
+
+None.
+
+### Current blocker
+
+None
+
+### Founder interrupt
+
+None
+`;
+
+const LINKED_PR_VIEW_559 = { headRefName: "issue-559-some-fix", headRefOid: "abc1234", body: "Addresses #559.", state: "OPEN" };
+
 // A `gh pr view` result satisfying the Shared Contract's PR-to-execution-Issue linkage
 // convention for execution Issue #447 at head "579188a" (the #447/#453 shape) / #537 at head
 // "6dc93ac" (the #537/#540 shape) — used as the default `ghPrViewImpl` stub in every run()
@@ -137,6 +178,21 @@ test("composeFinalizedControlBody: re-running against an already-finalized REVIE
   assert.equal(result.body, alreadyFinalized);
 });
 
+test("composeFinalizedControlBody: falls back to the '### State' heading when no ad hoc Lifecycle bullet exists (issue #563 / #560's shape)", () => {
+  const result = composeFinalizedControlBody(STATE_HEADING_BODY, { pr: 562, stage1Value: "requested" });
+  assert.equal(result.ok, true);
+  assert.match(result.body, /- \*\*PR:\*\* #562/);
+  assert.match(result.body, /- \*\*Stage 1:\*\* requested/);
+  // upsertControlBullet updates the "### State" heading's value in place rather than inserting
+  // a brand-new ad hoc "- **Lifecycle:**" bullet — see its own comment block.
+  assert.match(result.body, /### State\n\nREVIEW/);
+  assert.doesNotMatch(result.body, /### State\n\nREADY/);
+  assert.doesNotMatch(result.body, /- \*\*Lifecycle:\*\*/);
+  // Every other field must survive untouched.
+  assert.match(result.body, /- \*\*Execution:\*\* #559/);
+  assert.match(result.body, /- \*\*Route:\*\* implementation worker/);
+});
+
 test("composeFinalizedControlBody: refuses to overwrite a Lifecycle value it was not authorized to transition from (e.g. mid-cycle AUDIT)", () => {
   const auditBody = READY_BODY.replace("- **Lifecycle:** READY", "- **Lifecycle:** AUDIT");
   const result = composeFinalizedControlBody(auditBody, { pr: 453, stage1Value: "requested" });
@@ -152,6 +208,19 @@ test("verifyFinalizedBody: accepts a fresh body carrying the exact composed bull
 
 test("verifyFinalizedBody: rejects a fresh read-back that does not actually carry the PR bullet just composed (e.g. the gh write silently no-oped)", () => {
   const result = verifyFinalizedBody(READY_BODY, { pr: 453, stage1Value: "requested" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /PR bullet/);
+});
+
+test("verifyFinalizedBody: recognizes a '### State' heading updated in place as the finalized Lifecycle, on a template-shaped body with no ad hoc Lifecycle bullet (issue #563)", () => {
+  const composed = composeFinalizedControlBody(STATE_HEADING_BODY, { pr: 562, stage1Value: "requested" });
+  assert.equal(composed.ok, true);
+  const result = verifyFinalizedBody(composed.body, { pr: 562, stage1Value: "requested" });
+  assert.equal(result.ok, true);
+});
+
+test("verifyFinalizedBody: still rejects a template-shaped read-back whose '### State' heading was never actually updated (write silently no-oped)", () => {
+  const result = verifyFinalizedBody(STATE_HEADING_BODY, { pr: 562, stage1Value: "requested" });
   assert.equal(result.ok, false);
   assert.match(result.reason, /PR bullet/);
 });
@@ -222,6 +291,31 @@ test("run(): Verification scenario 5 — a control-write failure fails closed wi
   assert.equal(result.state, "PR_BREAKPOINT_UNVERIFIED");
   assert.equal(result.message, "PR_BREAKPOINT_UNVERIFIED 448 447 453");
   assert.equal(currentBody, originalBody, "the durable control body must be left exactly as it was on a write failure");
+});
+
+test("run(): issue #563 regression — a control Issue authored with '### State' (no ad hoc Lifecycle bullet, #560's exact shape) now finalizes as FINALIZED instead of failing closed with PR_BREAKPOINT_UNVERIFIED", async () => {
+  let currentBody = STATE_HEADING_BODY;
+  const writeCalls = [];
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 560, executionIssue: 559, pr: 562, head: "abc1234" },
+    {
+      ghIssueViewImpl: async () => currentBody,
+      ghPrViewImpl: makePrViewStub(LINKED_PR_VIEW_559),
+      stage1GateRunImpl: makeStage1GateStub({ exitCode: 2, state: "PENDING" }),
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        writeCalls.push(proposedBody);
+        currentBody = proposedBody; // simulate the durable write actually landing
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "FINALIZED");
+  assert.equal(result.message, "FINALIZED 560 559 562");
+  assert.equal(writeCalls.length, 1);
+  assert.match(writeCalls[0], /- \*\*PR:\*\* #562/);
+  assert.match(writeCalls[0], /- \*\*Stage 1:\*\* requested/);
+  assert.match(writeCalls[0], /### State\n\nREVIEW/);
 });
 
 test("run(): a caller claiming the PR crossed the breakpoint when no Stage 1 trigger actually exists fails closed, never reporting ordinary success", async () => {
