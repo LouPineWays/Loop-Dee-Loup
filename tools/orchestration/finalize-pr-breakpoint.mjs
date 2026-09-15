@@ -102,6 +102,7 @@ import { execFileSync } from "node:child_process";
 import {
   resolveRepoIdentity,
   parseControlBullet,
+  parseHeadingField,
   upsertControlBullet,
   readExecutionBulletField,
   parseExecutionPointer,
@@ -214,7 +215,14 @@ export function determineStage1Value(stage1GateResult) {
 // `upsertControlBullet` — every other field (Execution, Route, Blocker, Founder decision)
 // is left exactly as-is.
 export function composeFinalizedControlBody(body, { pr, stage1Value }) {
-  const currentLifecycle = parseControlBullet(body, "Lifecycle");
+  // Issue #563: a control Issue authored from the shipped template
+  // (`.github/ISSUE_TEMPLATE/parent-execution.yml`) never emits an ad hoc `- **Lifecycle:**`
+  // bullet at all -- its Lifecycle-equivalent is the `### State` heading. `evaluateReadyDispatchGate`
+  // in ready-dispatch-gate.mjs already reads Lifecycle with this same fallback; without it here,
+  // this script always read `currentLifecycle` as null for a template-shaped body and failed
+  // closed with `PR_BREAKPOINT_UNVERIFIED` even though the gate itself recognized the Issue as
+  // dispatch-ready (discovered live blocking #560's PR #562 finalize).
+  const currentLifecycle = parseControlBullet(body, "Lifecycle") ?? parseHeadingField(body, "State");
   if (currentLifecycle === null || !ALLOWED_PRE_FINALIZE_LIFECYCLE.has(currentLifecycle.trim())) {
     return {
       ok: false,
@@ -243,7 +251,12 @@ export function verifyFinalizedBody(freshBody, { pr, stage1Value }) {
   if (stage1Field === null || stage1Field.trim() !== stage1Value) {
     return { ok: false, reason: `fresh read-back's Stage 1 bullet is ${JSON.stringify(stage1Field)}, expected ${JSON.stringify(stage1Value)}` };
   }
-  const lifecycleField = parseControlBullet(freshBody, "Lifecycle");
+  // Issue #563: `upsertControlBullet` updates the `### State` heading in place (rather than
+  // inserting a new ad hoc bullet) when the control Issue never had a `- **Lifecycle:**`
+  // bullet to begin with -- see its own comment block around line 383-401. The read-back must
+  // recognize that same shape, or a template-authored control Issue's genuinely successful
+  // write would still fail verification here.
+  const lifecycleField = parseControlBullet(freshBody, "Lifecycle") ?? parseHeadingField(freshBody, "State");
   if (lifecycleField === null || lifecycleField.trim() !== "REVIEW") {
     return { ok: false, reason: `fresh read-back's Lifecycle bullet is ${JSON.stringify(lifecycleField)}, expected "REVIEW"` };
   }
