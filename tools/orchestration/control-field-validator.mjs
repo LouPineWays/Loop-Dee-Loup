@@ -111,10 +111,24 @@ export function validatePointerFieldValue(rawValue, { label, expectedKind = null
 // gate.mjs, including current execution, PR, and Stage 2 references."). "Execution" carries
 // its own alias ("Execution issue") and near-duplicate/alias-conflict handling already
 // implemented by readExecutionBulletField — reused directly rather than re-derived.
+//
+// "Blocker" and "Founder decision" (issue #437 unit 437-B) are deliberately spec'd with
+// `pointerCheck: false` rather than the `expectedKind`-only omission the other three fields
+// use: unlike Execution/PR/Stage 2, these two are never single-pointer fields — a genuine
+// live value is free prose ("Blocked by #407, #408." or a founder's own explanatory
+// sentence), and `validatePointerFieldValue` would otherwise reject any such value outright
+// via its unconditional `parseExecutionPointer` cardinality check (zero or more-than-one
+// "#N" reference fails that check regardless of `expectedKind`). These two specs exist only
+// for the same exact-duplicate-bullet protection every other canonical field already has —
+// see `validateControlField`'s `pointerCheck` branch below — never for pointer-cardinality
+// validation, matching "Terminal result"'s own established precedent of a freeform
+// compact-evidence field this module leaves pointer-cardinality-unconstrained.
 export const DEFAULT_CONTROL_FIELD_SPECS = [
   { label: "Execution", isExecutionField: true, expectedKind: "issue" },
   { label: "PR", expectedKind: "pull" },
   { label: "Stage 2", expectedKind: "issue" },
+  { label: "Blocker", pointerCheck: false },
+  { label: "Founder decision", pointerCheck: false },
 ];
 
 // Pure. Returns the raw values of every exact-label bold-bullet occurrence for `label`
@@ -190,7 +204,7 @@ export function validateLifecycleStateCoherence(body) {
 // Pure. Validates one field spec against a proposed control-Issue body. Returns
 // { ok: true, label, ... } or { ok: false, label, reason }.
 export function validateControlField(body, spec) {
-  const { label, expectedKind = null, isExecutionField = false } = spec;
+  const { label, expectedKind = null, isExecutionField = false, pointerCheck = true } = spec;
 
   if (isExecutionField) {
     const duplicateConflict = exactDuplicateBulletConflict(body, label) ?? exactDuplicateBulletConflict(body, "Execution issue");
@@ -221,6 +235,15 @@ export function validateControlField(body, spec) {
       };
     }
   }
+
+  // pointerCheck: false (issue #437 unit 437-B) — a field this module deliberately never
+  // pointer-cardinality-constrains (see DEFAULT_CONTROL_FIELD_SPECS' own comment for Blocker/
+  // Founder decision). Duplicate-bullet and near-duplicate-label protection above still apply
+  // in full; only the trailing validatePointerFieldValue cardinality/kind check is skipped.
+  if (!pointerCheck) {
+    return { ok: true, label, present: raw !== null };
+  }
+
   return { ...validatePointerFieldValue(raw, { label, expectedKind }), label };
 }
 
