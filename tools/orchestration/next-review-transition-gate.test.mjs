@@ -38,6 +38,43 @@ test("parseOptionalIssueRef: 'none' sentinel, a settled #N reference, missing, a
   assert.equal(empty.kind, "invalid");
 });
 
+// Issue #450 (the #428 live reproduction): the "Stage 2" bullet specifically tolerates the one
+// demonstrated legacy pre-Stage-2 synonym ("not started") as equivalent to "none" -- narrow,
+// scoped to exactly this label and this exact wording, never a broader acceptance.
+test("parseOptionalIssueRef: the legacy 'not started' synonym is tolerated for the Stage 2 label only, never for PR or any other unsupported synonym", () => {
+  assert.deepEqual(parseOptionalIssueRef("not started", "Stage 2"), { kind: "none" });
+  assert.deepEqual(parseOptionalIssueRef("Not Started", "Stage 2"), { kind: "none" });
+  assert.deepEqual(parseOptionalIssueRef("not started — audit not yet triggered", "Stage 2"), { kind: "none" });
+
+  // Never the same tolerance for a different label -- "PR" fails closed exactly as before.
+  const prInvalid = parseOptionalIssueRef("not started", "PR");
+  assert.equal(prInvalid.kind, "invalid");
+
+  // #450 Non-goals explicitly excludes accepting broader natural-language synonyms even for
+  // "Stage 2" itself -- "pending"/"later"/"not yet" must still fail closed.
+  for (const phrase of ["pending", "later", "not yet"]) {
+    const result = parseOptionalIssueRef(phrase, "Stage 2");
+    assert.equal(result.kind, "invalid", `expected "${phrase}" to remain fail-closed for Stage 2`);
+  }
+});
+
+// Stage 1 review finding on PR #569: a "not started" value whose trailing explanation carries a
+// real issue/PR pointer is not mechanically unambiguous as pre-Stage-2 "none" -- it must fall
+// through to the ordinary reference parser (and resolve/invalidate exactly as any other Stage 2
+// value would) instead of being silently swallowed as "none".
+test("parseOptionalIssueRef: a 'not started' value contradicted by a real pointer in its suffix is never treated as 'none'", () => {
+  const hashForm = parseOptionalIssueRef("not started — previous audit #480", "Stage 2");
+  assert.notEqual(hashForm.kind, "none");
+  assert.deepEqual(hashForm, { kind: "issue", issue: 480 });
+
+  const urlForm = parseOptionalIssueRef(
+    "not started — see https://github.com/LouPineWays/Loop-Dee-Loup/issues/480",
+    "Stage 2",
+  );
+  assert.notEqual(urlForm.kind, "none");
+  assert.deepEqual(urlForm, { kind: "issue", issue: 480 });
+});
+
 // -- parseOptionalIssueRefGuarded (issue #493, the #440 near-duplicate-label regression) ----
 
 test("parseOptionalIssueRefGuarded: the exact #440 regression -- stale canonical 'Stage 2: #480' coexisting with live 'Stage 2 (current): #492' fails closed as ambiguous", () => {
@@ -966,6 +1003,65 @@ test("runNextReviewTransitionGate: Stage 1 satisfied text does not override NOT_
     },
   );
   assert.equal(result.state, "NO_ACTION_YET");
+});
+
+// -- Issue #450: the exact #428 / PR #449 live regression -----------------------------------
+//
+// Control #428 was durably `Lifecycle: REVIEW` / `PR: #449` / `Stage 2: not started` while PR
+// #449 already carried one genuine findings-bearing Codex Stage 1 review. Before this fix,
+// `runNextReviewTransitionGate` returned AMBIGUOUS on the malformed "Stage 2" reference before
+// ever evaluating Stage 1 -- stranding the existing STAGE1_CORRECTION_REQUIRED transition
+// behind an unrelated field-serialization defect. Do not special-case issue #428 or PR #449 in
+// production logic (#450 Required Behavior #4) -- this fixture reproduces the shape generically.
+const CONTROL_BODY_428_SHAPE = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #427
+- **PR:** #449
+- **Stage 1:** requested
+- **Stage 2:** not started
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("runNextReviewTransitionGate: the exact #428/#449 regression -- a legacy 'Stage 2: not started' bullet no longer strands the transition as AMBIGUOUS before Stage 1 is evaluated", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "428" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        assert.equal(number, "428");
+        return { body: CONTROL_BODY_428_SHAPE, state: "OPEN" };
+      },
+      ghPrHeadImpl: async () => "67fa0c28fde901e721afe30a91451130668f0bb0",
+      stage1RunImpl: async () =>
+        stage1("RESPONSE_RECEIVED", {
+          matches: [
+            {
+              body_excerpt:
+                "### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.",
+            },
+          ],
+        }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+    },
+  );
+  // The composed post-PR transition reaches the existing Stage 1 findings path -- never
+  // AMBIGUOUS from Stage-2-reference parsing, and never a NO_ACTION_YET/other misroute either.
+  assert.equal(result.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.equal(result.exitCode, 3);
+});
+
+test("runNextReviewTransitionGate: the same #428-shaped body with a clean/no-findings Stage 1 response stays on the ordinary satisfied/merge path -- this fix does not force correction merely because Stage 2 is absent", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "428" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_428_SHAPE, state: "OPEN" }),
+      ghPrHeadImpl: async () => "67fa0c28fde901e721afe30a91451130668f0bb0",
+      stage1RunImpl: async () => stage1("RESPONSE_RECEIVED"),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+    },
+  );
+  assert.equal(result.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
 });
 
 // -- runNextReviewTransitionGate: correction-satisfied disposition (issue #454, unit 454-C) --

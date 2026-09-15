@@ -550,6 +550,45 @@ export function isNoneSentinel(value) {
   return typeof value === "string" && /^none\b/i.test(value.trim());
 }
 
+// Pure. Issue #450 (the #428 live reproduction): the one specifically demonstrated legacy
+// pre-Stage-2 synonym this repository's own thin-control bodies have been observed to carry
+// ("Stage 2: not started") — distinct from, and narrower than, isNoneSentinel's own "none"
+// recognition above. Control #428 was durably `Stage 2: not started` when
+// `next-review-transition-gate.mjs`'s Execution-pointer-shaped bullet parser (which expects
+// either the canonical "none" sentinel or exactly one "#N"/URL reference) correctly rejected
+// it as malformed, stranding a genuine findings-bearing Stage 1 correction transition behind
+// an unrelated Stage-2-reference error.
+//
+// Deliberately scoped to exactly this one wording — never a broader set of natural-language
+// phrases such as "pending"/"later"/"not yet" (#450 Non-goals explicitly excludes those) — and
+// this predicate has no opinion on which field it is being checked against; callers gate its
+// use on the "Stage 2" label themselves (see next-review-transition-gate.mjs's
+// parseOptionalIssueRef and finalize-pr-breakpoint.mjs's canonicalizePreStage2Bullet). This is
+// read-time/normalization tolerance for state that predates finalize-pr-breakpoint.mjs's
+// write-time canonicalization fix, never a second, equally-valid way to author new state —
+// control-field-validator.mjs's write-time validator continues to reject this value outright
+// (it is not the canonical "none" sentinel and does not parse as a pointer), so a new write
+// cannot persist it and report success.
+//
+// Stage 1 review finding on PR #569: the original pattern was a bare `^not started\b` prefix
+// test, so a contradictory value such as "not started — previous audit #480" also matched —
+// the trailing explanation was never inspected for a real pointer before the whole field was
+// treated as pre-Stage-2 `none`, letting `canonicalizePreStage2Bullet` erase a genuine audit
+// reference instead of leaving it to fail closed. The tolerated trailing explanation (e.g.
+// "not started — audit not yet triggered", #450's own demonstrated shape) is still accepted,
+// but only when it contains no parseable issue/PR reference — the same "#N" / ".../pull/N" /
+// ".../issues/N" shapes `parseExecutionPointer` above recognizes. A suffix carrying one of
+// those is no longer "mechanically unambiguous as Stage 2 has not started" (#450's own Required
+// Behavior #3), so it must not be canonicalized away.
+const LEGACY_STAGE2_NOT_STARTED_PATTERN = /^not started\b(.*)$/i;
+const SUFFIX_REFERENCE_PATTERN = /#\d+|\/(?:pull|issues)\/\d+/;
+export function isLegacyStage2NotStartedSentinel(value) {
+  if (typeof value !== "string") return false;
+  const match = LEGACY_STAGE2_NOT_STARTED_PATTERN.exec(value.trim());
+  if (!match) return false;
+  return !SUFFIX_REFERENCE_PATTERN.test(match[1]);
+}
+
 // Pure. True when a raw `gh pr list` entry's own `headRefName`/`body` names execution Issue
 // `executionIssue` via the Shared Contract's PR-to-execution-Issue linkage convention (issue
 // #456's Shared Contract, "PR-to-execution-Issue linkage convention"): a branch name

@@ -12,6 +12,7 @@ import {
   parseHeadingBlock,
   extractActiveExecutionRef,
   isNoneSentinel,
+  isLegacyStage2NotStartedSentinel,
   parseExecutionPointer,
   readExecutionBulletField,
   findNearDuplicateBulletLabels,
@@ -120,6 +121,35 @@ test("isNoneSentinel: bare \"none\" and \"none — explanation\" both count; a r
   assert.equal(isNoneSentinel("the READY thin-control path itself is the defect under repair"), false);
   assert.equal(isNoneSentinel(""), false);
   assert.equal(isNoneSentinel(null), false);
+});
+
+// Issue #450 (the #428 live reproduction): the one demonstrated legacy pre-Stage-2 synonym,
+// narrowly scoped -- never a broader natural-language acceptance.
+test("isLegacyStage2NotStartedSentinel: matches only the exact demonstrated 'not started' synonym, case-insensitively and tolerating trailing explanation", () => {
+  assert.equal(isLegacyStage2NotStartedSentinel("not started"), true);
+  assert.equal(isLegacyStage2NotStartedSentinel("Not Started"), true);
+  assert.equal(isLegacyStage2NotStartedSentinel("not started — audit not yet triggered"), true);
+  assert.equal(isLegacyStage2NotStartedSentinel("none"), false);
+  assert.equal(isLegacyStage2NotStartedSentinel("pending"), false);
+  assert.equal(isLegacyStage2NotStartedSentinel("later"), false);
+  assert.equal(isLegacyStage2NotStartedSentinel("not yet"), false);
+  assert.equal(isLegacyStage2NotStartedSentinel(""), false);
+  assert.equal(isLegacyStage2NotStartedSentinel(null), false);
+});
+
+// Stage 1 review finding on PR #569: a trailing explanation that itself carries a parseable
+// issue/PR reference contradicts the "Stage 2 has not started" reading and must fail closed
+// instead of being treated as the legacy pre-Stage-2 sentinel.
+test("isLegacyStage2NotStartedSentinel: rejects a trailing explanation that carries a parseable issue/PR reference", () => {
+  assert.equal(isLegacyStage2NotStartedSentinel("not started — previous audit #480"), false);
+  assert.equal(
+    isLegacyStage2NotStartedSentinel("not started — see https://github.com/LouPineWays/Loop-Dee-Loup/issues/480"),
+    false,
+  );
+  assert.equal(
+    isLegacyStage2NotStartedSentinel("not started — see https://github.com/LouPineWays/Loop-Dee-Loup/pull/480"),
+    false,
+  );
 });
 
 test("parseExecutionPointer: exactly one #N is ok; zero or multiple fail closed", () => {
