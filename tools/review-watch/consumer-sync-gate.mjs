@@ -242,6 +242,18 @@ function stripOuterWhitespace(text) {
   return (text ?? "").trim();
 }
 
+// Pure. True when a single stage1-gate.mjs bound match's `body_excerpt` carries Codex's fixed
+// clean-pass phrasing (CLEAN_REVIEW_PATTERN) -- distinct from a generic ack/kickoff comment or a
+// findings-bearing reply that can coexist with it on the same thread. Extracted from
+// isCleanStage1Response's own `hasCleanMatch` check (Stage 1 review finding on PR #605, issue
+// #596) so a caller that needs to identify *which* match(es) genuinely made a round clean --
+// e.g. to derive a historical-provenance timestamp from only the qualifying reply, never a
+// generic earlier acknowledgement on the same thread -- reuses this exact fixed-phrase test
+// rather than re-deriving a second, possibly divergent, copy of it.
+export function isCleanPassMatch(match) {
+  return CLEAN_REVIEW_PATTERN.test(stripOuterWhitespace(match?.body_excerpt));
+}
+
 // Pure. `stage1` is stage1-gate.mjs's own result (nested under merge-ready-gate.mjs's
 // composed `gate.stage1`). A genuine response existing (RESPONSE_RECEIVED) only proves Stage
 // 1 happened -- stage1-gate.mjs's own header comment is explicit that it "does not evaluate
@@ -266,7 +278,7 @@ export function isCleanStage1Response(stage1) {
   // preamble -- so a lone kickoff/ack comment (matching neither fixed preamble) doesn't block
   // an otherwise-clean round, while a genuine findings-bearing review among the matches still
   // does.
-  const hasCleanMatch = matches.some((m) => CLEAN_REVIEW_PATTERN.test(stripOuterWhitespace(m.body_excerpt)));
+  const hasCleanMatch = matches.some((m) => isCleanPassMatch(m));
   const hasFindingsMatch = matches.some((m) => FINDINGS_PREAMBLE_PATTERN.test(stripOuterWhitespace(m.body_excerpt)));
   return hasCleanMatch && !hasFindingsMatch;
 }

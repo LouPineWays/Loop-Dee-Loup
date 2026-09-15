@@ -15,6 +15,8 @@ import {
   ordinaryStage1SatisfiedDispositionValue,
   verifyControlPrBulletMatches,
   looksLikeCorrectionSatisfiedBullet,
+  checkAdmissibleRecoveryPrestate,
+  earliestMatchTimestampMs,
   composeStage1SatisfiedControlBody,
   verifyFinalizedStage1SatisfiedBody,
 } from "./finalize-stage1-satisfied-breakpoint.mjs";
@@ -38,7 +40,15 @@ const AUDIT_LIFECYCLE_BODY = REVIEW_BODY.replace("- **Lifecycle:** REVIEW", "- *
 const CORRECTION_LIFECYCLE_BODY = REVIEW_BODY.replace("- **Lifecycle:** REVIEW", "- **Lifecycle:** CORRECTION");
 
 const LINKED_PR_VIEW = { headRefName: "issue-586-fix-stage1-satisfied", headRefOid: HEAD, body: "Addresses #586.", state: "OPEN" };
-const MERGED_LINKED_PR_VIEW = { ...LINKED_PR_VIEW, state: "MERGED" };
+
+// #596 historical-provenance fixtures: a merge boundary plus response timestamps clearly before
+// and after it, mirroring the real #582/#583/#592 shape (trigger/response timestamps that are
+// genuinely ordered relative to the merge).
+const MERGED_AT = "2026-09-10T12:00:00Z";
+const PRE_MERGE_RESPONSE_AT = "2026-09-10T11:00:00Z";
+const POST_MERGE_RESPONSE_AT = "2026-09-10T13:00:00Z";
+
+const MERGED_LINKED_PR_VIEW = { ...LINKED_PR_VIEW, state: "MERGED", mergedAt: MERGED_AT };
 
 function makePrViewStub(view) {
   return async () => view;
@@ -69,11 +79,11 @@ function exemptStage1Result() {
   return { exitCode: 0, state: "EXEMPT", reason: "docs typo fix" };
 }
 
-function cleanStage1Result() {
+function cleanStage1Result({ createdAt = PRE_MERGE_RESPONSE_AT } = {}) {
   return {
     exitCode: 0,
     state: "RESPONSE_RECEIVED",
-    matches: [{ body_excerpt: "Codex Review: Didn't find any major issues. Looks good to merge." }],
+    matches: [{ body_excerpt: "Codex Review: Didn't find any major issues. Looks good to merge.", created_at: createdAt }],
     unboundGenuineMatches: [],
   };
 }
@@ -137,6 +147,62 @@ test("looksLikeCorrectionSatisfiedBullet: recognizes the distinct #576/#577 disp
   assert.equal(looksLikeCorrectionSatisfiedBullet(null), false);
 });
 
+// -- checkAdmissibleRecoveryPrestate (issue #596, original #597) -------------------------
+
+test("checkAdmissibleRecoveryPrestate: accepts the documented stranded 'requested' prestate", () => {
+  const result = checkAdmissibleRecoveryPrestate("requested", { head: HEAD });
+  assert.equal(result.ok, true);
+  assert.equal(result.disposition, "requested");
+});
+
+test("checkAdmissibleRecoveryPrestate: accepts the exact already-recovered value for the same head as an idempotent prestate", () => {
+  const result = checkAdmissibleRecoveryPrestate(`satisfied at ${HEAD}`, { head: HEAD });
+  assert.equal(result.ok, true);
+  assert.equal(result.disposition, "already-recovered");
+});
+
+test("checkAdmissibleRecoveryPrestate: refuses 'none'", () => {
+  const result = checkAdmissibleRecoveryPrestate("none", { head: HEAD });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /not an admissible --recover true prestate/);
+});
+
+test("checkAdmissibleRecoveryPrestate: refuses malformed/unparseable text", () => {
+  const result = checkAdmissibleRecoveryPrestate("¿¿¿ garbage ???", { head: HEAD });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /not an admissible --recover true prestate/);
+});
+
+test("checkAdmissibleRecoveryPrestate: refuses an ordinary satisfied-at-a-different-head value", () => {
+  const result = checkAdmissibleRecoveryPrestate(`satisfied at ${OTHER_HEAD}`, { head: HEAD });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /not an admissible --recover true prestate/);
+});
+
+test("checkAdmissibleRecoveryPrestate: refuses a correction-satisfied disposition as a defense-in-depth fallback", () => {
+  const result = checkAdmissibleRecoveryPrestate(`correction-satisfied at ${HEAD} (reviewed ${OTHER_HEAD})`, { head: HEAD });
+  assert.equal(result.ok, false);
+});
+
+test("checkAdmissibleRecoveryPrestate: refuses an entirely absent Stage 1 bullet", () => {
+  const result = checkAdmissibleRecoveryPrestate(null, { head: HEAD });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /no "Stage 1" bullet at all/);
+});
+
+// -- earliestMatchTimestampMs (issue #596, original #596) --------------------------------
+
+test("earliestMatchTimestampMs: returns the earliest created_at among multiple matches", () => {
+  const ms = earliestMatchTimestampMs([{ created_at: POST_MERGE_RESPONSE_AT }, { created_at: PRE_MERGE_RESPONSE_AT }]);
+  assert.equal(ms, new Date(PRE_MERGE_RESPONSE_AT).getTime());
+});
+
+test("earliestMatchTimestampMs: returns null when no match carries a usable timestamp (unknown ordering)", () => {
+  assert.equal(earliestMatchTimestampMs([{ body_excerpt: "no timestamp here" }]), null);
+  assert.equal(earliestMatchTimestampMs([]), null);
+  assert.equal(earliestMatchTimestampMs(undefined), null);
+});
+
 test("composeStage1SatisfiedControlBody: from REVIEW, sets only the Stage 1 bullet and leaves every other field untouched", () => {
   const result = composeStage1SatisfiedControlBody(REVIEW_BODY, { pr: 590, head: HEAD });
   assert.equal(result.ok, true);
@@ -167,6 +233,29 @@ test("composeStage1SatisfiedControlBody: refuses when the control Issue's PR bul
   const result = composeStage1SatisfiedControlBody(REVIEW_BODY, { pr: 999, head: HEAD });
   assert.equal(result.ok, false);
   assert.match(result.reason, /expected #999/);
+});
+
+// -- Near-duplicate field guard (issue #596, original #598 / recurrence of #493) ---------
+
+test("composeStage1SatisfiedControlBody: refuses when a canonical Stage 1 bullet coexists with an unrecognized near-duplicate label", () => {
+  const ambiguousBody = REVIEW_BODY.replace(
+    "- **Stage 1:** requested\n",
+    "- **Stage 1:** requested\n- **Stage 1 (current):** satisfied at deadbeef\n",
+  );
+  const result = composeStage1SatisfiedControlBody(ambiguousBody, { pr: 590, head: HEAD });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /"Stage 1" field is ambiguous/);
+  assert.match(result.reason, /Stage 1 \(current\)/);
+});
+
+test("composeStage1SatisfiedControlBody: a near-duplicate label with no canonical Stage 1 bullet does not manufacture ambiguity on its own", () => {
+  const noCanonicalBody = REVIEW_BODY.replace("- **Stage 1:** requested\n", "- **Stage 1 (current):** requested\n");
+  // No canonical "Stage 1" bullet exists at all here, so composeStage1SatisfiedControlBody
+  // proceeds to insert one fresh -- mirrors checkExecutionCompletePrBoundary's own `raw !== null`
+  // gate: a noncanonical bullet alone must never manufacture ambiguity.
+  const result = composeStage1SatisfiedControlBody(noCanonicalBody, { pr: 590, head: HEAD });
+  assert.equal(result.ok, true);
+  assert.match(result.body, /- \*\*Stage 1:\*\* satisfied at 0056e55a8a1d5eb6498a16de42327532d359c694/);
 });
 
 test("composeStage1SatisfiedControlBody: refuses to clobber an existing correction-satisfied disposition", () => {
@@ -661,6 +750,396 @@ test("run(): --recover true also accepts an EXEMPT disposition", async () => {
   );
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "FINALIZED");
+});
+
+// Issue #596 Required behavior: EXEMPT must never be rejected merely for lacking a
+// response-shaped timestamp -- it is a structural PR-body marker, not a timestamped event, so
+// this must succeed even when the PR carries no usable "mergedAt" at all (a case that would fail
+// closed for a RESPONSE_RECEIVED disposition -- see the "unknown ordering" test below).
+test("run(): --recover true accepts EXEMPT even when the PR carries no usable mergedAt timestamp", async () => {
+  const noMergedAtView = { ...MERGED_LINKED_PR_VIEW, mergedAt: null };
+  let currentBody = AUDIT_LIFECYCLE_BODY;
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590, recover: true },
+    {
+      ghIssueViewImpl: async () => currentBody,
+      ghPrViewImpl: makePrViewStub(noMergedAtView),
+      stage1GateRunImpl: async () => exemptStage1Result(),
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        currentBody = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "FINALIZED");
+});
+
+// -- Historical-provenance guard (issue #596, original #596) -----------------------------
+
+test("run(): --recover true refuses a clean response that arrived only after merge -- never backfills pre-merge authority", async () => {
+  let writeAttempted = false;
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590, recover: true },
+    {
+      ghIssueViewImpl: async () => AUDIT_LIFECYCLE_BODY,
+      ghPrViewImpl: makePrViewStub(MERGED_LINKED_PR_VIEW),
+      stage1GateRunImpl: async () => cleanStage1Result({ createdAt: POST_MERGE_RESPONSE_AT }),
+      writeControlSnapshotImpl: async () => {
+        writeAttempted = true;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "STAGE1_SATISFIED_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /does not predate PR #590's merge boundary/);
+  assert.equal(writeAttempted, false);
+});
+
+// Stage 1 review finding on this PR (issue #596/#605): a generic bot acknowledgement bound
+// before merge, plus the actual clean-pass reply that made the round clean arriving only after
+// merge, must fail closed -- taking the earliest timestamp across *all* bound matches would
+// wrongly select the acknowledgement and backfill authority the real clean-pass evidence never
+// had before the merge boundary.
+test("run(): --recover true derives ordering only from the qualifying clean-pass match, never a generic pre-merge acknowledgement -- issue #596/#605", async () => {
+  let writeAttempted = false;
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590, recover: true },
+    {
+      ghIssueViewImpl: async () => AUDIT_LIFECYCLE_BODY,
+      ghPrViewImpl: makePrViewStub(MERGED_LINKED_PR_VIEW),
+      stage1GateRunImpl: async () => ({
+        exitCode: 0,
+        state: "RESPONSE_RECEIVED",
+        matches: [
+          { body_excerpt: "Starting review shortly.", created_at: PRE_MERGE_RESPONSE_AT },
+          { body_excerpt: "Codex Review: Didn't find any major issues. Looks good to merge.", created_at: POST_MERGE_RESPONSE_AT },
+        ],
+        unboundGenuineMatches: [],
+      }),
+      writeControlSnapshotImpl: async () => {
+        writeAttempted = true;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "STAGE1_SATISFIED_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /does not predate PR #590's merge boundary/);
+  assert.equal(writeAttempted, false);
+});
+
+// Positive control for the same fix: a generic acknowledgement landing *after* merge must never
+// block a qualifying clean-pass reply that genuinely predates merge -- the filter only removes
+// non-qualifying matches from the ordering computation, it does not reject the round merely for
+// carrying an ack.
+test("run(): --recover true still succeeds when a non-qualifying acknowledgement lands after merge alongside a genuinely pre-merge clean-pass reply", async () => {
+  let currentBody = AUDIT_LIFECYCLE_BODY;
+  const writeCalls = [];
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590, recover: true },
+    {
+      ghIssueViewImpl: async () => currentBody,
+      ghPrViewImpl: makePrViewStub(MERGED_LINKED_PR_VIEW),
+      stage1GateRunImpl: async () => ({
+        exitCode: 0,
+        state: "RESPONSE_RECEIVED",
+        matches: [
+          { body_excerpt: "Codex Review: Didn't find any major issues. Looks good to merge.", created_at: PRE_MERGE_RESPONSE_AT },
+          { body_excerpt: "Thanks for the update.", created_at: POST_MERGE_RESPONSE_AT },
+        ],
+        unboundGenuineMatches: [],
+      }),
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        writeCalls.push(proposedBody);
+        currentBody = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "FINALIZED");
+  assert.equal(writeCalls.length, 1);
+});
+
+test("run(): --recover true succeeds when the qualifying response demonstrably predates merge", async () => {
+  let currentBody = AUDIT_LIFECYCLE_BODY;
+  const writeCalls = [];
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590, recover: true },
+    {
+      ghIssueViewImpl: async () => currentBody,
+      ghPrViewImpl: makePrViewStub(MERGED_LINKED_PR_VIEW),
+      stage1GateRunImpl: async () => cleanStage1Result({ createdAt: PRE_MERGE_RESPONSE_AT }),
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        writeCalls.push(proposedBody);
+        currentBody = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "FINALIZED");
+  assert.equal(writeCalls.length, 1);
+});
+
+test("run(): --recover true fails closed when the PR's own mergedAt timestamp is unusable -- unknown ordering, never guessed", async () => {
+  const unusableMergedAtView = { ...MERGED_LINKED_PR_VIEW, mergedAt: null };
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590, recover: true },
+    {
+      ghIssueViewImpl: async () => AUDIT_LIFECYCLE_BODY,
+      ghPrViewImpl: makePrViewStub(unusableMergedAtView),
+      stage1GateRunImpl: async () => cleanStage1Result(),
+      writeControlSnapshotImpl: async () => ({ exitCode: 0, state: "WRITTEN" }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "STAGE1_SATISFIED_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /no usable "mergedAt" timestamp/);
+});
+
+test("run(): --recover true fails closed when the qualifying response carries no usable timestamp -- unknown ordering, never guessed", async () => {
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590, recover: true },
+    {
+      ghIssueViewImpl: async () => AUDIT_LIFECYCLE_BODY,
+      ghPrViewImpl: makePrViewStub(MERGED_LINKED_PR_VIEW),
+      stage1GateRunImpl: async () => ({
+        exitCode: 0,
+        state: "RESPONSE_RECEIVED",
+        matches: [{ body_excerpt: "Codex Review: Didn't find any major issues. Looks good to merge." }], // no created_at
+        unboundGenuineMatches: [],
+      }),
+      writeControlSnapshotImpl: async () => ({ exitCode: 0, state: "WRITTEN" }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "STAGE1_SATISFIED_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /qualifying Stage 1 response carries no usable timestamp/);
+});
+
+// -- Admissible-prestate guard (issue #596, original #597) --------------------------------
+
+test("run(): --recover true refuses an admissible-prestate violation -- 'none' -- before ever consulting stage1-gate", async () => {
+  let stage1Invoked = false;
+  const noneBody = AUDIT_LIFECYCLE_BODY.replace("- **Stage 1:** requested", "- **Stage 1:** none");
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590, recover: true },
+    {
+      ghIssueViewImpl: async () => noneBody,
+      ghPrViewImpl: makePrViewStub(MERGED_LINKED_PR_VIEW),
+      stage1GateRunImpl: async () => {
+        stage1Invoked = true;
+        return cleanStage1Result();
+      },
+      writeControlSnapshotImpl: async () => ({ exitCode: 0, state: "WRITTEN" }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "STAGE1_SATISFIED_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /not an admissible --recover true prestate/);
+  assert.equal(stage1Invoked, false);
+});
+
+test("run(): --recover true refuses an admissible-prestate violation -- satisfied at a different head -- before ever consulting stage1-gate", async () => {
+  let stage1Invoked = false;
+  const differentHeadBody = AUDIT_LIFECYCLE_BODY.replace("- **Stage 1:** requested", `- **Stage 1:** satisfied at ${OTHER_HEAD}`);
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590, recover: true },
+    {
+      ghIssueViewImpl: async () => differentHeadBody,
+      ghPrViewImpl: makePrViewStub(MERGED_LINKED_PR_VIEW),
+      stage1GateRunImpl: async () => {
+        stage1Invoked = true;
+        return cleanStage1Result();
+      },
+      writeControlSnapshotImpl: async () => ({ exitCode: 0, state: "WRITTEN" }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "STAGE1_SATISFIED_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /not an admissible --recover true prestate/);
+  assert.equal(stage1Invoked, false);
+});
+
+test("run(): --recover true refuses malformed/unparseable Stage 1 text before ever consulting stage1-gate", async () => {
+  let stage1Invoked = false;
+  const malformedBody = AUDIT_LIFECYCLE_BODY.replace("- **Stage 1:** requested", "- **Stage 1:** ??? unparseable ???");
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590, recover: true },
+    {
+      ghIssueViewImpl: async () => malformedBody,
+      ghPrViewImpl: makePrViewStub(MERGED_LINKED_PR_VIEW),
+      stage1GateRunImpl: async () => {
+        stage1Invoked = true;
+        return cleanStage1Result();
+      },
+      writeControlSnapshotImpl: async () => ({ exitCode: 0, state: "WRITTEN" }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "STAGE1_SATISFIED_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /not an admissible --recover true prestate/);
+  assert.equal(stage1Invoked, false);
+});
+
+// -- Prestate TOCTOU guard (Stage 1 review finding on this PR, issue #596/#605) -----------
+//
+// checkAdmissibleRecoveryPrestate above only ever saw the control body fetched before
+// stage1-gate.mjs's own recovery re-derivation ran. These regressions prove the live "Stage 1"
+// bullet is re-validated a second time against the fresh pre-write read, immediately before
+// composing, so a prestate that became inadmissible in the interim can never be silently
+// normalized into a write.
+
+test("run(): --recover true revalidates the recovery prestate against the fresh pre-write read -- fails closed when Stage 1 changed to 'none' while stage1-gate was running", async () => {
+  let callCount = 0;
+  let writeAttempted = false;
+  const noneBody = AUDIT_LIFECYCLE_BODY.replace("- **Stage 1:** requested", "- **Stage 1:** none");
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590, recover: true },
+    {
+      ghIssueViewImpl: async () => {
+        callCount += 1;
+        return callCount === 1 ? AUDIT_LIFECYCLE_BODY : noneBody;
+      },
+      ghPrViewImpl: makePrViewStub(MERGED_LINKED_PR_VIEW),
+      stage1GateRunImpl: async () => cleanStage1Result(),
+      writeControlSnapshotImpl: async () => {
+        writeAttempted = true;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "STAGE1_SATISFIED_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /not an admissible --recover true prestate/);
+  assert.equal(writeAttempted, false);
+});
+
+test("run(): --recover true revalidates the recovery prestate against the fresh pre-write read -- fails closed when Stage 1 changed to a different-head satisfaction while stage1-gate was running", async () => {
+  let callCount = 0;
+  let writeAttempted = false;
+  const differentHeadBody = AUDIT_LIFECYCLE_BODY.replace("- **Stage 1:** requested", `- **Stage 1:** satisfied at ${OTHER_HEAD}`);
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590, recover: true },
+    {
+      ghIssueViewImpl: async () => {
+        callCount += 1;
+        return callCount === 1 ? AUDIT_LIFECYCLE_BODY : differentHeadBody;
+      },
+      ghPrViewImpl: makePrViewStub(MERGED_LINKED_PR_VIEW),
+      stage1GateRunImpl: async () => cleanStage1Result(),
+      writeControlSnapshotImpl: async () => {
+        writeAttempted = true;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "STAGE1_SATISFIED_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /not an admissible --recover true prestate/);
+  assert.equal(writeAttempted, false);
+});
+
+test("run(): --recover true revalidates the recovery prestate against the fresh pre-write read -- fails closed when Stage 1 became a correction-satisfied disposition while stage1-gate was running", async () => {
+  let callCount = 0;
+  let writeAttempted = false;
+  const correctionBody = AUDIT_LIFECYCLE_BODY.replace(
+    "- **Stage 1:** requested",
+    `- **Stage 1:** correction-satisfied at ${HEAD} (reviewed ${OTHER_HEAD})`,
+  );
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590, recover: true },
+    {
+      ghIssueViewImpl: async () => {
+        callCount += 1;
+        return callCount === 1 ? AUDIT_LIFECYCLE_BODY : correctionBody;
+      },
+      ghPrViewImpl: makePrViewStub(MERGED_LINKED_PR_VIEW),
+      stage1GateRunImpl: async () => cleanStage1Result(),
+      writeControlSnapshotImpl: async () => {
+        writeAttempted = true;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "STAGE1_SATISFIED_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /never reconciles that stranded shape/);
+  assert.equal(writeAttempted, false);
+});
+
+test("run(): --recover true still succeeds when the prestate is unchanged between the initial and pre-write reads", async () => {
+  let currentBody = AUDIT_LIFECYCLE_BODY;
+  const writeCalls = [];
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590, recover: true },
+    {
+      ghIssueViewImpl: async () => currentBody,
+      ghPrViewImpl: makePrViewStub(MERGED_LINKED_PR_VIEW),
+      stage1GateRunImpl: async () => cleanStage1Result(),
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        writeCalls.push(proposedBody);
+        currentBody = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "FINALIZED");
+  assert.equal(writeCalls.length, 1);
+});
+
+// -- Near-duplicate field guard in recovery mode (issue #596, original #598) -------------
+
+test("run(): --recover true fails closed on a near-duplicate Stage 1 label before persistence", async () => {
+  let writeAttempted = false;
+  const ambiguousBody = AUDIT_LIFECYCLE_BODY.replace(
+    "- **Stage 1:** requested\n",
+    "- **Stage 1:** requested\n- **Stage 1 (updated):** satisfied at deadbeef\n",
+  );
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590, recover: true },
+    {
+      ghIssueViewImpl: async () => ambiguousBody,
+      ghPrViewImpl: makePrViewStub(MERGED_LINKED_PR_VIEW),
+      stage1GateRunImpl: async () => cleanStage1Result(),
+      writeControlSnapshotImpl: async () => {
+        writeAttempted = true;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "STAGE1_SATISFIED_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /"Stage 1" field is ambiguous/);
+  assert.equal(writeAttempted, false);
+});
+
+test("run(): forward path also fails closed on a near-duplicate Stage 1 label before persistence", async () => {
+  let writeAttempted = false;
+  const ambiguousBody = REVIEW_BODY.replace(
+    "- **Stage 1:** requested\n",
+    "- **Stage 1:** requested\n- **Stage 1 (current):** satisfied at deadbeef\n",
+  );
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590 },
+    {
+      ghIssueViewImpl: async () => ambiguousBody,
+      ghPrViewImpl: makePrViewStub(LINKED_PR_VIEW),
+      runNextReviewTransitionGateImpl: async () => satisfiedVerdict({ controlIssue: 587 }),
+      writeControlSnapshotImpl: async () => {
+        writeAttempted = true;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "STAGE1_SATISFIED_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /"Stage 1" field is ambiguous/);
+  assert.equal(writeAttempted, false);
 });
 
 test("run(): --recover true refuses when the PR is not actually merged", async () => {

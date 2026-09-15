@@ -117,6 +117,33 @@
 // correction path"). Reuses the exact same compose/write/verify primitives as the forward path,
 // so the two converge on identical durable output.
 //
+// Issue #596 hardened this mode along three independent authority dimensions, none of which the
+// forward path needs (it never re-derives Stage 1 evidence after the fact):
+//   - historical provenance — a clean-pass response is only promoted into recovered authority
+//     when its own earliest bound timestamp provably predates the PR's `mergedAt` boundary; an
+//     unknown ordering (no usable timestamp) fails closed exactly like a provably-post-merge
+//     response, never guessed at. EXEMPT carries no invented timestamp requirement — it is a
+//     structural PR-body marker, not a timestamped event — but is still only ever accepted via
+//     the same real, deterministic stage1-gate.mjs re-derivation, never assumed from
+//     present-day control state. Stage 1 review finding on PR #605: that timestamp must be
+//     derived only from the match(es) that actually carry the qualifying clean-pass disposition
+//     (`isCleanPassMatch`) — never the earliest across every bound match indiscriminately, since
+//     a generic pre-merge acknowledgement can otherwise stand in for a clean-pass reply that
+//     only arrived after merge;
+//   - admissible prestate — `checkAdmissibleRecoveryPrestate` refuses, before stage1-gate.mjs is
+//     ever consulted, unless the control Issue's existing "Stage 1" bullet is the documented
+//     stranded `requested` shape or the exact already-recovered `satisfied at <head>` value for
+//     this same head (idempotent success/no-op, still re-validated against current authority);
+//     `none`, malformed text, and an ordinary `satisfied at <different-head>` all fail closed.
+//     Stage 1 review finding on PR #605: this admissibility is re-checked a second time against
+//     the fresh pre-write control-body read, immediately before composing -- the initial check
+//     alone cannot speak for a live "Stage 1" bullet that changed while stage1-gate.mjs's own
+//     recovery re-derivation was running;
+//   - field identity — `composeStage1SatisfiedControlBody`'s own near-duplicate-label guard
+//     (shared with the forward path, since both converge on that one composer) refuses to
+//     compose/persist when a canonical "Stage 1" bullet coexists with an unrecognized
+//     near-duplicate label.
+//
 // On success, prints `FINALIZED <controlIssue> <executionIssue> <pr>` (control-Issue mode) or
 // `STAGE1_SATISFIED_VERIFIED <pr>` (direct-reference mode) to stdout (exit 0). On a fail-closed
 // durable-handoff failure, prints `STAGE1_SATISFIED_BREAKPOINT_UNVERIFIED <pr>` to stdout (exit
@@ -143,13 +170,14 @@ import {
   parseHeadingField,
   upsertControlBullet,
   parseExecutionPointer,
+  findNearDuplicateBulletLabels,
 } from "./ready-dispatch-gate.mjs";
 import { verifyExecutionMatches, verifyPrHeadIsCurrent, verifyPrLinkage } from "./finalize-pr-breakpoint.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 import { runNextReviewTransitionGate } from "./next-review-transition-gate.mjs";
 import { extractUrlPointerKinds } from "./control-field-validator.mjs";
 import { run as stage1GateRun } from "../review-watch/stage1-gate.mjs";
-import { isCleanStage1Response } from "../review-watch/consumer-sync-gate.mjs";
+import { isCleanStage1Response, isCleanPassMatch } from "../review-watch/consumer-sync-gate.mjs";
 
 // Lifecycle values this script is authorized to write the ordinary Stage 1 `satisfied at <head>`
 // disposition bullet over. `REVIEW` is the normal pre-merge value the forward path always sees
@@ -229,6 +257,74 @@ export function looksLikeCorrectionSatisfiedBullet(raw) {
   return typeof raw === "string" && /^correction-satisfied\b/i.test(raw.trim());
 }
 
+// Pure. Admissible-prestate guard — original #597. `--recover true` exists to reconcile one
+// documented stranded shape (the #582/#583 incident: PR merged, control still says
+// `Stage 1: requested`), never to normalize an arbitrary existing Stage 1 value. Only two
+// prestates are authorized to proceed into recovery's own evidence re-derivation:
+//   - the exact stranded `requested` text recovery is defined to repair;
+//   - the exact already-recovered `satisfied at <head>` value for the SAME head about to be
+//     recovered, accepted as an idempotent success/no-op (current authority is still
+//     re-derived and re-verified by the caller below -- this only authorizes the attempt, it
+//     does not itself skip re-validation).
+// Everything else -- `none`, malformed/unparseable text, an ordinary `satisfied at
+// <different-head>`, or any other value not explicitly authorized here -- fails closed. The
+// distinct `correction-satisfied` shape is handled by its own earlier, more specific check
+// (looksLikeCorrectionSatisfiedBullet) so its dedicated #576/#577 message is preserved; this
+// function still refuses it too if ever reached directly, as a defense-in-depth fallback.
+export function checkAdmissibleRecoveryPrestate(raw, { head }) {
+  if (raw === null) {
+    return {
+      ok: false,
+      reason:
+        'control Issue has no "Stage 1" bullet at all -- --recover true only repairs the documented stranded ' +
+        '"requested" disposition, never an absent field',
+    };
+  }
+  const trimmed = raw.trim();
+  if (trimmed === "requested") {
+    return { ok: true, disposition: "requested" };
+  }
+  const expectedSatisfied = ordinaryStage1SatisfiedDispositionValue({ head });
+  if (trimmed === expectedSatisfied) {
+    return { ok: true, disposition: "already-recovered" };
+  }
+  return {
+    ok: false,
+    reason:
+      `control Issue's "Stage 1" bullet ${JSON.stringify(raw)} is not an admissible --recover true prestate -- only ` +
+      `the stranded "requested" disposition or the exact already-recovered ${JSON.stringify(expectedSatisfied)} value ` +
+      "may be reconciled; --recover true exists to repair one documented stranded state, not to normalize arbitrary " +
+      "Stage 1 values",
+  };
+}
+
+// Pure. Parses an ISO-8601-ish timestamp string (as GitHub's REST/GraphQL APIs return for
+// `mergedAt`/`created_at`/`submitted_at`) into epoch milliseconds, or null when unusable.
+function parseTimestampMs(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+// Pure. Historical-provenance guard — original #596. Extracts the earliest `created_at` among
+// the given matches, or null when none carries a usable timestamp (unknown ordering, which must
+// fail closed rather than being guessed at). Stage 1 review finding on this PR (#605): this
+// helper stays a generic "earliest timestamp in this list" primitive -- it must never be handed
+// every one of stage1-gate.mjs's bound genuine `matches` indiscriminately, since
+// `isCleanStage1Response` deliberately tolerates a generic acknowledgement alongside the actual
+// clean-pass reply on the same thread. A pre-merge acknowledgement plus the real clean-pass
+// reply landing only after merge would otherwise select the acknowledgement's earlier timestamp
+// and wrongly authorize recovery from evidence that never made the round clean before the merge
+// boundary. Callers deriving historical provenance for a clean-pass disposition must first
+// filter to only the match(es) actually carrying the qualifying disposition (see
+// `isCleanPassMatch` and its use in `deriveRecoveredStage1Head`) before calling this.
+export function earliestMatchTimestampMs(matches) {
+  const values = (matches ?? [])
+    .map((m) => parseTimestampMs(m?.created_at))
+    .filter((ms) => ms !== null);
+  return values.length > 0 ? Math.min(...values) : null;
+}
+
 // Pure. Composes the proposed control body: verifies the current Lifecycle and "PR" bullet are
 // ones this breakpoint is authorized to act against, then upserts only the "Stage 1" bullet via
 // `upsertControlBullet` — every other field (Execution, PR, Stage 2, Lifecycle, Route, Blocker,
@@ -248,6 +344,32 @@ export function composeStage1SatisfiedControlBody(body, { pr, head }) {
   if (!prCheck.ok) return prCheck;
 
   const existingStage1 = parseControlBullet(body, "Stage 1");
+
+  // Near-duplicate field guard — original #598 / recurrence of #493. Mirrors
+  // checkExecutionCompletePrBoundary's own "PR" field guard in ready-dispatch-gate.mjs: the
+  // near-duplicate scan is only meaningful once a canonical "- **Stage 1:**" bullet actually
+  // exists (`existingStage1 !== null`) — an unrelated noncanonical bullet must never manufacture
+  // ambiguity on its own. When a canonical bullet does exist, a coexisting unrecognized
+  // near-duplicate label (e.g. "Stage 1 (current)", "Stage 1 (updated)") means the live field's
+  // identity is ambiguous — some other tool or a human editor could have written the "real"
+  // current disposition onto the near-duplicate label instead of the canonical one — so this
+  // composer refuses to compose/persist a Stage 1 disposition at all rather than trusting either
+  // label. Reuses the exact same shared validator #493/#494 established, never a competing rule.
+  if (existingStage1 !== null) {
+    const nearDuplicates = findNearDuplicateBulletLabels(body, "Stage 1");
+    if (nearDuplicates.length > 0) {
+      return {
+        ok: false,
+        reason:
+          `"Stage 1" field is ambiguous: a recognized "- **Stage 1:**" bullet (${JSON.stringify(existingStage1)}) ` +
+          `coexists with unrecognized near-duplicate label(s) ${nearDuplicates
+            .map((m) => `"- **${m.label}:**" (${JSON.stringify(m.raw)})`)
+            .join(", ")} that could represent the same live field -- refusing to compose/persist a Stage 1 ` +
+          "disposition while the field identity is ambiguous",
+      };
+    }
+  }
+
   if (looksLikeCorrectionSatisfiedBullet(existingStage1)) {
     return {
       ok: false,
@@ -288,7 +410,21 @@ function unverified({ pr, reason }) {
 // re-derives ordinary Stage 1 satisfaction directly against the PR's own live (post-merge)
 // `headRefOid`, bypassing the pre-merge composed gate entirely (it no longer applies once the PR
 // has actually merged). Returns `{ ok: true, head }` or `{ ok: false, reason }`; never throws.
-async function deriveRecoveredStage1Head({ repo, pr, prView }, { stage1GateRunImpl }) {
+//
+// Issue #596 hardening, in order:
+//   1. admissible-prestate guard (checkAdmissibleRecoveryPrestate) -- refuses before ever
+//      consulting stage1-gate.mjs unless the control Issue's existing "Stage 1" bullet is the
+//      documented stranded `requested` shape or the exact already-recovered value for this head;
+//   2. historical-provenance guard -- for a clean-pass RESPONSE_RECEIVED disposition, the
+//      qualifying response's own earliest bound timestamp must provably predate the PR's
+//      `mergedAt` boundary; unknown ordering (no usable timestamp on either side) fails closed
+//      exactly like a provably-post-merge response does, never guessed at either way. EXEMPT
+//      deliberately carries no such requirement -- it is a structural PR-body marker
+//      (findExemption in stage1-gate.mjs), not a timestamped event, so inventing a response-style
+//      timestamp requirement for it would incorrectly reject a genuine exemption; it is still
+//      never accepted except via that same real, deterministic re-derivation against this PR's
+//      own live body -- never inferred from the control Issue's own state or assumed by default.
+async function deriveRecoveredStage1Head({ repo, pr, prView, existingStage1 }, { stage1GateRunImpl }) {
   if (!prView || prView.state !== "MERGED") {
     return { ok: false, reason: `--recover true requires the PR to already be MERGED; PR #${pr} is ${JSON.stringify(prView?.state ?? null)}` };
   }
@@ -296,6 +432,12 @@ async function deriveRecoveredStage1Head({ repo, pr, prView }, { stage1GateRunIm
   if (typeof head !== "string" || !head.trim()) {
     return { ok: false, reason: `PR #${pr} is MERGED but carries no live headRefOid to recover a head from` };
   }
+
+  const prestateCheck = checkAdmissibleRecoveryPrestate(existingStage1, { head });
+  if (!prestateCheck.ok) return prestateCheck;
+
+  const mergedAtMs = parseTimestampMs(prView.mergedAt);
+
   let stage1Result;
   try {
     stage1Result = await stage1GateRunImpl({ repo, number: pr, head });
@@ -309,6 +451,38 @@ async function deriveRecoveredStage1Head({ repo, pr, prView }, { stage1GateRunIm
     return { ok: true, head };
   }
   if (stage1Result.state === "RESPONSE_RECEIVED" && isCleanStage1Response(stage1Result)) {
+    if (mergedAtMs === null) {
+      return {
+        ok: false,
+        reason:
+          `PR #${pr} is MERGED but carries no usable "mergedAt" timestamp -- refusing to recover response-based ` +
+          "Stage 1 satisfaction without provable pre-merge ordering (unknown ordering fails closed)",
+      };
+    }
+    // Stage 1 review finding on this PR (#605): derive ordering only from the match(es) that
+    // actually carry the clean-pass disposition, never from every bound match indiscriminately
+    // -- a generic acknowledgement can land before merge while the real clean-pass reply that
+    // made the round clean arrives only after, and `isCleanStage1Response` above already
+    // confirmed at least one qualifying match exists, so this filter is never empty here.
+    const qualifyingCleanPassMatches = (stage1Result.matches ?? []).filter((m) => isCleanPassMatch(m));
+    const responseMs = earliestMatchTimestampMs(qualifyingCleanPassMatches);
+    if (responseMs === null) {
+      return {
+        ok: false,
+        reason:
+          "the qualifying Stage 1 response carries no usable timestamp -- refusing to recover response-based Stage " +
+          "1 satisfaction without provable pre-merge ordering (unknown ordering fails closed)",
+      };
+    }
+    if (responseMs >= mergedAtMs) {
+      return {
+        ok: false,
+        reason:
+          `the qualifying Stage 1 response (${new Date(responseMs).toISOString()}) does not predate PR #${pr}'s ` +
+          `merge boundary (${prView.mergedAt}) -- recovery must not let evidence that only arrived after merge ` +
+          "retroactively authorize it",
+      };
+    }
     return { ok: true, head };
   }
   return {
@@ -411,7 +585,7 @@ export async function run(
           "correction-satisfied disposition -- --recover true never reconciles that stranded shape (it belongs to #576/#577's own recovery)",
       });
     }
-    const recovered = await deriveRecoveredStage1Head({ repo, pr, prView }, { stage1GateRunImpl });
+    const recovered = await deriveRecoveredStage1Head({ repo, pr, prView, existingStage1 }, { stage1GateRunImpl });
     if (!recovered.ok) return unverified({ pr, reason: recovered.reason });
     authorizedHead = recovered.head;
   } else {
@@ -482,6 +656,30 @@ export async function run(
   const latestExecutionCheck = verifyExecutionMatches(latestBody, executionIssue);
   if (!latestExecutionCheck.ok) return unverified({ pr, reason: latestExecutionCheck.reason });
 
+  // Prestate TOCTOU guard -- Stage 1 review finding on this PR (#605). The admissible-prestate
+  // check above (checkAdmissibleRecoveryPrestate / looksLikeCorrectionSatisfiedBullet) only ever
+  // saw the control body fetched before stage1-gate.mjs's own recovery re-derivation ran. If the
+  // live "Stage 1" bullet changed in the interim -- e.g. from `requested` to `none`, to a
+  // different-head `satisfied at`, or to a `correction-satisfied` disposition -- that earlier
+  // check can no longer speak for the body being composed/written right now, and
+  // composeStage1SatisfiedControlBody's own checks (Lifecycle, PR bullet, near-duplicate,
+  // correction-satisfied) do not themselves re-derive full recovery admissibility. Re-run the
+  // same admissibility check against this fresh read, immediately before composing, so a
+  // prestate this guard explicitly rejects can never be silently normalized into a write.
+  if (recover) {
+    const latestExistingStage1 = parseControlBullet(latestBody, "Stage 1");
+    if (looksLikeCorrectionSatisfiedBullet(latestExistingStage1)) {
+      return unverified({
+        pr,
+        reason:
+          `control Issue's "Stage 1" bullet ${JSON.stringify(latestExistingStage1)} already carries a distinct ` +
+          "correction-satisfied disposition -- --recover true never reconciles that stranded shape (it belongs to #576/#577's own recovery)",
+      });
+    }
+    const latestPrestateCheck = checkAdmissibleRecoveryPrestate(latestExistingStage1, { head: authorizedHead });
+    if (!latestPrestateCheck.ok) return unverified({ pr, reason: latestPrestateCheck.reason });
+  }
+
   const composed = composeStage1SatisfiedControlBody(latestBody, { pr, head: authorizedHead });
   if (!composed.ok) return unverified({ pr, reason: composed.reason });
 
@@ -524,7 +722,7 @@ function defaultGhIssueView({ repo, controlIssue }) {
 }
 
 function defaultGhPrView({ repo, pr }) {
-  const args = ["pr", "view", String(pr), "--json", "headRefName,headRefOid,body,state"];
+  const args = ["pr", "view", String(pr), "--json", "headRefName,headRefOid,body,state,mergedAt"];
   if (repo) args.push("--repo", repo);
   const raw = execFileSync("gh", args, { encoding: "utf8" });
   return JSON.parse(raw);
