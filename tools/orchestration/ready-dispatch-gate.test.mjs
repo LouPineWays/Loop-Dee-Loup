@@ -1764,6 +1764,39 @@ test("evaluateReadyDispatchGate: EXECUTION_COMPLETE with both PR and Stage 1 bul
   assert.equal(result.status, "READY_TO_DISPATCH_INTEGRATION");
 });
 
+// Issue #558 Stage 1 correction, finding 1 (P2): a noncanonical "PR ..." bullet must never
+// manufacture PR/review-boundary state on its own when no canonical "- **PR:**" bullet is
+// present at all -- negative control for the near-duplicate scan now being gated on
+// `parseControlBullet(body, "PR") !== null`.
+test("evaluateReadyDispatchGate: EXECUTION_COMPLETE with a noncanonical 'PR notes' bullet and no canonical PR bullet still returns READY_TO_DISPATCH_INTEGRATION (no false ambiguity)", () => {
+  const body =
+    "- **Lifecycle:** EXECUTION_COMPLETE\n- **Execution:** #407\n- **Route:** integration worker\n- **PR notes:** not created yet\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "READY_TO_DISPATCH_INTEGRATION");
+  assert.equal(result.executionIssue, 407);
+});
+
+// Issue #558 Stage 1 correction, finding 2 (P1): a stale `Lifecycle: EXECUTION_COMPLETE` with
+// an already-established PR/Stage 1 boundary must resolve to exactly one deterministic next
+// action -- chain to next-review-transition-gate.mjs -- under both the machine action envelope
+// and (per the AGENTS.md edit accompanying this correction) the governing prose, never a
+// decomposition/free-reasoning fallthrough and never a repeat Integration/PR dispatch.
+test("evaluateReadyDispatchGate + getActionEnvelope: established PR/Stage 1 under stale EXECUTION_COMPLETE yields exactly one deterministic post-PR continuation, never fallthrough and never a repeat integration dispatch", () => {
+  const body =
+    "- **Lifecycle:** EXECUTION_COMPLETE\n- **Execution:** #439\n- **Route:** integration worker\n- **PR:** #443\n- **Stage 1:** requested\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const result = evaluateReadyDispatchGate(body);
+  assert.equal(result.status, "NOT_READY");
+  assert.notEqual(result.status, "READY_TO_DISPATCH_INTEGRATION");
+  assert.equal(result.postPrLifecycle, "EXECUTION_COMPLETE_PR_ESTABLISHED");
+
+  const envelope = getActionEnvelope(result.status, result);
+  // "chain" (never "fallthrough" or "bounded"/"none") is the one mode that both matches
+  // AGENTS.md's own "does not fall through to free reasoning either" exception and hands off
+  // to exactly one further deterministic gate invocation.
+  assert.equal(envelope.mode, "chain");
+  assert.deepEqual(envelope.authorizedActions, ["run-next-review-transition-gate"]);
+});
+
 // Issue #498 unit 498-A: durable thin-control-state projection at the PLAN_READY/ROUTED
 // breakpoints (the 2026-09-10 #500 stranded-state fix), plus the stopAfter contract on
 // every pre-PR terminal verdict.

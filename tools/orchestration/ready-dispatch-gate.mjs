@@ -860,7 +860,11 @@ export function classifyAuditIssue(body) {
 //     "PR" bullet coexisting with an unrecognized near-duplicate label that could hold the
 //     same live field (findNearDuplicateBulletLabels, the same ambiguity guard
 //     readExecutionBulletField already applies to "Execution") — is malformed and must also
-//     not authorize integration dispatch (fail closed on ambiguity).
+//     not authorize integration dispatch (fail closed on ambiguity). Issue #558 Stage 1
+//     finding 1: the near-duplicate scan is only run once `parseControlBullet(body, "PR")`
+//     is non-null — a noncanonical bullet (e.g. "PR notes") with no canonical "PR" bullet at
+//     all must never manufacture PR state by itself, mirroring
+//     parseOptionalIssueRefGuarded's own `raw !== null` gate in next-review-transition-gate.mjs.
 //   - "Stage 1": plain text (`requested`, `exempt: ...`, `correction-satisfied at ...`, or
 //     `none`), never an issue pointer — read with parseControlBullet only, never
 //     parseExecutionPointer. `raw === null` or `isNoneSentinel(raw)` is "not crossed"; any
@@ -874,30 +878,37 @@ export function classifyAuditIssue(body) {
 // invalid/ambiguous result shape as a small local helper, per the Shared Contract's
 // no-new-circular-import note, rather than importing it back from that module.
 function checkExecutionCompletePrBoundary(body) {
-  const prNearDuplicates = findNearDuplicateBulletLabels(body, "PR", []);
-  if (prNearDuplicates.length > 0) {
-    return {
-      established: true,
-      reason:
-        'PR reference is ambiguous: a recognized "- **PR:**" bullet coexists with unrecognized near-duplicate ' +
-        `label(s) ${prNearDuplicates.map((m) => `"- **${m.label}:**" (${JSON.stringify(m.raw)})`).join(", ")} that could ` +
-        "represent the same live field — refusing to treat the PR/review boundary as not-yet-crossed",
-    };
-  }
-
+  // Issue #558 Stage 1 finding 1 (P2): the near-duplicate scan is only meaningful once a
+  // canonical "- **PR:**" bullet actually exists — mirrors parseOptionalIssueRefGuarded's own
+  // `raw !== null` gate above near-duplicate detection. An unrelated noncanonical bullet (e.g.
+  // "- **PR notes:** not created yet") must never manufacture PR state on its own when no
+  // canonical field coexists with it.
   const prRaw = parseControlBullet(body, "PR");
-  if (prRaw !== null && !isNoneSentinel(prRaw)) {
-    const prPointer = parseExecutionPointer(prRaw);
-    if (prPointer.ok) {
+  if (prRaw !== null) {
+    const prNearDuplicates = findNearDuplicateBulletLabels(body, "PR", []);
+    if (prNearDuplicates.length > 0) {
       return {
         established: true,
-        reason: `PR is already recorded (#${prPointer.issue}) — a fresh Integration/PR worker must not be dispatched for an execution that already has a PR`,
+        reason:
+          'PR reference is ambiguous: a recognized "- **PR:**" bullet coexists with unrecognized near-duplicate ' +
+          `label(s) ${prNearDuplicates.map((m) => `"- **${m.label}:**" (${JSON.stringify(m.raw)})`).join(", ")} that could ` +
+          "represent the same live field — refusing to treat the PR/review boundary as not-yet-crossed",
       };
     }
-    return {
-      established: true,
-      reason: `"PR" bullet is present but neither "none" nor a single resolvable reference (found: ${JSON.stringify(prRaw)}) — failing closed rather than authorizing integration dispatch`,
-    };
+
+    if (!isNoneSentinel(prRaw)) {
+      const prPointer = parseExecutionPointer(prRaw);
+      if (prPointer.ok) {
+        return {
+          established: true,
+          reason: `PR is already recorded (#${prPointer.issue}) — a fresh Integration/PR worker must not be dispatched for an execution that already has a PR`,
+        };
+      }
+      return {
+        established: true,
+        reason: `"PR" bullet is present but neither "none" nor a single resolvable reference (found: ${JSON.stringify(prRaw)}) — failing closed rather than authorizing integration dispatch`,
+      };
+    }
   }
 
   const stage1Raw = parseControlBullet(body, "Stage 1");
