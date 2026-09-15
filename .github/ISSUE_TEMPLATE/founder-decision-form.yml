@@ -1,0 +1,122 @@
+name: Founder decision form
+description: Batch every currently knowable critical-path founder decision in one structured issue
+title: "[Decision Form] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Use this only when founder-level choices genuinely block or materially change the current
+        critical path. Batch every currently knowable question; do not use this form for technical
+        choices already settled by repository authority.
+
+  - type: input
+    id: parent
+    attributes:
+      label: Parent loop
+      description: Link the controlling parent/control issue.
+      placeholder: "#123"
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Accepted outcome
+      description: State the already-approved user or business outcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: current
+    attributes:
+      label: Current verified state
+      description: Facts only; do not include unresolved discussion.
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why founder input is required
+      description: Explain the critical-path blocker and why current authority cannot settle it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: unlocks
+    attributes:
+      label: What becomes implementable after completion
+      description: Name the slice, decision boundary, or other concrete continuation this form unlocks.
+    validations:
+      required: true
+
+  - type: textarea
+    id: decisions
+    attributes:
+      label: Decision batch
+      description: >-
+        Include every currently knowable founder-level decision. For each decision use a stable ID
+        and include: Decision required; Critical-path consequence; two or three mutually exclusive
+        options where appropriate; Recommendation; Tradeoffs; Suggested answer; Founder answer; and
+        optional Founder comments.
+      placeholder: |
+        Q1 — <decision title>
+
+        Decision required:
+        ...
+
+        Critical-path consequence:
+        ...
+
+        Options:
+        A — ...
+        B — ...
+
+        Recommendation:
+        ...
+
+        Tradeoffs:
+        ...
+
+        Suggested answer:
+        ...
+
+        Founder answer:
+        ...
+
+        Founder comments:
+        ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: comments
+    attributes:
+      label: General comments or constraints
+      description: Optional constraints or context not captured by an individual decision.
+    validations:
+      required: false
+
+  - type: textarea
+    id: new_outcomes
+    attributes:
+      label: New outcome proposals
+      description: >-
+        Optional independent outcomes exposed by these decisions. For each Loop-Dee-Loup outcome,
+        include its founder-selected priority horizon: Now, Soon, Later, or Wishes.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: backlog_authorization
+    attributes:
+      label: Backlog authorization
+      description: >-
+        Should accepted independent outcomes above be retained as backlog candidates in the owning
+        repository? This does not authorize execution.
+      options:
+        - "Yes — retain accepted independent outcomes as backlog candidates"
+        - "No — do not create backlog candidates from this form"
+    validations:
+      required: true
