@@ -56,6 +56,14 @@
 // worker dispatched on a satisfied READY immediate-dispatch gate — and that scope is
 // deliberate, not an oversight to be widened with a second mode.
 //
+// Issue #570 extends this same table-driven selection to `next-review-transition-gate.mjs`'s
+// two post-PR correction verdicts, closing the exact #451/PR #569 reproduction where a
+// mechanically authorized `STAGE1_CORRECTION_REQUIRED` -> `dispatch-correction-worker`
+// transition (per `tools/orchestration/action-envelope.mjs`) had no deterministic prompt path:
+//   node tools/orchestration/next-review-transition-gate.mjs --control-issue 451 \
+//     | node tools/orchestration/format-dispatch-prompt.mjs
+// and the equivalent for `STAGE2_CORRECTION_REQUIRED` from a post-merge NOT CLEAN verdict.
+//
 // Tests: node --test tools/orchestration/format-dispatch-prompt.test.mjs
 
 import { readFileSync } from "node:fs";
@@ -225,6 +233,67 @@ export function formatIntegrationWorkerDispatchPrompt({ controlIssue, executionI
   );
 }
 
+// Pure. Renders the fixed reference-only "Stage 1 correction worker dispatch" template for
+// issue #570 — `next-review-transition-gate.mjs`'s `STAGE1_CORRECTION_REQUIRED` verdict.
+// `action-envelope.mjs` already authorizes exactly `dispatch-correction-worker` for this state
+// (docs/operating-model.md § Watched lifecycle breakpoints, "Deterministic post-PR transition
+// resolution"), but until this issue nothing rendered that authorization into a deterministic
+// prompt — the live #451/PR #569 reproduction reached this exact verdict and then failed at
+// `format-dispatch-prompt.mjs`, which recognized no such state.
+//
+// `controlIssue` is optional (`null` when absent) because `next-review-transition-gate.mjs`'s
+// own direct-reference mode (`--pr`/`--head`/`--issue`, no `--control-issue`) can also reach
+// this verdict without a thin control Issue to name — the template renders the "Controlling
+// Issue" line only when one is actually present, never a fabricated placeholder.
+//
+// Deliberately carries no finding text, review comment excerpts, or acceptance-criteria
+// restatement: the dispatched correction worker reads PR #<pr>'s own current Stage 1 review and
+// Execution Issue #<issue> directly from GitHub, exactly as every other template in this file
+// hands over durable references instead of restated content.
+export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null, issue, pr }) {
+  if (!isPositiveInteger(issue) || !isPositiveInteger(pr)) {
+    throw new Error("formatStage1CorrectionWorkerDispatchPrompt requires issue and pr to be positive integers");
+  }
+  if (controlIssue !== null && controlIssue !== undefined && !isPositiveInteger(controlIssue)) {
+    throw new Error("formatStage1CorrectionWorkerDispatchPrompt requires controlIssue to be a positive integer when present");
+  }
+  const controlLine = controlIssue != null ? ` Controlling Issue: #${controlIssue}.` : "";
+  return (
+    `Stage 1 correction worker dispatch. Execution Issue: #${issue}. PR: #${pr}.${controlLine}\n\n` +
+    `Read PR #${pr}'s current Stage 1 review and Execution Issue #${issue} directly from GitHub to recover the ` +
+    `findings and correction authority — they were not restated here on purpose. Verify and apply one ` +
+    `consolidated correction per docs/bounded-review-cycle.md, push it, and stop: do not re-trigger review, ` +
+    `merge, or begin Stage 2 in this context.`
+  );
+}
+
+// Pure. Renders the fixed reference-only "Stage 2 correction worker dispatch" template for
+// issue #570 — `next-review-transition-gate.mjs`'s `STAGE2_CORRECTION_REQUIRED` verdict. Same
+// missing-formatter gap as the Stage 1 sibling above, for the post-merge NOT CLEAN path
+// (`action-envelope.mjs` authorizes the identical `dispatch-correction-worker` action here).
+//
+// Carries only the Audit Issue reference (plus an optional Controlling Issue reference, same
+// rule as the Stage 1 template above) — never the audit narrative or verdict text. The
+// dispatched correction worker reads Audit Issue #<auditIssue>'s completed Stage 2 report
+// directly, which itself names the work/execution Issue needing correction, so no second
+// reference is required here.
+export function formatStage2CorrectionWorkerDispatchPrompt({ controlIssue = null, auditIssue }) {
+  if (!isPositiveInteger(auditIssue)) {
+    throw new Error("formatStage2CorrectionWorkerDispatchPrompt requires auditIssue to be a positive integer");
+  }
+  if (controlIssue !== null && controlIssue !== undefined && !isPositiveInteger(controlIssue)) {
+    throw new Error("formatStage2CorrectionWorkerDispatchPrompt requires controlIssue to be a positive integer when present");
+  }
+  const controlLine = controlIssue != null ? ` Controlling Issue: #${controlIssue}.` : "";
+  return (
+    `Stage 2 correction worker dispatch. Audit Issue: #${auditIssue}.${controlLine}\n\n` +
+    `Read Audit Issue #${auditIssue}'s completed Stage 2 report directly from GitHub to recover the audit ` +
+    `findings, the work Issue it names, and correction authority — they were not restated here on purpose. ` +
+    `Verify and apply one consolidated correction per docs/bounded-review-cycle.md, push it, and stop: do not ` +
+    `re-trigger the audit or terminalize this cycle in this context.`
+  );
+}
+
 // Pure. Same reference-only size proxy diagnostic-trace.mjs's classifyPreDispatch uses
 // (DEFAULT_REFERENCE_THRESHOLD_CHARS = 700), duplicated rather than imported: this
 // directory and tools/telemetry are separate consumer-distributed units that should not
@@ -267,7 +336,11 @@ function readStdinIfPiped() {
 // original "Implementation worker dispatch" template unchanged. Issue #498 unit 498-B adds
 // REPLAN_REQUIRED, selecting formatPlanningCorrectionWorkerDispatchPrompt the same way. Every
 // non-implementation template takes its own fixed field set (see each formatter's own comment
-// for why), so the fields piped through differ by kind.
+// for why), so the fields piped through differ by kind. Issue #570 adds `STAGE1_CORRECTION_
+// REQUIRED`/`STAGE2_CORRECTION_REQUIRED` — `next-review-transition-gate.mjs`'s own verdict
+// field names (`issue`, `pr`, `auditIssue`, `controlIssue`) are used verbatim as the field keys
+// here rather than translated to `executionIssue`, so piped-JSON mode reads them straight off
+// the verdict object exactly like every other row in this table.
 const TEMPLATES_BY_STATE = {
   READY_TO_DISPATCH: { formatter: formatDispatchPrompt, fields: ["controlIssue", "executionIssue", "route"] },
   READY_TO_DISPATCH_PLANNING: { formatter: formatPlanningWorkerDispatchPrompt, fields: ["controlIssue", "executionIssue"] },
@@ -276,6 +349,8 @@ const TEMPLATES_BY_STATE = {
     formatter: formatPlanningCorrectionWorkerDispatchPrompt,
     fields: ["controlIssue", "executionIssue", "planIndexUrl", "replanRequiredUnitIds"],
   },
+  STAGE1_CORRECTION_REQUIRED: { formatter: formatStage1CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "issue", "pr"] },
+  STAGE2_CORRECTION_REQUIRED: { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
 };
 
 // Explicit-fields mode's equivalent of the state-based selection above, for a caller
@@ -286,6 +361,8 @@ const TEMPLATES_BY_STATE = {
 // CLI flag names differ from the in-memory field names for the two multi-word fields
 // (planIndexUrl -> --plan-index-url, replanRequiredUnitIds -> --replan-unit-ids, parsed as a
 // comma-separated list); every other field's flag is its own camelCase name kebab-cased.
+// Issue #570: "stage1-correction" and "stage2-correction" mirror the piped-mode field names
+// above (`issue`/`pr`/`auditIssue`), each with their own CLI flag per CLI_FLAG_BY_FIELD below.
 const FORMATTERS_BY_KIND = {
   implementation: { formatter: formatDispatchPrompt, fields: ["controlIssue", "executionIssue", "route"] },
   planning: { formatter: formatPlanningWorkerDispatchPrompt, fields: ["controlIssue", "executionIssue"] },
@@ -294,6 +371,8 @@ const FORMATTERS_BY_KIND = {
     formatter: formatPlanningCorrectionWorkerDispatchPrompt,
     fields: ["controlIssue", "executionIssue", "planIndexUrl", "replanRequiredUnitIds"],
   },
+  "stage1-correction": { formatter: formatStage1CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "issue", "pr"] },
+  "stage2-correction": { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
 };
 
 const CLI_FLAG_BY_FIELD = {
@@ -302,6 +381,9 @@ const CLI_FLAG_BY_FIELD = {
   route: "route",
   planIndexUrl: "plan-index-url",
   replanRequiredUnitIds: "replan-unit-ids",
+  issue: "issue",
+  pr: "pr",
+  auditIssue: "audit-issue",
 };
 
 // Pure. Reads one field's value out of an explicit-fields `args` map or a piped gate-result
@@ -309,7 +391,7 @@ const CLI_FLAG_BY_FIELD = {
 // replanRequiredUnitIds to an array — comma-split for the CLI flag, passed through as-is from
 // piped JSON where the gate already emits a real array).
 function readField(field, source, { isCli }) {
-  if (field === "controlIssue" || field === "executionIssue") {
+  if (field === "controlIssue" || field === "executionIssue" || field === "issue" || field === "pr" || field === "auditIssue") {
     const raw = isCli ? source[CLI_FLAG_BY_FIELD[field]] : source[field];
     return raw != null ? Number(raw) : null;
   }
@@ -334,7 +416,7 @@ function main() {
     if (!entry) {
       process.stderr.write(
         `format-dispatch-prompt.mjs: unknown --kind ${JSON.stringify(kind)} — use "implementation", "planning", ` +
-          `"integration", or "planning-correction"\n`,
+          `"integration", "planning-correction", "stage1-correction", or "stage2-correction"\n`,
       );
       process.exit(2);
       return;
@@ -368,8 +450,9 @@ function main() {
     if (!entry) {
       process.stderr.write(
         `format-dispatch-prompt.mjs: input state is ${JSON.stringify(parsed.state ?? null)}, not "READY_TO_DISPATCH" ` +
-          `(or "READY_TO_DISPATCH_PLANNING"/"READY_TO_DISPATCH_INTEGRATION"/"REPLAN_REQUIRED") — refusing to format a ` +
-          "dispatch prompt for a non-ready or malformed gate result\n",
+          `(or "READY_TO_DISPATCH_PLANNING"/"READY_TO_DISPATCH_INTEGRATION"/"REPLAN_REQUIRED"/` +
+          `"STAGE1_CORRECTION_REQUIRED"/"STAGE2_CORRECTION_REQUIRED") — refusing to format a dispatch prompt for a ` +
+          "non-ready or malformed gate result\n",
       );
       process.exit(2);
       return;

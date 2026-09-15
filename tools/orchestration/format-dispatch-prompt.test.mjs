@@ -11,6 +11,8 @@ import {
   formatPlanningWorkerDispatchPrompt,
   formatPlanningCorrectionWorkerDispatchPrompt,
   formatIntegrationWorkerDispatchPrompt,
+  formatStage1CorrectionWorkerDispatchPrompt,
+  formatStage2CorrectionWorkerDispatchPrompt,
   assertReferenceOnly,
 } from "./format-dispatch-prompt.mjs";
 
@@ -297,6 +299,101 @@ test("formatIntegrationWorkerDispatchPrompt throws for missing/invalid required 
   assert.throws(() => formatIntegrationWorkerDispatchPrompt({ controlIssue: 12.5, executionIssue: 407 }));
 });
 
+// -- issue #570: "Stage 1 correction worker dispatch" / "Stage 2 correction worker dispatch" --
+//
+// Closes the exact #451/PR #569 reproduction: `next-review-transition-gate.mjs` reached
+// `STAGE1_CORRECTION_REQUIRED`, `action-envelope.mjs` authorized `dispatch-correction-worker`,
+// but piping the verdict into this formatter exited 2 ("not a supported dispatch state").
+
+test("formatStage1CorrectionWorkerDispatchPrompt includes the exact PR, execution Issue, and controlling Issue references", () => {
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569 });
+  assert.match(prompt, /^Stage 1 correction worker dispatch\./);
+  assert.match(prompt, /#569/);
+  assert.match(prompt, /#570/);
+  assert.match(prompt, /#571/);
+});
+
+test("formatStage1CorrectionWorkerDispatchPrompt omits the Controlling Issue line when controlIssue is absent (direct-reference mode)", () => {
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ issue: 570, pr: 569 });
+  assert.ok(!prompt.includes("Controlling Issue"));
+  assert.match(prompt, /#569/);
+  assert.match(prompt, /#570/);
+});
+
+test("formatStage1CorrectionWorkerDispatchPrompt stays well under the reference-only threshold", () => {
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569 });
+  assert.ok(prompt.length < 700, `expected < 700 chars, got ${prompt.length}`);
+});
+
+// Reference-only negative control: the whole point of this template is that a correction
+// worker recovers findings from the PR/Issue directly rather than the controller restating
+// them here. Assert no finding-shaped prose ever appears.
+test("formatStage1CorrectionWorkerDispatchPrompt never restates finding text or AGENTS.md contract prose", () => {
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569 });
+  for (const forbidden of [
+    "Codex Review",
+    "automated review suggestions",
+    "STATUS",
+    "OUTCOME",
+    "CHANGED",
+    "VERIFIED",
+    "DECISIONS",
+    "NEW RISKS",
+    "Founder interrupt conditions",
+  ]) {
+    assert.ok(!prompt.includes(forbidden), `prompt unexpectedly contains restated content "${forbidden}"`);
+  }
+});
+
+test("formatStage1CorrectionWorkerDispatchPrompt throws for missing/invalid required fields", () => {
+  assert.throws(() => formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: null, pr: 569 }));
+  assert.throws(() => formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: NaN }));
+  assert.throws(() => formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: -7, pr: 569 }));
+  assert.throws(() => formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 12.5, issue: 570, pr: 569 }));
+});
+
+test("formatStage2CorrectionWorkerDispatchPrompt includes the exact Audit Issue and controlling Issue references", () => {
+  const prompt = formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: 559 });
+  assert.match(prompt, /^Stage 2 correction worker dispatch\./);
+  assert.match(prompt, /#559/);
+  assert.match(prompt, /#445/);
+});
+
+test("formatStage2CorrectionWorkerDispatchPrompt omits the Controlling Issue line when controlIssue is absent (direct-reference mode)", () => {
+  const prompt = formatStage2CorrectionWorkerDispatchPrompt({ auditIssue: 559 });
+  assert.ok(!prompt.includes("Controlling Issue"));
+  assert.match(prompt, /#559/);
+});
+
+test("formatStage2CorrectionWorkerDispatchPrompt stays well under the reference-only threshold", () => {
+  const prompt = formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: 559 });
+  assert.ok(prompt.length < 700, `expected < 700 chars, got ${prompt.length}`);
+});
+
+test("formatStage2CorrectionWorkerDispatchPrompt never restates audit narrative or AGENTS.md contract prose", () => {
+  const prompt = formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: 559 });
+  for (const forbidden of [
+    "NOT CLEAN",
+    "Verdict:",
+    "STATUS",
+    "OUTCOME",
+    "CHANGED",
+    "VERIFIED",
+    "DECISIONS",
+    "NEW RISKS",
+    "Founder interrupt conditions",
+  ]) {
+    assert.ok(!prompt.includes(forbidden), `prompt unexpectedly contains restated content "${forbidden}"`);
+  }
+});
+
+test("formatStage2CorrectionWorkerDispatchPrompt throws for missing/invalid required fields", () => {
+  assert.throws(() => formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: null }));
+  assert.throws(() => formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: NaN }));
+  assert.throws(() => formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: -1 }));
+  assert.throws(() => formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 12.5, auditIssue: 559 }));
+});
+
 // -- CLI: state-based template selection (piped mode) ----------------------------------------
 
 function runCli(input) {
@@ -337,6 +434,98 @@ test("CLI: an unrecognized state is still refused, error message names every rec
   assert.match(result.stderr, /READY_TO_DISPATCH_PLANNING/);
   assert.match(result.stderr, /READY_TO_DISPATCH_INTEGRATION/);
   assert.match(result.stderr, /REPLAN_REQUIRED/);
+  assert.match(result.stderr, /STAGE1_CORRECTION_REQUIRED/);
+  assert.match(result.stderr, /STAGE2_CORRECTION_REQUIRED/);
+});
+
+// Issue #570, exact live reproduction: `next-review-transition-gate.mjs --control-issue 451`
+// on the #450/#451/PR #569 thread produced this exact shape (state, stopAfter, repo, pr, head,
+// issue, controlIssue, actionEnvelope) and piping it into this formatter previously exited 2.
+test("CLI: piped STAGE1_CORRECTION_REQUIRED (exact #451/PR #569 shape) selects the Stage 1 correction template and succeeds", async () => {
+  const result = await runCli({
+    state: "STAGE1_CORRECTION_REQUIRED",
+    stopAfter: true,
+    repo: "LouPineWays/Loop-Dee-Loup",
+    pr: 569,
+    head: "30b36035c9d0",
+    issue: 450,
+    controlIssue: 451,
+    actionEnvelope: { mode: "bounded", authorizedActions: ["dispatch-correction-worker"] },
+  });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Stage 1 correction worker dispatch\./);
+  assert.match(result.stdout, /#569/);
+  assert.match(result.stdout, /#450/);
+  assert.match(result.stdout, /#451/);
+  // Reference-only negative control: none of the piped-in operational fields (repo, head,
+  // actionEnvelope) leak into the rendered prompt text.
+  assert.ok(!result.stdout.includes("30b36035c9d0"));
+  assert.ok(!result.stdout.includes("LouPineWays"));
+});
+
+test("CLI: piped STAGE1_CORRECTION_REQUIRED without a controlIssue (direct-reference mode) still succeeds, omitting the Controlling Issue line", async () => {
+  const result = await runCli({ state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, repo: "o/r", pr: 569, head: "abc1234", issue: 450 });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Stage 1 correction worker dispatch\./);
+  assert.ok(!result.stdout.includes("Controlling Issue"));
+});
+
+test("CLI: piped STAGE2_CORRECTION_REQUIRED selects the Stage 2 correction template and succeeds, without the audit narrative", async () => {
+  const result = await runCli({
+    state: "STAGE2_CORRECTION_REQUIRED",
+    stopAfter: true,
+    repo: "LouPineWays/Loop-Dee-Loup",
+    auditIssue: 559,
+    controlIssue: 445,
+    actionEnvelope: { mode: "bounded", authorizedActions: ["dispatch-correction-worker"] },
+  });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Stage 2 correction worker dispatch\./);
+  assert.match(result.stdout, /#559/);
+  assert.match(result.stdout, /#445/);
+  assert.ok(!result.stdout.includes("LouPineWays"));
+});
+
+// Malformed-state control (acceptance criterion 6): a payload that carries correction-shaped
+// fields but not the exact recognized state string must still fail closed, exactly like the
+// pre-existing malformed-READY_TO_DISPATCH control above.
+test("CLI: piped JSON with correction-shaped fields but a malformed state is still refused", async () => {
+  const result = await runCli({ state: "STAGE1_CORRECTION_REQUIRE", repo: "o/r", pr: 569, issue: 450, controlIssue: 451 });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /STAGE1_CORRECTION_REQUIRED/);
+  assert.equal(result.stdout, "");
+});
+
+test("CLI: piped STAGE1_CORRECTION_REQUIRED missing the required 'issue' field fails closed rather than emitting '#null'", async () => {
+  const result = await runCli({ state: "STAGE1_CORRECTION_REQUIRED", repo: "o/r", pr: 569, controlIssue: 451 });
+  assert.notEqual(result.status, 0);
+  assert.equal(result.stdout, "");
+});
+
+test("CLI: explicit --kind stage1-correction selects the Stage 1 correction template", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const scriptPath = fileURLToPath(new URL("./format-dispatch-prompt.mjs", import.meta.url));
+  const result = spawnSync(
+    process.execPath,
+    [scriptPath, "--kind", "stage1-correction", "--control-issue", "451", "--issue", "450", "--pr", "569"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Stage 1 correction worker dispatch\./);
+});
+
+test("CLI: explicit --kind stage2-correction selects the Stage 2 correction template", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const scriptPath = fileURLToPath(new URL("./format-dispatch-prompt.mjs", import.meta.url));
+  const result = spawnSync(
+    process.execPath,
+    [scriptPath, "--kind", "stage2-correction", "--control-issue", "445", "--audit-issue", "559"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Stage 2 correction worker dispatch\./);
 });
 
 test("CLI: piped REPLAN_REQUIRED selects the planning-correction template", async () => {
