@@ -59,6 +59,18 @@
 // effect" — a second, differently-written check could itself drift from the first and
 // reintroduce the exact gap this module exists to close.
 //
+// A material authorization witness is not always the control body alone. `docs/operating-
+// model.md` § "Transition-boundary contract" names examples explicitly outside the body itself
+// — a PR's live head, a Stage 1 disposition. Stage 1 review on this PR (#602) found that the
+// first cut of this module only ever revalidated the body: a caller that fetched such external
+// evidence once, closed over it in its own `compose` closure, and invoked this function could
+// have that evidence go stale between the initial check and the pre-effect commit check while
+// both `compose` calls still passed, because neither ever saw a fresh copy. `fetchWitness` (see
+// below) closes that gap the same way the body itself is closed: this module — never the
+// caller — re-fetches it fresh at both boundaries and passes it as `compose`'s second argument,
+// so cached/caller-supplied external evidence can never satisfy commit-time revalidation merely
+// because the control body happened to be unchanged.
+//
 // Non-atomic external effects (#601 Required layer 3 — e.g. merge-pr plus the control-state
 // projection around it, which cannot be one atomic mutation): this module does not attempt to
 // wrap an external side effect like a PR merge inside its own `compose`/write step. The
@@ -86,6 +98,7 @@
 
 import { execFileSync } from "node:child_process";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
+import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 
 // The four failure classes #601 Required layer 6 names. `null` on a successful result.
 export const TransitionFailureClass = Object.freeze({
@@ -127,21 +140,34 @@ function defaultGhIssueView({ repo, controlIssue }) {
   return JSON.parse(raw).body ?? "";
 }
 
-// The reusable commit-time seam. `compose(body)` is a pure function returning
+// No external witness declared: a purely body-authorized transition. Returns a stable constant
+// so `compose(body, witness)` sees the same `undefined` at both boundaries rather than this
+// module manufacturing a spurious "change".
+async function defaultFetchWitness() {
+  return undefined;
+}
+
+// The reusable commit-time seam. `compose(body, witness)` is a pure function returning
 // `{ ok: true, body: nextBody }` or `{ ok: false, reason }` — it is both the authorization/
-// precondition check AND the composer, called twice against two independently fresh reads (see
+// precondition check AND the composer, called twice against two independently fresh reads of
+// the control body AND (when a transition declares one) the material external witness (see
 // module comment). `verify(freshBodyAfterWrite)` is a pure function returning `{ ok: true }` or
 // `{ ok: false, reason }`, checking the postcondition the write was supposed to establish.
 //
-// `ghIssueViewImpl`/`writeControlSnapshotImpl` are injected so tests can drive this end-to-end
-// without touching the real network or `gh` CLI — see this module's own test file.
+// `ghIssueViewImpl`/`writeControlSnapshotImpl`/`resolveRepoIdentityImpl` are injected so tests
+// can drive this end-to-end without touching the real network, `gh`, or `git` — see this
+// module's own test file. `fetchWitness()` is likewise injectable: a transition with a material
+// external witness (e.g. a PR's live head or Stage 1 disposition) supplies it; a body-only
+// transition can omit it entirely.
 export async function commitControlBodyTransition({
   repo,
   controlIssue,
   compose,
   verify,
+  fetchWitness = defaultFetchWitness,
   ghIssueViewImpl = defaultGhIssueView,
   writeControlSnapshotImpl = checkWriteControlSnapshot,
+  resolveRepoIdentityImpl = resolveRepoIdentity,
 }) {
   if (!Number.isInteger(controlIssue) || controlIssue <= 0) {
     return operationalError("Missing/invalid required arg: controlIssue must be a positive integer.");
@@ -149,35 +175,72 @@ export async function commitControlBodyTransition({
   if (typeof compose !== "function" || typeof verify !== "function") {
     return operationalError("Missing required arg: compose and verify must both be functions.");
   }
+  if (typeof fetchWitness !== "function") {
+    return operationalError("Invalid arg: fetchWitness, when supplied, must be a function.");
+  }
 
-  // Step 1: fresh current state.
+  // Resolve repository identity exactly once, before any read or write, so every step of this
+  // operation targets the same repository. Stage 1 review finding on this PR: when `repo` was
+  // left unresolved, the default reads still succeeded because `gh issue view` infers the
+  // current repository on its own, but the default write path forwarded the unresolved value
+  // straight through to `gh issue edit --repo <unresolved>`, which fails -- every transition
+  // that omitted `repo` reported POSTCONDITION_PROJECTION_FAILED regardless of whether the
+  // transition itself was otherwise valid. Resolving once here, the same way write-control-
+  // snapshot.mjs's own CLI entrypoint already does, makes the reads and the write share one
+  // resolved identity instead of two independently-defaulted ones.
+  let resolvedRepo = repo;
+  if (!resolvedRepo) {
+    const identity = resolveRepoIdentityImpl();
+    if (!identity.ok) {
+      return operationalError(`Could not determine repository identity (repo was not supplied): ${identity.reason}`);
+    }
+    resolvedRepo = identity.repo;
+  }
+
+  // Step 1: fresh current state -- the control body, and any material external witness this
+  // transition declares.
   let initialBody;
   try {
-    initialBody = await ghIssueViewImpl({ repo, controlIssue });
+    initialBody = await ghIssueViewImpl({ repo: resolvedRepo, controlIssue });
   } catch (err) {
-    return operationalError(`gh issue view failed for ${repo ?? "<repo>"}#${controlIssue}: ${err.message}`);
+    return operationalError(`gh issue view failed for ${resolvedRepo}#${controlIssue}: ${err.message}`);
+  }
+  let initialWitness;
+  try {
+    initialWitness = await fetchWitness();
+  } catch (err) {
+    return operationalError(`initial witness fetch failed: ${err.message}`);
   }
 
   // Step 2: validate authorization/preconditions against that fresh current state. Fails fast,
   // before any evidence-gathering or write is even attempted, if the transition was never
   // authorized to begin with.
-  const initialCheck = compose(initialBody);
+  const initialCheck = compose(initialBody, initialWitness);
   if (!initialCheck.ok) {
     return failure(controlIssue, TransitionFailureClass.STALE_START_PRECONDITION, initialCheck.reason);
   }
 
-  // Step 3: immediately before the durable effect, revalidate the mutable witness. Re-reading
-  // here — rather than reusing `initialBody` — closes whatever window elapsed between step 1
-  // and this call (e.g. a caller's own external evidence-gathering `gh` calls made between
-  // establishing initial authorization and invoking this commit sequence). Re-running the exact
-  // same `compose` check against this fresh read is the TOCTOU guard itself.
+  // Step 3: immediately before the durable effect, revalidate the mutable witness -- both the
+  // control body and the external witness. Re-reading/re-fetching here — rather than reusing
+  // `initialBody`/`initialWitness` — closes whatever window elapsed between step 1 and this call
+  // (e.g. a caller's own external evidence-gathering `gh` calls made between establishing
+  // initial authorization and invoking this commit sequence, or simply time passing while other
+  // work ran). Re-running the exact same `compose` check against these fresh values is the
+  // TOCTOU guard itself; a caller-cached witness value is never accepted here because this
+  // module never receives one from the caller in the first place -- it always fetches its own.
   let latestBody;
   try {
-    latestBody = await ghIssueViewImpl({ repo, controlIssue });
+    latestBody = await ghIssueViewImpl({ repo: resolvedRepo, controlIssue });
   } catch (err) {
     return operationalError(`pre-effect control re-read failed: ${err.message}`);
   }
-  const commitCheck = compose(latestBody);
+  let latestWitness;
+  try {
+    latestWitness = await fetchWitness();
+  } catch (err) {
+    return operationalError(`pre-effect witness fetch failed: ${err.message}`);
+  }
+  const commitCheck = compose(latestBody, latestWitness);
   if (!commitCheck.ok) {
     return failure(controlIssue, TransitionFailureClass.WITNESS_CHANGED_TOCTOU, commitCheck.reason);
   }
@@ -188,7 +251,7 @@ export async function commitControlBodyTransition({
   // tolerance the four existing finalize-*-breakpoint.mjs scripts already rely on).
   let writeResult;
   try {
-    writeResult = await writeControlSnapshotImpl({ repo, controlIssue, proposedBody: commitCheck.body });
+    writeResult = await writeControlSnapshotImpl({ repo: resolvedRepo, controlIssue, proposedBody: commitCheck.body });
   } catch (err) {
     return failure(controlIssue, TransitionFailureClass.POSTCONDITION_PROJECTION_FAILED, `write threw: ${err.message}`);
   }
@@ -204,7 +267,7 @@ export async function commitControlBodyTransition({
   // trusting the write call's own return value alone.
   let freshBody;
   try {
-    freshBody = await ghIssueViewImpl({ repo, controlIssue });
+    freshBody = await ghIssueViewImpl({ repo: resolvedRepo, controlIssue });
   } catch (err) {
     return failure(controlIssue, TransitionFailureClass.POSTCONDITION_PROJECTION_FAILED, `post-write read-back failed: ${err.message}`);
   }

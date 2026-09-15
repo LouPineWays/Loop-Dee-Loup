@@ -354,3 +354,179 @@ test("operational error: an initial gh issue view failure is reported as exitCod
   assert.equal(result.exitCode, 1);
   assert.equal(result.failureClass, null);
 });
+
+// -- Stage 1 correction (PR #602): external mutable witness revalidation ---------------------
+// Codex finding: a transition whose authorization depends on mutable evidence *outside* the
+// control body (e.g. a PR's live head or Stage 1 disposition, per docs/operating-model.md's own
+// witness examples) was not revalidated by this module at all -- only the body was re-read. A
+// caller that fetched such evidence once and closed over it in `compose` could have it go stale
+// between the initial check and the pre-effect commit check while both checks still passed,
+// because neither ever saw a fresh copy. `fetchWitness` closes that gap: this module -- never
+// the caller -- re-fetches it fresh at both boundaries and hands it to `compose` as its second
+// argument.
+
+// Authorized only when the body's Lifecycle is READY AND the external witness's `headSha`
+// matches the value the transition was authorized against -- modeling "the PR's live head must
+// still match what authorized this transition" per the #601 witness examples.
+function composeMarkerDoneWithHeadWitness(body, witness) {
+  const bodyCheck = composeMarkerDone(body);
+  if (!bodyCheck.ok) return bodyCheck;
+  if (!witness || witness.headSha !== "sha-authorized") {
+    return { ok: false, reason: `external witness headSha is ${JSON.stringify(witness?.headSha)}, expected "sha-authorized"` };
+  }
+  return bodyCheck;
+}
+
+function stubWitnessFetch(values) {
+  let call = 0;
+  return async () => {
+    const value = values[Math.min(call, values.length - 1)];
+    call += 1;
+    return value;
+  };
+}
+
+test("external-witness TOCTOU: control body unchanged, but a material external witness changes between initial authorization and pre-effect revalidation; fails closed with WITNESS_CHANGED_TOCTOU and no write", async () => {
+  const reads = stubReads([READY_BODY, READY_BODY]);
+  const witnesses = stubWitnessFetch([{ headSha: "sha-authorized" }, { headSha: "sha-drifted" }]);
+  const write = stubWrite();
+
+  const result = await commitControlBodyTransition({
+    controlIssue: 12,
+    compose: composeMarkerDoneWithHeadWitness,
+    verify: verifyMarkerDone,
+    fetchWitness: witnesses,
+    ghIssueViewImpl: reads,
+    writeControlSnapshotImpl: write,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.failureClass, TransitionFailureClass.WITNESS_CHANGED_TOCTOU);
+  assert.equal(write.calls.length, 0, "no effect must be performed once the external witness fails to revalidate");
+});
+
+test("stable external witness: body and declared external witness remain materially stable; exactly one validated projection is written and fresh read-back succeeds", async () => {
+  const reads = stubReads([READY_BODY, READY_BODY, COMMITTED_BODY]);
+  const witnesses = stubWitnessFetch([{ headSha: "sha-authorized" }, { headSha: "sha-authorized" }]);
+  const write = stubWrite();
+
+  const result = await commitControlBodyTransition({
+    controlIssue: 13,
+    compose: composeMarkerDoneWithHeadWitness,
+    verify: verifyMarkerDone,
+    fetchWitness: witnesses,
+    ghIssueViewImpl: reads,
+    writeControlSnapshotImpl: write,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.failureClass, null);
+  assert.equal(write.calls.length, 1);
+});
+
+test("external witness is re-fetched by the guard itself, never a caller-cached value: fetchWitness is invoked exactly twice, once per boundary", async () => {
+  let calls = 0;
+  const witnesses = async () => {
+    calls += 1;
+    return { headSha: "sha-authorized" };
+  };
+  const reads = stubReads([READY_BODY, READY_BODY, COMMITTED_BODY]);
+  const write = stubWrite();
+
+  const result = await commitControlBodyTransition({
+    controlIssue: 14,
+    compose: composeMarkerDoneWithHeadWitness,
+    verify: verifyMarkerDone,
+    fetchWitness: witnesses,
+    ghIssueViewImpl: reads,
+    writeControlSnapshotImpl: write,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(calls, 2, "fetchWitness must run once for initial authorization and once for commit-boundary revalidation");
+});
+
+// -- Stage 1 correction (PR #602): repository identity default path --------------------------
+// Codex finding: when `repo` was omitted, the default reads still succeeded (gh infers the
+// current repository on its own), but the default write path forwarded the unresolved `repo`
+// straight through, and `gh issue edit --repo <unresolved>` fails -- every transition that
+// omitted `repo` silently reported POSTCONDITION_PROJECTION_FAILED. Repository identity must
+// now be resolved exactly once, before any read or write, so reads and the write always target
+// the same resolved repository.
+
+test("repository identity default path: omitting repo resolves it once via resolveRepoIdentityImpl, and every read and the write target that same resolved repository", async () => {
+  const seenRepos = [];
+  const reads = async ({ repo, controlIssue }) => {
+    seenRepos.push({ op: "read", repo, controlIssue });
+    return [READY_BODY, READY_BODY, COMMITTED_BODY][seenRepos.filter((c) => c.op === "read").length - 1];
+  };
+  const write = async ({ repo, controlIssue, proposedBody }) => {
+    seenRepos.push({ op: "write", repo, controlIssue });
+    return { exitCode: 0, state: "WRITTEN" };
+  };
+  const resolveRepoIdentityImpl = () => ({ ok: true, repo: "resolved-owner/resolved-repo" });
+
+  const result = await commitControlBodyTransition({
+    controlIssue: 15,
+    compose: composeMarkerDone,
+    verify: verifyMarkerDone,
+    ghIssueViewImpl: reads,
+    writeControlSnapshotImpl: write,
+    resolveRepoIdentityImpl,
+  });
+
+  assert.equal(result.ok, true);
+  assert.ok(seenRepos.length >= 3, "expects at least the two pre-effect reads and the write");
+  for (const call of seenRepos) {
+    assert.equal(call.repo, "resolved-owner/resolved-repo", `${call.op} must target the resolved repository, not an unresolved value`);
+  }
+});
+
+test("repository identity default path: an explicit repo bypasses resolution entirely", async () => {
+  let resolveCalls = 0;
+  const resolveRepoIdentityImpl = () => {
+    resolveCalls += 1;
+    return { ok: true, repo: "should-not-be-used/repo" };
+  };
+  const reads = stubReads([READY_BODY, READY_BODY, COMMITTED_BODY]);
+  const write = stubWrite();
+
+  const result = await commitControlBodyTransition({
+    repo: "explicit-owner/explicit-repo",
+    controlIssue: 16,
+    compose: composeMarkerDone,
+    verify: verifyMarkerDone,
+    ghIssueViewImpl: reads,
+    writeControlSnapshotImpl: write,
+    resolveRepoIdentityImpl,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(resolveCalls, 0, "resolveRepoIdentityImpl must not be invoked when repo is already supplied");
+  assert.equal(write.calls[0].repo, "explicit-owner/explicit-repo");
+});
+
+test("repository identity default path: an unresolvable repository identity is an operational error, not a classified transition failure, and performs no read or write", async () => {
+  let readCalls = 0;
+  const reads = async () => {
+    readCalls += 1;
+    return READY_BODY;
+  };
+  const write = stubWrite();
+  const resolveRepoIdentityImpl = () => ({ ok: false, reason: "no configured origin remote" });
+
+  const result = await commitControlBodyTransition({
+    controlIssue: 17,
+    compose: composeMarkerDone,
+    verify: verifyMarkerDone,
+    ghIssueViewImpl: reads,
+    writeControlSnapshotImpl: write,
+    resolveRepoIdentityImpl,
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.ok, false);
+  assert.equal(result.failureClass, null);
+  assert.equal(readCalls, 0);
+  assert.equal(write.calls.length, 0);
+});
