@@ -390,6 +390,16 @@ test("NOT_READY with postPrLifecycle: running the review gate and stopping is co
   assert.ok(violated.reasons.some((r) => r.includes("run-next-review-transition-gate") && r.includes("required action")));
 });
 
+// Issue #558 Stage 1 correction, finding 2 (P1): the EXECUTION_COMPLETE-with-established-PR
+// marker (issue #444) is a distinct literal from the five post-PR mid-cycle Lifecycle values
+// above, but getActionEnvelope's `postPrLifecycle` check is truthy-string-based, not an
+// enumerated match against those five -- this proves the marker also chains, matching the
+// AGENTS.md edit that named it as the second NOT_READY fallthrough exception.
+test("NOT_READY with postPrLifecycle: EXECUTION_COMPLETE_PR_ESTABLISHED is also chain mode, not fallthrough", () => {
+  const envelope = getActionEnvelope("NOT_READY", { postPrLifecycle: "EXECUTION_COMPLETE_PR_ESTABLISHED" });
+  assert.deepEqual(envelope, { mode: ENVELOPE_MODES.CHAIN, authorizedActions: ["run-next-review-transition-gate"] });
+});
+
 test("NOT_READY without postPrLifecycle is still ordinary unpoliced fallthrough", () => {
   assert.deepEqual(getActionEnvelope("NOT_READY", {}), { mode: ENVELOPE_MODES.FALLTHROUGH, authorizedActions: [] });
   assert.deepEqual(getActionEnvelope("NOT_READY", { postPrLifecycle: "" }), {
