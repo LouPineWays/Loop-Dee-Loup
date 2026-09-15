@@ -529,7 +529,7 @@ test("run(): direct-reference mode (no --control-issue) verifies the evidence an
   let issueReadAttempted = false;
   let capturedArgs = null;
   const result = await run(
-    { repo: "owner/repo", pr: 590 },
+    { repo: "owner/repo", pr: 590, issue: "none" },
     {
       ghIssueViewImpl: async () => {
         issueReadAttempted = true;
@@ -554,9 +554,40 @@ test("run(): direct-reference mode (no --control-issue) verifies the evidence an
   assert.deepEqual(capturedArgs, { repo: "owner/repo", pr: 590, head: HEAD, issue: "none" });
 });
 
-test("run(): direct-reference mode still fails closed on a verdict other than STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", async () => {
+test("run(): direct-reference mode passes a real work-issue reference through to the transition gate instead of the \"none\" sentinel (Stage 1 finding on PR #590)", async () => {
+  let capturedArgs = null;
+  const result = await run(
+    { repo: "owner/repo", pr: 590, issue: "586" },
+    {
+      ghPrViewImpl: makePrViewStub(LINKED_PR_VIEW),
+      runNextReviewTransitionGateImpl: async (args) => {
+        capturedArgs = args;
+        return satisfiedVerdict();
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE1_SATISFIED_VERIFIED");
+  assert.deepEqual(capturedArgs, { repo: "owner/repo", pr: 590, head: HEAD, issue: "586" });
+});
+
+test("run(): direct-reference mode requires --issue -- refuses to silently select the \"none\" sentinel on the caller's behalf", async () => {
   const result = await run(
     { repo: "owner/repo", pr: 590 },
+    {
+      ghPrViewImpl: makePrViewStub(LINKED_PR_VIEW),
+      runNextReviewTransitionGateImpl: async () => {
+        throw new Error("must not be called before --issue is validated");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /--issue is required in direct-reference mode/);
+});
+
+test("run(): direct-reference mode still fails closed on a verdict other than STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", async () => {
+  const result = await run(
+    { repo: "owner/repo", pr: 590, issue: "none" },
     {
       ghPrViewImpl: makePrViewStub(LINKED_PR_VIEW),
       runNextReviewTransitionGateImpl: async () => correctionRequiredVerdict(),
@@ -569,7 +600,7 @@ test("run(): direct-reference mode still fails closed on a verdict other than ST
 test("run(): direct-reference mode still fails closed on a stale head", async () => {
   let prViewCalls = 0;
   const result = await run(
-    { repo: "owner/repo", pr: 590 },
+    { repo: "owner/repo", pr: 590, issue: "none" },
     {
       ghPrViewImpl: async () => {
         prViewCalls++;

@@ -127,7 +127,10 @@
 // Usage:
 //   node tools/orchestration/finalize-stage1-satisfied-breakpoint.mjs --control-issue 587 \
 //     --execution-issue 586 --pr 590
-//   node tools/orchestration/finalize-stage1-satisfied-breakpoint.mjs --pr 590   # direct-reference
+//   node tools/orchestration/finalize-stage1-satisfied-breakpoint.mjs --pr 590 --issue none
+//     # direct-reference, explicit no-work-issue path
+//   node tools/orchestration/finalize-stage1-satisfied-breakpoint.mjs --pr 590 --issue 586
+//     # direct-reference, PR still belongs to a legacy/work issue with no thin control
 //   node tools/orchestration/finalize-stage1-satisfied-breakpoint.mjs --control-issue 587 \
 //     --execution-issue 586 --pr 590 --recover true   # #582/#583 stranded-state reconciliation
 //
@@ -321,7 +324,7 @@ async function deriveRecoveredStage1Head({ repo, pr, prView }, { stage1GateRunIm
 // the real network, `gh` CLI, or the full composed gates (which themselves need their own
 // network injection) — see this script's own test file for the fixture shapes.
 export async function run(
-  { repo, controlIssue = null, executionIssue = null, pr, head = null, recover = false },
+  { repo, controlIssue = null, executionIssue = null, pr, head = null, recover = false, issue = undefined },
   {
     ghIssueViewImpl = defaultGhIssueView,
     ghPrViewImpl = defaultGhPrView,
@@ -350,6 +353,23 @@ export async function run(
   }
   if (recover && controlIssue === null) {
     return { exitCode: 1, message: "--recover true requires --control-issue/--execution-issue -- there is no stranded control-Issue state to reconcile in direct-reference mode." };
+  }
+  // Stage 1 review finding on this PR (#590): direct-reference mode must pass through the
+  // caller's own actual work-issue reference to next-review-transition-gate.mjs's own
+  // `--issue`, never unconditionally select the "none" sentinel -- `executionIssue` is
+  // necessarily null here (the check above requires --control-issue/--execution-issue together),
+  // so silently defaulting to "none" would skip lifecycle-gate.mjs's closing-reference check for
+  // every PR that still belongs to a legacy/work issue without a thin control. Required (mirrors
+  // next-review-transition-gate.mjs's own "--issue is required ... (use \"none\" only for the
+  // explicit no-work-issue path)" contract) whenever this script will itself resolve the verdict
+  // in direct-reference mode (i.e. not --recover, which never reaches that call).
+  if (controlIssue === null && !recover && issue === undefined) {
+    return {
+      exitCode: 1,
+      message:
+        "Missing required arg: --issue is required in direct-reference mode " +
+        '(use "--issue none" only for the explicit no-work-issue path).',
+    };
   }
 
   let prView;
@@ -400,7 +420,7 @@ export async function run(
       gateResult =
         controlIssue !== null
           ? await runNextReviewTransitionGateImpl({ repo, controlIssue })
-          : await runNextReviewTransitionGateImpl({ repo, pr, head: head ?? prView?.headRefOid, issue: executionIssue ?? "none" });
+          : await runNextReviewTransitionGateImpl({ repo, pr, head: head ?? prView?.headRefOid, issue });
     } catch (err) {
       return unverified({ pr, reason: `next-review-transition-gate.mjs threw: ${err.message}` });
     }
@@ -539,8 +559,12 @@ async function main() {
   const pr = args.pr != null ? Number(args.pr) : null;
   const head = args.head ?? null;
   const recover = args.recover === "true" || args.recover === "1";
+  // Raw passthrough (undefined when omitted) -- mirrors next-review-transition-gate.mjs's own
+  // `--issue` convention: "none" for the explicit no-work-issue path, or a real issue reference
+  // otherwise. Only required in direct-reference mode (see run()'s own validation).
+  const issue = args.issue;
 
-  const result = await run({ repo: resolvedRepo, controlIssue, executionIssue, pr, head, recover });
+  const result = await run({ repo: resolvedRepo, controlIssue, executionIssue, pr, head, recover, issue });
 
   if (result.exitCode === 1) {
     console.error(result.message);
