@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Deterministic action-envelope classification — issue #486.
+// Deterministic action-envelope classification — issue #486, extended by issue #607.
 //
 // Both `ready-dispatch-gate.mjs` and `next-review-transition-gate.mjs` already compute the
 // correct next lifecycle transition and, for terminal/breakpoint verdicts, already attach a
-// literal `stopAfter: true` field (issue #498 unit 498-A / #397). Three independent live
+// literal `stopAfter: true` field (issue #498 unit 498-A / #397). Independent live
 // reproductions proved that alone is not enforcement:
 //
 //   - #440: `STAGE2_RESPONSE_UNUSABLE` (a no-action verdict) was followed by diagnosis, issue
@@ -17,6 +17,17 @@
 //     context, despite each transition's own documented "record state, then end" contract.
 //   - #500: `READY_TO_DISPATCH_UNITS` (bounded to a unit-dispatch handoff) was followed by
 //     free-form PR/repository archaeology and a direct source edit by the same controller.
+//   - #587 / PR #590 (issue #607): `next-review-transition-gate.mjs` correctly returned
+//     `STAGE1_CORRECTION_REQUIRED` (a bounded verdict authorizing exactly one
+//     `dispatch-correction-worker` action) and the controller correctly formatted and
+//     dispatched the bounded correction worker by reference — then, in the SAME initiating
+//     context, restarted #587's own kickoff and re-ran lifecycle logic instead of stopping.
+//     `STAGE1_CORRECTION_REQUIRED`'s and `STAGE2_CORRECTION_REQUIRED`'s bounded envelopes
+//     already rejected any action outside `["dispatch-correction-worker"]` generically, but
+//     this exact incident shape had no regression fixture and the specific "restart the
+//     control Issue's own kickoff in the same context" action had no named vocabulary entry.
+//     `restart-control-kickoff` (below) closes the naming gap; the fixture in
+//     `action-envelope.test.mjs` closes the coverage gap for this verdict.
 //
 // The missing piece is not another verdict field naming the next step — every verdict above
 // already carried the right `state`, `stopAfter`, and (where applicable) `nextCommand`. It is
@@ -279,11 +290,25 @@ export function getActionEnvelope(state, context = {}) {
 // "repository-reconnaissance" exactly as before, via the normal "not in this verdict's own
 // authorizedActions" path below (it never appears in any authorizedActions list), so #440's and
 // #500's no-action/bounded-mode reconnaissance violations are unaffected.
+//
+// `restart-control-kickoff` (issue #607, the #587/PR #590 reproduction) names the specific
+// behavior AGENTS.md's own Fixed chat report formats sentinel-line convention makes possible to
+// misuse: re-emitting the fixed `Starting #<issue>.` kickoff line for the SAME control Issue
+// inside a context that has already received a verdict for it. A genuine fresh session's own
+// kickoff always precedes its first gate invocation and verdict, so it is never itself an
+// "action taken after receiving a verdict" in the sense `classifyEnvelopeCompliance` checks —
+// only a same-context restart used to simulate a fresh dispatch and continue reasoning past an
+// already-consumed bounded/chain envelope is. Unlike "repository-reconnaissance", no legitimate
+// post-verdict use of this exact behavior exists in any mode (including ordinary NOT_READY
+// fallthrough — a fallthrough verdict's own controller is already mid-session and does not
+// re-kick off itself), so it belongs in the unconditional deny-list rather than being left to
+// each envelope's own "not in authorizedActions" check alone.
 const NEVER_AUTHORIZED = new Set([
   "rerun-gate",
   "wait-for-completion",
   "self-authorized-issue-creation",
   "self-authorized-implementation",
+  "restart-control-kickoff",
 ]);
 
 // Pure, deterministic compliance check. `actionsTaken` is an ordered list of short canonical

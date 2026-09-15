@@ -275,6 +275,31 @@ test("STAGE1_CORRECTION_REQUIRED: same bounded single-dispatch envelope", () => 
   );
 });
 
+// Issue #607, the live #587/PR #590 reproduction: the controller correctly reached
+// `STAGE1_CORRECTION_REQUIRED`, correctly dispatched the one authorized bounded correction
+// worker, then — in the SAME initiating context — restarted #587's own kickoff and re-ran
+// lifecycle logic instead of stopping. `STAGE1_CORRECTION_REQUIRED` had no violation-shape
+// fixture before this issue (only the compliant single-dispatch case above), unlike its sibling
+// `STAGE2_CORRECTION_REQUIRED` below, which already had one. This closes that specific gap and
+// proves the exact #587/PR #590 action sequence is rejected: the bounded envelope already
+// generically rejects any action outside `["dispatch-correction-worker"]`, and
+// `restart-control-kickoff`/`rerun-gate` are additionally unconditionally deny-listed.
+test("STAGE1_CORRECTION_REQUIRED: #587/PR #590 shape — dispatch the correction worker, then restart the control Issue's own kickoff and re-run lifecycle logic in the same context, is a violation", () => {
+  const result = classifyEnvelopeCompliance("STAGE1_CORRECTION_REQUIRED", [
+    "dispatch-correction-worker",
+    "restart-control-kickoff",
+    "rerun-gate",
+  ]);
+  assert.equal(result.status, "violation");
+  // restart-control-kickoff and rerun-gate are each unconditionally deny-listed (never
+  // authorized by any verdict envelope, regardless of mode) = 2 reasons.
+  // dispatch-correction-worker is the verdict's one authorized action and is attempted exactly
+  // once, in order, so it contributes no reason of its own.
+  assert.equal(result.reasons.length, 2);
+  assert.ok(result.reasons.some((r) => r.includes("restart-control-kickoff") && r.includes("never authorized")));
+  assert.ok(result.reasons.some((r) => r.includes("rerun-gate") && r.includes("never authorized")));
+});
+
 // -- classifyEnvelopeCompliance: #514 pre-PR planning/routing/dispatch breakpoints --------
 // Verification classes 8, 9, 10.
 
@@ -389,6 +414,7 @@ test("NOT_READY: fallthrough mode still rejects every NEVER_AUTHORIZED deny-list
     "wait-for-completion",
     "self-authorized-issue-creation",
     "self-authorized-implementation",
+    "restart-control-kickoff",
   ]) {
     const result = classifyEnvelopeCompliance("NOT_READY", [action]);
     assert.equal(result.status, "violation", `expected "${action}" to violate fallthrough's deny-list`);
