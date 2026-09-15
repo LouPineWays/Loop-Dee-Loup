@@ -11,9 +11,23 @@ import {
   validatePointerFieldValue,
   validateControlField,
   validateControlSnapshot,
+  validateLifecycleStateCoherence,
   findExactDuplicateBulletValues,
   DEFAULT_CONTROL_FIELD_SPECS,
 } from "./control-field-validator.mjs";
+
+// Issue #581's own #577 live reproduction: the exact hybrid body shape ("### State" stayed
+// READY while a redundant "- **Lifecycle:**" bullet alone advanced to REVIEW).
+const ISSUE_577_HYBRID_CONTRADICTORY_BODY = `### State
+
+READY
+
+### Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #497
+- **Route:** implementation worker
+`;
 
 // Issue #499's own real (corrupted) snapshot shape — the live reproduction #510 exists to
 // close. The canonical "Stage 2" field embeds a second parseable pointer (PR #509) inside its
@@ -252,4 +266,38 @@ test("validateControlSnapshot: default field specs are Execution/PR/Stage 2 — 
     DEFAULT_CONTROL_FIELD_SPECS.map((s) => s.label),
     ["Execution", "PR", "Stage 2"],
   );
+});
+
+// -- validateLifecycleStateCoherence / #581's #577 regression ----------------------------
+
+test("validateLifecycleStateCoherence: a body with neither representation is not a conflict", () => {
+  assert.deepEqual(validateLifecycleStateCoherence("Some legacy unsplit Issue body."), { ok: true });
+});
+
+test("validateLifecycleStateCoherence: a legacy Lifecycle-bullet-only body (no ### State heading) is not a conflict", () => {
+  assert.deepEqual(validateLifecycleStateCoherence("- **Lifecycle:** REVIEW\n"), { ok: true });
+});
+
+test("validateLifecycleStateCoherence: a template State-heading-only body (no ad hoc bullet) is not a conflict", () => {
+  const body = "### State\n\nREADY\n\n### Current state\n\n- **Execution:** #497\n";
+  assert.deepEqual(validateLifecycleStateCoherence(body), { ok: true });
+});
+
+test("validateLifecycleStateCoherence: a hybrid body where both representations already agree is not a conflict", () => {
+  const body = "### State\n\nREVIEW\n\n### Current state\n\n- **Lifecycle:** REVIEW\n- **Execution:** #497\n";
+  assert.deepEqual(validateLifecycleStateCoherence(body), { ok: true });
+});
+
+test("validateLifecycleStateCoherence: rejects the exact #577 hybrid contradiction (State=READY, Lifecycle=REVIEW)", () => {
+  const result = validateLifecycleStateCoherence(ISSUE_577_HYBRID_CONTRADICTORY_BODY);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /"Lifecycle".*"State".*contradictory/s);
+  assert.match(result.reason, /"READY"/);
+  assert.match(result.reason, /"REVIEW"/);
+});
+
+test("validateControlSnapshot: rejects the exact #577 hybrid contradiction as a negative control — a proposed State=READY + Lifecycle=REVIEW snapshot must not be accepted (Required check 2)", () => {
+  const result = validateControlSnapshot(ISSUE_577_HYBRID_CONTRADICTORY_BODY);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => /Lifecycle.*State.*contradictory/s.test(e)));
 });

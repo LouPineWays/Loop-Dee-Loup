@@ -50,7 +50,10 @@ body:
         dispatch), also include explicit `- **Execution:** #N` and `- **Route:** <settled
         route>` bullet lines here — `tools/orchestration/ready-dispatch-gate.mjs` reads
         them, alongside this template's own State/Current blocker/Founder interrupt
-        fields, to determine dispatch-readiness.
+        fields, to determine dispatch-readiness. Do not also add a `- **Lifecycle:**`
+        bullet here — the State field above is already this control's one lifecycle
+        representation, and repository tooling now fails closed on a body that carries
+        both with disagreeing values.
     validations:
       required: true
   - type: textarea
