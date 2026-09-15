@@ -85,8 +85,11 @@ test("performing an envelope's own authorized actions out of its declared order 
     "merge-pr",
   ]);
   assert.equal(result.status, "violation");
-  assert.equal(result.reasons.length, 2);
-  assert.ok(result.reasons.every((r) => r.includes("ran out of order")));
+  // Issue #586: this envelope now also requires "finalize-stage1-satisfied" (never attempted
+  // here), so a third reason names it missing, alongside the two original out-of-order reasons.
+  assert.equal(result.reasons.length, 3);
+  assert.equal(result.reasons.filter((r) => r.includes("ran out of order")).length, 2);
+  assert.ok(result.reasons.some((r) => r.includes("finalize-stage1-satisfied") && r.includes("required action")));
 });
 
 // Issue #561 (live #559/#445/PR #558 reproduction): the reviewer trigger racing ahead of the
@@ -95,6 +98,7 @@ test("performing an envelope's own authorized actions out of its declared order 
 // order this envelope used to authorize would be indistinguishable from this shape today.
 test("#559/#445/PR #558 shape: posting the Stage 2 reviewer trigger before the control snapshot is written is a violation", () => {
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
+    "finalize-stage1-satisfied",
     "merge-pr",
     "create-stage2-audit-issue",
     "post-stage2-reviewer-trigger",
@@ -106,12 +110,40 @@ test("#559/#445/PR #558 shape: posting the Stage 2 reviewer trigger before the c
 
 test("#559/#445/PR #558 shape: the corrected order (merge, create audit issue, project+verify control, then trigger) is compliant", () => {
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
+    "finalize-stage1-satisfied",
     "merge-pr",
     "create-stage2-audit-issue",
     "write-control-snapshot",
     "post-stage2-reviewer-trigger",
   ]);
   assert.equal(result.status, "compliant");
+});
+
+// -- Issue #586: finalize-stage1-satisfied is required, first, and strictly before merge-pr --
+
+test("#582/#583 shape: merging before the Stage 1 disposition is durably persisted is a violation", () => {
+  const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
+    "merge-pr",
+    "finalize-stage1-satisfied",
+    "create-stage2-audit-issue",
+    "write-control-snapshot",
+    "post-stage2-reviewer-trigger",
+  ]);
+  assert.equal(result.status, "violation");
+  assert.ok(result.reasons.some((r) => r.includes("finalize-stage1-satisfied") && r.includes("ran out of order")));
+});
+
+test("#582/#583 shape: omitting finalize-stage1-satisfied entirely is a violation even though every observed action is itself permitted and in order", () => {
+  const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
+    "merge-pr",
+    "create-stage2-audit-issue",
+    "write-control-snapshot",
+    "post-stage2-reviewer-trigger",
+  ]);
+  assert.equal(result.status, "violation");
+  assert.equal(result.reasons.length, 1);
+  assert.ok(result.reasons[0].includes("finalize-stage1-satisfied"));
+  assert.ok(result.reasons[0].includes("required action"));
 });
 
 // -- classifyEnvelopeCompliance: no-action verdicts --------------------------------------
@@ -187,9 +219,10 @@ test("STAGE2_REPORT_READY_TO_RECORD: performing only the record action and stopp
 // -- classifyEnvelopeCompliance: action-bearing merge -------------------------------------
 // Verification class 6.
 
-test("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2: merge, create audit issue, project+verify control, then trigger is compliant; anything more is a violation", () => {
+test("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2: finalize-stage1-satisfied, merge, create audit issue, project+verify control, then trigger is compliant; anything more is a violation", () => {
   assert.equal(
     classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
+      "finalize-stage1-satisfied",
       "merge-pr",
       "create-stage2-audit-issue",
       "write-control-snapshot",
@@ -198,6 +231,7 @@ test("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2: merge, create audit issue, proj
     "compliant",
   );
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
+    "finalize-stage1-satisfied",
     "merge-pr",
     "create-stage2-audit-issue",
     "wait-for-completion",

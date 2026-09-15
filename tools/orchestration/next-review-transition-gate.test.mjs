@@ -982,10 +982,18 @@ test("runNextReviewTransitionGate: control-Issue mode with a settled PR (no Stag
   // Issue #486: authorizes exactly the merge + Stage 2 trigger + persisting refs, then
   // stops — not Stage 2 waiting/result handling in the same context. Issue #561 (live
   // #559/#445/PR #558 reproduction): the reviewer trigger is authorized only after the
-  // control snapshot is projected and verified, never before.
+  // control snapshot is projected and verified, never before. Issue #586 (live #582/PR #583
+  // reproduction): finalize-stage1-satisfied is authorized first, strictly before merge-pr, so
+  // the durable Stage 1 disposition is persisted before merge/Stage 2 setup can begin.
   assert.deepEqual(result.actionEnvelope, {
     mode: "bounded",
-    authorizedActions: ["merge-pr", "create-stage2-audit-issue", "write-control-snapshot", "post-stage2-reviewer-trigger"],
+    authorizedActions: [
+      "finalize-stage1-satisfied",
+      "merge-pr",
+      "create-stage2-audit-issue",
+      "write-control-snapshot",
+      "post-stage2-reviewer-trigger",
+    ],
   });
 });
 
