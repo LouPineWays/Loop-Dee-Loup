@@ -22,8 +22,12 @@ function fieldBlock(yaml, id) {
 
 function assertField(yaml, id, label) {
   const block = fieldBlock(yaml, id);
-  assert.match(block, new RegExp(`\\n      label: ${label.replace(/[.*+?^$\{\}()|[\\]\\]/g, "\\$&")}\\n`));
+  assert.ok(block.includes(`      label: ${label}`), `field ${id} must keep label "${label}"`);
   return block;
+}
+
+function assertOption(block, option) {
+  assert.ok(block.includes(`        - ${option}`), `missing dropdown option "${option}"`);
 }
 
 test("parent execution preserves parser-sensitive headings and canonical empty defaults", () => {
@@ -34,9 +38,9 @@ test("parent execution preserves parser-sensitive headings and canonical empty d
   const interrupt = assertField(yaml, "interrupt", "Founder interrupt");
   const next = assertField(yaml, "next", "Next slice / resulting slices");
 
-  assert.match(blocker, /\n      value: "None"\n/);
-  assert.match(interrupt, /\n      value: "None"\n/);
-  assert.match(next, /\n      value: "None"\n/);
+  for (const block of [blocker, interrupt, next]) {
+    assert.ok(block.includes('      value: "None"'), "empty control-state fields must default to canonical None");
+  }
 });
 
 test("Stage 2 audit preserves headings consumed by audit lifecycle tooling", () => {
@@ -48,7 +52,7 @@ test("Stage 2 audit preserves headings consumed by audit lifecycle tooling", () 
   const verdict = assertField(yaml, "verdict", "Verdict");
 
   for (const option of ["PENDING", "CLEAN", "NOT CLEAN"]) {
-    assert.match(verdict, new RegExp(`\\n        - ${option.replace(/[.*+?^$\{\}()|[\\]\\]/g, "\\$&")}\\n`));
+    assertOption(verdict, option);
   }
 });
 
@@ -58,7 +62,7 @@ test("Idea intake priority field stays compatible with deterministic priority-la
   const horizon = assertField(yaml, "horizon", "Priority horizon");
 
   for (const option of ["Now", "Soon", "Later", "Wishes"]) {
-    assert.match(horizon, new RegExp(`\\n        - ${option}\\n`));
+    assertOption(horizon, option);
   }
 
   assert.match(workflow, /Priority horizon/);
