@@ -22,6 +22,22 @@
 //   PENDING          — a trigger exists but no genuine post-trigger bot response yet. exit 2.
 //   RESPONSE_RECEIVED — a trigger and a genuine post-trigger bot response both exist. exit 0.
 //
+// Issue #616 (recurrence of #135; live #441/#442, merged PR #615): a claimed exemption
+// never grants EXEMPT when the PR's own changed-file set touches a path
+// tools/review-watch/control-plane-paths.mjs classifies as mandatory-review under
+// docs/bounded-review-cycle.md's Entry check — PR #615 self-declared "Stage 1 exemption:
+// evidence-only diagnostic trace" on a changed docs/diagnostic-traces/*.md file and merged
+// without independent review, exactly the contradiction this closes. When that happens,
+// `run` does not short-circuit to EXEMPT; it records the rejection in a `rejectedExemption`
+// field (`{ reason, conflictingPaths }`) on whichever of NOT_REQUESTED/PENDING/
+// RESPONSE_RECEIVED the ordinary trigger/response evaluation below produces, so a genuinely
+// review-worthy PR still becomes reviewable/mergeable through an actual trigger + response
+// — it just cannot shortcut through the self-declared marker. Establishing the changed-file
+// set requires its own `gh` call, so this is only attempted when an exemption is actually
+// claimed (no added cost on the common non-exemption path); if that lookup itself fails or
+// returns something untrustworthy, this fails closed (exit 1) rather than letting the
+// absence of evidence become exemption evidence.
+//
 // RESPONSE_RECEIVED additionally requires the genuine response to be provably bound to the
 // exact frozen --head being gated (poll.mjs's matchBelongsToHead), not merely timestamped
 // after that head's trigger (issue #163): a delayed response for an older head on the same
@@ -46,6 +62,7 @@ import { execFileSync } from "node:child_process";
 import { endpointsFor, findAllMatches, matchBelongsToHead } from "./poll.mjs";
 import { findExistingTrigger, findTriggerRounds } from "./trigger.mjs";
 import { isGenuineResponse } from "./genuine-response.mjs";
+import { isControlPlanePath } from "./control-plane-paths.mjs";
 
 // Re-exported so existing callers/tests that import isGenuineResponse from this module
 // (its original home) keep working unchanged now that the classifier itself lives in
@@ -120,9 +137,12 @@ export function parseArgs(argv) {
   return args;
 }
 
-// `ghApiImpl` and `ghPrViewImpl` are injected so tests can drive `run` end-to-end without
-// touching the real network or `gh` CLI.
-export async function run(args, { ghApiImpl = defaultGhApi, ghPrViewImpl = defaultGhPrView } = {}) {
+// `ghApiImpl`, `ghPrViewImpl`, and `ghPrFilesImpl` are injected so tests can drive `run`
+// end-to-end without touching the real network or `gh` CLI.
+export async function run(
+  args,
+  { ghApiImpl = defaultGhApi, ghPrViewImpl = defaultGhPrView, ghPrFilesImpl = defaultGhPrFiles } = {},
+) {
   const { repo, number, head } = args;
   const bot = args.bot ?? "chatgpt-codex-connector[bot]";
 
@@ -138,8 +158,29 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPrViewImpl = defau
   }
 
   const exemption = findExemption(body);
+  // Set only when a claimed exemption is rejected for conflicting with a mandatory-review
+  // control-plane path (issue #616) — attached to whatever terminal state the ordinary
+  // trigger/response evaluation below produces, so the rejection is visible without ever
+  // itself granting EXEMPT.
+  let rejectedExemption = null;
   if (exemption) {
-    return { exitCode: 0, state: "EXEMPT", reason: exemption };
+    let changedFiles;
+    try {
+      changedFiles = await ghPrFilesImpl({ repo, number });
+    } catch (err) {
+      return { exitCode: 1, message: `gh pr view --json files failed for ${repo}#${number}: ${err.message}` };
+    }
+    if (!Array.isArray(changedFiles)) {
+      return {
+        exitCode: 1,
+        message: `Ambiguous changed-file read: expected an array of file paths for ${repo}#${number}.`,
+      };
+    }
+    const conflictingPaths = changedFiles.filter((path) => isControlPlanePath(path));
+    if (conflictingPaths.length === 0) {
+      return { exitCode: 0, state: "EXEMPT", reason: exemption };
+    }
+    rejectedExemption = { reason: exemption, conflictingPaths };
   }
 
   const endpoints = endpointsFor("pr", repo, number);
@@ -160,7 +201,7 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPrViewImpl = defau
 
   const trigger = findExistingTrigger(comments, { head });
   if (!trigger) {
-    return { exitCode: 2, state: "NOT_REQUESTED" };
+    return { exitCode: 2, state: "NOT_REQUESTED", ...(rejectedExemption ? { rejectedExemption } : {}) };
   }
 
   const sinceMs = new Date(trigger.created_at).getTime();
@@ -204,6 +245,7 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPrViewImpl = defau
       triggerTimestamp: trigger.created_at,
       nonGenuineMatches,
       unboundGenuineMatches,
+      ...(rejectedExemption ? { rejectedExemption } : {}),
     };
   }
 
@@ -213,12 +255,24 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPrViewImpl = defau
     triggerTimestamp: trigger.created_at,
     matches: boundGenuineMatches,
     unboundGenuineMatches,
+    ...(rejectedExemption ? { rejectedExemption } : {}),
   };
 }
 
 function defaultGhApi(path) {
   const raw = execFileSync("gh", ["api", path, "--paginate", "--slurp"], { encoding: "utf8" });
   return JSON.parse(raw).flat();
+}
+
+// Returns the PR's changed-file paths (repo-relative, forward slashes) — only invoked when
+// a `Stage 1 exemption:` marker is actually present, so the common no-exemption path never
+// pays for this extra `gh` call.
+function defaultGhPrFiles({ repo, number }) {
+  const raw = execFileSync("gh", ["pr", "view", String(number), "--repo", repo, "--json", "files"], {
+    encoding: "utf8",
+  });
+  const parsed = JSON.parse(raw);
+  return (parsed.files ?? []).map((f) => f.path);
 }
 
 function defaultGhPrView({ repo, number }) {

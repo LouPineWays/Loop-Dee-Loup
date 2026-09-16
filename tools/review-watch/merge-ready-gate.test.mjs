@@ -138,6 +138,31 @@ test("run: Stage 1 trigger with no genuine response (PENDING) is non-zero", asyn
   assert.equal(result.state, "BLOCKED");
 });
 
+// Issue #616: a PR that self-declares a `Stage 1 exemption:` marker conflicting with a
+// mandatory-review control-plane path never reaches stage1-gate.mjs's EXEMPT state — it
+// falls through to the ordinary NOT_REQUESTED/PENDING/RESPONSE_RECEIVED evaluation instead,
+// carrying a `rejectedExemption` field (see stage1-gate.test.mjs for that component's own
+// coverage). This composed-gate regression proves the #615-shaped PR (docs/diagnostic-
+// traces/*.md changed, self-declared exemption) still cannot become PRE_MERGE_READY through
+// that rejected marker: the same NOT_REQUESTED/PENDING component states that already block
+// an ordinary un-exempted PR block this one too, and merge-ready-gate.mjs needs no special-
+// casing of `rejectedExemption` itself to enforce that — it never looks at that field.
+test("run: a #615-shaped rejected exemption (NOT_REQUESTED with rejectedExemption) still blocks composed pre-merge readiness", async () => {
+  const rejectedExemptionStage1 = stage1Result({
+    exitCode: 2,
+    state: "NOT_REQUESTED",
+    rejectedExemption: {
+      reason: "evidence-only diagnostic trace, not review-worthy.",
+      conflictingPaths: ["docs/diagnostic-traces/441-a.md"],
+    },
+  });
+  const result = await run(ARGS, impls({ stage1: rejectedExemptionStage1 }));
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "BLOCKED");
+  assert.deepEqual(result.blockedBy, [{ component: "stage1", state: "NOT_REQUESTED" }]);
+  assert.notEqual(result.state, "PRE_MERGE_READY");
+});
+
 test("run: a successful Stage 1 result alone cannot be represented as the authoritative merge-ready result", async () => {
   // Stage 1 succeeds but lifecycle is blocked: the composed result must not be a success.
   const result = await run(

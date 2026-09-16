@@ -336,12 +336,17 @@ test("run: exits 1 when required args are missing", async () => {
   assert.match(result.message, /Missing required args/);
 });
 
-test("run: EXEMPT — an explicit exemption in the PR body short-circuits before any trigger read", async () => {
+test("run: EXEMPT — an explicit exemption on an exemption-eligible change short-circuits before any trigger read", async () => {
   let ghApiCalls = 0;
+  let ghPrFilesCalls = 0;
   const result = await run(
     { repo: "owner/repo", number: 50, head: "abc123" },
     {
       ghPrViewImpl: async () => "Stage 1 exemption: trivial docs fix, not review-worthy.",
+      ghPrFilesImpl: async () => {
+        ghPrFilesCalls += 1;
+        return ["src/foo.js"];
+      },
       ghApiImpl: async () => {
         ghApiCalls += 1;
         return [];
@@ -351,7 +356,98 @@ test("run: EXEMPT — an explicit exemption in the PR body short-circuits before
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "EXEMPT");
   assert.equal(result.reason, "trivial docs fix, not review-worthy.");
+  assert.equal(ghPrFilesCalls, 1, "an exemption claim must be validated against the PR's changed files (issue #616)");
   assert.equal(ghApiCalls, 0, "an exemption must short-circuit before reading any comment thread");
+});
+
+// -- issue #616: exemptions rejected when they conflict with a mandatory-review path ------
+
+test("run: NOT_REQUESTED with rejectedExemption — a claimed exemption on a changed docs/diagnostic-traces/*.md file is rejected (PR #615's exact recurrence)", async () => {
+  let ghApiCalls = 0;
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: evidence-only diagnostic trace, not review-worthy.",
+      ghPrFilesImpl: async () => ["docs/diagnostic-traces/441-a.md"],
+      ghApiImpl: async () => {
+        ghApiCalls += 1;
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "NOT_REQUESTED");
+  assert.notEqual(result.state, "EXEMPT");
+  assert.deepEqual(result.rejectedExemption, {
+    reason: "evidence-only diagnostic trace, not review-worthy.",
+    conflictingPaths: ["docs/diagnostic-traces/441-a.md"],
+  });
+  assert.ok(ghApiCalls > 0, "a rejected exemption must not short-circuit before the normal trigger/response check");
+});
+
+test("run: NOT_REQUESTED with rejectedExemption — a claimed exemption is rejected for a representative non-docs mandatory-review path (.claude/**)", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: session config tweak, not review-worthy.",
+      ghPrFilesImpl: async () => [".claude/settings.json"],
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "NOT_REQUESTED");
+  assert.deepEqual(result.rejectedExemption.conflictingPaths, [".claude/settings.json"]);
+});
+
+test("run: RESPONSE_RECEIVED still carries rejectedExemption when genuine Stage 1 evidence exists despite the rejected exemption claim", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: not review-worthy.",
+      ghPrFilesImpl: async () => ["tools/review-watch/stage1-gate.mjs"],
+      ghApiImpl: async () => [
+        { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
+        {
+          id: 2,
+          user: { login: "chatgpt-codex-connector[bot]" },
+          body: "No issues found. LGTM.",
+          created_at: "2026-08-23T13:05:00Z",
+        },
+      ],
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "RESPONSE_RECEIVED");
+  assert.ok(result.rejectedExemption, "the rejection must still be reported even once genuine evidence satisfies the gate");
+  assert.deepEqual(result.rejectedExemption.conflictingPaths, ["tools/review-watch/stage1-gate.mjs"]);
+});
+
+test("run: exits 1 when the changed-file lookup needed to validate a claimed exemption fails (fail closed, issue #616)", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: not review-worthy.",
+      ghPrFilesImpl: async () => {
+        throw new Error("gh: rate limited");
+      },
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /gh pr view --json files failed/);
+});
+
+test("run: exits 1 on an unexpected (non-array) changed-file response instead of treating the exemption as valid", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: not review-worthy.",
+      ghPrFilesImpl: async () => ({ unexpected: "shape" }),
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /Ambiguous changed-file read/);
 });
 
 test("run: NOT_REQUESTED — a fenced-example-only exemption in the PR body does not bypass Stage 1 (issue #162)", async () => {
