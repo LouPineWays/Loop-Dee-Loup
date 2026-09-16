@@ -261,6 +261,23 @@ export function formatIntegrationWorkerDispatchPrompt({ controlIssue, executionI
 // restatement: the dispatched correction worker reads PR #<pr>'s own current Stage 1 review (and,
 // when present, Execution Issue #<issue>) directly from GitHub, exactly as every other template
 // in this file hands over durable references instead of restated content.
+//
+// Issue #611 (the post-#576 #438/PR #610 regression): this template previously stopped at "push
+// it, and stop" with no instruction to run `finalize-correction-breakpoint.mjs` at all — the
+// mandatory step lived only in `docs/bounded-review-cycle.md`'s Correction-satisfied disposition
+// prose, exactly the "prose-only worker obligation" #611 exists to close, and exactly the seam a
+// Stage 1 review finding on PR #579 already flagged (`docs/operating-model.md`'s
+// `STAGE1_CORRECTION_REQUIRED` entry) without this formatter ever being updated to carry it. This
+// mirrors `formatIntegrationWorkerDispatchPrompt`'s own established `finalize-pr-breakpoint.mjs`
+// clause immediately above: name the mandatory finalize step and its fail-closed reporting
+// contract, without restating its flags — the worker already has `controlIssue`/`issue`/`pr` from
+// this same prompt, and derives `--reviewed-head`/`--corrected-head` itself from the PR it just
+// read and corrected, the same "read it directly, don't restate it" convention this whole file
+// uses. `finalize-correction-breakpoint.mjs` itself refuses `--control-issue` without a paired
+// `--execution-issue` (or vice versa), so a worker dispatched with a Controlling Issue but the
+// "none" no-work-issue sentinel (a real, separately-tested combination below) supplies only the
+// identity it actually has and the script's own direct-reference form applies -- no partial or
+// invented identity is ever passed.
 export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null, issue, pr }) {
   if (!isPositiveInteger(pr)) {
     throw new Error("formatStage1CorrectionWorkerDispatchPrompt requires pr to be a positive integer");
@@ -281,8 +298,10 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
     `Stage 1 correction worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
     `Read PR #${pr}'s current Stage 1 review${executionReadClause} directly from GitHub to recover the ` +
     `findings and correction authority — they were not restated here on purpose. Verify and apply one ` +
-    `consolidated correction per docs/bounded-review-cycle.md, push it, and stop: do not re-trigger review, ` +
-    `merge, or begin Stage 2 in this context.`
+    `consolidated correction per docs/bounded-review-cycle.md, push it. Then run ` +
+    `tools/orchestration/finalize-correction-breakpoint.mjs before reporting; on ` +
+    `CORRECTION_BREAKPOINT_UNVERIFIED report that reference, never ordinary success. Then stop: do not ` +
+    `re-trigger review, merge, or begin Stage 2 in this context.`
   );
 }
 

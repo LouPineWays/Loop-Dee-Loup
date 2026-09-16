@@ -160,6 +160,62 @@ test("run(): the exact #571/PR #573 shape — a genuinely corrected head persist
   assert.match(writeCalls[0], /correction-satisfied at 0009c54b180aedadfa48e3db6266b8473a1d8d35 \(reviewed 30b36035c9d6e1a9b0f2c3d4e5f60718293a4b5c\)/);
 });
 
+// Issue #611: the exact live #438/PR #610 regression this whole feature exists to close. #576's
+// mechanism (this script) already worked when invoked; the escaped defect was that the
+// correction worker's own dispatch prompt never instructed it to invoke this script at all
+// (format-dispatch-prompt.test.mjs's own #611 regression tests pin that half). This test proves
+// that once a worker actually follows the now-mandatory dispatch instruction and runs this
+// script with the incident's real PR/head values, finalization succeeds and persists exactly the
+// disposition next-review-transition-gate.mjs's own #611 regression tests (in
+// next-review-transition-gate.test.mjs) then prove unblocks the stuck NO_ACTION_YET loop.
+test("run(): the exact #438/PR #610 regression — finalizing with the incident's own real reviewed/corrected heads persists the canonical disposition", async () => {
+  const reviewedHead438 = "100801f442cd2538c6667eec9a6f935484d856f8";
+  const correctedHead438 = "f3fc2adaa35febe586fce838c027177b869c2739";
+  const body438 = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #437
+- **Route:** implementation worker
+- **PR:** #610
+- **Stage 1:** requested
+- **Blocker:** none
+- **Founder decision:** none
+`;
+  const prView438 = { headRefName: "issue-437-fix", headRefOid: correctedHead438, body: "Addresses #437.", state: "OPEN" };
+  let currentBody = body438;
+  const writeCalls = [];
+  const result = await run(
+    {
+      repo: "owner/repo",
+      controlIssue: 438,
+      executionIssue: 437,
+      pr: 610,
+      reviewedHead: reviewedHead438,
+      correctedHead: correctedHead438,
+    },
+    {
+      ghIssueViewImpl: async () => currentBody,
+      ghPrViewImpl: makePrViewStub(prView438),
+      checkCorrectionDeltaImpl: async () => ({
+        exitCode: 0,
+        state: "CORRECTION_SATISFIED",
+        reviewedHead: reviewedHead438,
+        correctedHead: correctedHead438,
+      }),
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        writeCalls.push(proposedBody);
+        currentBody = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "FINALIZED");
+  assert.equal(result.message, "FINALIZED 438 437 610");
+  assert.equal(writeCalls.length, 1);
+  assert.match(writeCalls[0], new RegExp(`correction-satisfied at ${correctedHead438} \\(reviewed ${reviewedHead438}\\)`));
+});
+
 test("run(): negative control — a stale corrected head that no longer matches the PR's live head fails closed before any evidence check runs", async () => {
   let deltaCalls = 0;
   const result = await run(

@@ -1178,6 +1178,100 @@ test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfie
   assert.equal(result.state, "NO_ACTION_YET");
 });
 
+// -- issue #611: the exact live #438/PR #610 regression -----------------------------------
+//
+// #611's own reproduction: PR #610's Stage 1 review was genuinely requested and reviewed at
+// frozen head `100801f442cd2538c6667eec9a6f935484d856f8` (seven actionable findings), the
+// consolidated correction advanced the PR to `f3fc2adaa35febe586fce838c027177b869c2739`, and
+// control Issue #438 stayed durably `Stage 1: requested` because the correction worker's own
+// dispatch prompt (`format-dispatch-prompt.mjs`'s `formatStage1CorrectionWorkerDispatchPrompt`)
+// never instructed it to run `finalize-correction-breakpoint.mjs` before stopping -- a
+// prose-only obligation living solely in `docs/bounded-review-cycle.md`. These two tests pin
+// both halves of that regression using the incident's own real PR/head values: the stuck loop
+// this gate reproduces when finalization never ran, and the exact same inputs resolving cleanly
+// once the canonical `correction-satisfied` disposition the finalizer persists is present --
+// proving issue #611's fix (the dispatch-prompt mandate added above) actually unblocks it.
+const ISSUE_611_REVIEWED_HEAD = "100801f442cd2538c6667eec9a6f935484d856f8";
+const ISSUE_611_CORRECTED_HEAD = "f3fc2adaa35febe586fce838c027177b869c2739";
+
+const CONTROL_BODY_438_STALE_STAGE1_REQUESTED = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #437
+- **Route:** implementation worker
+- **PR:** #610
+- **Stage 1:** requested
+- **Stage 2:** none
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("runNextReviewTransitionGate: exact #438/PR #610 regression, before finalization -- a stale 'Stage 1: requested' bullet at the corrected head reproduces the stuck NO_ACTION_YET loop", async () => {
+  let correctionDeltaCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "438" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_438_STALE_STAGE1_REQUESTED, state: "OPEN" }),
+      ghPrHeadImpl: async () => ISSUE_611_CORRECTED_HEAD,
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => {
+        correctionDeltaCalls += 1;
+        throw new Error("should never be called: the stale 'requested' bullet carries no reviewed/corrected head pair to derive evidence from");
+      },
+    },
+  );
+  assert.equal(correctionDeltaCalls, 0);
+  assert.equal(result.state, "NO_ACTION_YET");
+  assert.equal(result.stopAfter, true);
+});
+
+const CONTROL_BODY_438_CORRECTION_SATISFIED = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #437
+- **Route:** implementation worker
+- **PR:** #610
+- **Stage 1:** correction-satisfied at ${ISSUE_611_CORRECTED_HEAD} (reviewed ${ISSUE_611_REVIEWED_HEAD})
+- **Stage 2:** none
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("runNextReviewTransitionGate: exact #438/PR #610 regression, after finalization -- the same PR/head inputs resolve to STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 once finalize-correction-breakpoint.mjs's canonical disposition is durably recorded", async () => {
+  let correctionDeltaCallArgs = null;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "438" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_438_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrHeadImpl: async () => ISSUE_611_CORRECTED_HEAD,
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async (args) => {
+        correctionDeltaCallArgs = args;
+        return {
+          exitCode: 0,
+          state: "CORRECTION_SATISFIED",
+          reviewedHead: ISSUE_611_REVIEWED_HEAD,
+          correctedHead: ISSUE_611_CORRECTED_HEAD,
+        };
+      },
+    },
+  );
+  assert.deepEqual(correctionDeltaCallArgs, {
+    repo: "o/r",
+    pr: 610,
+    reviewedHead: ISSUE_611_REVIEWED_HEAD,
+    correctedHead: ISSUE_611_CORRECTED_HEAD,
+    gatedHead: ISSUE_611_CORRECTED_HEAD,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.reviewedHead, ISSUE_611_REVIEWED_HEAD);
+  assert.equal(result.correctedHead, ISSUE_611_CORRECTED_HEAD);
+});
+
 test("runNextReviewTransitionGate: control-Issue mode with no correction-satisfied-shaped Stage 1 disposition at all never invokes checkCorrectionDeltaImpl (no wasted gh call on the common path)", async () => {
   let correctionDeltaCalls = 0;
   const result = await runNextReviewTransitionGate(

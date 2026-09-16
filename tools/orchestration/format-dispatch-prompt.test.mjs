@@ -330,19 +330,27 @@ test("formatStage1CorrectionWorkerDispatchPrompt stays well under the reference-
 // them here. Assert no finding-shaped prose ever appears.
 test("formatStage1CorrectionWorkerDispatchPrompt never restates finding text or AGENTS.md contract prose", () => {
   const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569 });
-  for (const forbidden of [
-    "Codex Review",
-    "automated review suggestions",
-    "STATUS",
-    "OUTCOME",
-    "CHANGED",
-    "VERIFIED",
-    "DECISIONS",
-    "NEW RISKS",
-    "Founder interrupt conditions",
-  ]) {
+  for (const forbidden of ["Codex Review", "automated review suggestions"]) {
     assert.ok(!prompt.includes(forbidden), `prompt unexpectedly contains restated content "${forbidden}"`);
   }
+  // Issue #611: this template's own fixed `CORRECTION_BREAKPOINT_UNVERIFIED` reference (added to
+  // point the worker at the mandatory finalize step below) legitimately contains "VERIFIED" as a
+  // substring ("UN" immediately before it) -- word-boundary matched, mirroring
+  // formatDispatchPrompt's own established `PR_BREAKPOINT_UNVERIFIED` precedent above, rather than
+  // a bare `.includes` check that would misreport it as a restated Slice-handoff field.
+  for (const forbidden of ["STATUS", "OUTCOME", "CHANGED", "VERIFIED", "DECISIONS", "NEW RISKS", "Founder interrupt conditions"]) {
+    assert.ok(!new RegExp(`\\b${forbidden}\\b`).test(prompt), `prompt unexpectedly contains restated field "${forbidden}"`);
+  }
+});
+
+// Issue #611 (the post-#576 #438/PR #610 regression): the correction worker's own dispatch prompt
+// previously had no instruction to run `finalize-correction-breakpoint.mjs` at all -- the mandatory
+// step lived only in docs/bounded-review-cycle.md prose, which #611 exists to close. Mirrors
+// formatIntegrationWorkerDispatchPrompt's own equivalent assertion for finalize-pr-breakpoint.mjs.
+test("formatStage1CorrectionWorkerDispatchPrompt points the worker at finalize-correction-breakpoint.mjs before reporting, and names its fail-closed reference", () => {
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569 });
+  assert.match(prompt, /tools\/orchestration\/finalize-correction-breakpoint\.mjs/);
+  assert.match(prompt, /CORRECTION_BREAKPOINT_UNVERIFIED/);
 });
 
 test("formatStage1CorrectionWorkerDispatchPrompt throws for missing/invalid required fields", () => {
