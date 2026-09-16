@@ -214,6 +214,34 @@ const KNOWN_LIFECYCLE_STATES = [
   "BLOCKED_EXTERNAL",
 ];
 
+// Pure. True when `value` (case-insensitive) is one of this file's own recognized Lifecycle
+// vocabulary — issue #437/#610 Stage 1 finding 4: `reconcile-control-blocker.mjs`'s own
+// "Blocked lifecycle" companion field records the value a blocked control must be restored
+// to, authored by hand at block time; a typo (e.g. "READY_FOR_PALN") was previously accepted
+// as valid solely because it was non-empty, persisting an unknown Lifecycle value that the
+// next `ready-dispatch-gate.mjs` invocation would only discover as ordinary NOT_READY
+// fallthrough — silently losing the intended resume stage rather than failing closed at the
+// point the value was about to become durable. Exported so that reconciliation script can
+// validate against the exact same vocabulary this gate itself recognizes, never a second,
+// independently drifting list.
+export function isKnownLifecycleValue(value) {
+  return typeof value === "string" && KNOWN_LIFECYCLE_STATES.includes(value.toUpperCase());
+}
+
+// Pure. True unless `lifecycle` is specifically READY_FOR_PLAN and `route` is not (trimmed,
+// case-insensitive) "planning worker" — the one Lifecycle/Route compatibility rule this file
+// enforces (see the identical inline check inside evaluateReadyDispatchGate below, which this
+// function now backs, and #397's Shared Contract: "Route: must be planning worker"). Exported
+// so `reconcile-control-blocker.mjs` can apply the exact same compatibility rule to its own
+// "Blocked lifecycle"/"Blocked route" companion fields before persisting them (issue #437/#610
+// Stage 1 finding 4), rather than re-deriving a second version of this one rule.
+export function isRouteCompatibleWithLifecycle(lifecycle, route) {
+  if (typeof lifecycle === "string" && lifecycle.toUpperCase() === "READY_FOR_PLAN") {
+    return typeof route === "string" && route.trim().toLowerCase() === "planning worker";
+  }
+  return true;
+}
+
 // #397's four new pre-PR Lifecycle values (docs/operating-model.md's "Execution-stage
 // session boundaries" Plan/Route/Execute/Integrate pipeline), sitting between the existing
 // READY (direct single-worker dispatch) and the existing post-PR states. Recognizing these
@@ -899,11 +927,21 @@ export function readExecutionBulletField(body) {
 // ordinary control Issue — only a real audit-control-issue.yml-rendered body can satisfy all
 // three simultaneously.
 export function classifyAuditIssue(body) {
-  return (
-    parseStage2Verdict(body ?? "") !== null &&
-    parseFormField(body ?? "", "Merged PR") !== null &&
-    parseFormField(body ?? "", "Work issue") !== null
-  );
+  return parseStage2Verdict(body ?? "") !== null && isAuditShapedBody(body);
+}
+
+// Pure. Issue #437/#610 Stage 1 finding 2: the audit-control-issue.yml *shape* alone (the
+// "### Merged PR"/"### Work issue" headings), independent of whether the "### Verdict"
+// dropdown itself parses to a recognized value. classifyAuditIssue above additionally
+// requires `parseStage2Verdict(body) !== null`, which is exactly right for detecting a
+// canonical, closable Audit Issue — but a caller deciding whether a *prerequisite* satisfies
+// a control's "Blocked by ..." condition must not let a missing/malformed Verdict field
+// silently reclassify a genuine audit-shaped issue as an "ordinary closed issue" that
+// satisfies on closure alone (`reconcile-control-blocker.mjs`'s own `isPrerequisiteSatisfied`
+// is exactly that caller). This function answers only "is this an audit-control-issue.yml body
+// at all", leaving what to require of the Verdict field to the caller.
+export function isAuditShapedBody(body) {
+  return parseFormField(body ?? "", "Merged PR") !== null && parseFormField(body ?? "", "Work issue") !== null;
 }
 
 // Pure. Issue #444 unit 444-A — the #439/#440/#443 live reproduction: a control body's own
@@ -1058,6 +1096,13 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   // validated, exactly mirroring how the pre-existing READY path already defers its own
   // verdict construction to the end of this function.
   let dispatchLifecycle = null;
+  // Issue #437/#610 Stage 1 finding 1: set only when the Blocker field itself (never Founder
+  // decision or a blocking Lifecycle value alone) is the reason this control Issue is BLOCKED —
+  // the exact "reasons name a non-none Blocker" condition AGENTS.md § Session execution's own
+  // BLOCKED paragraph already names as the sole trigger for the one authorized
+  // reconcile-control-blocker.mjs step. Threaded onto the BLOCKED verdict below so
+  // action-envelope.mjs can authorize that step mechanically instead of only in prose.
+  let blockerActive = false;
   // Set either when the unrecognized-lifecycle branch below fires with one of the five
   // post-PR mid-cycle values (see POST_PR_MID_CYCLE_LIFECYCLE_VALUES's own comment above), or
   // — issue #444 unit 444-A — when EXECUTION_COMPLETE's own PR/Stage 1 boundary guard fires
@@ -1106,7 +1151,7 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
 
   if (routeRaw === null || routeRaw === "" || isNoneSentinel(routeRaw)) {
     reasons.push(`Route is not settled (found: ${JSON.stringify(routeRaw)})`);
-  } else if (dispatchLifecycle === "READY_FOR_PLAN" && routeRaw.trim().toLowerCase() !== "planning worker") {
+  } else if (!isRouteCompatibleWithLifecycle(dispatchLifecycle, routeRaw)) {
     // READY_FOR_PLAN is the one new pre-PR value whose Route must be a specific literal
     // value, not merely "settled" — it always dispatches the planning worker specifically
     // (#397's Shared Contract: "Route: must be planning worker").
@@ -1121,6 +1166,7 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
     const msg = `Blocker is not "none" (found: "${blockerRaw}") — an active blocker must not be reinterpreted as authorization to advance`;
     reasons.push(msg);
     blockingReasons.push(msg);
+    blockerActive = true;
   }
 
   if (founderDecisionRaw === null) {
@@ -1150,7 +1196,7 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   }
 
   if (blockingReasons.length > 0) {
-    return { status: "BLOCKED", reasons: blockingReasons };
+    return { status: "BLOCKED", reasons: blockingReasons, blockerActive };
   }
 
   if (reasons.length > 0) {
@@ -1704,7 +1750,19 @@ async function checkReadyDispatchCore(
   }
 
   if (result.status === "BLOCKED") {
-    return { exitCode: 4, state: "BLOCKED", controlIssue: Number(controlIssue), repo: resolvedRepo, reasons: result.reasons };
+    return {
+      exitCode: 4,
+      state: "BLOCKED",
+      controlIssue: Number(controlIssue),
+      repo: resolvedRepo,
+      reasons: result.reasons,
+      // Issue #437/#610 Stage 1 finding 1: the one mechanically-recognizable condition under
+      // which AGENTS.md § Session execution's BLOCKED paragraph authorizes a single
+      // reconcile-control-blocker.mjs step before treating this as a genuine stop.
+      // action-envelope.mjs's getActionEnvelope reads this exact field to decide BLOCKED's
+      // envelope — never a substring match over `reasons` prose.
+      blockerReconciliationEligible: result.blockerActive === true,
+    };
   }
   if (result.status === "NOT_READY") {
     return {

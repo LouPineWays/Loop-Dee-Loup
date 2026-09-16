@@ -301,6 +301,172 @@ test("checkReconcileControlBlocker: a gh issue edit failure during the write ste
   assert.match(result.message, /gh issue edit failed/);
 });
 
+// -- Stage 1 correction regression tests (PR #610, closing #437's Stage 1 review) -----------
+
+// Finding 2: a closed prerequisite with the canonical audit headings but a missing/malformed
+// "### Verdict" must not silently satisfy on closure alone merely because its Verdict field
+// failed to parse.
+test("isPrerequisiteSatisfied: a closed audit-shaped prerequisite with a missing/malformed Verdict never satisfies on closure alone (Stage 1 finding 2)", () => {
+  const missingVerdict = auditIssueBody("_No response_");
+  assert.equal(isPrerequisiteSatisfied({ state: "CLOSED", body: missingVerdict }), false);
+  const malformedVerdict = auditIssueBody("banana");
+  assert.equal(isPrerequisiteSatisfied({ state: "CLOSED", body: malformedVerdict }), false);
+});
+
+test("checkReconcileControlBlocker: INCOMPLETE_PREREQUISITE — a closed audit-shaped prerequisite with a malformed Verdict never silently passes (Stage 1 finding 2)", async () => {
+  const result = await checkReconcileControlBlocker(
+    { repo: "owner/repo", "control-issue": 440 },
+    {
+      ghIssueViewImpl: makeGhIssueViewImpl({ 436: { state: "CLOSED", body: auditIssueBody("banana") } }),
+      ghEditImpl: () => assert.fail("must not mutate on a malformed-Verdict audit prerequisite"),
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "INCOMPLETE_PREREQUISITE");
+  assert.deepEqual(result.pending, [436]);
+});
+
+// Finding 3: a Blocker naming one recognized prerequisite plus another issue reference outside
+// the recognized "Blocked by ..." clause must fail closed rather than only reconciling against
+// the issue(s) the clause happened to capture.
+test("checkReconcileControlBlocker: AMBIGUOUS_BLOCKER — an issue reference outside the recognized clause is never partially resolved (Stage 1 finding 3)", async () => {
+  const mixedBody = BLOCKED_BODY.replace(
+    "- **Blocker:** Blocked by #407, #408, #436.",
+    "- **Blocker:** Blocked by #407. Also waiting on #408.",
+  );
+  const result = await checkReconcileControlBlocker(
+    { repo: "owner/repo", "control-issue": 440 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        Number(number) === 440 ? { state: "OPEN", body: mixedBody } : assert.fail("must not fetch any prerequisite when the Blocker field is ambiguous"),
+      ghEditImpl: () => assert.fail("must not mutate on a mixed recognized/unrecognized Blocker"),
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS_BLOCKER");
+  assert.match(result.reason, /outside the recognized/);
+});
+
+// Finding 4: a typo'd "Blocked lifecycle" value, or a "Blocked lifecycle"/"Blocked route"
+// combination the live gate itself would reject as incompatible, must fail closed before ever
+// being persisted as the live resume state.
+test("checkReconcileControlBlocker: AMBIGUOUS_BLOCKER — an unrecognized 'Blocked lifecycle' value is refused (Stage 1 finding 4)", async () => {
+  const typoBody = BLOCKED_BODY.replace("- **Blocked lifecycle:** READY_FOR_PLAN", "- **Blocked lifecycle:** READY_FOR_PALN");
+  const result = await checkReconcileControlBlocker(
+    { repo: "owner/repo", "control-issue": 440 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        Number(number) === 440 ? { state: "OPEN", body: typoBody } : assert.fail("must not fetch prerequisites when 'Blocked lifecycle' is unrecognized"),
+      ghEditImpl: () => assert.fail("must not persist an unrecognized Lifecycle value"),
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS_BLOCKER");
+  assert.match(result.reason, /not a recognized Lifecycle value/);
+});
+
+test("checkReconcileControlBlocker: AMBIGUOUS_BLOCKER — a 'Blocked route' incompatible with 'Blocked lifecycle' is refused (Stage 1 finding 4)", async () => {
+  const incompatibleBody = BLOCKED_BODY.replace("- **Blocked route:** planning worker", "- **Blocked route:** integration worker");
+  const result = await checkReconcileControlBlocker(
+    { repo: "owner/repo", "control-issue": 440 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        Number(number) === 440 ? { state: "OPEN", body: incompatibleBody } : assert.fail("must not fetch prerequisites when the Route/Lifecycle pair is incompatible"),
+      ghEditImpl: () => assert.fail("must not persist an incompatible Route/Lifecycle pair"),
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS_BLOCKER");
+  assert.match(result.reason, /not a compatible Route/);
+});
+
+// Finding 5: a template-shaped control ("### Current blocker" heading, no ad hoc "- **Blocker:**"
+// bullet) must be read and reconciled exactly like the ad hoc bullet shape, not silently
+// treated as ALREADY_UNBLOCKED because the bullet convention alone was ever checked.
+test("checkReconcileControlBlocker: UNBLOCKED — a template-shaped 'Current blocker' heading is read and reconciled (Stage 1 finding 5)", async () => {
+  const templateBody = `### State
+
+BLOCKED
+
+### Current blocker
+
+Blocked by #407, #408.
+
+- **Blocked lifecycle:** READY_FOR_PLAN
+- **Blocked route:** planning worker
+`;
+  const calls = [];
+  const result = await checkReconcileControlBlocker(
+    { repo: "owner/repo", "control-issue": 440 },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (Number(number) === 440) return { state: "OPEN", body: templateBody };
+        return { state: "CLOSED", body: "" };
+      },
+      ghEditImpl: (a) => calls.push(a),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "UNBLOCKED");
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].body, /### Current blocker\n\nnone — #407, #408 closed/);
+});
+
+// Finding 6: the write must be composed from a freshly re-read control body immediately before
+// the effect, not the body read at the start of this invocation -- a concurrent edit that
+// resolves the blocker in the interim must never be silently overwritten by a stale UNBLOCKED
+// write, and a concurrent edit to an unrelated field must survive into the persisted body.
+test("checkReconcileControlBlocker: a concurrent resolution between the initial read and the pre-write re-check is honored, not overwritten (Stage 1 finding 6)", async () => {
+  const alreadyResolvedBody = BLOCKED_BODY.replace(
+    "- **Blocker:** Blocked by #407, #408, #436.",
+    "- **Blocker:** none — resolved by a concurrent session",
+  );
+  let controlReadCount = 0;
+  const result = await checkReconcileControlBlocker(
+    { repo: "owner/repo", "control-issue": 440 },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (Number(number) === 440) {
+          controlReadCount += 1;
+          // First read (pass 1) still sees the original BLOCKED body; the second read
+          // (pass 2, immediately before the write) observes a concurrent edit that already
+          // cleared the Blocker -- simulating another session's lifecycle transition landing
+          // in between.
+          return { state: "OPEN", body: controlReadCount === 1 ? BLOCKED_BODY : alreadyResolvedBody };
+        }
+        return { state: "CLOSED", body: "" };
+      },
+      ghEditImpl: () => assert.fail("must never overwrite a concurrently-resolved Blocker with a stale UNBLOCKED body"),
+    },
+  );
+  assert.equal(controlReadCount, 2, "the control Issue must be read fresh a second time immediately before the write");
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "ALREADY_UNBLOCKED");
+});
+
+test("checkReconcileControlBlocker: the persisted body is composed from the freshest control read, preserving a concurrent unrelated edit (Stage 1 finding 6)", async () => {
+  const editedBody = BLOCKED_BODY.replace("- **Execution:** #440", "- **Execution:** #440\n- **Plan:** https://example.com/plan");
+  let controlReadCount = 0;
+  const calls = [];
+  const result = await checkReconcileControlBlocker(
+    { repo: "owner/repo", "control-issue": 440 },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (Number(number) === 440) {
+          controlReadCount += 1;
+          return { state: "OPEN", body: controlReadCount === 1 ? BLOCKED_BODY : editedBody };
+        }
+        return makeGhIssueViewImpl()({ number });
+      },
+      ghEditImpl: (a) => calls.push(a),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "UNBLOCKED");
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].body, /- \*\*Plan:\*\* https:\/\/example\.com\/plan/, "the concurrent unrelated edit observed on the fresh pre-write read must survive into the write");
+});
+
 test("checkReconcileControlBlocker: a subsequent fresh run against the just-written UNBLOCKED body is idempotent (ALREADY_UNBLOCKED)", async () => {
   let writtenBody = null;
   const first = await checkReconcileControlBlocker(

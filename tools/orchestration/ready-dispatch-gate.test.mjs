@@ -624,7 +624,31 @@ test("checkReadyDispatch: a BLOCKED control Issue (control #301 reproduction sha
   assert.notEqual(result.exitCode, 3);
   assert.ok(result.reasons.length > 0);
   assert.ok(!("executionIssue" in result));
-  // Issue #486: BLOCKED authorizes zero further operational tool calls.
+  // Issue #486, corrected by issue #437/#610 Stage 1 finding 1: CONTROL_301_BODY's own
+  // Blocker field is non-`none` (free prose, not merely a Founder-decision-only or
+  // blocking-Lifecycle-only BLOCKED), so this is exactly the one case AGENTS.md § Session
+  // execution's BLOCKED paragraph authorizes a single reconcile-control-blocker.mjs step for
+  // before treating BLOCKED as a genuine stop — the gate must expose that as a `chain`
+  // envelope, not the unconditional `none` this test asserted before #610. The reconciler
+  // itself still fails closed on this exact free-prose shape (no recognized "Blocked by
+  // #N..." clause) once actually invoked; that is a separate, already-covered guarantee
+  // (reconcile-control-blocker.test.mjs's own Verification case 5), not this test's concern.
+  assert.deepEqual(result.actionEnvelope, { mode: "chain", authorizedActions: ["run-reconcile-control-blocker"] });
+});
+
+// Issue #437/#610 Stage 1 finding 1: a BLOCKED verdict caused solely by a non-`none` Founder
+// decision (Blocker itself reads "none") has no reconciliation step to run — reconcile-
+// control-blocker.mjs only ever reconciles a Blocker field, never a Founder decision — so its
+// envelope must stay the unconditional `none` this mechanism always returned, not become
+// `chain` merely because the verdict is BLOCKED.
+test("checkReadyDispatch: a BLOCKED control Issue caused only by a non-none Founder decision keeps the unconditional 'none' envelope (Stage 1 finding 1)", async () => {
+  const body = "- **Lifecycle:** READY\n- **Execution:** #5\n- **Route:** implementation worker\n- **Blocker:** none\n- **Founder decision:** ship the growth-hack banner or not?\n";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 500 },
+    { ghIssueViewImpl: async () => ({ body, state: "OPEN" }) },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "BLOCKED");
   assert.deepEqual(result.actionEnvelope, { mode: "none", authorizedActions: [] });
 });
 

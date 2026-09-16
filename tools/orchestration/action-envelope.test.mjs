@@ -184,6 +184,43 @@ test("BLOCKED (pre-PR blocker regression, #368-style): zero execution-plane read
   assert.equal(violated.reasons.length, 2);
 });
 
+// Issue #437/#610 Stage 1 finding 1: without `blockerReconciliationEligible` in context (the
+// ordinary case — no context at all, or a Founder-decision-only/blocking-Lifecycle-only
+// BLOCKED), BLOCKED stays exactly the unconditional no-action verdict above.
+test("BLOCKED with no blockerReconciliationEligible context is still the ordinary no-action envelope", () => {
+  assert.deepEqual(getActionEnvelope("BLOCKED"), { mode: ENVELOPE_MODES.NONE, authorizedActions: [] });
+  assert.deepEqual(getActionEnvelope("BLOCKED", { reasons: ["Founder decision is not \"none\" ..."] }), {
+    mode: ENVELOPE_MODES.NONE,
+    authorizedActions: [],
+  });
+  assert.deepEqual(getActionEnvelope("BLOCKED", { blockerReconciliationEligible: false }), {
+    mode: ENVELOPE_MODES.NONE,
+    authorizedActions: [],
+  });
+});
+
+// Issue #437/#610 Stage 1 finding 1 (the AGENTS.md/action-envelope.mjs authority mismatch): a
+// BLOCKED verdict whose Blocker field is itself the reason (ready-dispatch-gate.mjs sets
+// `blockerReconciliationEligible: true` only in exactly this case) chains to the one documented
+// reconciliation step, matching AUDIT_ISSUE_DETECTED's own chain shape.
+test("BLOCKED with blockerReconciliationEligible: true chains to exactly one reconcile-control-blocker run", () => {
+  const context = { blockerReconciliationEligible: true };
+  assert.deepEqual(getActionEnvelope("BLOCKED", context), {
+    mode: ENVELOPE_MODES.CHAIN,
+    authorizedActions: ["run-reconcile-control-blocker"],
+  });
+  assert.equal(classifyEnvelopeCompliance("BLOCKED", ["run-reconcile-control-blocker"], context).status, "compliant");
+  const missing = classifyEnvelopeCompliance("BLOCKED", [], context);
+  assert.equal(missing.status, "violation");
+  assert.match(missing.reasons.join(" "), /run-reconcile-control-blocker/);
+  const overreach = classifyEnvelopeCompliance(
+    "BLOCKED",
+    ["run-reconcile-control-blocker", "self-authorized-implementation"],
+    context,
+  );
+  assert.equal(overreach.status, "violation");
+});
+
 // -- classifyEnvelopeCompliance: wait state -----------------------------------------------
 // Verification class 3.
 

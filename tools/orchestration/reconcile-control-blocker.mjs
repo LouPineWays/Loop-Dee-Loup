@@ -67,9 +67,18 @@
 // Tests: node --test tools/orchestration/reconcile-control-blocker.test.mjs
 
 import { execFileSync } from "node:child_process";
-import { upsertControlBullet, resolveRepoIdentity, parseControlBullet, isNoneSentinel, classifyAuditIssue } from "./ready-dispatch-gate.mjs";
+import {
+  upsertControlBullet,
+  resolveRepoIdentity,
+  parseControlBullet,
+  parseHeadingField,
+  isNoneSentinel,
+  isAuditShapedBody,
+  isKnownLifecycleValue,
+  isRouteCompatibleWithLifecycle,
+} from "./ready-dispatch-gate.mjs";
 import { parseStage2Verdict } from "../review-watch/lifecycle-gate.mjs";
-import { extractBlockedByIssueNumbers } from "./blocker-grammar.mjs";
+import { extractBlockedByIssueNumbers, hasUnrecognizedBlockerWording } from "./blocker-grammar.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 
 function defaultGhIssueView({ repo, number }) {
@@ -79,18 +88,151 @@ function defaultGhIssueView({ repo, number }) {
   return JSON.parse(raw);
 }
 
-// Pure. Shared Contract design decision point 5: classifies one already-fetched
-// prerequisite issue's terminal condition. A prerequisite whose GitHub `state` is not
-// CLOSED never satisfies. A closed, ordinary (non-audit-shaped) issue satisfies on closure
-// alone. A closed, audit-shaped issue (classifyAuditIssue) additionally requires its own
-// recorded Verdict to read exactly "CLEAN" -- a closed audit Issue reading NOT CLEAN,
-// PENDING, or malformed never silently passes merely because the Issue closed.
+// Pure. Shared Contract design decision point 5, corrected by issue #437/#610 Stage 1 finding
+// 2: classifies one already-fetched prerequisite issue's terminal condition. A prerequisite
+// whose GitHub `state` is not CLOSED never satisfies. A closed, ordinary (non-audit-shaped)
+// issue satisfies on closure alone. A closed, audit-shaped issue (`isAuditShapedBody` --
+// deliberately NOT `classifyAuditIssue`, which additionally requires `parseStage2Verdict` to
+// already parse non-null) additionally requires its own recorded Verdict to read exactly
+// "CLEAN" -- a closed audit Issue reading NOT CLEAN, PENDING, missing, or malformed never
+// silently passes merely because the Issue closed. Stage 1 finding: using `classifyAuditIssue`
+// here let a closed prerequisite with the canonical audit headings but a missing/malformed
+// "### Verdict" field fall through to the "ordinary closed issue" branch below (since
+// `classifyAuditIssue` itself returned false the instant `parseStage2Verdict` failed to parse),
+// satisfying on closure alone despite never having a valid recorded CLEAN verdict at all.
+// `isAuditShapedBody` detects the audit shape independently of verdict validity, so a
+// malformed/missing verdict on a genuinely audit-shaped body still requires the same exact
+// "CLEAN" comparison as a validly-parsed one -- and still fails it.
 export function isPrerequisiteSatisfied({ state, body } = {}) {
   if (String(state ?? "").toUpperCase() !== "CLOSED") return false;
-  if (classifyAuditIssue(body ?? "")) {
+  if (isAuditShapedBody(body ?? "")) {
     return parseStage2Verdict(body ?? "") === "CLEAN";
   }
   return true;
+}
+
+// Pure, no network access. Issue #437/#610 Stage 1 findings 3-5: evaluates the Blocker
+// condition recorded on a control body from already-available text alone, so the identical
+// check can run twice against two independently fresh reads (see checkReconcileControlBlocker
+// below) without maintaining two different implementations that could drift apart.
+//
+// Returns one of:
+//   { kind: "ALREADY_UNBLOCKED" }                                    -- nothing to reconcile.
+//   { kind: "AMBIGUOUS_BLOCKER", reason }                            -- fails closed, no mutation.
+//   { kind: "RECONCILABLE", blockedByIssues, blockedLifecycle, blockedRoute }
+//
+// Stage 1 finding 5: reads "Blocker" the same way `ready-dispatch-gate.mjs`'s own
+// `evaluateReadyDispatchGate` does -- the ad hoc "- **Blocker:**" bullet, falling back to the
+// shipped `parent-execution.yml` template's own "### Current blocker" heading when the bullet
+// is absent. Reading only the bullet (the pre-#610 shape) meant a template-created control
+// with "Current blocker: Blocked by #9." produced BLOCKED at the gate and then
+// ALREADY_UNBLOCKED here without ever fetching #9 -- reconciliation silently no-op'd forever on
+// exactly the control shape it was built to also cover. `upsertControlBullet`'s own write side
+// already updates that same heading in place when no ad hoc bullet coexists with it (see its
+// `HEADING_FIELD_LABELS` table), so only the read side needed this fallback.
+export function evaluateBlockerCondition(body) {
+  const blockerRaw = parseControlBullet(body, "Blocker") ?? parseHeadingField(body, "Current blocker");
+  // Shared Contract design decision point 8 (Verification case 7): a missing bullet/heading or
+  // an already-"none" value means there is nothing to reconcile -- a safe, idempotent no-op.
+  if (blockerRaw === null || isNoneSentinel(blockerRaw)) {
+    return { kind: "ALREADY_UNBLOCKED" };
+  }
+
+  // Stage 1 finding 3: `hasUnrecognizedBlockerWording` is the fail-closed detector
+  // `blocker-grammar.mjs` already exports for exactly this purpose -- checked BEFORE
+  // extraction, not only via extraction's own "found nothing" case below, so a field naming an
+  // issue reference outside the recognized clause (e.g. "Blocked by #407. Also waiting on
+  // #408.") is treated as wholly ambiguous rather than partially resolved against only the
+  // issue(s) the clause happened to capture. Without this check, that exact shape fetched only
+  // #407 and cleared the entire blocker once it closed, even while #408 -- named elsewhere in
+  // the same field but outside the recognized clause -- remained open.
+  if (hasUnrecognizedBlockerWording(blockerRaw)) {
+    return {
+      kind: "AMBIGUOUS_BLOCKER",
+      reason:
+        `"Blocker" field ${JSON.stringify(blockerRaw)} contains issue reference(s) outside the recognized ` +
+        `"Blocked by #N[, #N...]." clause -- refusing to partially resolve a mixed recognized/unrecognized blocker`,
+    };
+  }
+
+  const blockedByIssues = extractBlockedByIssueNumbers(blockerRaw);
+  // Design decision point 3 (Verification case 5): a Blocker field that does not match the
+  // recognized "Blocked by #N[, #N...]." clause at all -- including the real historical
+  // #440 free-prose shape -- is never guessed at. (In practice this is now also caught by
+  // hasUnrecognizedBlockerWording above whenever the field names any "#N" at all; this check
+  // remains as the fail-closed backstop for a non-none field naming no issue number whatsoever.)
+  if (blockedByIssues.length === 0) {
+    return {
+      kind: "AMBIGUOUS_BLOCKER",
+      reason: `"Blocker" field ${JSON.stringify(blockerRaw)} does not match the recognized "Blocked by #N[, #N...]." clause`,
+    };
+  }
+
+  const blockedLifecycleRaw = parseControlBullet(body, "Blocked lifecycle");
+  const blockedRouteRaw = parseControlBullet(body, "Blocked route");
+  // Design decision point 4 (Verification case 6): both companion fields must be present
+  // and non-empty before this control can be mechanically reconciled -- their absence is
+  // itself an AMBIGUOUS_BLOCKER result, never a guess at the correct resume state.
+  if (!blockedLifecycleRaw || !blockedLifecycleRaw.trim() || !blockedRouteRaw || !blockedRouteRaw.trim()) {
+    return {
+      kind: "AMBIGUOUS_BLOCKER",
+      reason:
+        '"Blocked lifecycle" and "Blocked route" must both be present and non-empty before this control can be ' +
+        `mechanically reconciled (Blocked lifecycle: ${JSON.stringify(blockedLifecycleRaw)}, Blocked route: ${JSON.stringify(blockedRouteRaw)})`,
+    };
+  }
+  const blockedLifecycle = blockedLifecycleRaw.trim();
+  const blockedRoute = blockedRouteRaw.trim();
+
+  // Stage 1 finding 4: before this, both companion fields were considered valid solely because
+  // they were nonempty, so a typo such as "Blocked lifecycle: READY_FOR_PALN" was persisted as
+  // the live Lifecycle and still produced UNBLOCKED -- the next ready-dispatch-gate.mjs
+  // invocation would then treat that unknown value as ordinary NOT_READY fallthrough rather
+  // than resuming the intended stage. Validate the saved Lifecycle vocabulary...
+  if (!isKnownLifecycleValue(blockedLifecycle)) {
+    return {
+      kind: "AMBIGUOUS_BLOCKER",
+      reason:
+        `"Blocked lifecycle" value ${JSON.stringify(blockedLifecycle)} is not a recognized Lifecycle value -- ` +
+        "refusing to persist an unknown resume state",
+    };
+  }
+  // ...and Route/Lifecycle compatibility (e.g. READY_FOR_PLAN always requires Route "planning
+  // worker" -- the same rule evaluateReadyDispatchGate itself enforces on every read) before
+  // mutation. The literal sentinel "unchanged" is exempt: it writes nothing to Route at all
+  // (buildUnblockedControlBody below skips it entirely), so there is no value here to validate
+  // for compatibility.
+  if (blockedRoute.toLowerCase() !== "unchanged" && !isRouteCompatibleWithLifecycle(blockedLifecycle, blockedRoute)) {
+    return {
+      kind: "AMBIGUOUS_BLOCKER",
+      reason:
+        `"Blocked lifecycle" is ${JSON.stringify(blockedLifecycle)} but "Blocked route" is ${JSON.stringify(blockedRoute)}, ` +
+        "which is not a compatible Route for that Lifecycle",
+    };
+  }
+
+  return { kind: "RECONCILABLE", blockedByIssues, blockedLifecycle, blockedRoute };
+}
+
+// Fetches and classifies every named prerequisite fresh -- a real network round trip per
+// call, deliberately never cached or reused across the two evaluation passes
+// checkReconcileControlBlocker below performs, so a prerequisite that regressed between passes
+// is still detected. Returns `{ pending: [...] }` or `{ error: "..." }` (an unreadable named
+// prerequisite fails the whole control closed, exactly as before).
+async function fetchPrerequisiteStatus(blockedByIssues, { repo, ghIssueViewImpl }) {
+  const pending = [];
+  for (const issueNumber of blockedByIssues) {
+    let prereqData;
+    try {
+      prereqData = await ghIssueViewImpl({ repo, number: issueNumber });
+    } catch (err) {
+      return { error: `named prerequisite ${repo}#${issueNumber} could not be read: ${err.message}` };
+    }
+    if (!isPrerequisiteSatisfied(prereqData)) {
+      pending.push(issueNumber);
+    }
+  }
+  return { pending };
 }
 
 // Pure. Shared Contract design decision point 7: composes the reconciled control body once
@@ -109,11 +251,41 @@ export function buildUnblockedControlBody(body, { blockedByIssues, blockedLifecy
   return next;
 }
 
+function incompletePrerequisiteResult({ repo, controlIssue, controlIssueNumber, pending }) {
+  return {
+    exitCode: 3,
+    state: "INCOMPLETE_PREREQUISITE",
+    controlIssue: controlIssueNumber,
+    pending,
+    message:
+      `${repo}#${controlIssue} remains blocked: prerequisite(s) ${pending.map((n) => `#${n}`).join(", ")} have not yet ` +
+      "reached their required terminal condition.",
+  };
+}
+
 // `ghIssueViewImpl`/`ghEditImpl` are injected so tests can drive this end-to-end without
 // touching the real network or `gh` CLI. `ghEditImpl` is forwarded verbatim to
 // write-control-snapshot.mjs's own `checkWriteControlSnapshot` (see below) -- when omitted
 // here, that module's own default (a synchronous `gh issue edit --body-file -` via stdin)
 // applies, exactly as it does for every other canonical control-body write.
+//
+// Issue #437/#610 Stage 1 finding 6 (the TOCTOU window): the proposed body used to be derived
+// from one initial read, then written only after one or more prerequisite network reads --
+// during that window, another lifecycle transition could edit the control (or a "Blocked by"
+// clause could stop describing the currently-open prerequisite set), and the write-before-
+// validate helper below has no way to know the body it is asked to persist is already stale.
+// This function closes that window the same way this repository's existing finalize-*-
+// breakpoint.mjs scripts and transition-guard.mjs's own `commitControlBodyTransition` do it for
+// their own transitions: read fresh, validate, THEN immediately before the one durable effect
+// re-read fresh and re-validate against that latest snapshot -- never the initial one -- and
+// only then perform the write. `evaluateBlockerCondition`/`fetchPrerequisiteStatus` are the
+// single, side-effect-free implementations run for both passes, so there is no second,
+// independently-drifting copy of this logic to keep in sync. (This control-Issue-body
+// transition's authorization set is itself derived fresh from the body each pass -- the exact
+// "Blocked by ..." issue list to re-check -- which does not fit `commitControlBodyTransition`'s
+// own fixed-external-witness shape cleanly; this bespoke sequence applies the identical
+// discipline instead of forcing an ill-fitting reuse, per that finding's own accepted
+// alternative.)
 export async function checkReconcileControlBlocker(args, { ghIssueViewImpl = defaultGhIssueView, ghEditImpl } = {}) {
   const { repo, "control-issue": controlIssue } = args;
   if (!repo || !controlIssue) {
@@ -121,92 +293,71 @@ export async function checkReconcileControlBlocker(args, { ghIssueViewImpl = def
   }
   const controlIssueNumber = Number(controlIssue);
 
+  // Pass 1: fresh read, evaluate, gather prerequisites. Establishes whether reconciliation is
+  // even a candidate at all. None of ALREADY_TERMINAL/ALREADY_UNBLOCKED/AMBIGUOUS_BLOCKER/
+  // INCOMPLETE_PREREQUISITE ever mutates anything, so no TOCTOU protection is needed for them --
+  // there is no durable effect at stake yet if this pass's answer turns out to be stale by the
+  // time it is reported.
   let controlData;
   try {
     controlData = await ghIssueViewImpl({ repo, number: controlIssue });
   } catch (err) {
     return { exitCode: 1, message: `gh issue view failed for ${repo}#${controlIssue}: ${err.message}` };
   }
-
   // Mirrors close-control.mjs's own ALREADY_TERMINAL precedent exactly: an already-closed
   // control Issue is trusted as terminal in full, never re-read past this point or re-edited.
   if (controlData.state === "CLOSED") {
     return { exitCode: 0, state: "ALREADY_TERMINAL", controlIssue: controlIssueNumber };
   }
 
-  const body = controlData.body ?? "";
-  const blockerRaw = parseControlBullet(body, "Blocker");
-  // Shared Contract design decision point 8 (Verification case 7): a missing bullet or an
-  // already-"none" value means there is nothing to reconcile -- a safe, idempotent no-op.
-  if (blockerRaw === null || isNoneSentinel(blockerRaw)) {
+  const initialCondition = evaluateBlockerCondition(controlData.body ?? "");
+  if (initialCondition.kind === "ALREADY_UNBLOCKED") {
     return { exitCode: 0, state: "ALREADY_UNBLOCKED", controlIssue: controlIssueNumber };
   }
-
-  const blockedByIssues = extractBlockedByIssueNumbers(blockerRaw);
-  // Design decision point 3 (Verification case 5): a Blocker field that does not match the
-  // recognized "Blocked by #N[, #N...]." clause at all -- including the real historical
-  // #440 free-prose shape -- is never guessed at.
-  if (blockedByIssues.length === 0) {
-    return {
-      exitCode: 4,
-      state: "AMBIGUOUS_BLOCKER",
-      controlIssue: controlIssueNumber,
-      reason: `"Blocker" field ${JSON.stringify(blockerRaw)} does not match the recognized "Blocked by #N[, #N...]." clause`,
-    };
+  if (initialCondition.kind === "AMBIGUOUS_BLOCKER") {
+    return { exitCode: 4, state: "AMBIGUOUS_BLOCKER", controlIssue: controlIssueNumber, reason: initialCondition.reason };
   }
 
-  const blockedLifecycleRaw = parseControlBullet(body, "Blocked lifecycle");
-  const blockedRouteRaw = parseControlBullet(body, "Blocked route");
-  // Design decision point 4 (Verification case 6): both companion fields must be present
-  // and non-empty before this control can be mechanically reconciled -- their absence is
-  // itself an AMBIGUOUS_BLOCKER result, never a guess at the correct resume state.
-  if (!blockedLifecycleRaw || !blockedLifecycleRaw.trim() || !blockedRouteRaw || !blockedRouteRaw.trim()) {
-    return {
-      exitCode: 4,
-      state: "AMBIGUOUS_BLOCKER",
-      controlIssue: controlIssueNumber,
-      reason:
-        '"Blocked lifecycle" and "Blocked route" must both be present and non-empty before this control can be ' +
-        `mechanically reconciled (Blocked lifecycle: ${JSON.stringify(blockedLifecycleRaw)}, Blocked route: ${JSON.stringify(blockedRouteRaw)})`,
-    };
+  const initialPrereqs = await fetchPrerequisiteStatus(initialCondition.blockedByIssues, { repo, ghIssueViewImpl });
+  if (initialPrereqs.error) {
+    return { exitCode: 4, state: "AMBIGUOUS_BLOCKER", controlIssue: controlIssueNumber, reason: initialPrereqs.error };
   }
-  const blockedLifecycle = blockedLifecycleRaw.trim();
-  const blockedRoute = blockedRouteRaw.trim();
-
-  // Design decision point 5/6: every named prerequisite is fetched and independently
-  // classified; a single unsatisfied or unreadable prerequisite fails the whole control --
-  // never a partial clear.
-  const pending = [];
-  for (const issueNumber of blockedByIssues) {
-    let prereqData;
-    try {
-      prereqData = await ghIssueViewImpl({ repo, number: issueNumber });
-    } catch (err) {
-      return {
-        exitCode: 4,
-        state: "AMBIGUOUS_BLOCKER",
-        controlIssue: controlIssueNumber,
-        reason: `named prerequisite ${repo}#${issueNumber} could not be read: ${err.message}`,
-      };
-    }
-    if (!isPrerequisiteSatisfied(prereqData)) {
-      pending.push(issueNumber);
-    }
+  if (initialPrereqs.pending.length > 0) {
+    return incompletePrerequisiteResult({ repo, controlIssue, controlIssueNumber, pending: initialPrereqs.pending });
   }
 
-  if (pending.length > 0) {
-    return {
-      exitCode: 3,
-      state: "INCOMPLETE_PREREQUISITE",
-      controlIssue: controlIssueNumber,
-      pending,
-      message:
-        `${repo}#${controlIssue} remains blocked: prerequisite(s) ${pending.map((n) => `#${n}`).join(", ")} have not yet ` +
-        "reached their required terminal condition.",
-    };
+  // Pass 2, immediately before the one durable effect: re-read the control Issue fresh and
+  // re-run the identical evaluation/prerequisite checks against THAT fresh snapshot -- never
+  // the pass-1 one -- so a concurrent edit made while pass 1's own network calls were in flight
+  // is detected and reflected rather than silently overwritten by a now-stale proposed body.
+  let latestControlData;
+  try {
+    latestControlData = await ghIssueViewImpl({ repo, number: controlIssue });
+  } catch (err) {
+    return { exitCode: 1, message: `pre-write control re-read failed for ${repo}#${controlIssue}: ${err.message}` };
+  }
+  if (latestControlData.state === "CLOSED") {
+    return { exitCode: 0, state: "ALREADY_TERMINAL", controlIssue: controlIssueNumber };
+  }
+  const latestCondition = evaluateBlockerCondition(latestControlData.body ?? "");
+  if (latestCondition.kind === "ALREADY_UNBLOCKED") {
+    return { exitCode: 0, state: "ALREADY_UNBLOCKED", controlIssue: controlIssueNumber };
+  }
+  if (latestCondition.kind === "AMBIGUOUS_BLOCKER") {
+    return { exitCode: 4, state: "AMBIGUOUS_BLOCKER", controlIssue: controlIssueNumber, reason: latestCondition.reason };
+  }
+  const latestPrereqs = await fetchPrerequisiteStatus(latestCondition.blockedByIssues, { repo, ghIssueViewImpl });
+  if (latestPrereqs.error) {
+    return { exitCode: 4, state: "AMBIGUOUS_BLOCKER", controlIssue: controlIssueNumber, reason: latestPrereqs.error };
+  }
+  if (latestPrereqs.pending.length > 0) {
+    return incompletePrerequisiteResult({ repo, controlIssue, controlIssueNumber, pending: latestPrereqs.pending });
   }
 
-  const proposedBody = buildUnblockedControlBody(body, { blockedByIssues, blockedLifecycle, blockedRoute });
+  // The proposed body is composed from `latestControlData.body` -- never the pass-1 body -- so
+  // any unrelated concurrent edit to the same control Issue survives into the write instead of
+  // being silently clobbered by a stale copy.
+  const proposedBody = buildUnblockedControlBody(latestControlData.body, latestCondition);
 
   // Design decision point 7: route the composed body through the canonical
   // write-before-validate helper (issue #510) exactly like close-control.mjs already does --
@@ -225,7 +376,12 @@ export async function checkReconcileControlBlocker(args, { ghIssueViewImpl = def
     return { exitCode: 1, message: writeResult.message };
   }
 
-  return { exitCode: 0, state: "UNBLOCKED", controlIssue: controlIssueNumber, prerequisitesSatisfied: blockedByIssues };
+  return {
+    exitCode: 0,
+    state: "UNBLOCKED",
+    controlIssue: controlIssueNumber,
+    prerequisitesSatisfied: latestCondition.blockedByIssues,
+  };
 }
 
 function parseArgs(argv) {

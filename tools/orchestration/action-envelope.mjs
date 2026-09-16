@@ -67,8 +67,11 @@
 //                 lifecycle transition, or a newly invented recovery sequence, even when the
 //                 authorized action(s) were performed correctly first.
 // "chain"       — a verdict that itself hands off to exactly one further deterministic gate
-//                 invocation (currently only `AUDIT_ISSUE_DETECTED` -> run
-//                 next-review-transition-gate.mjs), whose OWN verdict and envelope then govern
+//                 invocation (`AUDIT_ISSUE_DETECTED` -> run next-review-transition-gate.mjs;
+//                 `BLOCKED` with `context.blockerReconciliationEligible === true` -> run
+//                 reconcile-control-blocker.mjs, then re-invoke ready-dispatch-gate.mjs fresh —
+//                 issue #437/#610 Stage 1 finding 1, see the `BLOCKED` handling in
+//                 `getActionEnvelope` below), whose OWN verdict and envelope then govern
 //                 whatever happens next. This is not "no boundary" — only that one named
 //                 chained action is authorized here, and compliance for what follows is judged
 //                 against the next verdict's own envelope, not this one.
@@ -98,6 +101,18 @@ export const ENVELOPE_MODES = Object.freeze({
 // because a single authoritative list is easier to keep exhaustive than two.
 const ENVELOPES = {
   // -- ready-dispatch-gate.mjs -------------------------------------------------------------
+  // This table row is the ordinary (no mechanically-reconcilable Blocker) case only. Issue
+  // #437/#610 Stage 1 finding 1: AGENTS.md § Session execution's own `BLOCKED` paragraph
+  // conditionally authorizes exactly one `reconcile-control-blocker.mjs` invocation — but only
+  // when the gate's own `reasons` name a non-`none` Blocker specifically, never for a
+  // Founder-decision-only or blocking-Lifecycle-only `BLOCKED`. Widening this row unconditionally
+  // to `bounded`/`chain` would authorize that step even when no Blocker condition exists to
+  // reconcile at all, and leaving it unconditionally `none` (the pre-#610 shape) made the
+  // documented recovery path unusable under its own authority model — a compliant controller or
+  // `verify-action-envelope.mjs` would reject both the reconciliation call and the follow-up
+  // fresh gate invocation. The actual authorized envelope is derived from
+  // `context.blockerReconciliationEligible` directly in `getActionEnvelope` below, never by
+  // widening this static row.
   BLOCKED: { mode: ENVELOPE_MODES.NONE, authorizedActions: [] },
   // NOT_READY's table row is the ordinary (pre-PR / non-lifecycle) case only. The post-PR
   // mid-cycle exception (`postPrLifecycle` present on the verdict) is handled as a special
@@ -236,13 +251,21 @@ function parseChainedCommands(commandText) {
 }
 
 // `context` is the verdict object itself (or an equivalent shape) — optional, and safe to omit
-// for a plain table lookup by state alone. Only two states currently read anything from it:
+// for a plain table lookup by state alone. Only three states currently read anything from it:
 //
 //   - `NOT_READY` with a truthy string `context.postPrLifecycle` (one of the post-PR mid-cycle
 //     Lifecycle values ready-dispatch-gate.mjs tags the verdict with — EXECUTING, VERIFYING,
 //     REVIEW, AUDIT, CORRECTION) is the AGENTS.md § Session execution exception: it must chain
 //     to `next-review-transition-gate.mjs`, never fall through to free reasoning. Absent (or a
 //     non-post-PR ordinary NOT_READY), the table's own `fallthrough` row applies unchanged.
+//   - `BLOCKED` with `context.blockerReconciliationEligible === true` (set by
+//     `ready-dispatch-gate.mjs` only when the Blocker field itself — never Founder decision or a
+//     blocking Lifecycle value alone — is the reason for BLOCKED) chains to exactly one
+//     `run-reconcile-control-blocker` action; the fresh `ready-dispatch-gate.mjs` re-invocation
+//     AGENTS.md's own BLOCKED paragraph authorizes afterward is judged against THAT invocation's
+//     own returned verdict/envelope, never pre-authorized here (issue #437/#610 Stage 1 finding
+//     1). Any other value (`false`, absent, or a still-non-`none` Founder-decision-only BLOCKED)
+//     keeps the table's own unconditional `none` row.
 //   - `STAGE2_CLOSE_READY` derives its actual authorized actions from `context.nextCommand`
 //     (always present on this verdict — see next-review-transition-gate.mjs) rather than the
 //     table's superset row, per the Stage 1 finding on PR #534 documented above the table entry.
@@ -257,6 +280,10 @@ export function getActionEnvelope(state, context = {}) {
 
   if (state === "NOT_READY" && typeof context.postPrLifecycle === "string" && context.postPrLifecycle.length > 0) {
     return { mode: ENVELOPE_MODES.CHAIN, authorizedActions: ["run-next-review-transition-gate"] };
+  }
+
+  if (state === "BLOCKED" && context.blockerReconciliationEligible === true) {
+    return { mode: ENVELOPE_MODES.CHAIN, authorizedActions: ["run-reconcile-control-blocker"] };
   }
 
   if (state === "STAGE2_CLOSE_READY") {
