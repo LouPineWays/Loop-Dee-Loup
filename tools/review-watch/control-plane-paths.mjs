@@ -41,6 +41,7 @@ export const CONTROL_PLANE_PATH_PATTERNS = [
   ".claude/**",
   "tools/check-priority-labels.mjs",
   "tools/check-startup-budget.mjs",
+  "tools/check-review-invocation-precedence.test.mjs",
   "tools/local-worker/**",
   "tools/review-watch/**",
   "tools/telemetry/**",
