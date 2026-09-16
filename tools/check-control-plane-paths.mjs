@@ -15,6 +15,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { CONTROL_PLANE_PATH_PATTERNS } from "./review-watch/control-plane-paths.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DOC_PATH = join(ROOT, "docs", "bounded-review-cycle.md");
@@ -50,32 +51,22 @@ const pathChecks = [
 // The single canonical list of mandatory-review control-plane path patterns, cross-checked
 // below against the governing prose in docs/bounded-review-cycle.md.
 //
-// Exported (issue #616) so tools/review-watch/control-plane-paths.mjs can import this exact
-// array to decide whether a claimed Stage 1 exemption conflicts with mandatory-review
-// policy, rather than hand-copying a second, driftable representation of the same list.
-// This script's own doc-consistency check below and that matcher therefore always agree by
-// construction — there is nowhere left for the two to silently diverge.
-export const CONTROL_PLANE_PATH_PATTERNS = [
-  "AGENTS.md",
-  "CLAUDE.md",
-  "README.md",
-  "docs/*.md",
-  ".github/ISSUE_TEMPLATE/*",
-  ".github/workflows/*.yml",
-  ".claude/**",
-  "tools/check-priority-labels.mjs",
-  "tools/check-startup-budget.mjs",
-  "tools/local-worker/**",
-  "tools/review-watch/**",
-  "tools/telemetry/**",
-  "tools/orchestration/**",
-  "tools/ldl-init/**",
-  "tools/ldl-update/**",
-  "tools/ldl-ack/**",
-  "tools/ldl-activate/**",
-  "tools/mcp-server/**",
-  "tools/ldl-sync/**",
-];
+// Defined in tools/review-watch/control-plane-paths.mjs, not here (issue #616 Stage 1
+// review, PR #622): tools/review-watch/** is a distributed subtree per
+// docs/consumer-contract.md, while this script is explicitly this repository's own
+// development state, never installed into a consumer repository. The array previously lived
+// here with tools/review-watch/control-plane-paths.mjs importing it — the reverse of this
+// import — which broke every consumer installation (tools/review-watch/** copied,
+// tools/check-control-plane-paths.mjs not, so the import target simply did not exist,
+// ERR_MODULE_NOT_FOUND). Importing it from the distributed subtree instead is safe in both
+// directions: this source-only script can depend on distributed content that is always
+// present in this repository's own checkout, while the reverse never was. Re-exported here
+// under the same name for any existing caller that still imports it from this file. This
+// script's own doc-consistency check below keeps that array in lockstep with
+// docs/bounded-review-cycle.md's governing prose enumeration, so the array and that
+// documentation can never silently diverge — there is exactly one place this list is
+// maintained, it just now lives in the distributed subtree.
+export { CONTROL_PLANE_PATH_PATTERNS };
 
 // Anchors bound the specific enumeration sentence, not the whole document — a docs-wide
 // substring search would still find e.g. "AGENTS.md" mentioned elsewhere in the file even

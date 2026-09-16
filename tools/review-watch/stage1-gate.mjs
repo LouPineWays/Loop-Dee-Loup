@@ -34,9 +34,32 @@
 // review-worthy PR still becomes reviewable/mergeable through an actual trigger + response
 // — it just cannot shortcut through the self-declared marker. Establishing the changed-file
 // set requires its own `gh` call, so this is only attempted when an exemption is actually
-// claimed (no added cost on the common non-exemption path); if that lookup itself fails or
-// returns something untrustworthy, this fails closed (exit 1) rather than letting the
-// absence of evidence become exemption evidence.
+// claimed AND `--repo` is Loop-Dee-Loup's own repository (see below); if that lookup itself
+// fails or returns something untrustworthy, this fails closed (exit 1) rather than letting
+// the absence of evidence become exemption evidence.
+//
+// PR #622's own Stage 1 review (still issue #616) found and closed three further gaps in
+// that first pass, all fixed below:
+//   - The Entry check's control-plane policy is scoped to "Within Loop-Dee-Loup's own
+//     repository", but this gate is distributed to every consumer repository via
+//     tools/review-watch/**. Unconditionally applying Loop's own mandatory-review list would
+//     force an installed consumer repository's legitimate, non-mandatory exemption through
+//     Stage 1 anyway. The changed-file validation below therefore only runs at all when
+//     `isLoopDeeLoupRepo(repo)` is true; any other `--repo` short-circuits to EXEMPT exactly
+//     as this gate behaved before issue #616, with zero added `gh` calls.
+//   - `gh pr view --json files` silently caps at the first 100 changed files (the installed
+//     `gh` CLI's embedded `files(first: 100)` GraphQL query, with no pagination flag), so a
+//     mandatory-review path beyond the first page could pass unnoticed. `defaultGhPrFiles`
+//     below instead pages the REST pulls/files endpoint with the same `--paginate --slurp`
+//     idiom `defaultGhApi` already uses.
+//   - That REST endpoint's file objects expose `filename` and, for a rename, the source path
+//     as `previous_filename` — the `gh pr view --json files` shape this replaced had no
+//     equivalent, so a rename out of a mandatory-review path (e.g. `docs/policy.md` ->
+//     `fixtures/policy.txt`) could grant EXEMPT looking only at the destination. `run` below
+//     checks both `filename` and, when present, `previous_filename` against
+//     isControlPlanePath. A malformed entry (not an object, or a non-string/empty
+//     `filename`) fails closed (exit 1) exactly like a lookup error or a non-array response,
+//     rather than silently dropping or ignoring it.
 //
 // RESPONSE_RECEIVED additionally requires the genuine response to be provably bound to the
 // exact frozen --head being gated (poll.mjs's matchBelongsToHead), not merely timestamped
@@ -62,7 +85,7 @@ import { execFileSync } from "node:child_process";
 import { endpointsFor, findAllMatches, matchBelongsToHead } from "./poll.mjs";
 import { findExistingTrigger, findTriggerRounds } from "./trigger.mjs";
 import { isGenuineResponse } from "./genuine-response.mjs";
-import { isControlPlanePath } from "./control-plane-paths.mjs";
+import { isControlPlanePath, isLoopDeeLoupRepo } from "./control-plane-paths.mjs";
 
 // Re-exported so existing callers/tests that import isGenuineResponse from this module
 // (its original home) keep working unchanged now that the classifier itself lives in
@@ -163,20 +186,46 @@ export async function run(
   // trigger/response evaluation below produces, so the rejection is visible without ever
   // itself granting EXEMPT.
   let rejectedExemption = null;
+  // Loop-Dee-Loup's own mandatory-review control-plane policy only applies within
+  // Loop-Dee-Loup's own repository (see module comment) — a consumer repository's exemption
+  // claim is unaffected and short-circuits exactly as this gate behaved before issue #616,
+  // with no changed-file lookup at all.
+  if (exemption && !isLoopDeeLoupRepo(repo)) {
+    return { exitCode: 0, state: "EXEMPT", reason: exemption };
+  }
   if (exemption) {
     let changedFiles;
     try {
       changedFiles = await ghPrFilesImpl({ repo, number });
     } catch (err) {
-      return { exitCode: 1, message: `gh pr view --json files failed for ${repo}#${number}: ${err.message}` };
+      return { exitCode: 1, message: `gh api pulls/files failed for ${repo}#${number}: ${err.message}` };
     }
     if (!Array.isArray(changedFiles)) {
       return {
         exitCode: 1,
-        message: `Ambiguous changed-file read: expected an array of file paths for ${repo}#${number}.`,
+        message: `Ambiguous changed-file read: expected an array of file entries for ${repo}#${number}.`,
       };
     }
-    const conflictingPaths = changedFiles.filter((path) => isControlPlanePath(path));
+    // Each entry is a REST pulls/files object (`{ filename, previous_filename?, ... }`, see
+    // defaultGhPrFiles below). A malformed entry fails closed rather than being silently
+    // dropped or coerced — the absence of evidence must never become exemption evidence.
+    // Both the current `filename` and, for a rename, the source `previous_filename` are
+    // checked: a rename out of a mandatory-review path is still a mandatory-review change
+    // (issue #616 Stage 1 review finding).
+    const paths = [];
+    for (const entry of changedFiles) {
+      if (!entry || typeof entry !== "object" || typeof entry.filename !== "string" || entry.filename.length === 0) {
+        return {
+          exitCode: 1,
+          message: `Ambiguous changed-file read: malformed file entry for ${repo}#${number}: ${JSON.stringify(entry)}.`,
+        };
+      }
+      paths.push(entry.filename);
+      if (typeof entry.previous_filename === "string" && entry.previous_filename.length > 0) {
+        paths.push(entry.previous_filename);
+      }
+    }
+    const conflictingPaths = [...new Set(paths.filter((path) => isControlPlanePath(path)))];
     if (conflictingPaths.length === 0) {
       return { exitCode: 0, state: "EXEMPT", reason: exemption };
     }
@@ -264,15 +313,24 @@ function defaultGhApi(path) {
   return JSON.parse(raw).flat();
 }
 
-// Returns the PR's changed-file paths (repo-relative, forward slashes) — only invoked when
-// a `Stage 1 exemption:` marker is actually present, so the common no-exemption path never
-// pays for this extra `gh` call.
+// Returns the PR's changed-file entries (`{ filename, previous_filename?, ... }`, per
+// GitHub's REST pulls/files response) — only invoked when a `Stage 1 exemption:` marker is
+// actually present AND `--repo` is Loop-Dee-Loup's own repository (see module comment), so
+// the common no-exemption/consumer-repository path never pays for this extra `gh` call.
+//
+// This uses the paginated REST endpoint, not `gh pr view --json files`: that command's
+// underlying GraphQL query is `files(first: 100)` with no pagination flag exposed by `gh pr
+// view --help`, so it silently drops any changed file beyond the first 100 — a PR with more
+// than 100 changed files and a mandatory-review path past that boundary could otherwise
+// pass exemption validation unnoticed (issue #616 Stage 1 review finding). `--paginate
+// --slurp` is the same idiom defaultGhApi above already uses for issue-comments pages: each
+// page's own JSON array arrives wrapped in --slurp's outer array, so `.flat()` merges every
+// page into one flat array of file entries regardless of how many pages existed.
 function defaultGhPrFiles({ repo, number }) {
-  const raw = execFileSync("gh", ["pr", "view", String(number), "--repo", repo, "--json", "files"], {
+  const raw = execFileSync("gh", ["api", `repos/${repo}/pulls/${number}/files`, "--paginate", "--slurp"], {
     encoding: "utf8",
   });
-  const parsed = JSON.parse(raw);
-  return (parsed.files ?? []).map((f) => f.path);
+  return JSON.parse(raw).flat();
 }
 
 function defaultGhPrView({ repo, number }) {

@@ -336,7 +336,9 @@ test("run: exits 1 when required args are missing", async () => {
   assert.match(result.message, /Missing required args/);
 });
 
-test("run: EXEMPT — an explicit exemption on an exemption-eligible change short-circuits before any trigger read", async () => {
+const LDL_REPO = "LouPineWays/Loop-Dee-Loup";
+
+test("run: EXEMPT — an explicit exemption in a consumer repository short-circuits before any trigger read or changed-file lookup (Loop's own control-plane policy is scoped to Loop-Dee-Loup's own repository, issue #616 Stage 1 review finding)", async () => {
   let ghApiCalls = 0;
   let ghPrFilesCalls = 0;
   const result = await run(
@@ -345,7 +347,7 @@ test("run: EXEMPT — an explicit exemption on an exemption-eligible change shor
       ghPrViewImpl: async () => "Stage 1 exemption: trivial docs fix, not review-worthy.",
       ghPrFilesImpl: async () => {
         ghPrFilesCalls += 1;
-        return ["src/foo.js"];
+        return [{ filename: "src/foo.js" }];
       },
       ghApiImpl: async () => {
         ghApiCalls += 1;
@@ -356,19 +358,44 @@ test("run: EXEMPT — an explicit exemption on an exemption-eligible change shor
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "EXEMPT");
   assert.equal(result.reason, "trivial docs fix, not review-worthy.");
-  assert.equal(ghPrFilesCalls, 1, "an exemption claim must be validated against the PR's changed files (issue #616)");
+  assert.equal(ghPrFilesCalls, 0, "a non-Loop-Dee-Loup --repo must never pay for the changed-file lookup");
   assert.equal(ghApiCalls, 0, "an exemption must short-circuit before reading any comment thread");
 });
 
-// -- issue #616: exemptions rejected when they conflict with a mandatory-review path ------
+test("run: EXEMPT — an explicit exemption on an exemption-eligible change in Loop-Dee-Loup's own repository still short-circuits, after validating changed files", async () => {
+  let ghApiCalls = 0;
+  let ghPrFilesCalls = 0;
+  const result = await run(
+    { repo: LDL_REPO, number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: trivial docs fix, not review-worthy.",
+      ghPrFilesImpl: async () => {
+        ghPrFilesCalls += 1;
+        return [{ filename: "src/foo.js" }];
+      },
+      ghApiImpl: async () => {
+        ghApiCalls += 1;
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "EXEMPT");
+  assert.equal(result.reason, "trivial docs fix, not review-worthy.");
+  assert.equal(ghPrFilesCalls, 1, "an exemption claim in Loop-Dee-Loup's own repository must be validated against the PR's changed files (issue #616)");
+  assert.equal(ghApiCalls, 0, "an exemption must short-circuit before reading any comment thread");
+});
+
+// -- issue #616: exemptions rejected when they conflict with a mandatory-review path,
+// scoped to Loop-Dee-Loup's own repository -------------------------------------------------
 
 test("run: NOT_REQUESTED with rejectedExemption — a claimed exemption on a changed docs/diagnostic-traces/*.md file is rejected (PR #615's exact recurrence)", async () => {
   let ghApiCalls = 0;
   const result = await run(
-    { repo: "owner/repo", number: 50, head: "abc123" },
+    { repo: LDL_REPO, number: 50, head: "abc123" },
     {
       ghPrViewImpl: async () => "Stage 1 exemption: evidence-only diagnostic trace, not review-worthy.",
-      ghPrFilesImpl: async () => ["docs/diagnostic-traces/441-a.md"],
+      ghPrFilesImpl: async () => [{ filename: "docs/diagnostic-traces/441-a.md" }],
       ghApiImpl: async () => {
         ghApiCalls += 1;
         return [];
@@ -387,10 +414,10 @@ test("run: NOT_REQUESTED with rejectedExemption — a claimed exemption on a cha
 
 test("run: NOT_REQUESTED with rejectedExemption — a claimed exemption is rejected for a representative non-docs mandatory-review path (.claude/**)", async () => {
   const result = await run(
-    { repo: "owner/repo", number: 50, head: "abc123" },
+    { repo: LDL_REPO, number: 50, head: "abc123" },
     {
       ghPrViewImpl: async () => "Stage 1 exemption: session config tweak, not review-worthy.",
-      ghPrFilesImpl: async () => [".claude/settings.json"],
+      ghPrFilesImpl: async () => [{ filename: ".claude/settings.json" }],
       ghApiImpl: async () => [],
     },
   );
@@ -399,12 +426,85 @@ test("run: NOT_REQUESTED with rejectedExemption — a claimed exemption is rejec
   assert.deepEqual(result.rejectedExemption.conflictingPaths, [".claude/settings.json"]);
 });
 
+test("run: NOT_REQUESTED with rejectedExemption — a new root-level *.md file such as CONTRIBUTING.md is rejected, not only the three current example filenames (issue #616 Stage 1 review finding)", async () => {
+  const result = await run(
+    { repo: LDL_REPO, number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: contributor guide tweak, not review-worthy.",
+      ghPrFilesImpl: async () => [{ filename: "CONTRIBUTING.md" }],
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.deepEqual(result.rejectedExemption.conflictingPaths, ["CONTRIBUTING.md"]);
+});
+
+test("run: NOT_REQUESTED with rejectedExemption — a rename OUT of a mandatory-review path is still rejected, based on the old path (issue #616 Stage 1 review finding)", async () => {
+  const result = await run(
+    { repo: LDL_REPO, number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: renamed out of docs, not review-worthy.",
+      ghPrFilesImpl: async () => [{ filename: "fixtures/policy.txt", previous_filename: "docs/policy.md" }],
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.deepEqual(result.rejectedExemption.conflictingPaths, ["docs/policy.md"]);
+});
+
+test("run: EXEMPT — a rename INTO a mandatory-review-shaped path but with a non-control-plane previous_filename is unaffected when the new path is also non-control-plane", async () => {
+  const result = await run(
+    { repo: LDL_REPO, number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: plain rename, not review-worthy.",
+      ghPrFilesImpl: async () => [{ filename: "src/new-name.js", previous_filename: "src/old-name.js" }],
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "EXEMPT");
+});
+
+test("run: NOT_REQUESTED with rejectedExemption — scans the entire paginated changed-file set, not only the first page (issue #616 Stage 1 review finding: gh pr view --json files silently caps at 100)", async () => {
+  const files = [];
+  for (let i = 0; i < 150; i++) files.push({ filename: `src/file-${i}.js` });
+  files.push({ filename: ".claude/settings.json" }); // conflict beyond the first 100 entries
+  const result = await run(
+    { repo: LDL_REPO, number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: large PR, not review-worthy.",
+      ghPrFilesImpl: async () => files,
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.deepEqual(result.rejectedExemption.conflictingPaths, [".claude/settings.json"]);
+});
+
+test("run: EXEMPT — an exemption claim in a consumer repository is unaffected even when the changed files would conflict under Loop-Dee-Loup's own policy (issue #616 Stage 1 review finding: must not impose Loop-only policy on a consumer repository)", async () => {
+  let ghPrFilesCalls = 0;
+  const result = await run(
+    { repo: "LouPineWays/YouTubery", number: 19, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: consumer's own docs/*.md is not mandatory-review here, not review-worthy.",
+      ghPrFilesImpl: async () => {
+        ghPrFilesCalls += 1;
+        return [{ filename: "docs/notes.md" }, { filename: ".claude/settings.json" }];
+      },
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "EXEMPT");
+  assert.equal(ghPrFilesCalls, 0, "a consumer repository's exemption must never even fetch changed files under Loop's policy");
+});
+
 test("run: RESPONSE_RECEIVED still carries rejectedExemption when genuine Stage 1 evidence exists despite the rejected exemption claim", async () => {
   const result = await run(
-    { repo: "owner/repo", number: 50, head: "abc123" },
+    { repo: LDL_REPO, number: 50, head: "abc123" },
     {
       ghPrViewImpl: async () => "Stage 1 exemption: not review-worthy.",
-      ghPrFilesImpl: async () => ["tools/review-watch/stage1-gate.mjs"],
+      ghPrFilesImpl: async () => [{ filename: "tools/review-watch/stage1-gate.mjs" }],
       ghApiImpl: async () => [
         { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
         {
@@ -424,7 +524,7 @@ test("run: RESPONSE_RECEIVED still carries rejectedExemption when genuine Stage 
 
 test("run: exits 1 when the changed-file lookup needed to validate a claimed exemption fails (fail closed, issue #616)", async () => {
   const result = await run(
-    { repo: "owner/repo", number: 50, head: "abc123" },
+    { repo: LDL_REPO, number: 50, head: "abc123" },
     {
       ghPrViewImpl: async () => "Stage 1 exemption: not review-worthy.",
       ghPrFilesImpl: async () => {
@@ -434,12 +534,12 @@ test("run: exits 1 when the changed-file lookup needed to validate a claimed exe
     },
   );
   assert.equal(result.exitCode, 1);
-  assert.match(result.message, /gh pr view --json files failed/);
+  assert.match(result.message, /gh api pulls\/files failed/);
 });
 
 test("run: exits 1 on an unexpected (non-array) changed-file response instead of treating the exemption as valid", async () => {
   const result = await run(
-    { repo: "owner/repo", number: 50, head: "abc123" },
+    { repo: LDL_REPO, number: 50, head: "abc123" },
     {
       ghPrViewImpl: async () => "Stage 1 exemption: not review-worthy.",
       ghPrFilesImpl: async () => ({ unexpected: "shape" }),
@@ -448,6 +548,45 @@ test("run: exits 1 on an unexpected (non-array) changed-file response instead of
   );
   assert.equal(result.exitCode, 1);
   assert.match(result.message, /Ambiguous changed-file read/);
+});
+
+test("run: exits 1 on a null entry in an otherwise-valid changed-file array (fail closed, issue #616 Stage 1 review finding)", async () => {
+  const result = await run(
+    { repo: LDL_REPO, number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: not review-worthy.",
+      ghPrFilesImpl: async () => [{ filename: "src/foo.js" }, null],
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /malformed file entry/);
+});
+
+test("run: exits 1 when a changed-file entry is missing a string filename (fail closed, issue #616 Stage 1 review finding)", async () => {
+  const result = await run(
+    { repo: LDL_REPO, number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: not review-worthy.",
+      ghPrFilesImpl: async () => [{ status: "modified" }],
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /malformed file entry/);
+});
+
+test("run: exits 1 when a changed-file entry's filename is an empty string (fail closed, issue #616 Stage 1 review finding)", async () => {
+  const result = await run(
+    { repo: LDL_REPO, number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: not review-worthy.",
+      ghPrFilesImpl: async () => [{ filename: "" }],
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /malformed file entry/);
 });
 
 test("run: NOT_REQUESTED — a fenced-example-only exemption in the PR body does not bypass Stage 1 (issue #162)", async () => {
