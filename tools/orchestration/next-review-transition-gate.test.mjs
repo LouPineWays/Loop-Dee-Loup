@@ -192,11 +192,16 @@ test("resolvePreMergeVerdict: RESPONSE_RECEIVED + BLOCKED_CLOSING_REFERENCE -> S
   assert.equal(v.stopAfter, true);
   assert.equal("stage1" in v, false);
   assert.equal("mergeReady" in v, false);
+  // Stage 1 review finding on PR #613 (P1): a clean-pass response blocked only by the closing
+  // reference carries no findings -- format-dispatch-prompt.mjs must not mandate
+  // finalize-correction-breakpoint.mjs for this shape.
+  assert.equal(v.correctionReason, "closing-reference");
 });
 
 test("resolvePreMergeVerdict: EXEMPT + BLOCKED_CLOSING_REFERENCE -> STAGE1_CORRECTION_REQUIRED", () => {
   const v = resolvePreMergeVerdict({ stage1: stage1("EXEMPT"), mergeReady: mergeReady("BLOCKED_CLOSING_REFERENCE") });
   assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.equal(v.correctionReason, "closing-reference");
 });
 
 test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED -> STAGE1_CORRECTION_REQUIRED even when merge-ready is otherwise ready", () => {
@@ -208,6 +213,9 @@ test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED -> STAGE1_CORRE
     mergeReady: mergeReady("MERGE_READY"),
   });
   assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+  // The one genuinely findings-bearing path -- #611's #438/PR #610 regression --
+  // finalize-correction-breakpoint.mjs remains mandatory here.
+  assert.equal(v.correctionReason, "findings");
 });
 
 // PR #435's own live regression: the genuine Codex review body_excerpt for commit
@@ -324,6 +332,10 @@ test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + BLOCKED_CLO
   });
   assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
   assert.equal(v.stopAfter, true);
+  // Stage 1 review finding on PR #613 (P1): a correction-satisfied disposition already exists
+  // and re-verified clean -- the only remaining blocker is the closing reference, not a fresh
+  // findings-bearing correction, so finalize-correction-breakpoint.mjs must not run again.
+  assert.equal(v.correctionReason, "closing-reference");
 });
 
 test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + an unrecognized-but-exitCode-0 merge-ready state still resolves to STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 (P1 finding on PR #459: authorization is derived from merge-ready-gate.mjs's own combineMergeReadyResult, which -- like the real lifecycle-gate.mjs merge-ready check it composes -- trusts exitCode as authoritative, never a state-string allowlist a real component's exitCode-0 output could fall outside of)", () => {
@@ -1057,6 +1069,7 @@ test("runNextReviewTransitionGate: the exact #428/#449 regression -- a legacy 'S
   // AMBIGUOUS from Stage-2-reference parsing, and never a NO_ACTION_YET/other misroute either.
   assert.equal(result.state, "STAGE1_CORRECTION_REQUIRED");
   assert.equal(result.exitCode, 3);
+  assert.equal(result.correctionReason, "findings");
 });
 
 test("runNextReviewTransitionGate: the same #428-shaped body with a clean/no-findings Stage 1 response stays on the ordinary satisfied/merge path -- this fix does not force correction merely because Stage 2 is absent", async () => {
@@ -1134,6 +1147,7 @@ test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfie
   );
   assert.equal(result.exitCode, 3);
   assert.equal(result.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.equal(result.correctionReason, "closing-reference");
 });
 
 test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfied disposition whose evidence does not check out (NOT_SATISFIED) resolves to AMBIGUOUS", async () => {
@@ -1176,6 +1190,100 @@ test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfie
     },
   );
   assert.equal(result.state, "NO_ACTION_YET");
+});
+
+// -- issue #611: the exact live #438/PR #610 regression -----------------------------------
+//
+// #611's own reproduction: PR #610's Stage 1 review was genuinely requested and reviewed at
+// frozen head `100801f442cd2538c6667eec9a6f935484d856f8` (seven actionable findings), the
+// consolidated correction advanced the PR to `f3fc2adaa35febe586fce838c027177b869c2739`, and
+// control Issue #438 stayed durably `Stage 1: requested` because the correction worker's own
+// dispatch prompt (`format-dispatch-prompt.mjs`'s `formatStage1CorrectionWorkerDispatchPrompt`)
+// never instructed it to run `finalize-correction-breakpoint.mjs` before stopping -- a
+// prose-only obligation living solely in `docs/bounded-review-cycle.md`. These two tests pin
+// both halves of that regression using the incident's own real PR/head values: the stuck loop
+// this gate reproduces when finalization never ran, and the exact same inputs resolving cleanly
+// once the canonical `correction-satisfied` disposition the finalizer persists is present --
+// proving issue #611's fix (the dispatch-prompt mandate added above) actually unblocks it.
+const ISSUE_611_REVIEWED_HEAD = "100801f442cd2538c6667eec9a6f935484d856f8";
+const ISSUE_611_CORRECTED_HEAD = "f3fc2adaa35febe586fce838c027177b869c2739";
+
+const CONTROL_BODY_438_STALE_STAGE1_REQUESTED = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #437
+- **Route:** implementation worker
+- **PR:** #610
+- **Stage 1:** requested
+- **Stage 2:** none
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("runNextReviewTransitionGate: exact #438/PR #610 regression, before finalization -- a stale 'Stage 1: requested' bullet at the corrected head reproduces the stuck NO_ACTION_YET loop", async () => {
+  let correctionDeltaCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "438" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_438_STALE_STAGE1_REQUESTED, state: "OPEN" }),
+      ghPrHeadImpl: async () => ISSUE_611_CORRECTED_HEAD,
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => {
+        correctionDeltaCalls += 1;
+        throw new Error("should never be called: the stale 'requested' bullet carries no reviewed/corrected head pair to derive evidence from");
+      },
+    },
+  );
+  assert.equal(correctionDeltaCalls, 0);
+  assert.equal(result.state, "NO_ACTION_YET");
+  assert.equal(result.stopAfter, true);
+});
+
+const CONTROL_BODY_438_CORRECTION_SATISFIED = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #437
+- **Route:** implementation worker
+- **PR:** #610
+- **Stage 1:** correction-satisfied at ${ISSUE_611_CORRECTED_HEAD} (reviewed ${ISSUE_611_REVIEWED_HEAD})
+- **Stage 2:** none
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("runNextReviewTransitionGate: exact #438/PR #610 regression, after finalization -- the same PR/head inputs resolve to STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 once finalize-correction-breakpoint.mjs's canonical disposition is durably recorded", async () => {
+  let correctionDeltaCallArgs = null;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "438" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_438_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrHeadImpl: async () => ISSUE_611_CORRECTED_HEAD,
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async (args) => {
+        correctionDeltaCallArgs = args;
+        return {
+          exitCode: 0,
+          state: "CORRECTION_SATISFIED",
+          reviewedHead: ISSUE_611_REVIEWED_HEAD,
+          correctedHead: ISSUE_611_CORRECTED_HEAD,
+        };
+      },
+    },
+  );
+  assert.deepEqual(correctionDeltaCallArgs, {
+    repo: "o/r",
+    pr: 610,
+    reviewedHead: ISSUE_611_REVIEWED_HEAD,
+    correctedHead: ISSUE_611_CORRECTED_HEAD,
+    gatedHead: ISSUE_611_CORRECTED_HEAD,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.reviewedHead, ISSUE_611_REVIEWED_HEAD);
+  assert.equal(result.correctedHead, ISSUE_611_CORRECTED_HEAD);
 });
 
 test("runNextReviewTransitionGate: control-Issue mode with no correction-satisfied-shaped Stage 1 disposition at all never invokes checkCorrectionDeltaImpl (no wasted gh call on the common path)", async () => {

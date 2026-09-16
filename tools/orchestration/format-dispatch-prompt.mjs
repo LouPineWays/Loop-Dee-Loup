@@ -261,7 +261,39 @@ export function formatIntegrationWorkerDispatchPrompt({ controlIssue, executionI
 // restatement: the dispatched correction worker reads PR #<pr>'s own current Stage 1 review (and,
 // when present, Execution Issue #<issue>) directly from GitHub, exactly as every other template
 // in this file hands over durable references instead of restated content.
-export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null, issue, pr }) {
+//
+// Issue #611 (the post-#576 #438/PR #610 regression): this template previously stopped at "push
+// it, and stop" with no instruction to run `finalize-correction-breakpoint.mjs` at all — the
+// mandatory step lived only in `docs/bounded-review-cycle.md`'s Correction-satisfied disposition
+// prose, exactly the "prose-only worker obligation" #611 exists to close, and exactly the seam a
+// Stage 1 review finding on PR #579 already flagged (`docs/operating-model.md`'s
+// `STAGE1_CORRECTION_REQUIRED` entry) without this formatter ever being updated to carry it. This
+// mirrors `formatIntegrationWorkerDispatchPrompt`'s own established `finalize-pr-breakpoint.mjs`
+// clause immediately above: name the mandatory finalize step and its fail-closed reporting
+// contract, without restating its flags — the worker already has `controlIssue`/`issue`/`pr` from
+// this same prompt, and derives `--reviewed-head`/`--corrected-head` itself from the PR it just
+// read and corrected, the same "read it directly, don't restate it" convention this whole file
+// uses. `finalize-correction-breakpoint.mjs` itself refuses `--control-issue` without a paired
+// `--execution-issue` (or vice versa), so a worker dispatched with a Controlling Issue but the
+// "none" no-work-issue sentinel (a real, separately-tested combination below) supplies only the
+// identity it actually has and the script's own direct-reference form applies -- no partial or
+// invented identity is ever passed.
+//
+// Stage 1 review finding on PR #613 (P1): the unconditional finalizer mandate above conflated two
+// distinct `STAGE1_CORRECTION_REQUIRED` classes that `next-review-transition-gate.mjs` emits
+// through this same verdict. A CLEAN/EXEMPT Stage 1 result blocked only by
+// `BLOCKED_CLOSING_REFERENCE` has neither findings provenance nor necessarily a newer PR head, so
+// `finalize-correction-breakpoint.mjs`'s own findings-bearing/strict-descendant requirements
+// correctly reject it -- mandating the finalizer for that class turned a valid closing-reference
+// repair into `CORRECTION_BREAKPOINT_UNVERIFIED`. `correctionReason` (the gate's own new
+// discriminant field, "findings" or "closing-reference" -- see next-review-transition-gate.mjs's
+// four `STAGE1_CORRECTION_REQUIRED` return sites) carries the distinction the dispatched worker
+// needs rather than making it infer workflow class from reviewer prose. Only "findings" mandates
+// the finalizer and #611's fail-closed contract; "closing-reference" routes the worker through the
+// ordinary repair-and-stop instruction and explicitly tells it not to manufacture a
+// correction-satisfied disposition. Defaults to "findings" when absent (every pre-#613 caller,
+// including this file's own explicit-fields CLI mode, already assumed the findings-bearing shape).
+export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null, issue, pr, correctionReason }) {
   if (!isPositiveInteger(pr)) {
     throw new Error("formatStage1CorrectionWorkerDispatchPrompt requires pr to be a positive integer");
   }
@@ -274,15 +306,33 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
   if (controlIssue !== null && controlIssue !== undefined && !isPositiveInteger(controlIssue)) {
     throw new Error("formatStage1CorrectionWorkerDispatchPrompt requires controlIssue to be a positive integer when present");
   }
+  const reason = correctionReason ?? "findings";
+  if (reason !== "findings" && reason !== "closing-reference") {
+    throw new Error(
+      'formatStage1CorrectionWorkerDispatchPrompt requires correctionReason to be "findings", "closing-reference", or absent',
+    );
+  }
   const executionLine = hasExecutionIssue ? ` Execution Issue: #${issue}.` : "";
   const controlLine = controlIssue != null ? ` Controlling Issue: #${controlIssue}.` : "";
   const executionReadClause = hasExecutionIssue ? ` and Execution Issue #${issue}` : "";
+  if (reason === "closing-reference") {
+    return (
+      `Stage 1 correction worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
+      `Read PR #${pr}'s current Stage 1 review${executionReadClause} directly from GitHub to recover the ` +
+      `closing-reference finding and correction authority — it was not restated here on purpose. This is a ` +
+      `closing-reference-only repair (no findings): fix it per docs/bounded-review-cycle.md, push it, and ` +
+      `stop. Do not run finalize-correction-breakpoint.mjs or record a correction-satisfied disposition. Do ` +
+      `not re-trigger review, merge, or begin Stage 2 in this context.`
+    );
+  }
   return (
     `Stage 1 correction worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
     `Read PR #${pr}'s current Stage 1 review${executionReadClause} directly from GitHub to recover the ` +
     `findings and correction authority — they were not restated here on purpose. Verify and apply one ` +
-    `consolidated correction per docs/bounded-review-cycle.md, push it, and stop: do not re-trigger review, ` +
-    `merge, or begin Stage 2 in this context.`
+    `consolidated correction per docs/bounded-review-cycle.md, push it. Then run ` +
+    `tools/orchestration/finalize-correction-breakpoint.mjs before reporting; on ` +
+    `CORRECTION_BREAKPOINT_UNVERIFIED report that reference, never ordinary success. Then stop: do not ` +
+    `re-trigger review, merge, or begin Stage 2 in this context.`
   );
 }
 
@@ -368,7 +418,10 @@ const TEMPLATES_BY_STATE = {
     formatter: formatPlanningCorrectionWorkerDispatchPrompt,
     fields: ["controlIssue", "executionIssue", "planIndexUrl", "replanRequiredUnitIds"],
   },
-  STAGE1_CORRECTION_REQUIRED: { formatter: formatStage1CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "issue", "pr"] },
+  STAGE1_CORRECTION_REQUIRED: {
+    formatter: formatStage1CorrectionWorkerDispatchPrompt,
+    fields: ["controlIssue", "issue", "pr", "correctionReason"],
+  },
   STAGE2_CORRECTION_REQUIRED: { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
 };
 
@@ -390,7 +443,10 @@ const FORMATTERS_BY_KIND = {
     formatter: formatPlanningCorrectionWorkerDispatchPrompt,
     fields: ["controlIssue", "executionIssue", "planIndexUrl", "replanRequiredUnitIds"],
   },
-  "stage1-correction": { formatter: formatStage1CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "issue", "pr"] },
+  "stage1-correction": {
+    formatter: formatStage1CorrectionWorkerDispatchPrompt,
+    fields: ["controlIssue", "issue", "pr", "correctionReason"],
+  },
   "stage2-correction": { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
 };
 
@@ -403,6 +459,7 @@ const CLI_FLAG_BY_FIELD = {
   issue: "issue",
   pr: "pr",
   auditIssue: "audit-issue",
+  correctionReason: "correction-reason",
 };
 
 // Pure. Reads one field's value out of an explicit-fields `args` map or a piped gate-result

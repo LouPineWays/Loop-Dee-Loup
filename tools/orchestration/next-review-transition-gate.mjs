@@ -46,6 +46,7 @@
 //           Stage 2, then stop — kept as a distinct verdict string purely for durable
 //           auditability of which path authorized the merge)
 //         CORRECTION_SATISFIED, lifecycle-gate merge-ready BLOCKED_CLOSING_REFERENCE -> STAGE1_CORRECTION_REQUIRED
+//           (correctionReason: "closing-reference" -- see #613 note below)
 //         CORRECTION_SATISFIED, any other lifecycle-gate merge-ready state -> AMBIGUOUS
 //           (unrecognized combination — falls through to the same bottom-of-function fallback
 //           as every other unrecognized combination in this table)
@@ -60,11 +61,25 @@
 //     - stage1-gate EXEMPT, and
 //         lifecycle-gate merge-ready MERGE_READY(*)      -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2
 //         lifecycle-gate merge-ready BLOCKED_CLOSING_REFERENCE -> STAGE1_CORRECTION_REQUIRED
+//           (correctionReason: "closing-reference")
 //     - stage1-gate RESPONSE_RECEIVED with a clean-pass response (consumer-sync-gate.mjs's
-//       `isCleanStage1Response`), and lifecycle-gate merge-ready MERGE_READY(*) -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2
-//     - stage1-gate RESPONSE_RECEIVED with findings preamble -> STAGE1_CORRECTION_REQUIRED,
-//       except a control Issue Stage 1 bullet that is both satisfied/exempt and explicitly
-//       head-scoped to this same current head also allows merge-ready progression
+//       `isCleanStage1Response`), and lifecycle-gate merge-ready MERGE_READY(*) -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2;
+//       BLOCKED_CLOSING_REFERENCE instead -> STAGE1_CORRECTION_REQUIRED (correctionReason: "closing-reference")
+//     - stage1-gate RESPONSE_RECEIVED with findings preamble -> STAGE1_CORRECTION_REQUIRED
+//       (correctionReason: "findings"), except a control Issue Stage 1 bullet that is both
+//       satisfied/exempt and explicitly head-scoped to this same current head also allows
+//       merge-ready progression
+//
+//     Issue #611/PR #613 (Stage 1 review, P1): every STAGE1_CORRECTION_REQUIRED verdict above
+//     now also carries a `correctionReason` field ("findings" or "closing-reference"). The one
+//     genuinely findings-bearing path (RESPONSE_RECEIVED with findings preamble) is the #611
+//     #438/PR #610 regression -- format-dispatch-prompt.mjs's formatStage1CorrectionWorkerDispatchPrompt
+//     mandates finalize-correction-breakpoint.mjs only for that reason. The other three paths
+//     (an already correction-satisfied disposition, EXEMPT, or a clean-pass response) are all
+//     blocked solely by the closing reference -- finalize-correction-breakpoint.mjs's own
+//     findings-bearing/strict-descendant requirements would reject them, so the dispatched
+//     worker is instead routed through the ordinary closing-reference repair with no
+//     correction-satisfied disposition manufactured.
 //     - stage1-gate RESPONSE_RECEIVED without a clean-pass or findings preamble -> NO_ACTION_YET
 //     - anything else (operational error from either check, or a combination this gate does
 //       not recognize)                                   -> AMBIGUOUS
@@ -409,7 +424,13 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
         };
       }
       if (composed.exitCode === 2 && composed.blockedBy?.length === 1 && composed.blockedBy[0].component === "lifecycle") {
-        return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context };
+        // Stage 1 review finding on PR #613 (P1): a correction-satisfied disposition already
+        // exists and re-verified clean here — the only remaining blocker is the closing
+        // reference, not a fresh findings-bearing correction. `correctionReason:
+        // "closing-reference"` lets format-dispatch-prompt.mjs's formatter route this to the
+        // ordinary closing-reference repair instruction instead of mandating
+        // finalize-correction-breakpoint.mjs a second time over evidence it already verified.
+        return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context, correctionReason: "closing-reference" };
       }
       // Any other composed outcome for an otherwise-satisfied correction delta (an
       // operational error from the composed check itself, or a combination this gate does
@@ -473,8 +494,11 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
     if (isMergeReadyState(mergeReady.state)) {
       return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
     }
+    // Stage 1 review finding on PR #613 (P1): EXEMPT carries no findings at all -- the only
+    // possible correction here is the closing reference. See the CORRECTION_SATISFIED branch
+    // above for why this field exists.
     if (mergeReady.state === "BLOCKED_CLOSING_REFERENCE") {
-      return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context };
+      return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context, correctionReason: "closing-reference" };
     }
   }
 
@@ -483,14 +507,18 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
       if (isMergeReadyState(mergeReady.state)) {
         return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
       }
+      // Stage 1 review finding on PR #613 (P1): a clean-pass response has no findings either --
+      // same closing-reference-only reasoning as the EXEMPT branch above.
       if (mergeReady.state === "BLOCKED_CLOSING_REFERENCE") {
-        return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context };
+        return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context, correctionReason: "closing-reference" };
       }
     } else if (hasFindingsStage1Response(stage1)) {
       if (stage1DispositionSatisfiedAtHead && isMergeReadyState(mergeReady.state)) {
         return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
       }
-      return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context };
+      // The one genuinely findings-bearing path: #611's #438/PR #610 regression.
+      // finalize-correction-breakpoint.mjs remains mandatory here.
+      return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context, correctionReason: "findings" };
     }
     return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
   }
