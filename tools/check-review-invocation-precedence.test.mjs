@@ -32,6 +32,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { deriveConsumerAgents } from "./ldl-init/index.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const AGENTS_PATH = join(ROOT, "AGENTS.md");
@@ -99,6 +100,26 @@ test("`## Code Review Rules` explicitly forbids running the executor's READY/lif
   );
 });
 
+test("`## Code Review Rules` narrows the Stage 1 reviewer reference to reviewer-facing inspection/reporting requirements, not the whole executor procedure", () => {
+  // Stage 1 review finding on this PR (issue #626): telling a Stage 1 reviewer to follow
+  // `docs/bounded-review-cycle.md`'s Stage 1 contract "directly" points it at the entire
+  // nine-step executor procedure -- including triggering the review, batching corrections,
+  // and merging -- none of which the reviewer-only boundary above permits it to do. The
+  // reviewer needs only the inspection scope and actionable-defect criteria (the Entry
+  // check and Stage 1 step 4), not the surrounding executor mechanics.
+  assert.match(
+    codeReviewRules,
+    /reads only `docs\/bounded-review-cycle\.md`'s Entry check and Stage 1 step 4/,
+    "Code Review Rules no longer narrows the Stage 1 reviewer reference to the Entry check and Stage 1 step 4 -- " +
+      "it must not point a review invocation at the full Stage 1 executor procedure."
+  );
+  assert.match(
+    codeReviewRules,
+    /never the surrounding Stage 1 executor procedure for triggering the review, batching corrections, merging, or persisting lifecycle\/control state/,
+    "Code Review Rules no longer excludes the Stage 1 executor procedure (trigger/batch/merge/persist) from what a review invocation reads."
+  );
+});
+
 test("both sections live outside `<!-- ldl:source-only -->` blocks, so the precedence text still propagates to installed consumer AGENTS.md files", () => {
   assert.ok(
     isOutsideSourceOnlyBlocks(agentsMd, sessionExecution),
@@ -107,5 +128,46 @@ test("both sections live outside `<!-- ldl:source-only -->` blocks, so the prece
   assert.ok(
     isOutsideSourceOnlyBlocks(agentsMd, codeReviewRules),
     "`## Code Review Rules` moved inside a ldl:source-only block -- the reviewer-precedence text would no longer install into consumer repositories"
+  );
+});
+
+test("the derived consumer AGENTS.md (via ldl-init's own deriveConsumerAgents, not a source-only-block heuristic) retains every reviewer-precedence and executor-gate-exclusion statement", () => {
+  // Stage 1 review finding on this PR (issue #626): a section-start/source-only heuristic
+  // proves the *sections* aren't wrapped in a source-only block, but a future edit could
+  // still wrap only the new precedence sentence inside an otherwise-unwrapped section --
+  // the heuristic above would not catch that. Running the actual installer transform used
+  // for real consumer repositories is the only way to prove the installed artifact, not
+  // just its source placement, keeps this text.
+  const derived = deriveConsumerAgents(agentsMd);
+
+  assert.match(
+    derived,
+    /never governs an invocation triggered by `@codex review`/,
+    "Derived consumer AGENTS.md lost Session execution's `@codex review` exclusion statement."
+  );
+  assert.match(
+    derived,
+    /governed exclusively by `## Code Review Rules` below/,
+    "Derived consumer AGENTS.md lost Session execution's pointer to `## Code Review Rules` as the exclusive governing section."
+  );
+  assert.match(
+    derived,
+    /before any other instruction in this file, including `## Session execution`'s own `first action \/ before any other tool call` READY-gate rule/,
+    "Derived consumer AGENTS.md lost Code Review Rules' role-classification precedence statement."
+  );
+  assert.match(
+    derived,
+    /must never run `node tools\/orchestration\/ready-dispatch-gate\.mjs` or `node tools\/orchestration\/next-review-transition-gate\.mjs`/,
+    "Derived consumer AGENTS.md lost the named executor-gate-script exclusion."
+  );
+  assert.match(
+    derived,
+    /reads `docs\/stage2-audit-contract\.md` in full and posts the audit response it defines/,
+    "Derived consumer AGENTS.md lost the Stage 2 audit-contract routing statement."
+  );
+  assert.match(
+    derived,
+    /reads only `docs\/bounded-review-cycle\.md`'s Entry check and Stage 1 step 4/,
+    "Derived consumer AGENTS.md lost the narrowed Stage 1 reviewer reference."
   );
 });

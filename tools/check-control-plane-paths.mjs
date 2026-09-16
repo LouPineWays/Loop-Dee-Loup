@@ -35,6 +35,10 @@ const pathChecks = [
   { label: ".claude/**", ok: () => dirHasFiles(".claude") },
   { label: "tools/check-priority-labels.mjs", ok: () => existsSync(join(ROOT, "tools", "check-priority-labels.mjs")) },
   { label: "tools/check-startup-budget.mjs", ok: () => existsSync(join(ROOT, "tools", "check-startup-budget.mjs")) },
+  {
+    label: "tools/check-review-invocation-precedence.test.mjs",
+    ok: () => existsSync(join(ROOT, "tools", "check-review-invocation-precedence.test.mjs")),
+  },
   { label: "tools/local-worker/**", ok: () => dirHasFiles("tools/local-worker") },
   { label: "tools/review-watch/**", ok: () => dirHasFiles("tools/review-watch") },
   { label: "tools/telemetry/**", ok: () => dirHasFiles("tools/telemetry") },
@@ -60,6 +64,7 @@ const requiredLiterals = [
   ".claude/**",
   "tools/check-priority-labels.mjs",
   "tools/check-startup-budget.mjs",
+  "tools/check-review-invocation-precedence.test.mjs",
   "tools/local-worker/**",
   "tools/review-watch/**",
   "tools/telemetry/**",
