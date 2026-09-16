@@ -18,6 +18,7 @@ on:
       - "tools/check-startup-budget.mjs"
       - "tools/check-priority-labels.mjs"
       - "tools/check-eol-policy.test.mjs"
+      - "tools/check-review-invocation-precedence.test.mjs"
       - "tools/local-worker/**"
       - "tools/review-watch/**"
       - "tools/telemetry/**"
@@ -48,6 +49,9 @@ jobs:
 
       - name: EOL policy regression guard
         run: node --test tools/check-eol-policy.test.mjs
+
+      - name: Review-invocation precedence regression guard
+        run: node --test tools/check-review-invocation-precedence.test.mjs
 
       - name: Local-worker adapter tests
         run: node --test tools/local-worker/adapter.test.mjs
