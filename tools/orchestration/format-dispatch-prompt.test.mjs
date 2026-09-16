@@ -353,6 +353,44 @@ test("formatStage1CorrectionWorkerDispatchPrompt points the worker at finalize-c
   assert.match(prompt, /CORRECTION_BREAKPOINT_UNVERIFIED/);
 });
 
+test('formatStage1CorrectionWorkerDispatchPrompt with correctionReason "findings" (explicit) renders the same mandatory-finalizer template as the default', () => {
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, correctionReason: "findings" });
+  assert.match(prompt, /tools\/orchestration\/finalize-correction-breakpoint\.mjs/);
+  assert.match(prompt, /CORRECTION_BREAKPOINT_UNVERIFIED/);
+});
+
+// Stage 1 review finding on PR #613 (P1): `STAGE1_CORRECTION_REQUIRED` also fires for a
+// CLEAN/EXEMPT Stage 1 result blocked only by `BLOCKED_CLOSING_REFERENCE` -- no findings, no
+// necessarily-newer PR head -- for which `finalize-correction-breakpoint.mjs`'s own
+// findings-bearing/strict-descendant requirements correctly reject the transition. Mandating the
+// finalizer unconditionally turned a valid closing-reference repair into
+// `CORRECTION_BREAKPOINT_UNVERIFIED`. `correctionReason: "closing-reference"` must route to a
+// different, repair-and-stop instruction that never mentions the finalizer.
+test('formatStage1CorrectionWorkerDispatchPrompt with correctionReason "closing-reference" does not mandate finalize-correction-breakpoint.mjs or a correction-satisfied disposition', () => {
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({
+    controlIssue: 571,
+    issue: 570,
+    pr: 569,
+    correctionReason: "closing-reference",
+  });
+  assert.match(prompt, /^Stage 1 correction worker dispatch\./);
+  // The prompt explicitly names finalize-correction-breakpoint.mjs only to tell the worker NOT to
+  // run it (clearer than silent omission) -- it must never carry the mandatory-finalizer phrasing
+  // or its fail-closed reference, and must never instruct recording a correction-satisfied
+  // disposition.
+  assert.ok(!prompt.includes("before reporting"));
+  assert.ok(!prompt.includes("CORRECTION_BREAKPOINT_UNVERIFIED"));
+  assert.match(prompt, /Do not run finalize-correction-breakpoint\.mjs/);
+  assert.match(prompt, /correction-satisfied disposition/);
+  assert.match(prompt, /closing-reference/);
+});
+
+test("formatStage1CorrectionWorkerDispatchPrompt rejects an unrecognized correctionReason", () => {
+  assert.throws(() =>
+    formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, correctionReason: "something-else" }),
+  );
+});
+
 test("formatStage1CorrectionWorkerDispatchPrompt throws for missing/invalid required fields", () => {
   assert.throws(() => formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: null, pr: 569 }));
   assert.throws(() => formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: NaN }));
@@ -521,6 +559,43 @@ test('CLI: piped STAGE1_CORRECTION_REQUIRED with issue "none" (direct-reference 
   assert.ok(!result.stdout.includes("#NaN"));
 });
 
+// Stage 1 review finding on PR #613 (P1): a piped verdict carrying `correctionReason:
+// "closing-reference"` (the three non-findings STAGE1_CORRECTION_REQUIRED return sites in
+// next-review-transition-gate.mjs) must render the repair-and-stop template, never the
+// mandatory-finalizer one.
+test('CLI: piped STAGE1_CORRECTION_REQUIRED with correctionReason "closing-reference" renders the repair-and-stop template, not the finalizer mandate', async () => {
+  const result = await runCli({
+    state: "STAGE1_CORRECTION_REQUIRED",
+    stopAfter: true,
+    repo: "o/r",
+    pr: 569,
+    head: "abc1234",
+    issue: 450,
+    controlIssue: 451,
+    correctionReason: "closing-reference",
+    actionEnvelope: { mode: "bounded", authorizedActions: ["dispatch-correction-worker"] },
+  });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Stage 1 correction worker dispatch\./);
+  assert.ok(!result.stdout.includes("before reporting"));
+  assert.ok(!result.stdout.includes("CORRECTION_BREAKPOINT_UNVERIFIED"));
+  assert.match(result.stdout, /Do not run finalize-correction-breakpoint\.mjs/);
+});
+
+test("CLI: piped STAGE1_CORRECTION_REQUIRED without correctionReason defaults to the mandatory-finalizer template", async () => {
+  const result = await runCli({
+    state: "STAGE1_CORRECTION_REQUIRED",
+    stopAfter: true,
+    repo: "o/r",
+    pr: 569,
+    head: "abc1234",
+    issue: 450,
+    controlIssue: 451,
+  });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /finalize-correction-breakpoint\.mjs/);
+});
+
 test("CLI: piped STAGE2_CORRECTION_REQUIRED selects the Stage 2 correction template and succeeds, without the audit narrative", async () => {
   const result = await runCli({
     state: "STAGE2_CORRECTION_REQUIRED",
@@ -564,6 +639,33 @@ test("CLI: explicit --kind stage1-correction selects the Stage 1 correction temp
   );
   assert.equal(result.status, 0);
   assert.match(result.stdout, /^Stage 1 correction worker dispatch\./);
+});
+
+test("CLI: explicit --kind stage1-correction --correction-reason closing-reference selects the repair-and-stop template", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const scriptPath = fileURLToPath(new URL("./format-dispatch-prompt.mjs", import.meta.url));
+  const result = spawnSync(
+    process.execPath,
+    [
+      scriptPath,
+      "--kind",
+      "stage1-correction",
+      "--control-issue",
+      "451",
+      "--issue",
+      "450",
+      "--pr",
+      "569",
+      "--correction-reason",
+      "closing-reference",
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Stage 1 correction worker dispatch\./);
+  assert.ok(!result.stdout.includes("before reporting"));
+  assert.ok(!result.stdout.includes("CORRECTION_BREAKPOINT_UNVERIFIED"));
 });
 
 test('CLI: explicit --kind stage1-correction --issue none (direct-reference no-work-issue path) succeeds', async () => {

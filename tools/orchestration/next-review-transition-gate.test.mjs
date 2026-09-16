@@ -192,11 +192,16 @@ test("resolvePreMergeVerdict: RESPONSE_RECEIVED + BLOCKED_CLOSING_REFERENCE -> S
   assert.equal(v.stopAfter, true);
   assert.equal("stage1" in v, false);
   assert.equal("mergeReady" in v, false);
+  // Stage 1 review finding on PR #613 (P1): a clean-pass response blocked only by the closing
+  // reference carries no findings -- format-dispatch-prompt.mjs must not mandate
+  // finalize-correction-breakpoint.mjs for this shape.
+  assert.equal(v.correctionReason, "closing-reference");
 });
 
 test("resolvePreMergeVerdict: EXEMPT + BLOCKED_CLOSING_REFERENCE -> STAGE1_CORRECTION_REQUIRED", () => {
   const v = resolvePreMergeVerdict({ stage1: stage1("EXEMPT"), mergeReady: mergeReady("BLOCKED_CLOSING_REFERENCE") });
   assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.equal(v.correctionReason, "closing-reference");
 });
 
 test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED -> STAGE1_CORRECTION_REQUIRED even when merge-ready is otherwise ready", () => {
@@ -208,6 +213,9 @@ test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED -> STAGE1_CORRE
     mergeReady: mergeReady("MERGE_READY"),
   });
   assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+  // The one genuinely findings-bearing path -- #611's #438/PR #610 regression --
+  // finalize-correction-breakpoint.mjs remains mandatory here.
+  assert.equal(v.correctionReason, "findings");
 });
 
 // PR #435's own live regression: the genuine Codex review body_excerpt for commit
@@ -324,6 +332,10 @@ test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + BLOCKED_CLO
   });
   assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
   assert.equal(v.stopAfter, true);
+  // Stage 1 review finding on PR #613 (P1): a correction-satisfied disposition already exists
+  // and re-verified clean -- the only remaining blocker is the closing reference, not a fresh
+  // findings-bearing correction, so finalize-correction-breakpoint.mjs must not run again.
+  assert.equal(v.correctionReason, "closing-reference");
 });
 
 test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + an unrecognized-but-exitCode-0 merge-ready state still resolves to STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 (P1 finding on PR #459: authorization is derived from merge-ready-gate.mjs's own combineMergeReadyResult, which -- like the real lifecycle-gate.mjs merge-ready check it composes -- trusts exitCode as authoritative, never a state-string allowlist a real component's exitCode-0 output could fall outside of)", () => {
@@ -1057,6 +1069,7 @@ test("runNextReviewTransitionGate: the exact #428/#449 regression -- a legacy 'S
   // AMBIGUOUS from Stage-2-reference parsing, and never a NO_ACTION_YET/other misroute either.
   assert.equal(result.state, "STAGE1_CORRECTION_REQUIRED");
   assert.equal(result.exitCode, 3);
+  assert.equal(result.correctionReason, "findings");
 });
 
 test("runNextReviewTransitionGate: the same #428-shaped body with a clean/no-findings Stage 1 response stays on the ordinary satisfied/merge path -- this fix does not force correction merely because Stage 2 is absent", async () => {
@@ -1134,6 +1147,7 @@ test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfie
   );
   assert.equal(result.exitCode, 3);
   assert.equal(result.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.equal(result.correctionReason, "closing-reference");
 });
 
 test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfied disposition whose evidence does not check out (NOT_SATISFIED) resolves to AMBIGUOUS", async () => {
