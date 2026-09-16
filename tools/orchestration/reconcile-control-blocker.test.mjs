@@ -192,10 +192,19 @@ test("checkReconcileControlBlocker: INCOMPLETE_PREREQUISITE — two of three pre
 
 // Verification case 5: a Blocker field using free prose with no recognized "blocked by ...
 // ." clause (the actual historical #440 shape) yields AMBIGUOUS_BLOCKER with no mutation.
+//
+// This fixture is the verbatim original #440 Blocker bullet text (confirmed against GitHub's
+// own `userContentEdits` revision history for issue #440 — the oldest recorded edit,
+// 2026-09-07T14:36:57Z — since #437's own "Reproduction B" section quotes only a truncated
+// "..." excerpt of it). #437's own quote ends at "cycle ..."; the real historical continuation
+// is "; do not contaminate PR #435's audited result with this newly observed follow-up defect",
+// not the differently-worded "so the new follow-up defect does not contaminate ..." paraphrase
+// a prior revision of this fixture invented to fill in #437's elision — 437-C (issue #437)
+// corrected the fixture, per its own Worker Unit Contract, rather than the assertion.
 test("checkReconcileControlBlocker: AMBIGUOUS_BLOCKER — real historical #440 free-prose Blocker shape is never guessed at (Verification case 5)", async () => {
   const freeProseBody = BLOCKED_BODY.replace(
     "- **Blocker:** Blocked by #407, #408, #436.",
-    "- **Blocker:** #407/#408 must first terminalize their already-CLEAN #436 cycle so the new follow-up defect does not contaminate PR #435's audited result.",
+    "- **Blocker:** #407/#408 must first terminalize their already-CLEAN #436 cycle; do not contaminate PR #435's audited result with this newly observed follow-up defect",
   );
   const result = await checkReconcileControlBlocker(
     { repo: "owner/repo", "control-issue": 440 },
