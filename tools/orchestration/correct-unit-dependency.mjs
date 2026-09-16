@@ -20,11 +20,27 @@
 // Field-scoped exception to docs/operating-model.md § Durable plan artifacts' edit-ownership
 // rule: normally only a unit's own dispatched worker may edit its Worker Unit Contract
 // comment (to update State/completion). This script is the one narrow, deterministic
-// exception -- it may touch ONLY the "Prerequisites/dependencies" bullet of an UNDISPATCHED
-// unit's comment, and every other bullet (including State) is verified byte-identical
-// before success is ever reported. It never rewrites outcome, capability, authority
-// pointers, verification, files/surfaces, or any other unit semantics; a correction needing
-// those belongs in a replacement unit instead (see AGENTS.md's Vertical-slice rule).
+// exception -- on the target UNIT's OWN comment it may touch ONLY the
+// "Prerequisites/dependencies" bullet, and every other bullet (including State) is verified
+// byte-identical before success is ever reported. It never rewrites outcome, capability,
+// authority pointers, verification, files/surfaces, or any other unit semantics; a correction
+// needing those belongs in a replacement unit instead (see AGENTS.md's Vertical-slice rule).
+//
+// Manifest-staleness side effect (Stage 1 review finding on PR #620, P1): a Dispatch
+// Manifest's own "dispatch_ready" flag is computed once, at Route/Prepare time, from the
+// dependency graph as it stood then -- prepare-dispatch-manifest.mjs never re-derives it on
+// its own. If this script left an already-persisted manifest untouched, its stale
+// dispatch_ready=true entry for the just-corrected unit could still authorize a premature
+// dispatch until someone remembers to re-run prepare-dispatch-manifest.mjs by hand -- exactly
+// the #441 hazard (a manual manifest note/override) issue #618 exists to replace. So when the
+// Plan Index's own "Dispatch manifest" field is already a real comment (not "none"), this
+// script's last step regenerates that one existing manifest comment through
+// prepare-dispatch-manifest.mjs's own exported `runPrepareDispatchManifest` -- the same
+// mechanical, deterministic recomputation Route/Prepare already owns; this script never
+// invents its own routing/readiness logic. That is a second, DELIBERATE mutation this script
+// performs (the Dispatch Manifest comment, never the Plan Index or any other unit's own
+// comment), gated strictly on a manifest already existing, and it is why "field-scoped" above
+// is scoped to the target unit's own comment specifically, not to this script's entire effect.
 //
 // Byte-preserving mutation, not reconstruction: `format-execution-plan.mjs`'s own
 // `formatWorkerUnitBody` cannot be reused here -- it expects raw structured input (a bare
@@ -87,10 +103,14 @@
 //   3 -- STALE_START_TOCTOU: the target unit's state or the plan's dependency topology changed
 //        between the initial validation and the pre-write revalidation. Fail-closed; nothing
 //        was written. Re-run this script fresh against current state.
-//   4 -- CORRECTION_UNVERIFIED: the PATCH was attempted but its postcondition (byte-identical
-//        other fields, exact round-tripped dependsOn) could not be confirmed by a fresh
-//        read-back. The write may or may not have taken -- treat as unverified, not as a
-//        confirmed failure or a confirmed success.
+//   4 -- CORRECTION_UNVERIFIED: either the PATCH was attempted but its postcondition
+//        (byte-identical other fields, exact round-tripped dependsOn) could not be confirmed
+//        by a fresh read-back, or the dependency-field write itself was durably verified but
+//        an already-existing Dispatch Manifest could not be regenerated to reflect it. Either
+//        way treat the OVERALL correction as unverified, not as a confirmed failure or a
+//        confirmed success -- for the manifest-regeneration case the target unit's own
+//        contract WAS durably corrected; only the manifest's own staleness is unresolved, and
+//        the caller must re-run prepare-dispatch-manifest.mjs against it before any dispatch.
 //
 // Tests: node --test tools/orchestration/correct-unit-dependency.test.mjs
 
@@ -102,6 +122,7 @@ import { runParseExecutionPlan, parseBulletBlock, WORKER_UNIT_FIELDS, WORKER_UNI
 import { validateDependsOn } from "./format-execution-plan.mjs";
 import { extractDependencyUnitIds, hasUnrecognizedDependencyWording, formatPrerequisitesDependencies } from "./dependency-grammar.mjs";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
+import { runPrepareDispatchManifest, extractCommentIdFromUrl } from "./prepare-dispatch-manifest.mjs";
 
 const PREREQUISITES_LABEL = "Prerequisites/dependencies";
 
@@ -354,6 +375,7 @@ export async function runCorrectUnitDependency(
     getCommentImpl = defaultGetComment,
     patchCommentImpl = defaultPatchComment,
     resolveRepoIdentityImpl = resolveRepoIdentity,
+    prepareDispatchManifestImpl = runPrepareDispatchManifest,
   } = {},
 ) {
   if (!Number.isInteger(executionIssue) || executionIssue <= 0) {
@@ -470,6 +492,41 @@ export async function runCorrectUnitDependency(
     return { exitCode: 1, ok: false, errors: [replaced.reason] };
   }
 
+  // Stage 1 review finding on PR #620 (P1): `rawBody` above can itself go stale between that
+  // fetch and the PATCH below -- if the target unit's own dispatched worker lands a State/
+  // completion edit in that window, PATCHing `replaced.body` (computed from the now-stale
+  // `rawBody`) would silently overwrite it, and the read-back further below would trivially
+  // "verify" success since it only compares against the body this script itself just wrote,
+  // never against independent ground truth. One more fresh fetch, immediately before the
+  // PATCH, narrows that window down to the PATCH call itself: if the live body no longer
+  // matches byte-for-byte the exact body the replacement was computed from, something changed
+  // concurrently and this fails closed rather than clobbering it -- the same
+  // fetch-immediately-before-effect discipline Step 2 above already applies at the plan level,
+  // now applied at the raw-comment level too.
+  let preCommitComment;
+  try {
+    preCommitComment = await getCommentImpl({ repo: resolvedRepo, commentId });
+  } catch (err) {
+    return {
+      exitCode: 1,
+      ok: false,
+      operationalError: true,
+      errors: [`failed re-reading target comment #${commentId} immediately before commit: ${err.message}`],
+    };
+  }
+  if ((preCommitComment.body ?? "") !== rawBody) {
+    return {
+      exitCode: 3,
+      ok: false,
+      state: "STALE_START_TOCTOU",
+      errors: [
+        `target comment #${commentId}'s body changed concurrently between the pre-write fetch and the commit -- ` +
+          `fail closed rather than overwrite a concurrent edit (e.g. the unit's own dispatched worker updating ` +
+          `State/completion); re-run this planning correction fresh`,
+      ],
+    };
+  }
+
   // Step 3: perform the bounded effect.
   try {
     await patchCommentImpl({ repo: resolvedRepo, commentId, body: replaced.body });
@@ -528,6 +585,41 @@ export async function runCorrectUnitDependency(
     };
   }
 
+  // Step 5: the dependency-field write above is now durably persisted and verified. If this
+  // plan already has a real Dispatch Manifest, its own dispatch_ready entries were computed
+  // from the OLD dependency graph and must not be left stale (see module comment's
+  // "Manifest-staleness side effect"). `freshParsed` (Step 2) already read the Plan Index's own
+  // "Dispatch manifest" field fresh, and nothing this script does touches the Plan Index, so
+  // that value remains valid here. "none" (or absent) means no manifest exists yet -- an
+  // ordinary first Route/Prepare run will compute correctly from the already-corrected unit
+  // contract, and there is nothing to regenerate.
+  const existingManifestCommentId = extractCommentIdFromUrl(freshParsed.plan?.planIndex?.dispatchManifest);
+  let manifestRegenerated = false;
+  if (existingManifestCommentId) {
+    let regeneration;
+    try {
+      regeneration = await prepareDispatchManifestImpl({ repo: resolvedRepo, executionIssue, commentId: existingManifestCommentId });
+    } catch (err) {
+      regeneration = { exitCode: 1, ok: false, message: err.message };
+    }
+    if (!regeneration || regeneration.exitCode !== 0) {
+      return {
+        exitCode: 4,
+        ok: false,
+        state: "CORRECTION_UNVERIFIED",
+        errors: [
+          `dependency correction for unit "${unitId}" was durably written and read-back-verified on comment ` +
+            `#${commentId}, but the existing Dispatch Manifest comment #${existingManifestCommentId} could not be ` +
+            `regenerated to reflect it -- its stale dispatch_ready flag(s) may still authorize premature dispatch; ` +
+            `re-run \`node tools/orchestration/prepare-dispatch-manifest.mjs --execution-issue ${executionIssue} ` +
+            `--comment-id ${existingManifestCommentId}\` before any unit dispatch: ` +
+            `${regeneration?.message ?? "unknown manifest regeneration failure"}`,
+        ],
+      };
+    }
+    manifestRegenerated = true;
+  }
+
   return {
     exitCode: 0,
     ok: true,
@@ -538,6 +630,7 @@ export async function runCorrectUnitDependency(
     commentId,
     commentUrl: readBack.html_url ?? rawComment.html_url ?? null,
     dependsOn,
+    manifestRegenerated,
   };
 }
 
@@ -576,7 +669,12 @@ async function main() {
       "correct-unit-dependency.mjs: usage: --execution-issue <N> --unit <UnitID> " +
         '--depends-on <comma-separated unit IDs, or "" for none> [--repo OWNER/REPO]\n',
     );
-    process.exit(2);
+    // Stage 1 review finding on PR #620 (P2): this script's own documented exit-code contract
+    // (module header above) assigns invalid CLI usage to exit 1 and reserves exit 2 for a
+    // malformed execution plan (runParseExecutionPlanImpl's own exitCode 2 passthrough further
+    // below). Exiting 2 here for a usage error let automation misclassify it as a plan-parse
+    // failure.
+    process.exit(1);
     return;
   }
 
@@ -594,6 +692,7 @@ async function main() {
       commentId: result.commentId,
       commentUrl: result.commentUrl,
       dependsOn: result.dependsOn,
+      manifestRegenerated: result.manifestRegenerated,
     })}\n`,
   );
   process.exit(0);

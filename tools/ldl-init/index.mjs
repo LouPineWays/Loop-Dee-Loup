@@ -665,6 +665,18 @@ export const HARD_MODULE_DEPENDENCIES = [
   // (re)installed hard-importing it, so install/update would report success while the
   // mandated `reconcile-control-blocker.mjs` invocation fails immediately at import time.
   { dest: "tools/orchestration/reconcile-control-blocker.mjs", dependsOnDest: "tools/orchestration/blocker-grammar.mjs" },
+  // Issue #618 Stage 1 review finding (P2): correct-unit-dependency.mjs hard-imports all four
+  // of these modules (parse-execution-plan.mjs, format-execution-plan.mjs,
+  // dependency-grammar.mjs, ready-dispatch-gate.mjs, and prepare-dispatch-manifest.mjs for its
+  // own Dispatch-Manifest-regeneration step). Without these edges, a consumer that already owns
+  // an unmanaged file at one of these paths would have it preserved while the managed importer
+  // is (re)installed hard-importing it, so install/update would report success while
+  // correct-unit-dependency.mjs then fails immediately at import time.
+  { dest: "tools/orchestration/correct-unit-dependency.mjs", dependsOnDest: "tools/orchestration/parse-execution-plan.mjs" },
+  { dest: "tools/orchestration/correct-unit-dependency.mjs", dependsOnDest: "tools/orchestration/format-execution-plan.mjs" },
+  { dest: "tools/orchestration/correct-unit-dependency.mjs", dependsOnDest: "tools/orchestration/dependency-grammar.mjs" },
+  { dest: "tools/orchestration/correct-unit-dependency.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
+  { dest: "tools/orchestration/correct-unit-dependency.mjs", dependsOnDest: "tools/orchestration/prepare-dispatch-manifest.mjs" },
 ];
 
 // Pure. Given one install/update run's final toInstall/toSkip classification, returns one

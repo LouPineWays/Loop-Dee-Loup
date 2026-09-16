@@ -336,8 +336,8 @@ test("runCorrectUnitDependency: #441 regression -- correcting 441-B to depend on
   assert.equal(preReadiness.ready, true);
 
   const result = await runCorrectUnitDependency(
-    { executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-C"] },
-    { repo: REPO, ...io },
+    { repo: REPO, executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-C"] },
+    { ...io },
   );
   assert.equal(result.exitCode, 0);
   assert.equal(result.ok, true);
@@ -380,7 +380,7 @@ test("runCorrectUnitDependency: #441 regression -- correcting 441-B to depend on
 test("runCorrectUnitDependency: correcting to an empty dependsOn set is a valid 'no dependencies' correction", async () => {
   const store = make441Store();
   const io = storeIo(store);
-  const result = await runCorrectUnitDependency({ executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: [] }, { repo: REPO, ...io });
+  const result = await runCorrectUnitDependency({ repo: REPO, executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: [] }, { ...io });
   assert.equal(result.exitCode, 0);
   const plan = planFromStore(store);
   assert.equal(plan.units["441-B"].prerequisitesDependencies, "None.");
@@ -396,8 +396,8 @@ test("runCorrectUnitDependency rejects (exit 1, no write) a target unit outside 
   const originalBody = bComment.body;
   const io = storeIo(store);
   const result = await runCorrectUnitDependency(
-    { executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-C"] },
-    { repo: REPO, ...io, parseExecutionPlanImpl: async (args) => {
+    { repo: REPO, executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-C"] },
+    { ...io, parseExecutionPlanImpl: async (args) => {
         // Force 441-B to look IN_PROGRESS for this call only.
         const mutatedStore = { comments: store.comments.map((c) => (c === bComment ? { ...c, body: workerUnitBody("441-B", { state: "IN_PROGRESS", dependsOnField: "Depends on 441-A." }) } : c)) };
         const parsed = parseExecutionPlan(mutatedStore.comments, { executionIssue: args.executionIssue });
@@ -416,8 +416,8 @@ test("runCorrectUnitDependency rejects (exit 1, no write) an unknown dependency 
   const originalBody = bComment.body;
   const io = storeIo(store);
   const result = await runCorrectUnitDependency(
-    { executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-Z"] },
-    { repo: REPO, ...io },
+    { repo: REPO, executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-Z"] },
+    { ...io },
   );
   assert.equal(result.exitCode, 1);
   assert.equal(bComment.body, originalBody);
@@ -426,7 +426,10 @@ test("runCorrectUnitDependency rejects (exit 1, no write) an unknown dependency 
 test("runCorrectUnitDependency rejects (exit 1, no write) a self-dependency", async () => {
   const store = make441Store();
   const io = storeIo(store);
-  const result = await runCorrectUnitDependency({ executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-B"] }, { repo: REPO, ...io });
+  const result = await runCorrectUnitDependency(
+    { repo: REPO, executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-B"] },
+    { ...io },
+  );
   assert.equal(result.exitCode, 1);
 });
 
@@ -436,8 +439,8 @@ test("runCorrectUnitDependency rejects (exit 1, no write) a cyclic correction", 
   cComment.body = workerUnitBody("441-C", { state: "PLANNED", dependsOnField: "Depends on 441-B." });
   const io = storeIo(store);
   const result = await runCorrectUnitDependency(
-    { executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-C"] },
-    { repo: REPO, ...io },
+    { repo: REPO, executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-C"] },
+    { ...io },
   );
   assert.equal(result.exitCode, 1);
   assert.ok(result.errors.some((e) => e.includes("cycle")));
@@ -460,8 +463,8 @@ test("runCorrectUnitDependency fails closed (exit 3) when the target unit is dis
     return io.parseExecutionPlanImpl(args);
   };
   const result = await runCorrectUnitDependency(
-    { executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-C"] },
-    { repo: REPO, ...io, parseExecutionPlanImpl: wrappedParse },
+    { repo: REPO, executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-C"] },
+    { ...io, parseExecutionPlanImpl: wrappedParse },
   );
   assert.equal(result.exitCode, 3);
   assert.equal(result.state, "STALE_START_TOCTOU");
@@ -482,8 +485,8 @@ test("runCorrectUnitDependency fails closed (exit 3) when the plan's dependency 
     return io.parseExecutionPlanImpl(args);
   };
   const result = await runCorrectUnitDependency(
-    { executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-C"] },
-    { repo: REPO, ...io, parseExecutionPlanImpl: wrappedParse },
+    { repo: REPO, executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-C"] },
+    { ...io, parseExecutionPlanImpl: wrappedParse },
   );
   assert.equal(result.exitCode, 3);
   assert.equal(result.state, "STALE_START_TOCTOU");
@@ -493,8 +496,8 @@ test("runCorrectUnitDependency fails closed (exit 3) when the plan's dependency 
 
 test("runCorrectUnitDependency reports exit 2 when the execution plan cannot be parsed", async () => {
   const result = await runCorrectUnitDependency(
-    { executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: [] },
-    { repo: REPO, parseExecutionPlanImpl: async () => ({ exitCode: 2, ok: false, errors: ["no Plan Index comment found"] }) },
+    { repo: REPO, executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: [] },
+    { parseExecutionPlanImpl: async () => ({ exitCode: 2, ok: false, errors: ["no Plan Index comment found"] }) },
   );
   assert.equal(result.exitCode, 2);
   assert.equal(result.ok, false);
@@ -513,9 +516,8 @@ test("runCorrectUnitDependency reports exit 4 when the read-back body does not m
   const store = make441Store();
   const io = storeIo(store);
   const result = await runCorrectUnitDependency(
-    { executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-C"] },
+    { repo: REPO, executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-C"] },
     {
-      repo: REPO,
       ...io,
       patchCommentImpl: async (args) => {
         await io.patchCommentImpl(args);
@@ -526,10 +528,11 @@ test("runCorrectUnitDependency reports exit 4 when the read-back body does not m
         return async (args) => {
           calls += 1;
           const real = await io.getCommentImpl(args);
-          // Corrupt only the read-back after the write (3rd getCommentImpl call: initial
+          // Corrupt only the read-back after the write (4th getCommentImpl call: initial
           // validation doesn't call getCommentImpl at all; pre-write fetch is call 1; the
-          // post-write read-back is call 2).
-          if (calls >= 2) return { ...real, body: `${real.body}\ncorrupted` };
+          // pre-commit staleness re-check (Stage 1 finding on PR #620) is call 2 and must stay
+          // clean so this test still reaches the PATCH; the post-write read-back is call 3).
+          if (calls >= 3) return { ...real, body: `${real.body}\ncorrupted` };
           return real;
         };
       })(),
@@ -537,4 +540,103 @@ test("runCorrectUnitDependency reports exit 4 when the read-back body does not m
   );
   assert.equal(result.exitCode, 4);
   assert.equal(result.state, "CORRECTION_UNVERIFIED");
+});
+
+// Stage 1 review finding on PR #620 (P1): a unit worker's own concurrent State/completion edit
+// landing between the pre-write fetch and the PATCH must fail closed rather than being silently
+// overwritten by the stale `rawBody`-derived replacement.
+test("runCorrectUnitDependency fails closed (exit 3, no write) when the target comment's own body changes concurrently between the pre-write fetch and the commit", async () => {
+  const store = make441Store();
+  const io = storeIo(store);
+  const bComment = store.comments.find((c) => c.body.includes("## Worker Unit: 441-B"));
+  let calls = 0;
+  const wrappedGetComment = async (args) => {
+    calls += 1;
+    // Call 1 is the pre-write fetch this correction computes its replacement from. Simulate the
+    // unit's own dispatched worker landing a State edit immediately after that, before this
+    // script's own pre-commit re-check (call 2).
+    if (calls === 1) {
+      const real = await io.getCommentImpl(args);
+      bComment.body = workerUnitBody("441-B", { state: "IN_PROGRESS", dependsOnField: "Depends on 441-A." });
+      return real;
+    }
+    return io.getCommentImpl(args);
+  };
+  const result = await runCorrectUnitDependency(
+    { repo: REPO, executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-C"] },
+    { ...io, getCommentImpl: wrappedGetComment },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STALE_START_TOCTOU");
+  // The worker's own concurrent edit must survive untouched -- this is the exact overwrite the
+  // finding described (a stale "replaced.body" clobbering it, e.g. reverting DONE to PLANNED).
+  assert.match(bComment.body, /State:\*\* IN_PROGRESS/);
+});
+
+// --- runCorrectUnitDependency: existing Dispatch Manifest regeneration (Stage 1 P1 finding) --
+
+function withExistingManifest(store, { manifestCommentId = 105 } = {}) {
+  const planIndexComment = store.comments.find((c) => c.body.includes("## Execution Plan Index"));
+  const updated = planIndexComment.body.replace("- **Dispatch manifest:** none", `- **Dispatch manifest:** ${commentUrl(manifestCommentId)}`);
+  assert.notEqual(updated, planIndexComment.body, "test fixture bug: no '- **Dispatch manifest:** none' bullet found to replace");
+  planIndexComment.body = updated;
+  return manifestCommentId;
+}
+
+test("runCorrectUnitDependency regenerates an already-persisted Dispatch Manifest so a stale dispatch_ready=true entry cannot outlive the correction", async () => {
+  const store = make441Store();
+  const manifestCommentId = withExistingManifest(store);
+  const io = storeIo(store);
+  const regenerationCalls = [];
+  const result = await runCorrectUnitDependency(
+    { repo: REPO, executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-C"] },
+    {
+      ...io,
+      prepareDispatchManifestImpl: async (args) => {
+        regenerationCalls.push(args);
+        return { exitCode: 0, ok: true, state: "DISPATCH_MANIFEST_VERIFIED" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.ok, true);
+  assert.equal(result.manifestRegenerated, true);
+  assert.equal(regenerationCalls.length, 1);
+  assert.deepEqual(regenerationCalls[0], { repo: REPO, executionIssue: EXECUTION_ISSUE, commentId: manifestCommentId });
+});
+
+test("runCorrectUnitDependency does not attempt manifest regeneration when no Dispatch Manifest is persisted yet", async () => {
+  const store = make441Store();
+  const io = storeIo(store);
+  const result = await runCorrectUnitDependency(
+    { repo: REPO, executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-C"] },
+    {
+      ...io,
+      prepareDispatchManifestImpl: async () => {
+        throw new Error('must not be called when the Plan Index\'s own "Dispatch manifest" field is still "none"');
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.manifestRegenerated, false);
+});
+
+test("runCorrectUnitDependency reports exit 4 (CORRECTION_UNVERIFIED) when an existing Dispatch Manifest cannot be regenerated after the dependency field write already succeeded", async () => {
+  const store = make441Store();
+  const manifestCommentId = withExistingManifest(store);
+  const io = storeIo(store);
+  const result = await runCorrectUnitDependency(
+    { repo: REPO, executionIssue: EXECUTION_ISSUE, unitId: "441-B", dependsOn: ["441-A", "441-C"] },
+    {
+      ...io,
+      prepareDispatchManifestImpl: async () => ({ exitCode: 1, ok: false, message: "simulated regeneration failure" }),
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "CORRECTION_UNVERIFIED");
+  // The dependency field itself was already durably written even though the overall result is
+  // reported unverified -- the caller must re-run prepare-dispatch-manifest.mjs manually.
+  const bComment = store.comments.find((c) => c.body.includes("## Worker Unit: 441-B"));
+  assert.match(bComment.body, /Depends on 441-A, 441-C\./);
+  assert.match(result.errors[0], new RegExp(`#${manifestCommentId}`));
 });
