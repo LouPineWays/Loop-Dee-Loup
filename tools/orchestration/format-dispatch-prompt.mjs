@@ -184,9 +184,13 @@ export function formatPlanningWorkerDispatchPrompt({ controlIssue, executionIssu
 // `replanRequiredUnitIds` remain required inputs (the caller must hold a genuine
 // REPLAN_REQUIRED result, not merely `controlIssue`/`executionIssue`), but neither is rendered
 // any more — the prompt's length is now a function of two bounded integers and fixed prose
-// only, independent of plan/unit-set size, repository name, and git host length alike: 472
+// only, independent of plan/unit-set size, repository name, and git host length alike: 618
 // chars even at `Number.MAX_SAFE_INTEGER` (2^53-1, 16 digits, the true upper bound
-// `isPositiveInteger` can ever accept) for both `controlIssue` and `executionIssue`.
+// `isPositiveInteger` can ever accept) for both `controlIssue` and `executionIssue` (Stage 1
+// review finding on PR #620: the fixed prose grew to name `correct-unit-dependency.mjs` as the
+// only mechanism that can patch an existing unit's dependency field in place, since
+// `format-execution-plan.mjs` alone cannot and a worker following it verbatim could not perform
+// the field-scoped correction issue #618 established).
 export function formatPlanningCorrectionWorkerDispatchPrompt({ controlIssue, executionIssue, planIndexUrl, replanRequiredUnitIds }) {
   if (
     !isPositiveInteger(controlIssue) ||
@@ -206,8 +210,10 @@ export function formatPlanningCorrectionWorkerDispatchPrompt({ controlIssue, exe
     `#${controlIssue}.\n\n` +
     `Re-run ready-dispatch-gate.mjs against the Controlling Issue above to recover the Plan Index and ` +
     `failing unit(s). Read the Plan Index and each unit's contract, then correct per ` +
-    `AGENTS.md/docs/operating-model.md using format-execution-plan.mjs. Return a compact confirmation ` +
-    `and stop — do not prepare the Dispatch Manifest, advance Lifecycle, or dispatch units.`
+    `AGENTS.md/docs/operating-model.md — use correct-unit-dependency.mjs for an existing unit's ` +
+    `dependency field (format-execution-plan.mjs cannot patch one in place), or format-execution-plan.mjs ` +
+    `only for a new unit. Return a compact confirmation and stop — do not prepare the Dispatch Manifest, ` +
+    `advance Lifecycle, or dispatch units.`
   );
 }
 

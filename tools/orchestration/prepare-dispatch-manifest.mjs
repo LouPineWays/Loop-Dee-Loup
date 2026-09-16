@@ -417,7 +417,10 @@ function parseIssueNumberFromIssueUrl(issueUrl) {
   return m ? Number(m[1]) : null;
 }
 
-function extractCommentIdFromUrl(url) {
+// Exported (issue #618 Stage 1 review finding, P1) so correct-unit-dependency.mjs can resolve
+// an already-persisted Dispatch Manifest's own comment id from the Plan Index's "Dispatch
+// manifest" field without a second, independently-drifting copy of this URL parsing.
+export function extractCommentIdFromUrl(url) {
   if (typeof url !== "string") return null;
   const m = url.match(/#issuecomment-(\d+)$/);
   return m ? Number(m[1]) : null;

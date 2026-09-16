@@ -64,7 +64,10 @@ import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 
 const PLAN_INDEX_HEADING = /^## Execution Plan Index \(v1\)$/;
 const SHARED_CONTRACT_HEADING = /^## Shared Contract \(v1\)$/;
-const WORKER_UNIT_HEADING = /^## Worker Unit: (\S+) \(v1\)$/;
+// Exported (issue #618) so correct-unit-dependency.mjs's own heading-identity check reuses
+// this exact grammar rather than duplicating it -- the same one-authority discipline
+// dependency-grammar.mjs already applies to the "Prerequisites/dependencies" clause.
+export const WORKER_UNIT_HEADING = /^## Worker Unit: (\S+) \(v1\)$/;
 
 // The Worker Unit Contract comment's required bold-label bullets, in the order the Shared
 // Contract fixes them. `key` is the camelCase field name used in this script's JSON output.

@@ -627,6 +627,20 @@ test("findHardDependencyCollisions: flags a skipped blocker-grammar.mjs dependen
   assert.match(collisions[0].reason, /reconcile-control-blocker\.mjs/);
 });
 
+// Issue #618 Stage 1 review finding (P2): the analogous collision coverage for
+// correct-unit-dependency.mjs's own hard imports, mirroring the dependency-grammar.mjs/
+// blocker-grammar.mjs coverage above. One representative edge (ready-dispatch-gate.mjs) is
+// enough here -- the "every declared pair is a real path" test below already structurally
+// validates every edge this importer declares.
+test("findHardDependencyCollisions: flags a skipped ready-dispatch-gate.mjs dependency whose importer (correct-unit-dependency.mjs) is about to be (re)installed", () => {
+  const toInstall = [{ destRel: "tools/orchestration/correct-unit-dependency.mjs", content: Buffer.from("x") }];
+  const toSkip = [{ dest: "tools/orchestration/ready-dispatch-gate.mjs", reason: "destination already exists and is not LDL-managed" }];
+  const collisions = findHardDependencyCollisions({ toInstall, toSkip });
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].dest, "tools/orchestration/ready-dispatch-gate.mjs");
+  assert.match(collisions[0].reason, /correct-unit-dependency\.mjs/);
+});
+
 test("HARD_MODULE_DEPENDENCIES: every declared importer/dependency pair is a real path this repository actually ships", () => {
   for (const { dest, dependsOnDest } of HARD_MODULE_DEPENDENCIES) {
     assert.ok(existsSync(join(REPO_ROOT, dest)), `${dest} does not exist in this repository`);
