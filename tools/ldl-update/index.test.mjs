@@ -420,6 +420,52 @@ test("run: still updates normally when the consumer has no pre-existing dependen
   assert.ok(after.files.some((f) => f.dest === "tools/orchestration/format-execution-plan.mjs"));
 });
 
+// Issue #437/#610 Stage 1 finding 7: the analogous update-side collision coverage for
+// reconcile-control-blocker.mjs's own hard import of blocker-grammar.mjs, mirroring the
+// dependency-grammar.mjs coverage immediately above.
+function addBlockerGrammarFixtureFiles(root, revisionTag) {
+  mkdirSync(join(root, "tools", "orchestration"), { recursive: true });
+  writeFileSync(
+    join(root, "tools", "orchestration", "blocker-grammar.mjs"),
+    `export function extractBlockedByIssueNumbers() { return []; } // ${revisionTag}\n`,
+  );
+  writeFileSync(
+    join(root, "tools", "orchestration", "reconcile-control-blocker.mjs"),
+    `import { extractBlockedByIssueNumbers } from "./blocker-grammar.mjs"; // ${revisionTag}\n`,
+  );
+}
+
+test("run: refuses the whole update, as a conflict, when updating would install reconcile-control-blocker.mjs unable to load an unmanaged, preserved blocker-grammar.mjs (Stage 1 finding 7 on #610)", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, rootV1, "rev-1");
+
+  writeFileSync(
+    join(dest, "tools", "orchestration", "blocker-grammar.mjs"),
+    "// consumer-owned file, exports nothing LDL needs\n",
+  );
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  addBlockerGrammarFixtureFiles(rootV2, "rev-2");
+
+  const result = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /blocker-grammar\.mjs/);
+  assert.match(result.message, /reconcile-control-blocker\.mjs/);
+  assert.equal(
+    readFileSync(join(dest, "tools", "orchestration", "blocker-grammar.mjs"), "utf8"),
+    "// consumer-owned file, exports nothing LDL needs\n",
+    "the consumer's own file must be left untouched",
+  );
+  assert.ok(
+    !existsSync(join(dest, "tools", "orchestration", "reconcile-control-blocker.mjs")),
+    "the hard importer must not be written either -- the whole update is refused atomically",
+  );
+  const after = readManifest(dest);
+  assert.equal(after.ldlSourceRevision, "rev-1", "the manifest must not advance when the update is refused");
+});
+
 test("run: rewritten manifest reflects the new revision and lists both updated and already-matching managed files", async (t) => {
   const rootV1 = makeFixtureRoot(t, "rev-1");
   const dest = tempDir(t);

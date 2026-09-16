@@ -261,11 +261,57 @@ test("validateControlSnapshot: multiple simultaneously-invalid fields are all re
   assert.equal(result.errors.length, 2);
 });
 
-test("validateControlSnapshot: default field specs are Execution/PR/Stage 2 — the fields ready-dispatch-gate.mjs / next-review-transition-gate.mjs already structurally trust", () => {
+test("validateControlSnapshot: default field specs are Execution/PR/Stage 2/Blocker/Founder decision — the fields ready-dispatch-gate.mjs / next-review-transition-gate.mjs already structurally trust, plus the two live-interrupt fields issue #437 unit 437-B adds", () => {
   assert.deepEqual(
     DEFAULT_CONTROL_FIELD_SPECS.map((s) => s.label),
-    ["Execution", "PR", "Stage 2"],
+    ["Execution", "PR", "Stage 2", "Blocker", "Founder decision"],
   );
+});
+
+// -- Blocker / Founder decision field specs (issue #437 unit 437-B) ------------------------
+
+test("validateControlField: pointerCheck:false accepts free-prose values a pointer-cardinality check would reject (zero or multiple '#N' references)", () => {
+  const zeroRefs = validateControlField("- **Blocker:** Waiting on founder input to decide pricing.\n", { label: "Blocker", pointerCheck: false });
+  assert.equal(zeroRefs.ok, true);
+
+  const multiRefs = validateControlField("- **Blocker:** Blocked by #407, #408, #436.\n", { label: "Blocker", pointerCheck: false });
+  assert.equal(multiRefs.ok, true);
+});
+
+test("validateControlField: pointerCheck:false still accepts the 'none' sentinel and an absent field", () => {
+  const none = validateControlField("- **Blocker:** none\n", { label: "Blocker", pointerCheck: false });
+  assert.equal(none.ok, true);
+
+  const absent = validateControlField("- **Lifecycle:** READY\n", { label: "Blocker", pointerCheck: false });
+  assert.equal(absent.ok, true);
+  assert.equal(absent.present, false);
+});
+
+test("validateControlField: pointerCheck:false still rejects two exact duplicate 'Blocker' bullets (duplicate-bullet protection is unaffected by skipping the pointer check)", () => {
+  const body = "- **Blocker:** none\n- **Blocker:** Blocked by #407.\n";
+  const result = validateControlField(body, { label: "Blocker", pointerCheck: false });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /"Blocker" reference is ambiguous/);
+});
+
+test("validateControlSnapshot: rejects duplicate 'Blocker'/'Founder decision' bullets in a full proposed body via DEFAULT_CONTROL_FIELD_SPECS, without rejecting a well-formed free-prose Blocker value", () => {
+  const body = [
+    "- **Lifecycle:** BLOCKED",
+    "- **Execution:** #440",
+    "- **Blocker:** Blocked by #407, #408.",
+    "- **Blocker:** none",
+    "- **Founder decision:** none",
+  ].join("\n");
+  const result = validateControlSnapshot(body);
+  assert.equal(result.ok, false);
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0], /"Blocker" reference is ambiguous/);
+});
+
+test("validateControlSnapshot: a single well-formed 'Blocked by ...' Blocker bullet alongside 'Founder decision: none' both validate (no pointer-cardinality false positive)", () => {
+  const body = ["- **Lifecycle:** BLOCKED", "- **Execution:** #440", "- **Blocker:** Blocked by #407, #408, #436.", "- **Founder decision:** none"].join("\n");
+  const result = validateControlSnapshot(body);
+  assert.equal(result.ok, true);
 });
 
 // -- validateLifecycleStateCoherence / #581's #577 regression ----------------------------

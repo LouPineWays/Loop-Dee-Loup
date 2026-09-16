@@ -657,6 +657,14 @@ export function planInstall({ ops, destRoot, existingManifest }) {
 export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/format-execution-plan.mjs", dependsOnDest: "tools/orchestration/dependency-grammar.mjs" },
   { dest: "tools/orchestration/prepare-dispatch-manifest.mjs", dependsOnDest: "tools/orchestration/dependency-grammar.mjs" },
+  // Issue #437/#610 Stage 1 finding 7: reconcile-control-blocker.mjs hard-imports
+  // extractBlockedByIssueNumbers/hasUnrecognizedBlockerWording from blocker-grammar.mjs, the
+  // exact same unresolvable-import hazard the two edges above already close for
+  // dependency-grammar.mjs. Without this edge, a consumer's own pre-existing unmanaged
+  // tools/orchestration/blocker-grammar.mjs would be preserved while the managed reconciler is
+  // (re)installed hard-importing it, so install/update would report success while the
+  // mandated `reconcile-control-blocker.mjs` invocation fails immediately at import time.
+  { dest: "tools/orchestration/reconcile-control-blocker.mjs", dependsOnDest: "tools/orchestration/blocker-grammar.mjs" },
 ];
 
 // Pure. Given one install/update run's final toInstall/toSkip classification, returns one

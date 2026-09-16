@@ -615,6 +615,18 @@ test("findHardDependencyCollisions: no collision when the dependency isn't skipp
   );
 });
 
+// Issue #437/#610 Stage 1 finding 7: the analogous collision coverage for
+// reconcile-control-blocker.mjs's own hard import of blocker-grammar.mjs, mirroring the
+// dependency-grammar.mjs coverage immediately above.
+test("findHardDependencyCollisions: flags a skipped blocker-grammar.mjs dependency whose importer (reconcile-control-blocker.mjs) is about to be (re)installed", () => {
+  const toInstall = [{ destRel: "tools/orchestration/reconcile-control-blocker.mjs", content: Buffer.from("x") }];
+  const toSkip = [{ dest: "tools/orchestration/blocker-grammar.mjs", reason: "destination already exists and is not LDL-managed" }];
+  const collisions = findHardDependencyCollisions({ toInstall, toSkip });
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].dest, "tools/orchestration/blocker-grammar.mjs");
+  assert.match(collisions[0].reason, /reconcile-control-blocker\.mjs/);
+});
+
 test("HARD_MODULE_DEPENDENCIES: every declared importer/dependency pair is a real path this repository actually ships", () => {
   for (const { dest, dependsOnDest } of HARD_MODULE_DEPENDENCIES) {
     assert.ok(existsSync(join(REPO_ROOT, dest)), `${dest} does not exist in this repository`);
@@ -636,6 +648,47 @@ function addHardDependencyFixtureFiles(root) {
     'import { extractDependencyUnitIds } from "./dependency-grammar.mjs";\n',
   );
 }
+
+// Issue #437/#610 Stage 1 finding 7: the analogous fixture-file helper for the
+// reconcile-control-blocker.mjs -> blocker-grammar.mjs hard-import edge.
+function addBlockerGrammarFixtureFiles(root) {
+  mkdirSync(join(root, "tools", "orchestration"), { recursive: true });
+  writeFileSync(
+    join(root, "tools", "orchestration", "blocker-grammar.mjs"),
+    "export function extractBlockedByIssueNumbers() { return []; }\n",
+  );
+  writeFileSync(
+    join(root, "tools", "orchestration", "reconcile-control-blocker.mjs"),
+    'import { extractBlockedByIssueNumbers } from "./blocker-grammar.mjs";\n',
+  );
+}
+
+test("run: refuses atomically, writing nothing, when installing reconcile-control-blocker.mjs would leave it unable to load an unmanaged, preserved blocker-grammar.mjs (Stage 1 finding 7 on #610, mirroring the #522/PR #530 dependency-grammar.mjs precedent)", async (t) => {
+  const root = makeFixtureRoot(t);
+  addBlockerGrammarFixtureFiles(root);
+  const dest = tempDir(t);
+  mkdirSync(join(dest, "tools", "orchestration"), { recursive: true });
+  writeFileSync(
+    join(dest, "tools", "orchestration", "blocker-grammar.mjs"),
+    "// consumer-owned file, predates LDL's own blocker-grammar.mjs, exports nothing LDL needs\n",
+  );
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /blocker-grammar\.mjs/);
+  assert.match(result.message, /reconcile-control-blocker\.mjs/);
+  assert.ok(!existsSync(join(dest, ".ldl", "manifest.json")), "no manifest must be written when the operation is refused");
+  assert.equal(
+    readFileSync(join(dest, "tools", "orchestration", "blocker-grammar.mjs"), "utf8"),
+    "// consumer-owned file, predates LDL's own blocker-grammar.mjs, exports nothing LDL needs\n",
+    "the consumer's own file must be left untouched",
+  );
+  assert.ok(
+    !existsSync(join(dest, "tools", "orchestration", "reconcile-control-blocker.mjs")),
+    "the hard importer must not be written either -- the whole operation is refused atomically",
+  );
+});
 
 test("run: refuses atomically, writing nothing, when installing a hard importer would leave it unable to load its unmanaged, preserved dependency (#522 Stage 1 review finding on PR #530)", async (t) => {
   const root = makeFixtureRoot(t);
