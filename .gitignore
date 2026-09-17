@@ -1,3 +1,7 @@
 # Raw and reduced session telemetry (tools/telemetry) is transient local evidence, never
 # durable repository state — see tools/telemetry/README.md.
 .claude/telemetry/
+
+# Per-session action-envelope stop markers (tools/orchestration/action-envelope-hook.mjs,
+# issue #641) are transient live-session state, never durable repository state.
+.claude/action-envelope-state/
