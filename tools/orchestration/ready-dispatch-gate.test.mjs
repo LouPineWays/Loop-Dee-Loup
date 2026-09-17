@@ -31,6 +31,8 @@ import {
   reconcileReadyPrBreakpoint,
   referencesExecutionIssue,
   defaultOpenExecutionLinkedPrList,
+  assertOpenPrListNotTruncated,
+  OPEN_PR_RECONCILIATION_LIMIT,
 } from "./ready-dispatch-gate.mjs";
 import { getActionEnvelope } from "./action-envelope.mjs";
 
@@ -2619,6 +2621,48 @@ test("defaultOpenExecutionLinkedPrList: a PR present in both listings is dedupli
   );
   assert.equal(result.length, 1);
   assert.equal(result[0].number, 644);
+});
+
+// -- assertOpenPrListNotTruncated / defaultGhOpenPrList's fail-closed bound (Stage 2 audit
+// finding on issue #649, P1) --------------------------------------------------------------------
+// The prior hard `--limit 30` on the unscoped open-PR listing could silently truncate in a
+// repository with more than 30 open PRs, so a branch-only-linked correction PR outside that
+// window would never even be examined -- reconciliation would then wrongly authorize a
+// duplicate correction-worker dispatch from truncated, not missing, evidence.
+
+test("assertOpenPrListNotTruncated: passes a list under the limit through unchanged", () => {
+  const list = [{ number: 1 }, { number: 2 }];
+  assert.equal(assertOpenPrListNotTruncated(list, 5), list);
+});
+
+test("assertOpenPrListNotTruncated: throws when the list length is at or over the limit, refusing to trust it as exhaustive", () => {
+  const atLimit = Array.from({ length: 5 }, (_, i) => ({ number: i }));
+  assert.throws(() => assertOpenPrListNotTruncated(atLimit, 5), /possibly-truncated/);
+  const overLimit = Array.from({ length: 6 }, (_, i) => ({ number: i }));
+  assert.throws(() => assertOpenPrListNotTruncated(overLimit, 5), /possibly-truncated/);
+});
+
+test("assertOpenPrListNotTruncated: defaults to OPEN_PR_RECONCILIATION_LIMIT when no limit is given", () => {
+  const underDefault = [{ number: 1 }];
+  assert.equal(assertOpenPrListNotTruncated(underDefault), underDefault);
+  const atDefault = Array.from({ length: OPEN_PR_RECONCILIATION_LIMIT }, (_, i) => ({ number: i }));
+  assert.throws(() => assertOpenPrListNotTruncated(atDefault), /possibly-truncated/);
+});
+
+test("defaultOpenExecutionLinkedPrList: propagates a truncated open-PR listing's thrown error rather than swallowing it", () => {
+  assert.throws(
+    () =>
+      defaultOpenExecutionLinkedPrList(
+        { repo: "o/r", executionIssue: 375 },
+        {
+          ghPrListImpl: () => [],
+          ghOpenPrListImpl: () => {
+            throw new Error("gh pr list --state open returned 500 PRs, at or over the 500-PR reconciliation safety bound -- refusing to treat a possibly-truncated open-PR listing as exhaustive");
+          },
+        },
+      ),
+    /possibly-truncated/,
+  );
 });
 
 test("reconcileReadyPrBreakpoint: crossed:true when a linked PR is found", async () => {

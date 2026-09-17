@@ -1888,6 +1888,32 @@ test("reconcileStage2CorrectionPr: an operational gh failure fails closed, never
   assert.match(result.reason, /network timeout/);
 });
 
+// Stage 2 audit finding on issue #649 (P1): `defaultOpenExecutionLinkedPrList`'s unscoped
+// open-PR listing (`ready-dispatch-gate.mjs`'s `defaultGhOpenPrList`) used to hard-limit at 30
+// results with no truncation check, so a branch-only-linked correction PR sitting outside that
+// window in a repo with >30 open PRs would silently never be examined, and this reconciliation
+// would wrongly report `crossed: false` -- authorizing a duplicate correction-worker dispatch
+// from truncated, not missing, evidence. `defaultGhOpenPrList` now throws via
+// `assertOpenPrListNotTruncated` when its listing comes back at/over its bound; this proves that
+// thrown error reaches this function's own caller as the same fail-closed `operationalError`
+// shape as any other `gh` failure, never silently swallowed into `crossed: false`.
+test("reconcileStage2CorrectionPr: a truncated open-PR listing (its ghPrListImpl throws) fails closed as operationalError, never crossed:false", async () => {
+  const result = await reconcileStage2CorrectionPr(
+    { repo: "o/r", workIssue: 375 },
+    {
+      ghPrListImpl: async () => {
+        throw new Error(
+          "gh pr list --state open returned 500 PRs, at or over the 500-PR reconciliation safety bound -- " +
+            "refusing to treat a possibly-truncated open-PR listing as exhaustive",
+        );
+      },
+    },
+  );
+  assert.equal(result.crossed, false);
+  assert.equal(result.operationalError, true);
+  assert.match(result.reason, /possibly-truncated/);
+});
+
 test("composeStage2CorrectionFinalizeCommand: control-Issue mode chains trigger.mjs then finalize-pr-breakpoint.mjs", () => {
   const command = composeStage2CorrectionFinalizeCommand({
     repo: "o/r",
