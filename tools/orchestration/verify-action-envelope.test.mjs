@@ -61,3 +61,79 @@ test("verify-action-envelope: missing --state entirely is still a usage error, e
   assert.equal(result.exitCode, 1);
   assert.ok(result.stderr.includes("--state"));
 });
+
+// Stage 1 review finding on PR #647 (issue #646, P2): a context-sensitive state's authorized
+// actions come entirely from the verdict's own `nextCommand`. The CLI previously called
+// `classifyEnvelopeCompliance(state, actions)` with no context at all, so a genuinely authorized
+// trigger+finalize sequence was misreported as a violation, and, worse, an *empty* observed-
+// actions list was misreported as "compliant" merely because no nextCommand was ever seen. These
+// tests lock in the fix: missing required context now fails closed (exit 1), and supplying it
+// correctly distinguishes control-mode from direct-reference-mode authorized sequences.
+
+const CONTROL_MODE_NEXT_COMMAND =
+  "node tools/review-watch/trigger.mjs --repo o/r --kind pr --number 644 --head correctionhead && node tools/orchestration/finalize-pr-breakpoint.mjs --control-issue 322 --execution-issue 375 --pr 644 --head correctionhead";
+const DIRECT_REFERENCE_NEXT_COMMAND = "node tools/review-watch/trigger.mjs --repo o/r --kind pr --number 644 --head correctionhead";
+
+test("verify-action-envelope: a context-sensitive state with no --next-command fails closed, exit 1, never a silent empty-actions exit 0", () => {
+  const result = run(["--state", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", "--actions", "run-review-watch-trigger"]);
+  assert.equal(result.exitCode, 1);
+  assert.ok(result.stderr.includes("--next-command"));
+});
+
+test("verify-action-envelope: a context-sensitive state with no --next-command and NO observed actions still fails closed, never a silent empty-actions exit 0", () => {
+  const result = run(["--state", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION"]);
+  assert.equal(result.exitCode, 1);
+});
+
+test("verify-action-envelope: control-mode nextCommand — the actual trigger+finalize sequence verifies compliant", () => {
+  const result = run([
+    "--state",
+    "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
+    "--actions",
+    "run-review-watch-trigger,run-finalize-pr-breakpoint",
+    "--next-command",
+    CONTROL_MODE_NEXT_COMMAND,
+  ]);
+  assert.equal(result.exitCode, 0);
+  const parsed = JSON.parse(result.stdout.trim());
+  assert.equal(parsed.status, "compliant");
+});
+
+test("verify-action-envelope: control-mode nextCommand — omitting the finalize action is a violation", () => {
+  const result = run([
+    "--state",
+    "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
+    "--actions",
+    "run-review-watch-trigger",
+    "--next-command",
+    CONTROL_MODE_NEXT_COMMAND,
+  ]);
+  assert.equal(result.exitCode, 5);
+});
+
+test("verify-action-envelope: direct-reference-mode nextCommand — only the narrower trigger-only sequence verifies compliant", () => {
+  const result = run([
+    "--state",
+    "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
+    "--actions",
+    "run-review-watch-trigger",
+    "--next-command",
+    DIRECT_REFERENCE_NEXT_COMMAND,
+  ]);
+  assert.equal(result.exitCode, 0);
+  const parsed = JSON.parse(result.stdout.trim());
+  assert.equal(parsed.status, "compliant");
+});
+
+test("verify-action-envelope: direct-reference-mode nextCommand — run-finalize-pr-breakpoint remains unauthorized (no control Issue to project onto)", () => {
+  const result = run([
+    "--state",
+    "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
+    "--actions",
+    "run-review-watch-trigger,run-finalize-pr-breakpoint",
+    "--next-command",
+    DIRECT_REFERENCE_NEXT_COMMAND,
+  ]);
+  assert.equal(result.exitCode, 5);
+  assert.ok(result.stderr.includes("run-finalize-pr-breakpoint"));
+});

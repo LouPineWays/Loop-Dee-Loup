@@ -468,6 +468,31 @@ test("formatStage2CorrectionWorkerDispatchPrompt mandates opening/identifying a 
   assert.match(prompt, /PR_BREAKPOINT_UNVERIFIED/);
 });
 
+// Stage 1 review finding on PR #647 (issue #646, P1): direct-reference mode (`controlIssue`
+// absent) has no thin control Issue to project a PR/Stage-1 breakpoint onto, so
+// `finalize-pr-breakpoint.mjs` -- which hard-requires positive-integer `--control-issue` and
+// `--execution-issue` -- can never be satisfied by a direct-reference worker. The template must
+// not mandate an impossible step; it must give this mode a real no-control handoff instead.
+test("formatStage2CorrectionWorkerDispatchPrompt (direct-reference mode): never mandates the impossible finalize-pr-breakpoint.mjs step, but still mandates the Stage 1 trigger and a usable handoff", () => {
+  const prompt = formatStage2CorrectionWorkerDispatchPrompt({ auditIssue: 559 });
+  assert.ok(!prompt.includes("finalize-pr-breakpoint.mjs") || /skip finalize-pr-breakpoint\.mjs/.test(prompt));
+  assert.doesNotMatch(prompt, /then run tools\/orchestration\/finalize-pr-breakpoint\.mjs/);
+  assert.match(prompt, /trigger\.mjs/);
+  assert.match(prompt, /PR number/);
+  assert.match(prompt, /direct-reference/);
+});
+
+test("formatStage2CorrectionWorkerDispatchPrompt (control mode) still mandates finalize-pr-breakpoint.mjs unchanged", () => {
+  const prompt = formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: 559 });
+  assert.match(prompt, /then run tools\/orchestration\/finalize-pr-breakpoint\.mjs/);
+  assert.match(prompt, /PR_BREAKPOINT_UNVERIFIED/);
+});
+
+test("formatStage2CorrectionWorkerDispatchPrompt (direct-reference mode) stays well under the reference-only threshold", () => {
+  const prompt = formatStage2CorrectionWorkerDispatchPrompt({ auditIssue: 559 });
+  assert.ok(prompt.length < 700, `expected < 700 chars, got ${prompt.length}`);
+});
+
 test("formatStage2CorrectionWorkerDispatchPrompt throws for missing/invalid required fields", () => {
   assert.throws(() => formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: null }));
   assert.throws(() => formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: NaN }));
@@ -624,6 +649,21 @@ test("CLI: piped STAGE2_CORRECTION_REQUIRED selects the Stage 2 correction templ
   assert.match(result.stdout, /#559/);
   assert.match(result.stdout, /#445/);
   assert.ok(!result.stdout.includes("LouPineWays"));
+});
+
+test("CLI: piped STAGE2_CORRECTION_REQUIRED in direct-reference mode (no controlIssue) never mandates finalize-pr-breakpoint.mjs", async () => {
+  const result = await runCli({
+    state: "STAGE2_CORRECTION_REQUIRED",
+    stopAfter: true,
+    repo: "LouPineWays/Loop-Dee-Loup",
+    auditIssue: 559,
+    actionEnvelope: { mode: "bounded", authorizedActions: ["dispatch-correction-worker"] },
+  });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Stage 2 correction worker dispatch\./);
+  assert.ok(!result.stdout.includes("Controlling Issue"));
+  assert.doesNotMatch(result.stdout, /then run tools\/orchestration\/finalize-pr-breakpoint\.mjs/);
+  assert.match(result.stdout, /trigger\.mjs/);
 });
 
 // Malformed-state control (acceptance criterion 6): a payload that carries correction-shaped

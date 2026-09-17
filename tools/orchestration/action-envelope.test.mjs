@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getActionEnvelope, classifyEnvelopeCompliance, knownEnvelopeStates, ENVELOPE_MODES } from "./action-envelope.mjs";
+import {
+  getActionEnvelope,
+  classifyEnvelopeCompliance,
+  knownEnvelopeStates,
+  contextSensitiveEnvelopeStates,
+  ENVELOPE_MODES,
+} from "./action-envelope.mjs";
 
 // -- getActionEnvelope: table shape -----------------------------------------------------
 
@@ -31,6 +37,17 @@ test("getActionEnvelope: every ready-dispatch-gate.mjs and next-review-transitio
   const known = knownEnvelopeStates();
   for (const state of expected) assert.ok(known.includes(state), `missing envelope for ${state}`);
   assert.equal(known.length, expected.length, "envelope table has an unexpected extra/missing entry");
+});
+
+// Stage 1 review finding on PR #647 (issue #646, P2): the exact two states whose authorized
+// actions above are derived from `context.nextCommand` rather than a fixed table row --
+// `verify-action-envelope.mjs`'s CLI uses this list to fail closed when that context is missing,
+// instead of silently classifying against an absent nextCommand.
+test("contextSensitiveEnvelopeStates: names exactly the two nextCommand-derived states", () => {
+  assert.deepEqual(
+    [...contextSensitiveEnvelopeStates()].sort(),
+    ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION"].sort(),
+  );
 });
 
 test("getActionEnvelope: an unrecognized or absent state fails closed to mode none with zero authorized actions", () => {

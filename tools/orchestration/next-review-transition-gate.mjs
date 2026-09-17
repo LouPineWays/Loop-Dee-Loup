@@ -204,7 +204,7 @@ import {
   describeExecutionConflict,
   findNearDuplicateBulletLabels,
   findOpenExecutionLinkedPr,
-  defaultGhPrList,
+  defaultOpenExecutionLinkedPrList,
 } from "./ready-dispatch-gate.mjs";
 import { run as stage1Run } from "../review-watch/stage1-gate.mjs";
 import { checkMergeReady, checkPostAudit } from "../review-watch/lifecycle-gate.mjs";
@@ -842,7 +842,15 @@ async function resolvePreMerge(
 // work-Issue-linked correction PR already exists — the caller must route to finalization
 // instead of dispatching a sibling. `ghPrListImpl` is injected so tests never touch the real
 // network/`gh` CLI, matching this file's existing injection convention.
-export async function reconcileStage2CorrectionPr({ repo, workIssue }, { ghPrListImpl = defaultGhPrList } = {}) {
+//
+// Stage 1 review finding on PR #647 (issue #646, P1): defaults to
+// `defaultOpenExecutionLinkedPrList` rather than the bare `defaultGhPrList` this call used
+// before — `defaultGhPrList`'s own `--search "#N"` cannot discover a correction PR linked purely
+// by the permitted branch-name convention (no body marker), since GitHub's PR search never
+// indexes head ref names. See `defaultOpenExecutionLinkedPrList`'s own comment in
+// ready-dispatch-gate.mjs for why that merge lives there rather than inside `defaultGhPrList`
+// itself.
+export async function reconcileStage2CorrectionPr({ repo, workIssue }, { ghPrListImpl = defaultOpenExecutionLinkedPrList } = {}) {
   let prList;
   try {
     prList = await ghPrListImpl({ repo, executionIssue: workIssue });

@@ -367,6 +367,18 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
 // `finalize-pr-breakpoint.mjs` before ever reporting success — on `PR_BREAKPOINT_UNVERIFIED`,
 // report that reference verbatim, never ordinary success, mirroring the Stage 1 sibling's own
 // `CORRECTION_BREAKPOINT_UNVERIFIED` contract above.
+// Stage 1 review finding on PR #647 (issue #646, P1): the unconditional finalizer mandate below
+// used to apply verbatim in direct-reference mode too (`controlIssue` absent), but
+// `finalize-pr-breakpoint.mjs` hard-requires positive-integer `--control-issue` AND
+// `--execution-issue` values and exits 1 (a plain operational failure, never the documented
+// `PR_BREAKPOINT_UNVERIFIED`) without them — an impossible instruction a direct-reference worker
+// could never satisfy. `composeStage2CorrectionFinalizeCommand` above already gets this right
+// (it omits the `finalize-pr-breakpoint.mjs` segment entirely when `controlIssue` is absent); this
+// template now mirrors that same branch in its prose. Direct-reference mode has no thin control
+// Issue to project a breakpoint onto in the first place, so its worker only requests Stage 1 at
+// the correction PR's head and reports the PR/head/work-Issue identity — a fresh invocation
+// continues via `next-review-transition-gate.mjs`'s own `--pr`/`--head`/`--issue` direct-reference
+// path, which re-derives live state without needing any control write.
 export function formatStage2CorrectionWorkerDispatchPrompt({ controlIssue = null, auditIssue }) {
   if (!isPositiveInteger(auditIssue)) {
     throw new Error("formatStage2CorrectionWorkerDispatchPrompt requires auditIssue to be a positive integer");
@@ -374,15 +386,20 @@ export function formatStage2CorrectionWorkerDispatchPrompt({ controlIssue = null
   if (controlIssue !== null && controlIssue !== undefined && !isPositiveInteger(controlIssue)) {
     throw new Error("formatStage2CorrectionWorkerDispatchPrompt requires controlIssue to be a positive integer when present");
   }
-  const controlLine = controlIssue != null ? ` Controlling Issue: #${controlIssue}.` : "";
+  const hasControlIssue = controlIssue != null;
+  const controlLine = hasControlIssue ? ` Controlling Issue: #${controlIssue}.` : "";
+  const breakpointClause = hasControlIssue
+    ? `request Stage 1 at its head, then run tools/orchestration/finalize-pr-breakpoint.mjs before ` +
+      `reporting; on PR_BREAKPOINT_UNVERIFIED report that reference, never success.`
+    : `request Stage 1 at its head via trigger.mjs; verify it succeeded. No control Issue exists to ` +
+      `finalize onto — skip finalize-pr-breakpoint.mjs. Report the PR number, head, and work Issue for ` +
+      `a fresh invocation's direct-reference resume.`;
   return (
     `Stage 2 correction worker dispatch. Audit Issue: #${auditIssue}.${controlLine}\n\n` +
     `Read Audit Issue #${auditIssue}'s completed Stage 2 report directly from GitHub to recover the audit ` +
     `findings, the work Issue it names, and correction authority — not restated here on purpose. Apply one ` +
     `consolidated correction per docs/bounded-review-cycle.md, open/identify one correction PR linked to the ` +
-    `work Issue, request Stage 1 at its head, then run tools/orchestration/finalize-pr-breakpoint.mjs before ` +
-    `reporting; on PR_BREAKPOINT_UNVERIFIED report that reference, never success. Then stop: do not re-trigger ` +
-    `the audit or terminalize this cycle here.`
+    `work Issue, ${breakpointClause} Then stop: do not re-trigger the audit or terminalize this cycle here.`
   );
 }
 

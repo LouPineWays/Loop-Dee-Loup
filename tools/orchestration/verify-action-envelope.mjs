@@ -8,14 +8,25 @@
 //
 // Usage:
 //   node tools/orchestration/verify-action-envelope.mjs --state <VERDICT_STATE> \
-//     --actions <comma-separated action-kind list> [--actions-file <path-to-json-array>]
+//     --actions <comma-separated action-kind list> [--actions-file <path-to-json-array>] \
+//     [--next-command <the verdict's own nextCommand string>]
+//
+// `--next-command` carries the same `nextCommand` field the piped gate verdict itself returned,
+// forwarded verbatim as `classifyEnvelopeCompliance`'s `context.nextCommand` (issue #646, Stage 1
+// review finding on PR #647, P2: this CLI previously called `classifyEnvelopeCompliance(state,
+// actions)` with no context at all, so `getActionEnvelope`'s context-sensitive states —
+// `STAGE2_CLOSE_READY`/`STAGE2_CORRECTION_PR_NEEDS_FINALIZATION` — always derived their
+// authorized actions from an absent `nextCommand`, misreporting genuinely authorized actions as
+// violations and, worse, certifying an empty observed-actions list as "compliant"). `--state`
+// values in `contextSensitiveEnvelopeStates()` now require `--next-command`; omitting it is a
+// usage error (exit 1), never a silent fall-through to context-free classification.
 //
 // Exit codes: 0 compliant, 5 violation, 1 usage/operational error. Prints one JSON line with
 // {status, envelope, reasons} to stdout (violation reasons also go to stderr for a quick
 // human-readable read).
 
 import { readFileSync } from "node:fs";
-import { classifyEnvelopeCompliance } from "./action-envelope.mjs";
+import { classifyEnvelopeCompliance, contextSensitiveEnvelopeStates } from "./action-envelope.mjs";
 
 // Stage 1 finding on PR #534: the previous version consumed the next token unconditionally,
 // whether or not it was actually present or was itself another `--option`. That let a malformed
@@ -26,7 +37,7 @@ import { classifyEnvelopeCompliance } from "./action-envelope.mjs";
 // actions list — both exited 0 (compliant) despite never checking the actions the caller
 // actually meant to supply. Every option now requires a real value: a following token that is
 // absent, or itself starts with "--", is a usage error, not a silently-accepted empty value.
-const KNOWN_OPTIONS = new Set(["state", "actions", "actions-file"]);
+const KNOWN_OPTIONS = new Set(["state", "actions", "actions-file", "next-command"]);
 
 function parseArgs(argv) {
   const args = {};
@@ -79,6 +90,21 @@ function main() {
     return;
   }
 
+  // Stage 1 review finding on PR #647 (issue #646, P2): a context-sensitive state's authorized
+  // actions depend entirely on the verdict's own `nextCommand` — silently proceeding without it
+  // previously misclassified genuinely authorized actions as violations, and, worse, certified an
+  // empty observed-actions list as "compliant" purely because no chained command was ever seen.
+  // Fail closed here instead: missing required verdict context is a usage error, not a
+  // classification outcome.
+  if (contextSensitiveEnvelopeStates().includes(args.state) && args["next-command"] === undefined) {
+    process.stderr.write(
+      `verify-action-envelope.mjs: --state "${args.state}" derives its authorized actions from the ` +
+        `verdict's own nextCommand; --next-command <the verdict's nextCommand string> is required\n`,
+    );
+    process.exit(1);
+    return;
+  }
+
   let actions;
   try {
     actions = loadActions(args);
@@ -88,7 +114,8 @@ function main() {
     return;
   }
 
-  const result = classifyEnvelopeCompliance(args.state, actions);
+  const context = args["next-command"] !== undefined ? { nextCommand: args["next-command"] } : {};
+  const result = classifyEnvelopeCompliance(args.state, actions, context);
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (result.status === "violation") {
     for (const reason of result.reasons) process.stderr.write(`violation: ${reason}\n`);

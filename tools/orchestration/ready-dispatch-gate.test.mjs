@@ -30,6 +30,7 @@ import {
   findOpenExecutionLinkedPr,
   reconcileReadyPrBreakpoint,
   referencesExecutionIssue,
+  defaultOpenExecutionLinkedPrList,
 } from "./ready-dispatch-gate.mjs";
 import { getActionEnvelope } from "./action-envelope.mjs";
 
@@ -2573,6 +2574,51 @@ test("findOpenExecutionLinkedPr: a bare '#N' background mention still does not c
 test("findOpenExecutionLinkedPr: returns null for an empty/no-match list", () => {
   assert.equal(findOpenExecutionLinkedPr([], 375), null);
   assert.equal(findOpenExecutionLinkedPr([{ number: 1, url: "u1", state: "OPEN", headRefName: "unrelated", body: "" }], 375), null);
+});
+
+// -- defaultOpenExecutionLinkedPrList (issue #646, Stage 1 review finding on PR #647, P1) ------
+// GitHub's PR search (what the search-based lookup keys `--search "#N"` off) indexes title/body
+// text only, never a PR's own head ref name — so a correction PR linked purely by the permitted
+// branch-name convention ("issue-<N>-...", no body marker) can never surface from that search
+// alone. This is the acquisition-boundary fix: merge in one additional bounded, unscoped listing
+// of currently OPEN PRs so a branch-only-linked candidate is discoverable too.
+
+test("defaultOpenExecutionLinkedPrList: a branch-only-linked PR absent from the search results (no body marker) is still discoverable via the unscoped open-PR listing", () => {
+  const result = defaultOpenExecutionLinkedPrList(
+    { repo: "o/r", executionIssue: 375 },
+    {
+      ghPrListImpl: () => [], // GitHub's text search finds nothing -- no "#375" body marker anywhere
+      ghOpenPrListImpl: () => [{ number: 644, url: "u644", state: "OPEN", headRefName: "issue-375-correction", body: "" }],
+    },
+  );
+  assert.equal(result.length, 1);
+  assert.equal(result[0].number, 644);
+  // The pure filter downstream must actually recognize it as linked, proving the acquisition fix
+  // closes the whole path end to end, not merely that the raw PR object survived the merge.
+  assert.equal(findOpenExecutionLinkedPr(result, 375).number, 644);
+});
+
+test("defaultOpenExecutionLinkedPrList: an existing body-linked ('Addresses #N') PR from the search results remains discoverable unchanged", () => {
+  const result = defaultOpenExecutionLinkedPrList(
+    { repo: "o/r", executionIssue: 375 },
+    {
+      ghPrListImpl: () => [{ number: 644, url: "u644", state: "OPEN", headRefName: "some-branch", body: "Addresses #375." }],
+      ghOpenPrListImpl: () => [],
+    },
+  );
+  assert.equal(result.length, 1);
+  assert.equal(findOpenExecutionLinkedPr(result, 375).number, 644);
+});
+
+test("defaultOpenExecutionLinkedPrList: a PR present in both listings is deduplicated by PR number", () => {
+  const searchPr = { number: 644, url: "u644", state: "OPEN", headRefName: "issue-375-correction", body: "Addresses #375." };
+  const openPr = { number: 644, url: "u644", state: "OPEN", headRefName: "issue-375-correction", body: "Addresses #375." };
+  const result = defaultOpenExecutionLinkedPrList(
+    { repo: "o/r", executionIssue: 375 },
+    { ghPrListImpl: () => [searchPr], ghOpenPrListImpl: () => [openPr] },
+  );
+  assert.equal(result.length, 1);
+  assert.equal(result[0].number, 644);
 });
 
 test("reconcileReadyPrBreakpoint: crossed:true when a linked PR is found", async () => {

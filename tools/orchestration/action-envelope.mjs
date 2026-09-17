@@ -491,3 +491,14 @@ export function classifyEnvelopeCompliance(state, actionsTaken = [], context = {
 export function knownEnvelopeStates() {
   return Object.keys(ENVELOPES);
 }
+
+// Stage 1 review finding on PR #647 (issue #646, P2): the verdict states whose
+// `getActionEnvelope` branch above derives `authorizedActions` from `context.nextCommand`
+// (`parseChainedCommands`) rather than a fixed table row. Exported as the single source of
+// truth for any caller that must know when omitting `context` is unsafe — `getActionEnvelope`
+// itself degrades silently (missing context reads as "no chained command", not as an error), so
+// `verify-action-envelope.mjs`'s CLI wrapper below uses this list to fail closed instead of
+// certifying a spuriously empty/incomplete action list as compliant.
+export function contextSensitiveEnvelopeStates() {
+  return ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION"];
+}

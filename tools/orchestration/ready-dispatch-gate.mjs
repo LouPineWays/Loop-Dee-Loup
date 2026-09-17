@@ -1380,6 +1380,61 @@ export function defaultGhPrList({ repo, executionIssue }) {
   return JSON.parse(raw);
 }
 
+// Stage 1 review finding on PR #647 (issue #646, P1): GitHub's PR search (what `defaultGhPrList`
+// above keys `--search` off) indexes title/body text only — it never indexes a PR's own head ref
+// name. A correction PR linked purely by the permitted branch-name convention
+// ("issue-<executionIssue>-...", no "Addresses #N"/"Implements #N" body marker) can therefore
+// never surface from that search, so `findOpenExecutionLinkedPr` never even receives it as a
+// candidate and `reconcileStage2CorrectionPr` below wrongly reports `crossed: false`, authorizing
+// a duplicate correction-worker dispatch — the exact #487/#643/#644/#645 failure this
+// reconciliation exists to prevent.
+//
+// This is Stage 2 correction-PR reconciliation's own acquisition boundary, deliberately separate
+// from `defaultGhPrList` above rather than a change to it: `reconcileReadyPrBreakpoint`'s
+// established pre-dispatch READY-lifecycle route (issue #456 unit 456-B) already works correctly
+// off the search-only lookup and stays untouched. One additional bounded, unscoped listing of
+// currently OPEN PRs (`--state open --limit 30`, no `--search`) is merged in by PR number so a
+// branch-only-linked candidate is discoverable via `referencesExecutionIssue`'s own headRefName
+// check — bounded to open PRs only, never a full-history/closed-PR scan, per AGENTS.md's "keep
+// the lookup narrow" instruction.
+//
+// `ghPrListImpl`/`ghOpenPrListImpl` are injected (defaulting to the real search-based and
+// unscoped-open `gh` calls respectively) so the merge/dedup logic itself — the part this
+// correction actually changes — is directly unit-testable without touching the real network/`gh`
+// CLI, matching this file's existing injection convention.
+export function defaultOpenExecutionLinkedPrList(
+  { repo, executionIssue },
+  { ghPrListImpl = defaultGhPrList, ghOpenPrListImpl = defaultGhOpenPrList } = {},
+) {
+  const bySearch = ghPrListImpl({ repo, executionIssue });
+  const openUnscoped = ghOpenPrListImpl({ repo });
+  const merged = new Map();
+  for (const pr of [...bySearch, ...openUnscoped]) {
+    if (pr && typeof pr.number === "number") merged.set(pr.number, pr);
+  }
+  return [...merged.values()];
+}
+
+function defaultGhOpenPrList({ repo }) {
+  const raw = execFileSync(
+    "gh",
+    [
+      "pr",
+      "list",
+      "--repo",
+      repo,
+      "--state",
+      "open",
+      "--json",
+      "number,url,state,headRefName,headRefOid,body",
+      "--limit",
+      "30",
+    ],
+    { encoding: "utf8" },
+  );
+  return JSON.parse(raw);
+}
+
 // Issue #456 unit 456-B (the #447/#448/#453 live reproduction): before authorizing
 // READY_TO_DISPATCH off a plain `Lifecycle: READY` control Issue, reconcile against one
 // narrow, execution-Issue-scoped PR lookup — the recovery safety net the Shared Contract
