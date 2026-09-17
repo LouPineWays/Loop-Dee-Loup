@@ -31,6 +31,7 @@ import {
   reconcileReadyPrBreakpoint,
   referencesExecutionIssue,
   defaultOpenExecutionLinkedPrList,
+  assertOpenPrListNotTruncated,
 } from "./ready-dispatch-gate.mjs";
 import { getActionEnvelope } from "./action-envelope.mjs";
 
@@ -2619,6 +2620,33 @@ test("defaultOpenExecutionLinkedPrList: a PR present in both listings is dedupli
   );
   assert.equal(result.length, 1);
   assert.equal(result[0].number, 644);
+});
+
+// Stage 2 audit finding on PR #647 (Audit #649, P1): a hardcoded `--limit 30` on the unscoped
+// open-PR listing silently truncated in any repo with more than 30 open PRs, indistinguishable
+// from genuine proof "no linked correction PR exists". `assertOpenPrListNotTruncated` is the
+// pure boundary check that now guards `defaultGhOpenPrList`'s real `gh` call — it must fail
+// closed (throw) at or above the safety bound rather than returning a silently truncated list.
+test("assertOpenPrListNotTruncated: passes a list well under the safety bound through unchanged", () => {
+  const list = [{ number: 1 }, { number: 2 }];
+  assert.equal(assertOpenPrListNotTruncated(list, 30), list);
+});
+
+test("assertOpenPrListNotTruncated: throws when the list length is at the safety bound (possible truncation)", () => {
+  const list = Array.from({ length: 30 }, (_, i) => ({ number: i + 1 }));
+  assert.throws(() => assertOpenPrListNotTruncated(list, 30), /at or above the 30-result safety bound/);
+});
+
+test("assertOpenPrListNotTruncated: throws when the list length exceeds the safety bound", () => {
+  const list = Array.from({ length: 31 }, (_, i) => ({ number: i + 1 }));
+  assert.throws(() => assertOpenPrListNotTruncated(list, 30));
+});
+
+test("assertOpenPrListNotTruncated: uses the real default safety bound (500) when no limit is passed", () => {
+  const shortList = [{ number: 1 }];
+  assert.equal(assertOpenPrListNotTruncated(shortList), shortList);
+  const longList = Array.from({ length: 500 }, (_, i) => ({ number: i + 1 }));
+  assert.throws(() => assertOpenPrListNotTruncated(longList));
 });
 
 test("reconcileReadyPrBreakpoint: crossed:true when a linked PR is found", async () => {

@@ -1393,7 +1393,7 @@ export function defaultGhPrList({ repo, executionIssue }) {
 // from `defaultGhPrList` above rather than a change to it: `reconcileReadyPrBreakpoint`'s
 // established pre-dispatch READY-lifecycle route (issue #456 unit 456-B) already works correctly
 // off the search-only lookup and stays untouched. One additional bounded, unscoped listing of
-// currently OPEN PRs (`--state open --limit 30`, no `--search`) is merged in by PR number so a
+// currently OPEN PRs (`--state open`, no `--search`) is merged in by PR number so a
 // branch-only-linked candidate is discoverable via `referencesExecutionIssue`'s own headRefName
 // check — bounded to open PRs only, never a full-history/closed-PR scan, per AGENTS.md's "keep
 // the lookup narrow" instruction.
@@ -1415,6 +1415,32 @@ export function defaultOpenExecutionLinkedPrList(
   return [...merged.values()];
 }
 
+// Stage 2 audit finding on PR #647 (Audit #649, P1): the old hardcoded `--limit 30` made this
+// unscoped open-PR listing silently truncate in any repository with more than 30 open PRs —
+// `gh pr list` never signals truncation itself, so a truncated result was indistinguishable from
+// genuine proof "no linked correction PR exists", exactly the unsafe assumption issue #646 exists
+// to prevent. `OPEN_PR_LIST_SAFETY_BOUND` widens the practical limit and `assertOpenPrListNotTruncated`
+// fails closed (throws) whenever the result lands at or above that bound, since a list at the
+// bound is itself evidence the true count may exceed it. The throw propagates out of
+// `ghOpenPrListImpl` into `reconcileStage2CorrectionPr`'s existing try/catch (next-review-
+// transition-gate.mjs), which already converts any acquisition error into `operationalError:
+// true` and fails the caller closed to AMBIGUOUS rather than authorizing a duplicate dispatch —
+// no new wiring needed here, only a listing that never lies about completeness.
+const OPEN_PR_LIST_SAFETY_BOUND = 500;
+
+// Pure. Separated from `defaultGhOpenPrList` below so the truncation check itself is directly
+// unit-testable without touching the real `gh` CLI.
+export function assertOpenPrListNotTruncated(list, limit = OPEN_PR_LIST_SAFETY_BOUND) {
+  if (Array.isArray(list) && list.length >= limit) {
+    throw new Error(
+      `defaultGhOpenPrList returned ${list.length} open PRs, at or above the ${limit}-result safety ` +
+      `bound — this listing may be truncated and cannot be trusted as proof no linked correction PR ` +
+      `exists; widen OPEN_PR_LIST_SAFETY_BOUND or add exhaustive pagination`,
+    );
+  }
+  return list;
+}
+
 function defaultGhOpenPrList({ repo }) {
   const raw = execFileSync(
     "gh",
@@ -1428,11 +1454,11 @@ function defaultGhOpenPrList({ repo }) {
       "--json",
       "number,url,state,headRefName,headRefOid,body",
       "--limit",
-      "30",
+      String(OPEN_PR_LIST_SAFETY_BOUND),
     ],
     { encoding: "utf8" },
   );
-  return JSON.parse(raw);
+  return assertOpenPrListNotTruncated(JSON.parse(raw));
 }
 
 // Issue #456 unit 456-B (the #447/#448/#453 live reproduction): before authorizing

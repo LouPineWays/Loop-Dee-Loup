@@ -460,10 +460,15 @@ test("formatStage2CorrectionWorkerDispatchPrompt never restates audit narrative 
 // on the next dispatch. This template now points the worker at finalize-pr-breakpoint.mjs before
 // reporting, mirroring formatStage1CorrectionWorkerDispatchPrompt's own finalize-correction-
 // breakpoint.mjs mandate above.
-test("formatStage2CorrectionWorkerDispatchPrompt mandates opening/identifying a linked correction PR, requesting Stage 1, and finalize-pr-breakpoint.mjs before reporting, naming its fail-closed reference", () => {
+// Stage 2 audit finding on PR #647 (Audit #649, P1): the control-mode clause previously said
+// only "request Stage 1 at its head", the same generic phrase the direct-reference branch also
+// contains -- matching that phrase alone does not prove control mode mandates the deterministic
+// tools/review-watch/trigger.mjs trigger rather than an ad hoc review request. Assert the exact
+// script reference, not just the word "Stage 1".
+test("formatStage2CorrectionWorkerDispatchPrompt mandates opening/identifying a linked correction PR, requesting Stage 1 via trigger.mjs, and finalize-pr-breakpoint.mjs before reporting, naming its fail-closed reference", () => {
   const prompt = formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: 559 });
   assert.match(prompt, /correction PR/);
-  assert.match(prompt, /Stage 1/);
+  assert.match(prompt, /request Stage 1 at its head via tools\/review-watch\/trigger\.mjs/);
   assert.match(prompt, /tools\/orchestration\/finalize-pr-breakpoint\.mjs/);
   assert.match(prompt, /PR_BREAKPOINT_UNVERIFIED/);
 });
