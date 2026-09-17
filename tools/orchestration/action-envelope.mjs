@@ -213,6 +213,21 @@ const ENVELOPES = {
     authorizedActions: ["run-lifecycle-gate-record-verdict"],
   },
   STAGE2_RESPONSE_UNUSABLE: { mode: ENVELOPE_MODES.NONE, authorizedActions: [] },
+  // Issue #646 (the #487/#643/#644/#645 live reproduction): reconcileStage2CorrectionPr found
+  // an already-open, work-Issue-linked correction PR while re-evaluating what would otherwise
+  // be STAGE2_CORRECTION_REQUIRED -- the PR boundary was already crossed by a prior (possibly
+  // interrupted) correction worker, so this controller finalizes that existing PR's own PR/
+  // Stage-1 breakpoint directly (the same mechanical trigger-then-finalize sequence
+  // `docs/bounded-review-cycle.md`'s Integration/PR worker step 6 already authorizes a
+  // controller to run itself), rather than dispatching a sibling correction worker. This table
+  // row is the documentation-default (real thin control Issue) superset, kept only as a
+  // reference shape -- `getActionEnvelope` below derives the actual authorized actions from
+  // this verdict's own `nextCommand`, exactly like `STAGE2_CLOSE_READY` above, never guessed
+  // from `state` alone.
+  STAGE2_CORRECTION_PR_NEEDS_FINALIZATION: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["run-review-watch-trigger", "run-finalize-pr-breakpoint"],
+  },
 };
 
 // Fail-closed default for any verdict state this table does not recognize — including a state
@@ -274,6 +289,11 @@ function parseChainedCommands(commandText) {
 //     segment's own script (via `parseChainedCommands` above, never a raw substring match) —
 //     the shape `next-review-transition-gate.mjs`'s own `appendCloseControlCommand` produces only
 //     when that gate was invoked in control-Issue mode (never guessed from `state` alone).
+//   - `STAGE2_CORRECTION_PR_NEEDS_FINALIZATION` (issue #646) derives its authorized actions the
+//     same context-sensitive way: `run-review-watch-trigger`/`run-finalize-pr-breakpoint` are
+//     each authorized only when `nextCommand` actually chains that script — direct-reference
+//     mode's `nextCommand` (no thin control Issue) never chains `finalize-pr-breakpoint.mjs`,
+//     so that mode's envelope never authorizes a control write it has nothing to write onto.
 export function getActionEnvelope(state, context = {}) {
   const entry = typeof state === "string" ? ENVELOPES[state] : undefined;
   if (!entry) return { mode: FAIL_CLOSED_DEFAULT.mode, authorizedActions: [], reason: FAIL_CLOSED_DEFAULT.reason };
@@ -294,6 +314,22 @@ export function getActionEnvelope(state, context = {}) {
     if (hasWorkIssue) authorizedActions.push("run-lifecycle-gate-close-work-issue");
     authorizedActions.push("run-lifecycle-gate-close-audit");
     if (hasCloseControl) authorizedActions.push("run-close-control");
+    return { mode: entry.mode, authorizedActions };
+  }
+
+  // Issue #646: `STAGE2_CORRECTION_PR_NEEDS_FINALIZATION` derives its actual authorized actions
+  // from `context.nextCommand` the same way `STAGE2_CLOSE_READY` does above — `run-finalize-pr-
+  // breakpoint` is authorized only when `nextCommand` itself invokes `finalize-pr-breakpoint.mjs`
+  // as a chained segment, which `composeStage2CorrectionFinalizeCommand`'s own direct-reference
+  // mode (no thin control Issue to project onto) deliberately omits, so a no-control-Issue
+  // reconciliation's envelope never authorizes a control write it has no control Issue for.
+  if (state === "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION") {
+    const commands = parseChainedCommands(context.nextCommand);
+    const hasTrigger = commands.some((c) => c.scriptName === "trigger.mjs");
+    const hasFinalize = commands.some((c) => c.scriptName === "finalize-pr-breakpoint.mjs");
+    const authorizedActions = [];
+    if (hasTrigger) authorizedActions.push("run-review-watch-trigger");
+    if (hasFinalize) authorizedActions.push("run-finalize-pr-breakpoint");
     return { mode: entry.mode, authorizedActions };
   }
 
@@ -454,4 +490,15 @@ export function classifyEnvelopeCompliance(state, actionsTaken = [], context = {
 // nothing was left out, without duplicating the list by hand.
 export function knownEnvelopeStates() {
   return Object.keys(ENVELOPES);
+}
+
+// Stage 1 review finding on PR #647 (issue #646, P2): the verdict states whose
+// `getActionEnvelope` branch above derives `authorizedActions` from `context.nextCommand`
+// (`parseChainedCommands`) rather than a fixed table row. Exported as the single source of
+// truth for any caller that must know when omitting `context` is unsafe — `getActionEnvelope`
+// itself degrades silently (missing context reads as "no chained command", not as an error), so
+// `verify-action-envelope.mjs`'s CLI wrapper below uses this list to fail closed instead of
+// certifying a spuriously empty/incomplete action list as compliant.
+export function contextSensitiveEnvelopeStates() {
+  return ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION"];
 }

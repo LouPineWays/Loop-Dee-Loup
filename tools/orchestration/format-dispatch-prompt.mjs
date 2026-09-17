@@ -352,6 +352,33 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
 // dispatched correction worker reads Audit Issue #<auditIssue>'s completed Stage 2 report
 // directly, which itself names the work/execution Issue needing correction, so no second
 // reference is required here.
+//
+// Issue #646 (the #487/#643/#644/#645 live reproduction): the prior template mandated only
+// "apply one consolidated correction ... push it, and stop" — a bare push, with no PR creation/
+// linkage, Stage 1 trigger, or PR-breakpoint finalization required. That left a genuinely
+// successful correction indistinguishable, from a fresh controller's own durable-state read, from
+// one that never happened: control #487 stayed on PR #642/Stage 2 #643 after correction PR #644
+// existed, so a later fresh dispatch produced a duplicate PR #645 against the same finding. This
+// template now mandates the same PR/Stage-1 breakpoint the direct implementation-worker and
+// Integration/PR-worker routes already require (`docs/bounded-review-cycle.md`'s Integration/PR
+// worker step 6, and `finalize-pr-breakpoint.mjs`'s own #456 contract, extended by this same issue
+// to accept a `Lifecycle: AUDIT` source state): open or identify exactly one correction PR linked
+// to the work Issue, request Stage 1 at its live head via `trigger.mjs`, then run
+// `finalize-pr-breakpoint.mjs` before ever reporting success — on `PR_BREAKPOINT_UNVERIFIED`,
+// report that reference verbatim, never ordinary success, mirroring the Stage 1 sibling's own
+// `CORRECTION_BREAKPOINT_UNVERIFIED` contract above.
+// Stage 1 review finding on PR #647 (issue #646, P1): the unconditional finalizer mandate below
+// used to apply verbatim in direct-reference mode too (`controlIssue` absent), but
+// `finalize-pr-breakpoint.mjs` hard-requires positive-integer `--control-issue` AND
+// `--execution-issue` values and exits 1 (a plain operational failure, never the documented
+// `PR_BREAKPOINT_UNVERIFIED`) without them — an impossible instruction a direct-reference worker
+// could never satisfy. `composeStage2CorrectionFinalizeCommand` above already gets this right
+// (it omits the `finalize-pr-breakpoint.mjs` segment entirely when `controlIssue` is absent); this
+// template now mirrors that same branch in its prose. Direct-reference mode has no thin control
+// Issue to project a breakpoint onto in the first place, so its worker only requests Stage 1 at
+// the correction PR's head and reports the PR/head/work-Issue identity — a fresh invocation
+// continues via `next-review-transition-gate.mjs`'s own `--pr`/`--head`/`--issue` direct-reference
+// path, which re-derives live state without needing any control write.
 export function formatStage2CorrectionWorkerDispatchPrompt({ controlIssue = null, auditIssue }) {
   if (!isPositiveInteger(auditIssue)) {
     throw new Error("formatStage2CorrectionWorkerDispatchPrompt requires auditIssue to be a positive integer");
@@ -359,13 +386,20 @@ export function formatStage2CorrectionWorkerDispatchPrompt({ controlIssue = null
   if (controlIssue !== null && controlIssue !== undefined && !isPositiveInteger(controlIssue)) {
     throw new Error("formatStage2CorrectionWorkerDispatchPrompt requires controlIssue to be a positive integer when present");
   }
-  const controlLine = controlIssue != null ? ` Controlling Issue: #${controlIssue}.` : "";
+  const hasControlIssue = controlIssue != null;
+  const controlLine = hasControlIssue ? ` Controlling Issue: #${controlIssue}.` : "";
+  const breakpointClause = hasControlIssue
+    ? `request Stage 1 at its head, then run tools/orchestration/finalize-pr-breakpoint.mjs before ` +
+      `reporting; on PR_BREAKPOINT_UNVERIFIED report that reference, never success.`
+    : `request Stage 1 at its head via trigger.mjs; verify it succeeded. No control Issue exists to ` +
+      `finalize onto — skip finalize-pr-breakpoint.mjs. Report the PR number, head, and work Issue for ` +
+      `a fresh invocation's direct-reference resume.`;
   return (
     `Stage 2 correction worker dispatch. Audit Issue: #${auditIssue}.${controlLine}\n\n` +
     `Read Audit Issue #${auditIssue}'s completed Stage 2 report directly from GitHub to recover the audit ` +
-    `findings, the work Issue it names, and correction authority — they were not restated here on purpose. ` +
-    `Verify and apply one consolidated correction per docs/bounded-review-cycle.md, push it, and stop: do not ` +
-    `re-trigger the audit or terminalize this cycle in this context.`
+    `findings, the work Issue it names, and correction authority — not restated here on purpose. Apply one ` +
+    `consolidated correction per docs/bounded-review-cycle.md, open/identify one correction PR linked to the ` +
+    `work Issue, ${breakpointClause} Then stop: do not re-trigger the audit or terminalize this cycle here.`
   );
 }
 
