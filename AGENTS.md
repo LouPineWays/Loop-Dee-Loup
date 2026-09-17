@@ -95,6 +95,8 @@ When a worker's task is already backed by a self-sufficient durable execution Is
 
 When an execution Issue's implementation is planned rather than performed inline, the stages between dispatch and PR — Plan, Route/Prepare, Execute, Integrate/PR — are separate bounded sessions: exactly one planning owner reads the thick Issue in full, the plan/unit/shared-contract artifacts live as fixed-format comments on that same Issue rather than as new backlog Issues, deterministic routing is a later stage and never a second planning pass, and the integration worker that opens the PR is never the independent reviewer. See `docs/operating-model.md` § Execution-stage session boundaries and `docs/bounded-review-cycle.md` § Integration/PR worker.
 
+When more than one subagent dispatch runs concurrently in the same message and any of them writes or commits repository state, dispatch each concurrent writer with `isolation: "worktree"` so it owns a distinct directory path rather than sharing the orchestrating session's own working directory with a sibling. This is the one gap issue #441's founder-confirmed path-lock invariant found in LDL's own dispatch surfaces — one live Claude Code session/process owns an exact directory path at a time, and an occupied path is a deterministic lock, never global Dispatch-capacity exhaustion; LDL itself launches no top-level session and cannot violate that boundary directly, but concurrent wave-dispatched unit workers can. A single, non-concurrent dispatch needs no isolation change. See `docs/operating-model.md` § Concurrent subagent directory isolation.
+
 ## Session communication budget
 
 Keep Claude Code messages deliberately terse. Normally send only:
