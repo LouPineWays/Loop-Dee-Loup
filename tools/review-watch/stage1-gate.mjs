@@ -61,6 +61,15 @@
 //     `filename`) fails closed (exit 1) exactly like a lookup error or a non-array response,
 //     rather than silently dropping or ignoring it.
 //
+// Issue #625 (Stage 2 audit of PR #622): the malformed-entry check above validated `filename`
+// but only consulted `previous_filename` when it already happened to be a non-empty string,
+// so a present-but-malformed `previous_filename` (a non-string, or an empty string) was
+// silently treated as if the property were absent — an incomplete rename-provenance read
+// could still grant EXEMPT. `run` below now requires that when a changed-file entry carries a
+// `previous_filename` property at all, its value must be a non-empty string, and fails closed
+// (exit 1) exactly like a malformed `filename` otherwise. An entry with no `previous_filename`
+// property remains valid, unaffected, for an ordinary non-rename change.
+//
 // RESPONSE_RECEIVED additionally requires the genuine response to be provably bound to the
 // exact frozen --head being gated (poll.mjs's matchBelongsToHead), not merely timestamped
 // after that head's trigger (issue #163): a delayed response for an older head on the same
@@ -211,7 +220,12 @@ export async function run(
     // dropped or coerced — the absence of evidence must never become exemption evidence.
     // Both the current `filename` and, for a rename, the source `previous_filename` are
     // checked: a rename out of a mandatory-review path is still a mandatory-review change
-    // (issue #616 Stage 1 review finding).
+    // (issue #616 Stage 1 review finding). `previous_filename` is optional — absent entirely
+    // on a non-rename entry, which remains valid — but when the property is present at all,
+    // it must be a non-empty string just like `filename`; a present-but-malformed value (a
+    // non-string, or an empty string) fails closed rather than being treated as absent, which
+    // would silently drop real rename-provenance evidence and could grant EXEMPT based on an
+    // incomplete changed-file set (issue #625 Stage 2 audit finding on PR #622).
     const paths = [];
     for (const entry of changedFiles) {
       if (!entry || typeof entry !== "object" || typeof entry.filename !== "string" || entry.filename.length === 0) {
@@ -220,8 +234,15 @@ export async function run(
           message: `Ambiguous changed-file read: malformed file entry for ${repo}#${number}: ${JSON.stringify(entry)}.`,
         };
       }
+      const hasPreviousFilename = Object.prototype.hasOwnProperty.call(entry, "previous_filename");
+      if (hasPreviousFilename && (typeof entry.previous_filename !== "string" || entry.previous_filename.length === 0)) {
+        return {
+          exitCode: 1,
+          message: `Ambiguous changed-file read: malformed file entry for ${repo}#${number}: ${JSON.stringify(entry)}.`,
+        };
+      }
       paths.push(entry.filename);
-      if (typeof entry.previous_filename === "string" && entry.previous_filename.length > 0) {
+      if (hasPreviousFilename) {
         paths.push(entry.previous_filename);
       }
     }

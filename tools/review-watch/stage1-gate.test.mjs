@@ -589,6 +589,58 @@ test("run: exits 1 when a changed-file entry's filename is an empty string (fail
   assert.match(result.message, /malformed file entry/);
 });
 
+test("run: exits 1 when a changed-file entry's previous_filename is present but not a string (fail closed, issue #625 Stage 2 audit finding)", async () => {
+  const result = await run(
+    { repo: LDL_REPO, number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: not review-worthy.",
+      ghPrFilesImpl: async () => [{ filename: "src/foo.js", previous_filename: 42 }],
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /malformed file entry/);
+});
+
+test("run: exits 1 when a changed-file entry's previous_filename is an empty string (fail closed, issue #625 Stage 2 audit finding)", async () => {
+  const result = await run(
+    { repo: LDL_REPO, number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: not review-worthy.",
+      ghPrFilesImpl: async () => [{ filename: "src/foo.js", previous_filename: "" }],
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /malformed file entry/);
+});
+
+test("run: EXEMPT — a changed-file entry with no previous_filename property at all remains valid (issue #625 Stage 2 audit finding: absence must stay distinct from malformed presence)", async () => {
+  const result = await run(
+    { repo: LDL_REPO, number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: not review-worthy.",
+      ghPrFilesImpl: async () => [{ filename: "src/foo.js" }],
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "EXEMPT");
+});
+
+test("run: NOT_REQUESTED with rejectedExemption — a valid previous_filename naming a mandatory-review path still rejects the exemption (issue #625 Stage 2 audit finding: regression guard alongside the new malformed-previous_filename check)", async () => {
+  const result = await run(
+    { repo: LDL_REPO, number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: renamed out of docs, not review-worthy.",
+      ghPrFilesImpl: async () => [{ filename: "fixtures/policy.txt", previous_filename: "docs/policy.md" }],
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.deepEqual(result.rejectedExemption.conflictingPaths, ["docs/policy.md"]);
+});
+
 test("run: NOT_REQUESTED — a fenced-example-only exemption in the PR body does not bypass Stage 1 (issue #162)", async () => {
   let ghApiCalls = 0;
   const body = ["Documenting the exemption syntax:", "", "```text", "Stage 1 exemption: generated artifact only", "```"].join(
