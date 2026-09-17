@@ -20,7 +20,14 @@
 //   EXEMPT           — the PR body records an explicit justified exemption. exit 0.
 //   NOT_REQUESTED    — no `@codex review` trigger found at the given --head. exit 2.
 //   PENDING          — a trigger exists but no genuine post-trigger bot response yet. exit 2.
-//   RESPONSE_RECEIVED — a trigger and a genuine post-trigger bot response both exist. exit 0.
+//   FINDINGS_LACK_FORMAL_REVIEW — a genuine, head-bound response exists and reports
+//                      actionable findings, but no formal GitHub PR review artifact (an
+//                      inline review comment or a review submission) backs any of it — only
+//                      plain issue-comments matches do. exit 2.
+//   RESPONSE_RECEIVED — a trigger and a genuine post-trigger bot response both exist, and
+//                      (per issue #638) either the response is a recognized "clean"/no-
+//                      actionable-findings reply, or at least one findings-bearing match
+//                      carries formal review-object provenance. exit 0.
 //
 // RESPONSE_RECEIVED additionally requires the genuine response to be provably bound to the
 // exact frozen --head being gated (poll.mjs's matchBelongsToHead), not merely timestamped
@@ -28,6 +35,21 @@
 // PR must never satisfy a newer head's gate just because it arrived later. A genuine response
 // that exists but isn't reliably bound to --head leaves the gate at PENDING, reported via
 // unboundGenuineMatches rather than folded into RESPONSE_RECEIVED.
+//
+// FINDINGS_LACK_FORMAL_REVIEW (issue #638): PR #637's live reproduction posted a substantive
+// P1 finding only as a top-level PR Issue comment (`pull_request_review_id: null`) — no
+// formal review object at all. #163's own contract already distinguished formal review/
+// review-comment objects (which carry commit identity) from plain issue comments (which
+// often do not); this state is the enforcement of that distinction for Stage 1's actual
+// completion decision. See stage1-findings.mjs for the narrow, fail-closed clean-vs-
+// findings-bearing content classifier and the formal-vs-plain endpoint check this composes.
+// A *clean* (no-actionable-findings) genuine response is unaffected by this state and keeps
+// prior behavior — any genuine bound match, on any endpoint, still satisfies
+// RESPONSE_RECEIVED, exactly as before this issue. This state has no automated retrigger or
+// recovery path, matching trigger.mjs's own cross-head/force blocks: a second Stage 1 round
+// merely because the provider used the wrong response surface is not authorized by default
+// (docs/bounded-review-cycle.md Stage 1 step 7) — treat it as a founder interrupt per
+// AGENTS.md, the same as a blocked repeat-round trigger.
 //
 // This gate does not evaluate whether a reported finding is valid or whether a correction
 // actually fixes it — that is the controlling session's job under Stage 1 steps 4-9. Its
@@ -37,8 +59,9 @@
 // Usage:
 //   node tools/review-watch/stage1-gate.mjs --repo OWNER/REPO --number 50 --head <sha>
 //
-// Exit codes: 0 = EXEMPT or RESPONSE_RECEIVED (safe to proceed), 2 = NOT_REQUESTED or
-// PENDING (must not be reported complete/merge-ready yet), 1 = operational error.
+// Exit codes: 0 = EXEMPT or RESPONSE_RECEIVED (safe to proceed), 2 = NOT_REQUESTED, PENDING,
+// or FINDINGS_LACK_FORMAL_REVIEW (must not be reported complete/merge-ready yet), 1 =
+// operational error.
 //
 // Tests: node --test tools/review-watch/stage1-gate.test.mjs
 
@@ -46,6 +69,7 @@ import { execFileSync } from "node:child_process";
 import { endpointsFor, findAllMatches, matchBelongsToHead } from "./poll.mjs";
 import { findExistingTrigger, findTriggerRounds } from "./trigger.mjs";
 import { isGenuineResponse } from "./genuine-response.mjs";
+import { isFindingsBearingResponse, isFormalReviewEndpoint } from "./stage1-findings.mjs";
 
 // Re-exported so existing callers/tests that import isGenuineResponse from this module
 // (its original home) keep working unchanged now that the classifier itself lives in
@@ -205,6 +229,32 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPrViewImpl = defau
       nonGenuineMatches,
       unboundGenuineMatches,
     };
+  }
+
+  // Issue #638: a findings-bearing round (at least one genuine, head-bound match reporting
+  // actionable findings, per stage1-findings.mjs's isFindingsBearingResponse) may only be
+  // satisfied by RESPONSE_RECEIVED when at least one genuine, head-bound match carries
+  // durable formal-review-object provenance — an inline review comment (`pull-comments`) or
+  // a review submission (`pull-reviews`), never a plain `issue-comments` match alone, no
+  // matter how substantive its content (PR #637's live reproduction). A round with no
+  // findings-bearing content at all — every bound match is a recognized "clean"/no-issues
+  // reply — is unaffected and keeps the prior behavior: any genuine bound match, on any
+  // endpoint, satisfies it. Mixed surfaces (a formal match plus a supplementary plain
+  // comment) are accepted on the strength of the formal match without discarding the
+  // supplementary one from `matches`.
+  const hasFormalBoundMatch = boundGenuineMatches.some((m) => isFormalReviewEndpoint(m.endpoint));
+  if (!hasFormalBoundMatch) {
+    const findingsMatches = boundGenuineMatches.filter((m) => isFindingsBearingResponse(m.body_excerpt));
+    if (findingsMatches.length > 0) {
+      return {
+        exitCode: 2,
+        state: "FINDINGS_LACK_FORMAL_REVIEW",
+        triggerTimestamp: trigger.created_at,
+        findingsMatches,
+        nonGenuineMatches,
+        unboundGenuineMatches,
+      };
+    }
   }
 
   return {

@@ -214,6 +214,15 @@ test("resolvePreMergeVerdict: an unrecognized state combination fails closed to 
   assert.match(v.reason, /SOMETHING_NEW/);
 });
 
+test("resolvePreMergeVerdict: stage1-gate's new FINDINGS_LACK_FORMAL_REVIEW state (issue #638) is not a recognized pre-merge state and fails closed to AMBIGUOUS -- a founder-interrupt-eligible stop, never a silent STAGE1_CORRECTION_REQUIRED auto-route or a merge authorization", () => {
+  const v = resolvePreMergeVerdict(
+    { stage1: stage1("FINDINGS_LACK_FORMAL_REVIEW", { exitCode: 2 }), mergeReady: mergeReady("MERGE_READY") },
+  );
+  assert.equal(v.state, "AMBIGUOUS");
+  assert.equal(v.stopAfter, true);
+  assert.match(v.reason, /FINDINGS_LACK_FORMAL_REVIEW/);
+});
+
 test("resolvePreMergeVerdict: carries the given context through on every verdict", () => {
   const v = resolvePreMergeVerdict(
     { stage1: stage1("RESPONSE_RECEIVED"), mergeReady: mergeReady("MERGE_READY") },

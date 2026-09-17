@@ -234,7 +234,10 @@ function isCodexCloudSetupPrompt(text) {
 // markers are only stripped when followed by whitespace, so they can never consume "*" or
 // "_" emphasis markers (which are only ever immediately followed by non-space content) --
 // the two wrapper classes stay unambiguous regardless of loop order.
-function stripLeadingMarkdownWrapper(text) {
+// Exported (issue #638) so stage1-findings.mjs's clean/findings-bearing classifier can reuse
+// the exact same leading-Markdown-wrapper-stripping discipline as isGenuineResponse, rather
+// than re-implementing a second, competing normalization step.
+export function stripLeadingMarkdownWrapper(text) {
   let s = text ?? "";
   let prev;
   do {

@@ -609,7 +609,7 @@ test("run: PENDING — a list-formatted BLOCKED reply does not open the gate (Yo
   assert.equal(result.nonGenuineMatches.length, 1);
 });
 
-test("run: RESPONSE_RECEIVED — a genuine finding discussing permission rules opens the gate (issue #161 Failure B)", async () => {
+test("run: FINDINGS_LACK_FORMAL_REVIEW — a genuine finding discussing permission rules is correctly classified genuine (not BLOCKED, issue #161 Failure B) but, as a plain issue-comment-only match with no recognized clean phrasing, no longer satisfies the gate on its own (issue #638 narrowed this from the prior RESPONSE_RECEIVED behavior)", async () => {
   const result = await run(
     { repo: "owner/repo", number: 50, head: "abc123" },
     {
@@ -630,9 +630,40 @@ test("run: RESPONSE_RECEIVED — a genuine finding discussing permission rules o
       },
     },
   );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "FINDINGS_LACK_FORMAL_REVIEW");
+  assert.equal(result.findingsMatches.length, 1);
+  assert.equal(result.findingsMatches[0].id, 2);
+});
+
+test("run: RESPONSE_RECEIVED — the same permission-rules finding, backed by a formal pull-reviews match instead, satisfies the gate", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [{ id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" }];
+        }
+        if (path.includes("/reviews")) {
+          return [
+            {
+              id: 9,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "Reviewed the diff. Note: the reviewer cannot have write permission under this workflow, by design.",
+              submitted_at: "2026-08-23T13:05:00Z",
+              commit_id: "abc123",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "RESPONSE_RECEIVED");
   assert.equal(result.matches.length, 1);
+  assert.equal(result.matches[0].endpoint, "pull-reviews");
 });
 
 test("run: PENDING — a Codex Cloud 'create an environment' reply does not open the gate (Stage 2 audit finding on issue #141)", async () => {
@@ -923,4 +954,290 @@ test("run: exits 1 on an unexpected (non-array) comments response instead of gue
   );
   assert.equal(result.exitCode, 1);
   assert.match(result.message, /Ambiguous trigger read/);
+});
+
+// Issue #638 required-checks fixtures: findings-bearing Stage 1 output must use a formal
+// GitHub review artifact (an inline review comment or a review submission), never a plain
+// top-level PR Issue comment alone. Every fixture below is numbered per issue #638's own
+// "Required checks" list.
+
+const PR_637_HEAD = "aa344fce02c3b3fcfc9427c79d443d73211ec6af";
+// The exact live reproduction body from PR #637's response comment
+// (#issuecomment-5712333910) — a substantive P1 finding posted only as a plain top-level PR
+// Issue comment, with pull_request_review_id: null on GitHub (no formal review object at
+// all, which findAllMatches/findExemption never see directly — the absence is represented
+// here simply by never returning anything from the pull-comments/pull-reviews endpoints).
+const PR_637_FINDING_BODY =
+  "## Review finding\n\n- **P1 — Validate authority-envelope field types instead of truthiness.** The classifier " +
+  "promises that malformed trigger shapes fail closed, but all three authorized paths currently accept arbitrary " +
+  "truthy values.";
+
+test("run: 1. PR #637 reproduction — a same-head trigger plus a substantive findings-bearing bot Issue comment only does not satisfy Stage 1", async () => {
+  const result = await run(
+    { repo: "LouPineWays/Loop-Dee-Loup", number: 637, head: PR_637_HEAD },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody(PR_637_HEAD), created_at: "2026-09-17T09:47:10Z" },
+            {
+              id: 2,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: PR_637_FINDING_BODY,
+              created_at: "2026-09-17T09:48:05Z",
+              html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/pull/637#issuecomment-5712333910",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "FINDINGS_LACK_FORMAL_REVIEW");
+  assert.equal(result.findingsMatches.length, 1);
+  assert.equal(result.findingsMatches[0].endpoint, "issue-comments");
+});
+
+test("run: 2. formal review body — a same-head genuine PR review submission with an actionable finding is accepted findings-bearing review evidence", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [{ id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" }];
+        }
+        if (path.includes("/reviews")) {
+          return [
+            {
+              id: 9,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "P1: the classifier accepts arbitrary truthy values instead of validating field types.",
+              submitted_at: "2026-08-23T13:05:00Z",
+              commit_id: "abc123",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "RESPONSE_RECEIVED");
+  assert.equal(result.matches.length, 1);
+  assert.equal(result.matches[0].endpoint, "pull-reviews");
+});
+
+test("run: 3. inline review comments — same-head genuine inline findings, including multiple comments from one invocation, are accepted as one Stage 1 round", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [{ id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" }];
+        }
+        if (path.includes("/pulls/") && path.includes("/comments")) {
+          return [
+            {
+              id: 30,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "P1: missing null check on this line.",
+              created_at: "2026-08-23T13:05:00Z",
+              commit_id: "abc123",
+            },
+            {
+              id: 31,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "P2: this branch is unreachable.",
+              created_at: "2026-08-23T13:05:30Z",
+              commit_id: "abc123",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "RESPONSE_RECEIVED");
+  assert.equal(result.matches.length, 2);
+  assert.ok(result.matches.every((m) => m.endpoint === "pull-comments"));
+});
+
+test("run: 4. mixed surface — a formal findings-bearing review plus a supplementary findings-bearing Issue comment is accepted based on the formal artifact without losing the supplementary evidence", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
+            {
+              id: 2,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "P2: also noting a related concern as a standalone comment.",
+              created_at: "2026-08-23T13:06:00Z",
+            },
+          ];
+        }
+        if (path.includes("/reviews")) {
+          return [
+            {
+              id: 9,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "P1: the classifier accepts arbitrary truthy values instead of validating field types.",
+              submitted_at: "2026-08-23T13:05:00Z",
+              commit_id: "abc123",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "RESPONSE_RECEIVED");
+  assert.equal(result.matches.length, 2, "the formal review and the supplementary issue comment are both retained in matches");
+  assert.ok(result.matches.some((m) => m.endpoint === "pull-reviews"));
+  assert.ok(result.matches.some((m) => m.endpoint === "issue-comments"));
+});
+
+test("run: 5. wrong/old head — a formal findings-bearing review bound to an older head cannot satisfy a newer head's gate (preserves issue #163; the new findings-bearing check never even runs when nothing is bound)", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "sha-b" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody("sha-a"), created_at: "2026-08-23T13:00:00Z" },
+            { id: 2, body: triggerCommentBody("sha-b"), created_at: "2026-08-23T14:00:00Z" },
+            {
+              id: 3,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "P1: this finding arrived as a plain Issue comment, unbound to either head (two rounds exist).",
+              created_at: "2026-08-23T14:06:00Z",
+            },
+          ];
+        }
+        if (path.includes("/reviews")) {
+          return [
+            {
+              id: 9,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "P1: a formal finding, but bound to the older head A, not B.",
+              submitted_at: "2026-08-23T15:00:00Z",
+              commit_id: "sha-a",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  // Head B has no bound genuine match at all (the formal review is commit-bound to A, and the
+  // plain comment cannot be reliably bound once two distinct rounds exist, per issue #163) —
+  // the gate must report PENDING, not RESPONSE_RECEIVED (the old head's formal artifact never
+  // leaks across heads) and not FINDINGS_LACK_FORMAL_REVIEW (that state only applies once at
+  // least one genuine match is actually bound to the requested head).
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "PENDING");
+  assert.equal(result.unboundGenuineMatches.length, 2);
+});
+
+test("run: 6. plain comment with explicit textual 'Reviewed commit:' citation remains insufficient by itself — parsed prose never substitutes for GitHub review-object provenance", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
+            {
+              id: 2,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "Reviewed commit: abc123. P1: missing null check on line 42.",
+              created_at: "2026-08-23T13:05:00Z",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "FINDINGS_LACK_FORMAL_REVIEW");
+  assert.equal(result.findingsMatches.length, 1);
+});
+
+// 7. Clean/no-actionable response regression: already covered by the pre-existing
+// RESPONSE_RECEIVED fixtures above ("Reviewed. No issues found.", "LGTM", "Reviewed after
+// retry. No issues found.", "Reviewed head A/B. No issues found.") — each is an
+// issue-comments-only or pull-reviews match with no formal-artifact requirement triggered,
+// exactly as before this issue.
+
+test("run: 7b. RESPONSE_RECEIVED — Codex's own real fixed clean-pass preamble ('Codex Review: Didn't find any major issues.'), delivered as a plain issue-comments-only match, is unaffected by the new formal-artifact requirement (consumer-sync-gate.mjs's own CLEAN_REVIEW_PATTERN, observed live on PRs #257/#266 — this is the exact real-world surface consumer-sync-gate.mjs's automated flow depends on)", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
+            {
+              id: 2,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "Codex Review: Didn't find any major issues. Nice work!",
+              created_at: "2026-08-23T13:05:00Z",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "RESPONSE_RECEIVED");
+  assert.equal(result.matches.length, 1);
+  assert.equal(result.matches[0].endpoint, "issue-comments");
+});
+
+// 8. Non-genuine reviewer responses (BLOCKED/permission/setup-prompt) remain fail-closed:
+// already covered by the pre-existing PENDING fixtures above — isGenuineResponse filtering
+// runs before findings-bearing classification, so this issue does not change that behavior.
+
+test("run: FINDINGS_LACK_FORMAL_REVIEW — a genuine unbound findings-bearing match is not counted toward findingsMatches (head-binding still applies first)", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "sha-b" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody("sha-a"), created_at: "2026-08-23T13:00:00Z" },
+            { id: 2, body: triggerCommentBody("sha-b"), created_at: "2026-08-23T14:00:00Z" },
+            {
+              id: 3,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "P1: an unbound plain comment finding on a multi-head thread.",
+              created_at: "2026-08-23T14:06:00Z",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  // Two distinct trigger heads exist and this match carries no commit_id, so it is unbound
+  // to either head (issue #163) — the gate must report PENDING (no bound genuine match at
+  // all), not FINDINGS_LACK_FORMAL_REVIEW (which requires at least one *bound* genuine match).
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "PENDING");
+  assert.equal(result.unboundGenuineMatches.length, 1);
 });
