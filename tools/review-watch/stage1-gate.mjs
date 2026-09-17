@@ -59,7 +59,11 @@
 //     checks both `filename` and, when present, `previous_filename` against
 //     isControlPlanePath. A malformed entry (not an object, or a non-string/empty
 //     `filename`) fails closed (exit 1) exactly like a lookup error or a non-array response,
-//     rather than silently dropping or ignoring it.
+//     rather than silently dropping or ignoring it. The same fail-closed treatment applies
+//     when `previous_filename` is present but not a non-empty string: an earlier version of
+//     this check only used `previous_filename` when it was already valid, so a present
+//     malformed value (e.g. a non-string) was silently treated as absent and could still
+//     grant EXEMPT on incomplete rename evidence (issue #625 Stage 2 audit finding).
 //
 // RESPONSE_RECEIVED additionally requires the genuine response to be provably bound to the
 // exact frozen --head being gated (poll.mjs's matchBelongsToHead), not merely timestamped
@@ -211,7 +215,10 @@ export async function run(
     // dropped or coerced — the absence of evidence must never become exemption evidence.
     // Both the current `filename` and, for a rename, the source `previous_filename` are
     // checked: a rename out of a mandatory-review path is still a mandatory-review change
-    // (issue #616 Stage 1 review finding).
+    // (issue #616 Stage 1 review finding). When `previous_filename` is present at all, it
+    // must be a non-empty string or the entry fails closed the same as a malformed `filename`
+    // — a present-but-malformed rename source must never be silently treated as absent and
+    // fall through to incomplete rename evidence (issue #625 Stage 2 audit finding).
     const paths = [];
     for (const entry of changedFiles) {
       if (!entry || typeof entry !== "object" || typeof entry.filename !== "string" || entry.filename.length === 0) {
@@ -221,7 +228,13 @@ export async function run(
         };
       }
       paths.push(entry.filename);
-      if (typeof entry.previous_filename === "string" && entry.previous_filename.length > 0) {
+      if (entry.previous_filename !== undefined) {
+        if (typeof entry.previous_filename !== "string" || entry.previous_filename.length === 0) {
+          return {
+            exitCode: 1,
+            message: `Ambiguous changed-file read: malformed file entry for ${repo}#${number}: ${JSON.stringify(entry)}.`,
+          };
+        }
         paths.push(entry.previous_filename);
       }
     }

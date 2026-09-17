@@ -465,6 +465,45 @@ test("run: EXEMPT — a rename INTO a mandatory-review-shaped path but with a no
   assert.equal(result.state, "EXEMPT");
 });
 
+test("run: exits 1 when a changed-file entry's previous_filename is present but not a string (fail closed, issue #625 Stage 2 audit finding)", async () => {
+  const result = await run(
+    { repo: LDL_REPO, number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: not review-worthy.",
+      ghPrFilesImpl: async () => [{ filename: "src/foo.js", previous_filename: 42 }],
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /malformed file entry/);
+});
+
+test("run: exits 1 when a changed-file entry's previous_filename is an empty string (fail closed, issue #625 Stage 2 audit finding)", async () => {
+  const result = await run(
+    { repo: LDL_REPO, number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: not review-worthy.",
+      ghPrFilesImpl: async () => [{ filename: "src/foo.js", previous_filename: "" }],
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /malformed file entry/);
+});
+
+test("run: EXEMPT — an absent previous_filename on an otherwise-valid non-rename entry remains valid (issue #625 Stage 2 audit finding)", async () => {
+  const result = await run(
+    { repo: LDL_REPO, number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "Stage 1 exemption: plain edit, not review-worthy.",
+      ghPrFilesImpl: async () => [{ filename: "src/foo.js" }],
+      ghApiImpl: async () => [],
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "EXEMPT");
+});
+
 test("run: NOT_REQUESTED with rejectedExemption — scans the entire paginated changed-file set, not only the first page (issue #616 Stage 1 review finding: gh pr view --json files silently caps at 100)", async () => {
   const files = [];
   for (let i = 0; i < 150; i++) files.push({ filename: `src/file-${i}.js` });
