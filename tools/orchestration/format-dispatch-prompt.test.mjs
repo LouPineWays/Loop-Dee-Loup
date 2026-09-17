@@ -468,9 +468,23 @@ test("formatStage2CorrectionWorkerDispatchPrompt never restates audit narrative 
 test("formatStage2CorrectionWorkerDispatchPrompt mandates opening/identifying a linked correction PR, requesting Stage 1 via trigger.mjs, and finalize-pr-breakpoint.mjs before reporting, naming its fail-closed reference", () => {
   const prompt = formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: 559 });
   assert.match(prompt, /correction PR/);
-  assert.match(prompt, /request Stage 1 at its head via tools\/review-watch\/trigger\.mjs/);
+  assert.match(prompt, /request Stage 1 at its head via trigger\.mjs/);
   assert.match(prompt, /tools\/orchestration\/finalize-pr-breakpoint\.mjs/);
   assert.match(prompt, /PR_BREAKPOINT_UNVERIFIED/);
+});
+
+// Stage 1 review finding on this PR (P2): the added "via trigger.mjs" clause pushed the
+// control-mode prompt to 703 chars when both issue fields sit at the largest value
+// isPositiveInteger still accepts (Number.MAX_SAFE_INTEGER), over the CLI's 700-char
+// assertReferenceOnly ceiling -- a valid STAGE2_CORRECTION_REQUIRED verdict at that accepted
+// input boundary would then exit with an error instead of producing its dispatch prompt.
+// Exercise that exact worst case here rather than only a typical-size example.
+test("formatStage2CorrectionWorkerDispatchPrompt (control mode) stays under the reference-only threshold even at the largest accepted issue numbers", () => {
+  const prompt = formatStage2CorrectionWorkerDispatchPrompt({
+    controlIssue: Number.MAX_SAFE_INTEGER,
+    auditIssue: Number.MAX_SAFE_INTEGER,
+  });
+  assert.ok(prompt.length < 700, `expected < 700 chars, got ${prompt.length}`);
 });
 
 // Stage 1 review finding on PR #647 (issue #646, P1): direct-reference mode (`controlIssue`

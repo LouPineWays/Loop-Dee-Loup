@@ -389,9 +389,8 @@ export function formatStage2CorrectionWorkerDispatchPrompt({ controlIssue = null
   const hasControlIssue = controlIssue != null;
   const controlLine = hasControlIssue ? ` Controlling Issue: #${controlIssue}.` : "";
   const breakpointClause = hasControlIssue
-    ? `request Stage 1 at its head via tools/review-watch/trigger.mjs, then run ` +
-      `tools/orchestration/finalize-pr-breakpoint.mjs before reporting; on PR_BREAKPOINT_UNVERIFIED report ` +
-      `that reference, never success.`
+    ? `request Stage 1 at its head via trigger.mjs, then run tools/orchestration/finalize-pr-breakpoint.mjs ` +
+      `before reporting; on PR_BREAKPOINT_UNVERIFIED report that reference, never success.`
     : `request Stage 1 at its head via trigger.mjs; verify it succeeded. No control Issue exists to ` +
       `finalize onto — skip finalize-pr-breakpoint.mjs. Report the PR number, head, and work Issue for ` +
       `a fresh invocation's direct-reference resume.`;

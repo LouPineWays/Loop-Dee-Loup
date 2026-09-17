@@ -1441,6 +1441,14 @@ export function assertOpenPrListNotTruncated(list, limit = OPEN_PR_LIST_SAFETY_B
   return list;
 }
 
+// Stage 1 review finding on this PR (P2): `execFileSync`'s default 1 MiB stdout buffer is easy
+// to exceed once every one of up to `OPEN_PR_LIST_SAFETY_BOUND` records carries its full `body`
+// — well under 500 nontrivial open PRs already crosses it, throwing before
+// `assertOpenPrListNotTruncated` ever runs and permanently resolving reconciliation to
+// operational `AMBIGUOUS` for an otherwise-valid, non-truncated repository. An explicit,
+// generous `maxBuffer` avoids that false failure without weakening the truncation check above.
+const GH_OPEN_PR_LIST_MAX_BUFFER_BYTES = 50 * 1024 * 1024;
+
 function defaultGhOpenPrList({ repo }) {
   const raw = execFileSync(
     "gh",
@@ -1456,7 +1464,7 @@ function defaultGhOpenPrList({ repo }) {
       "--limit",
       String(OPEN_PR_LIST_SAFETY_BOUND),
     ],
-    { encoding: "utf8" },
+    { encoding: "utf8", maxBuffer: GH_OPEN_PR_LIST_MAX_BUFFER_BYTES },
   );
   return assertOpenPrListNotTruncated(JSON.parse(raw));
 }
