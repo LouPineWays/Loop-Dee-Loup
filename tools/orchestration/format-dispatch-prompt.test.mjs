@@ -439,19 +439,33 @@ test("formatStage2CorrectionWorkerDispatchPrompt stays well under the reference-
 
 test("formatStage2CorrectionWorkerDispatchPrompt never restates audit narrative or AGENTS.md contract prose", () => {
   const prompt = formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: 559 });
-  for (const forbidden of [
-    "NOT CLEAN",
-    "Verdict:",
-    "STATUS",
-    "OUTCOME",
-    "CHANGED",
-    "VERIFIED",
-    "DECISIONS",
-    "NEW RISKS",
-    "Founder interrupt conditions",
-  ]) {
+  for (const forbidden of ["NOT CLEAN", "Verdict:"]) {
     assert.ok(!prompt.includes(forbidden), `prompt unexpectedly contains restated content "${forbidden}"`);
   }
+  // Issue #646: this template's own fixed `PR_BREAKPOINT_UNVERIFIED` reference (added to point
+  // the worker at the mandatory finalize-pr-breakpoint.mjs step) legitimately contains "VERIFIED"
+  // as a substring ("UN" immediately before it) -- word-boundary matched, mirroring
+  // formatStage1CorrectionWorkerDispatchPrompt's own established `CORRECTION_BREAKPOINT_UNVERIFIED`
+  // precedent above, rather than a bare `.includes` check that would misreport it as a restated
+  // Slice-handoff field.
+  for (const forbidden of ["STATUS", "OUTCOME", "CHANGED", "VERIFIED", "DECISIONS", "NEW RISKS", "Founder interrupt conditions"]) {
+    assert.ok(!new RegExp(`\\b${forbidden}\\b`).test(prompt), `prompt unexpectedly contains restated field "${forbidden}"`);
+  }
+});
+
+// Issue #646 (the #487/#643/#644/#645 live reproduction): the prior template ended at "push it,
+// and stop" -- no PR/linkage, Stage 1 trigger, or breakpoint finalization required, which is
+// exactly what let a genuinely successful correction (PR #644) leave the thin control Issue
+// durably pointed at the pre-correction PR/audit state, producing a duplicate correction PR #645
+// on the next dispatch. This template now points the worker at finalize-pr-breakpoint.mjs before
+// reporting, mirroring formatStage1CorrectionWorkerDispatchPrompt's own finalize-correction-
+// breakpoint.mjs mandate above.
+test("formatStage2CorrectionWorkerDispatchPrompt mandates opening/identifying a linked correction PR, requesting Stage 1, and finalize-pr-breakpoint.mjs before reporting, naming its fail-closed reference", () => {
+  const prompt = formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: 559 });
+  assert.match(prompt, /correction PR/);
+  assert.match(prompt, /Stage 1/);
+  assert.match(prompt, /tools\/orchestration\/finalize-pr-breakpoint\.mjs/);
+  assert.match(prompt, /PR_BREAKPOINT_UNVERIFIED/);
 });
 
 test("formatStage2CorrectionWorkerDispatchPrompt throws for missing/invalid required fields", () => {

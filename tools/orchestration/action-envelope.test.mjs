@@ -23,6 +23,7 @@ test("getActionEnvelope: every ready-dispatch-gate.mjs and next-review-transitio
     "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
     "STAGE1_CORRECTION_REQUIRED",
     "STAGE2_CORRECTION_REQUIRED",
+    "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
     "STAGE2_CLOSE_READY",
     "STAGE2_REPORT_READY_TO_RECORD",
     "STAGE2_RESPONSE_UNUSABLE",
@@ -725,4 +726,52 @@ test("STAGE2_CLOSE_READY: a --work-issue or --audit-issue value containing the c
   };
   const envelope = getActionEnvelope("STAGE2_CLOSE_READY", trickyArgValue);
   assert.deepEqual(envelope.authorizedActions, ["run-lifecycle-gate-close-audit"]);
+});
+
+// -- Issue #646: STAGE2_CORRECTION_PR_NEEDS_FINALIZATION -------------------------------------
+// The #487/#643/#644/#645 live reproduction: a controller re-evaluating what would otherwise be
+// STAGE2_CORRECTION_REQUIRED discovers an already-open, work-Issue-linked correction PR and must
+// finalize it directly (trigger Stage 1, then finalize-pr-breakpoint.mjs) rather than dispatch a
+// sibling correction worker. Its authorized actions depend on `nextCommand`, the same
+// context-sensitive derivation STAGE2_CLOSE_READY already established above.
+
+const CORRECTION_PR_FINALIZE_CONTROL_ISSUE_MODE = {
+  nextCommand:
+    "node tools/review-watch/trigger.mjs --repo o/r --kind pr --number 644 --head correctionhead && node tools/orchestration/finalize-pr-breakpoint.mjs --control-issue 322 --execution-issue 375 --pr 644 --head correctionhead",
+};
+const CORRECTION_PR_FINALIZE_DIRECT_REFERENCE_MODE = {
+  nextCommand: "node tools/review-watch/trigger.mjs --repo o/r --kind pr --number 644 --head correctionhead",
+};
+
+test("STAGE2_CORRECTION_PR_NEEDS_FINALIZATION (control-Issue mode): performing trigger then finalize, in order, is compliant", () => {
+  const envelope = getActionEnvelope("STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", CORRECTION_PR_FINALIZE_CONTROL_ISSUE_MODE);
+  assert.deepEqual(envelope.authorizedActions, ["run-review-watch-trigger", "run-finalize-pr-breakpoint"]);
+  const result = classifyEnvelopeCompliance(
+    "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
+    ["run-review-watch-trigger", "run-finalize-pr-breakpoint"],
+    CORRECTION_PR_FINALIZE_CONTROL_ISSUE_MODE,
+  );
+  assert.equal(result.status, "compliant");
+});
+
+test("STAGE2_CORRECTION_PR_NEEDS_FINALIZATION (direct-reference mode, no thin control): run-finalize-pr-breakpoint is not authorized -- there is no control Issue to project onto", () => {
+  const envelope = getActionEnvelope("STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", CORRECTION_PR_FINALIZE_DIRECT_REFERENCE_MODE);
+  assert.deepEqual(envelope.authorizedActions, ["run-review-watch-trigger"]);
+  const result = classifyEnvelopeCompliance(
+    "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
+    ["run-review-watch-trigger", "run-finalize-pr-breakpoint"],
+    CORRECTION_PR_FINALIZE_DIRECT_REFERENCE_MODE,
+  );
+  assert.equal(result.status, "violation");
+  assert.ok(result.reasons.some((r) => r.includes("run-finalize-pr-breakpoint") && r.includes("not in the authorized envelope")));
+});
+
+test("STAGE2_CORRECTION_PR_NEEDS_FINALIZATION: dispatching a fresh correction worker instead of finalizing the already-open PR is a violation -- exactly the #644/#645 duplicate-PR shape this verdict exists to prevent", () => {
+  const result = classifyEnvelopeCompliance(
+    "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
+    ["dispatch-correction-worker"],
+    CORRECTION_PR_FINALIZE_CONTROL_ISSUE_MODE,
+  );
+  assert.equal(result.status, "violation");
+  assert.ok(result.reasons.some((r) => r.includes("dispatch-correction-worker")));
 });

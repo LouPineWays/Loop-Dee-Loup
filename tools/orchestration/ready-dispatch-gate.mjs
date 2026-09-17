@@ -685,6 +685,25 @@ export function findExecutionLinkedPr(prList, executionIssue) {
   return pool.reduce((best, pr) => (Number(pr.number) > Number(best.number) ? pr : best), pool[0]);
 }
 
+// Pure. Issue #646 (the #487/#643/#644/#645 live reproduction): a strict-OPEN-only sibling of
+// `findExecutionLinkedPr` above. That function deliberately falls back to the highest-numbered
+// candidate of ANY state when no open one exists — correct for its own pre-dispatch use, where
+// an already-merged linked PR is itself valid "the PR boundary was already crossed" evidence.
+// A Stage 2 NOT CLEAN correction's own audited PR is, by definition, always already merged/
+// closed by the time this reconciliation ever runs — so reusing that same fallback here would
+// misidentify the just-audited PR itself as if it were a not-yet-created correction PR, and
+// authorize dispatching a correction worker that genuinely has nothing left to correct (or
+// worse, silently "reconcile" onto the wrong PR). Returns null (never crossed) whenever no
+// OPEN linked PR exists, so a genuinely fresh STAGE2_CORRECTION_REQUIRED state is never
+// confused with a stranded post-PR one.
+export function findOpenExecutionLinkedPr(prList, executionIssue) {
+  const open = (Array.isArray(prList) ? prList : []).filter(
+    (pr) => referencesExecutionIssue(pr ?? {}, executionIssue) && String(pr?.state ?? "").toUpperCase() === "OPEN",
+  );
+  if (open.length === 0) return null;
+  return open.reduce((best, pr) => (Number(pr.number) > Number(best.number) ? pr : best), open[0]);
+}
+
 function extractCommentIdFromUrl(url) {
   if (typeof url !== "string") return null;
   const m = url.match(/#issuecomment-(\d+)$/);
@@ -1332,7 +1351,14 @@ function defaultGhCommentView({ repo, commentId }) {
 // required to leave on every PR it opens; `findExecutionLinkedPr` above still re-validates
 // every candidate this returns against the exact linkage convention rather than trusting
 // GitHub's own text-search relevance.
-function defaultGhPrList({ repo, executionIssue }) {
+//
+// Exported (issue #646) so `next-review-transition-gate.mjs`'s own Stage 2 NOT CLEAN
+// correction-PR reconciliation (`findOpenExecutionLinkedPr` below) can reuse this exact same
+// evidence source rather than a second, competing `gh pr list` call. `headRefOid` was added to
+// the requested JSON fields for that same reuse: the reconciliation path needs the linked PR's
+// live head to compose a Stage 1 trigger/finalize command, and `defaultGhPrView`-style callers
+// already trust `gh pr view`'s own `headRefOid` field name for this.
+export function defaultGhPrList({ repo, executionIssue }) {
   const raw = execFileSync(
     "gh",
     [
@@ -1345,7 +1371,7 @@ function defaultGhPrList({ repo, executionIssue }) {
       "--state",
       "all",
       "--json",
-      "number,url,state,headRefName,body",
+      "number,url,state,headRefName,headRefOid,body",
       "--limit",
       "30",
     ],

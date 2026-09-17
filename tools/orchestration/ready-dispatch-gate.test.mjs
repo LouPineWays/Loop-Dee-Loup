@@ -27,6 +27,7 @@ import {
   probeExistingPlan,
   probeReplanRequired,
   findExecutionLinkedPr,
+  findOpenExecutionLinkedPr,
   reconcileReadyPrBreakpoint,
   referencesExecutionIssue,
 } from "./ready-dispatch-gate.mjs";
@@ -2533,6 +2534,45 @@ test("findExecutionLinkedPr: prefers an OPEN PR over a CLOSED/MERGED one; ties b
     { number: 301, url: "u301", state: "OPEN", headRefName: "issue-447-b", body: "" },
   ];
   assert.equal(findExecutionLinkedPr(bothOpen, 447).number, 301);
+});
+
+// -- findOpenExecutionLinkedPr (issue #646) ---------------------------------------------------
+// A strict-OPEN-only sibling of findExecutionLinkedPr, for next-review-transition-gate.mjs's
+// Stage 2 NOT CLEAN correction-PR reconciliation. Unlike findExecutionLinkedPr's own pre-dispatch
+// use (where falling back to an already-merged linked PR is itself valid "crossed" evidence), a
+// Stage 2 NOT CLEAN correction's own audited PR is always already merged/closed by the time
+// reconciliation runs -- falling back to it here would misidentify the just-audited PR itself as
+// a not-yet-created correction PR, so this function must never fall back to a non-OPEN candidate.
+
+test("findOpenExecutionLinkedPr: the #487/#643 ordinary case -- only the already-merged audited PR is linked, no correction PR exists yet -> null, never the merged PR itself", () => {
+  const prList = [{ number: 642, url: "u642", state: "MERGED", headRefName: "issue-375-original", body: "" }];
+  assert.equal(findOpenExecutionLinkedPr(prList, 375), null);
+});
+
+test("findOpenExecutionLinkedPr: the #487/#644 shape -- an OPEN correction PR alongside the already-merged original PR matches only the open one", () => {
+  const prList = [
+    { number: 642, url: "u642", state: "MERGED", headRefName: "issue-375-original", body: "" },
+    { number: 644, url: "u644", state: "OPEN", headRefName: "issue-375-correction", body: "" },
+  ];
+  assert.equal(findOpenExecutionLinkedPr(prList, 375).number, 644);
+});
+
+test("findOpenExecutionLinkedPr: multiple OPEN linked PRs break ties to the numerically highest", () => {
+  const prList = [
+    { number: 644, url: "u644", state: "OPEN", headRefName: "issue-375-correction-a", body: "" },
+    { number: 645, url: "u645", state: "OPEN", headRefName: "issue-375-correction-b", body: "" },
+  ];
+  assert.equal(findOpenExecutionLinkedPr(prList, 375).number, 645);
+});
+
+test("findOpenExecutionLinkedPr: a bare '#N' background mention still does not count as linkage, same convention as findExecutionLinkedPr", () => {
+  const prList = [{ number: 999, url: "u999", state: "OPEN", headRefName: "some-other-branch", body: "See also #375 for background; unrelated." }];
+  assert.equal(findOpenExecutionLinkedPr(prList, 375), null);
+});
+
+test("findOpenExecutionLinkedPr: returns null for an empty/no-match list", () => {
+  assert.equal(findOpenExecutionLinkedPr([], 375), null);
+  assert.equal(findOpenExecutionLinkedPr([{ number: 1, url: "u1", state: "OPEN", headRefName: "unrelated", body: "" }], 375), null);
 });
 
 test("reconcileReadyPrBreakpoint: crossed:true when a linked PR is found", async () => {

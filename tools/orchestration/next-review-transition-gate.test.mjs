@@ -18,6 +18,8 @@ import {
   resolvePreMergeVerdict,
   resolvePostMergeVerdict,
   runNextReviewTransitionGate,
+  reconcileStage2CorrectionPr,
+  composeStage2CorrectionFinalizeCommand,
 } from "./next-review-transition-gate.mjs";
 
 // -- parseOptionalIssueRef ------------------------------------------------------------------
@@ -1838,4 +1840,197 @@ test("runNextReviewTransitionGate: a #375-shaped mid-cycle control Issue (PR req
   );
   assert.equal(result.state, "NO_ACTION_YET");
   assert.equal(result.stopAfter, true);
+});
+
+// -- Issue #646: Stage 2 correction-worker PR/Stage 1 breakpoint gap ------------------------
+//
+// The #487/#643/#644/#645 live reproduction: a Stage 2 NOT CLEAN correction worker opened PR
+// #644, but nothing projected that onto the thin control Issue -- #487 stayed durably on PR
+// #642 / Stage 2 #643, so a fresh dispatch re-ran the correction and produced duplicate PR
+// #645. reconcileStage2CorrectionPr/composeStage2CorrectionFinalizeCommand are the narrow
+// recovery that closes this: before authorizing another STAGE2_CORRECTION_REQUIRED dispatch,
+// reconcile against any already-open, work-Issue-linked correction PR.
+
+test("reconcileStage2CorrectionPr: no open execution-linked PR -> not crossed (the ordinary, genuinely fresh case)", async () => {
+  const result = await reconcileStage2CorrectionPr(
+    { repo: "o/r", workIssue: 375 },
+    { ghPrListImpl: async () => [{ number: 376, state: "MERGED", headRefName: "issue-375-fix", body: "" }] },
+  );
+  assert.deepEqual(result, { crossed: false });
+});
+
+test("reconcileStage2CorrectionPr: an OPEN execution-linked PR already exists -> crossed, carrying that PR", async () => {
+  const result = await reconcileStage2CorrectionPr(
+    { repo: "o/r", workIssue: 375 },
+    {
+      ghPrListImpl: async () => [
+        { number: 376, state: "MERGED", headRefName: "issue-375-fix", body: "", headRefOid: "mergedhead" },
+        { number: 644, state: "OPEN", headRefName: "issue-375-correction", body: "", headRefOid: "correctionhead" },
+      ],
+    },
+  );
+  assert.equal(result.crossed, true);
+  assert.equal(result.pr.number, 644);
+  assert.equal(result.pr.headRefOid, "correctionhead");
+});
+
+test("reconcileStage2CorrectionPr: an operational gh failure fails closed, never silently reports not-crossed", async () => {
+  const result = await reconcileStage2CorrectionPr(
+    { repo: "o/r", workIssue: 375 },
+    {
+      ghPrListImpl: async () => {
+        throw new Error("network timeout");
+      },
+    },
+  );
+  assert.equal(result.crossed, false);
+  assert.equal(result.operationalError, true);
+  assert.match(result.reason, /network timeout/);
+});
+
+test("composeStage2CorrectionFinalizeCommand: control-Issue mode chains trigger.mjs then finalize-pr-breakpoint.mjs", () => {
+  const command = composeStage2CorrectionFinalizeCommand({
+    repo: "o/r",
+    controlIssue: 487,
+    workIssue: 375,
+    pr: 644,
+    head: "correctionhead",
+  });
+  assert.equal(
+    command,
+    "node tools/review-watch/trigger.mjs --repo o/r --kind pr --number 644 --head correctionhead && " +
+      "node tools/orchestration/finalize-pr-breakpoint.mjs --control-issue 487 --execution-issue 375 --pr 644 --head correctionhead",
+  );
+});
+
+test("composeStage2CorrectionFinalizeCommand: direct-reference mode (no thin control) only triggers Stage 1 -- there is no control Issue to project onto", () => {
+  const command = composeStage2CorrectionFinalizeCommand({
+    repo: "o/r",
+    controlIssue: null,
+    workIssue: 375,
+    pr: 644,
+    head: "correctionhead",
+  });
+  assert.equal(command, "node tools/review-watch/trigger.mjs --repo o/r --kind pr --number 644 --head correctionhead");
+});
+
+test("runNextReviewTransitionGate: NOT CLEAN with a real work Issue and no existing correction PR still dispatches ordinarily (STAGE2_CORRECTION_REQUIRED, carrying workIssue)", async () => {
+  let reconcileCalledWith = null;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 375 }),
+      reconcileStage2CorrectionPrImpl: async (args) => {
+        reconcileCalledWith = args;
+        return { crossed: false };
+      },
+    },
+  );
+  assert.deepEqual(reconcileCalledWith, { repo: "o/r", workIssue: 375 });
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE2_CORRECTION_REQUIRED");
+  assert.equal(result.workIssue, 375);
+});
+
+test("runNextReviewTransitionGate: NOT CLEAN with no resolvable work Issue never spends a reconciliation lookup at all (issue #190 no-work-issue state)", async () => {
+  let reconcileCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN" }),
+      reconcileStage2CorrectionPrImpl: async () => {
+        reconcileCalls++;
+        return { crossed: false };
+      },
+    },
+  );
+  assert.equal(reconcileCalls, 0);
+  assert.equal(result.state, "STAGE2_CORRECTION_REQUIRED");
+  assert.equal(result.workIssue, null);
+});
+
+test("runNextReviewTransitionGate: the exact #487/#643/#644 shape -- an already-open correction PR reconciles to STAGE2_CORRECTION_PR_NEEDS_FINALIZATION instead of authorizing a duplicate dispatch", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 375 }),
+      reconcileStage2CorrectionPrImpl: async ({ repo, workIssue }) => {
+        assert.equal(repo, "o/r");
+        assert.equal(workIssue, 375);
+        return { crossed: true, pr: { number: 644, headRefOid: "correctionhead", state: "OPEN" } };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.equal(result.pr, 644);
+  assert.equal(result.head, "correctionhead");
+  assert.equal(result.workIssue, 375);
+  assert.equal(result.controlIssue, 322);
+  assert.equal(
+    result.nextCommand,
+    "node tools/review-watch/trigger.mjs --repo o/r --kind pr --number 644 --head correctionhead && " +
+      "node tools/orchestration/finalize-pr-breakpoint.mjs --control-issue 322 --execution-issue 375 --pr 644 --head correctionhead",
+  );
+  assert.equal(result.actionEnvelope.mode, "bounded");
+  assert.deepEqual(
+    result.actionEnvelope.authorizedActions.slice().sort(),
+    ["run-finalize-pr-breakpoint", "run-review-watch-trigger"].sort(),
+  );
+});
+
+test("runNextReviewTransitionGate: direct-reference mode (--audit-issue only, no thin control) reconciles the same way, nextCommand only triggers Stage 1", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", auditIssue: "378" },
+    {
+      checkPostAuditImpl: async (args) => {
+        assert.equal(args["audit-issue"], "378");
+        return { exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 375 };
+      },
+      reconcileStage2CorrectionPrImpl: async () => ({
+        crossed: true,
+        pr: { number: 644, headRefOid: "correctionhead", state: "OPEN" },
+      }),
+    },
+  );
+  assert.equal(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.equal(result.controlIssue, undefined);
+  assert.equal(result.nextCommand, "node tools/review-watch/trigger.mjs --repo o/r --kind pr --number 644 --head correctionhead");
+});
+
+test("runNextReviewTransitionGate: a reconciliation operational failure fails closed to AMBIGUOUS -- never silently authorizes a duplicate dispatch", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 375 }),
+      reconcileStage2CorrectionPrImpl: async () => ({ crossed: false, operationalError: true, reason: "network timeout" }),
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /network timeout/);
+  assert.equal(result.actionEnvelope.mode, "none");
+});
+
+test("runNextReviewTransitionGate: a reconciled correction PR with no usable headRefOid fails closed to AMBIGUOUS rather than composing an unverifiable finalize command", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 375 }),
+      reconcileStage2CorrectionPrImpl: async () => ({ crossed: true, pr: { number: 644, state: "OPEN" } }),
+    },
+  );
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /644/);
+  assert.match(result.reason, /headRefOid/);
 });

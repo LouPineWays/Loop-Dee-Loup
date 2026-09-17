@@ -277,11 +277,27 @@ test("verifyFinalizedBody: rejects a fresh read-back that still carries the lega
   assert.match(result.reason, /legacy pre-start sentinel/);
 });
 
-test("composeFinalizedControlBody: refuses to overwrite a Lifecycle value it was not authorized to transition from (e.g. mid-cycle AUDIT)", () => {
-  const auditBody = READY_BODY.replace("- **Lifecycle:** READY", "- **Lifecycle:** AUDIT");
-  const result = composeFinalizedControlBody(auditBody, { pr: 453, stage1Value: "requested" });
+test("composeFinalizedControlBody: refuses to overwrite a Lifecycle value it was not authorized to transition from (e.g. mid-cycle CORRECTION)", () => {
+  const correctionBody = READY_BODY.replace("- **Lifecycle:** READY", "- **Lifecycle:** CORRECTION");
+  const result = composeFinalizedControlBody(correctionBody, { pr: 453, stage1Value: "requested" });
   assert.equal(result.ok, false);
   assert.match(result.reason, /not one of the recognized pre-finalize values/);
+});
+
+test("composeFinalizedControlBody: from AUDIT (Stage 2 NOT CLEAN correction-worker route, issue #646), also transitions to REVIEW", () => {
+  const auditBody = READY_BODY.replace("- **Lifecycle:** READY", "- **Lifecycle:** AUDIT").replace(
+    "- **Stage 1:** none",
+    "- **Stage 1:** none\n- **Stage 2:** #643",
+  );
+  const result = composeFinalizedControlBody(auditBody, { pr: 644, stage1Value: "requested" });
+  assert.equal(result.ok, true);
+  assert.match(result.body, /- \*\*PR:\*\* #644/);
+  assert.match(result.body, /- \*\*Stage 1:\*\* requested/);
+  assert.match(result.body, /- \*\*Lifecycle:\*\* REVIEW/);
+  // The prior audit's own Stage 2 pointer is left exactly as-is -- it remains the
+  // most-recent-Stage-2-audit reference until the correction PR's own eventual merge
+  // triggers a fresh Stage 2 and finalize-audit-breakpoint.mjs overwrites it.
+  assert.match(result.body, /- \*\*Stage 2:\*\* #643/);
 });
 
 test("verifyFinalizedBody: accepts a fresh body carrying the exact composed bullets", () => {

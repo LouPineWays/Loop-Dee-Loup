@@ -203,6 +203,8 @@ import {
   readExecutionBulletField,
   describeExecutionConflict,
   findNearDuplicateBulletLabels,
+  findOpenExecutionLinkedPr,
+  defaultGhPrList,
 } from "./ready-dispatch-gate.mjs";
 import { run as stage1Run } from "../review-watch/stage1-gate.mjs";
 import { checkMergeReady, checkPostAudit } from "../review-watch/lifecycle-gate.mjs";
@@ -707,7 +709,18 @@ export function resolvePostMergeVerdict({ postAudit }, context = {}) {
       };
     }
     if (postAudit.rawVerdict === "NOT CLEAN") {
-      return { state: "STAGE2_CORRECTION_REQUIRED", stopAfter: true, ...context };
+      // Issue #646: thread the audited Work/execution Issue through from durable authority
+      // (checkPostAudit's own already-fetched `workIssue`, parsed from the Audit Issue's own
+      // "Work issue" field) rather than leaving a dispatched correction worker or the
+      // reconciliation check below to re-derive it a second way. Absent for the explicit
+      // no-work-issue state (issue #190) -- reconciliation below is skipped in that case, since
+      // there is no execution-linked PR search to perform without a work Issue to search for.
+      return {
+        state: "STAGE2_CORRECTION_REQUIRED",
+        stopAfter: true,
+        ...context,
+        workIssue: typeof postAudit.workIssue === "number" ? postAudit.workIssue : null,
+      };
     }
     // rawVerdict is null/PENDING, or CLEAN-but-not-yet-backed-by-a-completed-report (verdict
     // nulled out by checkPostAudit itself in that case) -- either way, no completed Stage 2
@@ -760,6 +773,10 @@ function exitCodeFor(state) {
       return 0;
     case "STAGE1_CORRECTION_REQUIRED":
     case "STAGE2_CORRECTION_REQUIRED":
+    // Issue #646: STAGE2_CORRECTION_PR_NEEDS_FINALIZATION names a concrete, non-blocking
+    // corrective action too (run the trigger/finalize nextCommand) -- same exit-code bucket as
+    // its STAGE2_CORRECTION_REQUIRED sibling, never the "authorizes proceeding" bucket above.
+    case "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION":
       return 3;
     case "AMBIGUOUS":
     case "STAGE2_RESPONSE_UNUSABLE":
@@ -814,7 +831,51 @@ async function resolvePreMerge(
   return { exitCode: exitCodeFor(verdict.state), ...verdict };
 }
 
-async function resolvePostMerge({ repo, auditIssue, controlIssue }, { checkPostAuditImpl }) {
+// Issue #646 (the #487/#643/#644/#645 live reproduction): before authorizing another
+// `STAGE2_CORRECTION_REQUIRED` dispatch, reconcile against the one narrow, work-Issue-scoped
+// PR lookup `findOpenExecutionLinkedPr` above authorizes for exactly this recovery — the same
+// Shared Contract pattern `ready-dispatch-gate.mjs`'s own `reconcileReadyPrBreakpoint`
+// (issue #456 unit 456-B) already established for the pre-PR READY-lifecycle case, reused
+// here rather than a second competing PR-discovery mechanism. Returns `{ crossed: false }`
+// for the ordinary, genuinely no-correction-PR-yet case (the ONLY case in which dispatching a
+// fresh correction worker is authorized), or `{ crossed: true, pr }` when an OPEN,
+// work-Issue-linked correction PR already exists — the caller must route to finalization
+// instead of dispatching a sibling. `ghPrListImpl` is injected so tests never touch the real
+// network/`gh` CLI, matching this file's existing injection convention.
+export async function reconcileStage2CorrectionPr({ repo, workIssue }, { ghPrListImpl = defaultGhPrList } = {}) {
+  let prList;
+  try {
+    prList = await ghPrListImpl({ repo, executionIssue: workIssue });
+  } catch (err) {
+    return {
+      crossed: false,
+      operationalError: true,
+      reason: `operational failure searching for an execution-linked correction PR for ${repo}#${workIssue}: ${err.message}`,
+    };
+  }
+  const pr = findOpenExecutionLinkedPr(prList, workIssue);
+  if (!pr) return { crossed: false };
+  return { crossed: true, pr };
+}
+
+// Pure. Composes the exact real (non-dry-run) command a controller must run to finalize a
+// Stage 2 NOT CLEAN correction PR that reconciliation above already proved exists: an
+// idempotent Stage 1 trigger at the correction PR's own live head, chained into
+// `finalize-pr-breakpoint.mjs` (extended to accept a `Lifecycle: AUDIT` source state — see its
+// own comment) whenever a real thin control Issue exists to project onto. Mirrors the exact
+// trigger-then-finalize sequence `docs/bounded-review-cycle.md`'s Integration/PR worker step 6
+// and direct-implementation-worker route already establish for the analogous pre-merge PR/
+// Stage-1 breakpoint -- this is the same breakpoint, reached from a different pre-state.
+export function composeStage2CorrectionFinalizeCommand({ repo, controlIssue, workIssue, pr, head }) {
+  const triggerCommand = `node tools/review-watch/trigger.mjs --repo ${repo} --kind pr --number ${pr} --head ${head}`;
+  if (controlIssue === null || controlIssue === undefined) return triggerCommand;
+  return (
+    `${triggerCommand} && node tools/orchestration/finalize-pr-breakpoint.mjs --control-issue ${controlIssue} ` +
+    `--execution-issue ${workIssue} --pr ${pr} --head ${head}`
+  );
+}
+
+async function resolvePostMerge({ repo, auditIssue, controlIssue }, { checkPostAuditImpl, reconcileStage2CorrectionPrImpl = reconcileStage2CorrectionPr }) {
   let postAudit;
   try {
     postAudit = await checkPostAuditImpl({ repo, "audit-issue": auditIssue });
@@ -846,6 +907,59 @@ async function resolvePostMerge({ repo, auditIssue, controlIssue }, { checkPostA
     ...(effectiveControlIssue != null ? { controlIssue: effectiveControlIssue } : {}),
   };
   const verdict = resolvePostMergeVerdict({ postAudit }, context);
+
+  // Issue #646: STAGE2_CORRECTION_REQUIRED is the one verdict this reconciliation step can
+  // still override -- every other verdict above is left exactly as resolvePostMergeVerdict
+  // computed it. Skipped entirely when there is no real work Issue to search for (the explicit
+  // no-work-issue state, issue #190) -- there is no execution-linked PR convention to search
+  // against without one.
+  if (verdict.state === "STAGE2_CORRECTION_REQUIRED" && typeof verdict.workIssue === "number") {
+    const reconciliation = await reconcileStage2CorrectionPrImpl({ repo, workIssue: verdict.workIssue });
+    if (reconciliation.operationalError) {
+      // Fail closed rather than silently falling through to an ordinary correction-worker
+      // dispatch on an operational failure -- an unverified "no PR exists yet" claim is exactly
+      // the unsafe assumption issue #646's own duplicate-PR incident (#644/#645) grew from.
+      const failedVerdict = {
+        state: "AMBIGUOUS",
+        stopAfter: true,
+        ...context,
+        postAudit,
+        reason: `Stage 2 correction-PR reconciliation failed operationally, refusing to authorize a correction-worker dispatch without it: ${reconciliation.reason}`,
+      };
+      return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
+    }
+    if (reconciliation.crossed) {
+      const pr = reconciliation.pr;
+      const head = pr?.headRefOid;
+      if (typeof head !== "string" || !head) {
+        const failedVerdict = {
+          state: "AMBIGUOUS",
+          stopAfter: true,
+          ...context,
+          postAudit,
+          reason: `found an open execution-linked correction PR #${pr?.number} for ${repo}#${verdict.workIssue}, but it carries no usable headRefOid -- refusing to compose a finalize command against an unverified head`,
+        };
+        return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
+      }
+      const crossedVerdict = {
+        state: "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
+        stopAfter: true,
+        ...context,
+        workIssue: verdict.workIssue,
+        pr: Number(pr.number),
+        head,
+        nextCommand: composeStage2CorrectionFinalizeCommand({
+          repo,
+          controlIssue: context.controlIssue ?? null,
+          workIssue: verdict.workIssue,
+          pr: Number(pr.number),
+          head,
+        }),
+      };
+      return { exitCode: exitCodeFor(crossedVerdict.state), ...crossedVerdict };
+    }
+  }
+
   return { exitCode: exitCodeFor(verdict.state), ...verdict };
 }
 
@@ -944,6 +1058,7 @@ async function runNextReviewTransitionGateCore(
     checkMergeReadyImpl = checkMergeReady,
     checkPostAuditImpl = checkPostAudit,
     checkCorrectionDeltaImpl = checkCorrectionDelta,
+    reconcileStage2CorrectionPrImpl = reconcileStage2CorrectionPr,
   } = {},
 ) {
   let repo = args.repo;
@@ -961,7 +1076,7 @@ async function runNextReviewTransitionGateCore(
   // Direct-reference mode: skips the control-Issue read entirely. Checked before
   // --control-issue so an explicit direct reference always wins if both happen to be given.
   if (args.auditIssue) {
-    return resolvePostMerge({ repo, auditIssue: args.auditIssue, controlIssue: null }, { checkPostAuditImpl });
+    return resolvePostMerge({ repo, auditIssue: args.auditIssue, controlIssue: null }, { checkPostAuditImpl, reconcileStage2CorrectionPrImpl });
   }
   if (args.pr) {
     if (!args.head) {
@@ -1076,7 +1191,7 @@ async function runNextReviewTransitionGateCore(
     if (prState.state === "MERGED") {
       // The relevant PR is merged: the settled Stage 2 reference owns the transition, exactly
       // as it did before #537.
-      return resolvePostMerge({ repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber }, { checkPostAuditImpl });
+      return resolvePostMerge({ repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber }, { checkPostAuditImpl, reconcileStage2CorrectionPrImpl });
     }
     if (prState.state === "OPEN") {
       // The PR is still open: the pre-merge PR/Stage 1 phase owns the transition even though a
@@ -1109,7 +1224,7 @@ async function runNextReviewTransitionGateCore(
   if (auditRef.kind === "issue") {
     // No settled "PR" reference at all ("none", or the bullet is simply absent): the settled
     // Stage 2 reference remains the only active post-review pointer, exactly as before #537.
-    return resolvePostMerge({ repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber }, { checkPostAuditImpl });
+    return resolvePostMerge({ repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber }, { checkPostAuditImpl, reconcileStage2CorrectionPrImpl });
   }
 
   if (prRef.kind === "issue") {

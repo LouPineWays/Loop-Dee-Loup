@@ -11,12 +11,14 @@
 // contract) already required this; nothing mechanically enforced it on the direct
 // bounded-implementation route.
 //
-// This script is that mechanical enforcement. Both authorized PR-opening routes —
+// This script is that mechanical enforcement. All three authorized PR-opening routes —
 // the direct implementation-worker route (`format-dispatch-prompt.mjs`'s
-// formatDispatchPrompt template) and the Integration/PR-worker route (its
+// formatDispatchPrompt template), the Integration/PR-worker route (its
 // formatIntegrationWorkerDispatchPrompt template; `docs/bounded-review-cycle.md`
-// "Integration/PR worker" step 6) — invoke it once the PR exists and Stage 1 has been
-// requested (or a Stage 1 exemption recorded), before reporting success or stopping.
+// "Integration/PR worker" step 6), and the Stage 2 NOT CLEAN correction-worker route (its
+// formatStage2CorrectionWorkerDispatchPrompt template; issue #646, closing the #487/#643/
+// #644/#645 duplicate-correction-PR reproduction) — invoke it once the PR exists and Stage 1
+// has been requested (or a Stage 1 exemption recorded), before reporting success or stopping.
 //
 // It composes existing tooling only, never reimplements it:
 //   - `tools/review-watch/stage1-gate.mjs`'s `run` supplies the durable Stage 1 evidence
@@ -46,13 +48,14 @@
 //     (`docs/operating-model.md` § "Deterministic post-PR transition resolution") expects,
 //     so a fresh controller resuming this control Issue routes through that gate instead
 //     of falling back to the pre-PR immediate-dispatch gate. The current Lifecycle must
-//     already be one of the two authorized pre-PR states this pipeline can transition
-//     from (`READY` for the direct route, `EXECUTION_COMPLETE` for the Integration/PR
-//     route) — or already `REVIEW` itself, so re-running this script against an
+//     already be one of the authorized pre-finalize source states this pipeline can
+//     transition from (`READY` for the direct route, `EXECUTION_COMPLETE` for the
+//     Integration/PR route, `AUDIT` for a Stage 2 NOT CLEAN correction's new PR — issue
+//     #646) — or already `REVIEW` itself, so re-running this script against an
 //     already-finalized PR/head is a safe no-op (Verification scenario 6) — never any
 //     other Lifecycle value; this guards against a stale/out-of-order invocation
-//     clobbering genuine mid-cycle or terminal state (e.g. `AUDIT`, `CORRECTION`,
-//     `BLOCKED`) it does not understand.
+//     clobbering genuine mid-cycle or terminal state (e.g. `CORRECTION`, `BLOCKED`) it
+//     does not understand.
 //   - The PR head is deliberately never written into the control body: the exact current
 //     PR head is re-derived live from the PR itself (`gh pr view --json headRefOid`)
 //     whenever post-PR authority needs it — `next-review-transition-gate.mjs` already does
@@ -122,7 +125,16 @@ import { run as stage1GateRun } from "../review-watch/stage1-gate.mjs";
 // worker route's (docs/operating-model.md § "Execution-stage session boundaries" stage 4).
 // `REVIEW` is included so a repeated finalize against the same already-finalized PR/head
 // (Verification scenario 6) is a safe no-op rather than a fail-closed rejection.
-const ALLOWED_PRE_FINALIZE_LIFECYCLE = new Set(["READY", "EXECUTION_COMPLETE", "REVIEW"]);
+// `AUDIT` is issue #646's own addition: a Stage 2 NOT CLEAN correction worker's new correction
+// PR reaches this exact same PR/Stage-1/Lifecycle breakpoint from a control Issue still
+// durably `Lifecycle: AUDIT` (the post-Stage-2-trigger value `finalize-audit-breakpoint.mjs`
+// itself established for the *prior* PR this correction responds to) — it is a legitimate
+// fourth pre-finalize source state, not a different breakpoint. This script's own Stage 2/
+// canonicalizePreStage2Bullet handling is unaffected: the control Issue's existing `Stage 2`
+// bullet (a real `#<audit-issue>` reference, never the legacy sentinel this function already
+// normalizes) is deliberately left as-is — it remains the most-recent-Stage-2-audit pointer
+// until the correction PR's own eventual merge triggers a fresh Stage 2 and overwrites it.
+const ALLOWED_PRE_FINALIZE_LIFECYCLE = new Set(["READY", "EXECUTION_COMPLETE", "REVIEW", "AUDIT"]);
 
 function isPositiveInteger(value) {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
