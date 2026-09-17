@@ -460,10 +460,15 @@ test("formatStage2CorrectionWorkerDispatchPrompt never restates audit narrative 
 // on the next dispatch. This template now points the worker at finalize-pr-breakpoint.mjs before
 // reporting, mirroring formatStage1CorrectionWorkerDispatchPrompt's own finalize-correction-
 // breakpoint.mjs mandate above.
-test("formatStage2CorrectionWorkerDispatchPrompt mandates opening/identifying a linked correction PR, requesting Stage 1, and finalize-pr-breakpoint.mjs before reporting, naming its fail-closed reference", () => {
+test("formatStage2CorrectionWorkerDispatchPrompt mandates opening/identifying a linked correction PR, requesting Stage 1 via trigger.mjs, and finalize-pr-breakpoint.mjs before reporting, naming its fail-closed reference", () => {
   const prompt = formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: 559 });
   assert.match(prompt, /correction PR/);
   assert.match(prompt, /Stage 1/);
+  // Stage 2 audit finding on issue #649 (P1): control mode must name the deterministic
+  // trigger script explicitly, exactly like direct-reference mode already does below --
+  // otherwise the principal correction-worker route can satisfy this clause with an ad hoc
+  // review request instead of the required `tools/review-watch/trigger.mjs` invocation.
+  assert.match(prompt, /tools\/review-watch\/trigger\.mjs/);
   assert.match(prompt, /tools\/orchestration\/finalize-pr-breakpoint\.mjs/);
   assert.match(prompt, /PR_BREAKPOINT_UNVERIFIED/);
 });
@@ -482,9 +487,9 @@ test("formatStage2CorrectionWorkerDispatchPrompt (direct-reference mode): never 
   assert.match(prompt, /direct-reference/);
 });
 
-test("formatStage2CorrectionWorkerDispatchPrompt (control mode) still mandates finalize-pr-breakpoint.mjs unchanged", () => {
+test("formatStage2CorrectionWorkerDispatchPrompt (control mode) still mandates finalize-pr-breakpoint.mjs, now naming trigger.mjs explicitly", () => {
   const prompt = formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: 559 });
-  assert.match(prompt, /then run tools\/orchestration\/finalize-pr-breakpoint\.mjs/);
+  assert.match(prompt, /via tools\/review-watch\/trigger\.mjs, then run tools\/orchestration\/finalize-pr-breakpoint\.mjs/);
   assert.match(prompt, /PR_BREAKPOINT_UNVERIFIED/);
 });
 

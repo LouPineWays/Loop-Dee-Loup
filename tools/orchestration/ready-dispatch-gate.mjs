@@ -1393,10 +1393,13 @@ export function defaultGhPrList({ repo, executionIssue }) {
 // from `defaultGhPrList` above rather than a change to it: `reconcileReadyPrBreakpoint`'s
 // established pre-dispatch READY-lifecycle route (issue #456 unit 456-B) already works correctly
 // off the search-only lookup and stays untouched. One additional bounded, unscoped listing of
-// currently OPEN PRs (`--state open --limit 30`, no `--search`) is merged in by PR number so a
-// branch-only-linked candidate is discoverable via `referencesExecutionIssue`'s own headRefName
-// check — bounded to open PRs only, never a full-history/closed-PR scan, per AGENTS.md's "keep
-// the lookup narrow" instruction.
+// currently OPEN PRs (`--state open --limit <OPEN_PR_RECONCILIATION_LIMIT>`, no `--search`) is
+// merged in by PR number so a branch-only-linked candidate is discoverable via
+// `referencesExecutionIssue`'s own headRefName check — bounded to open PRs only, never a
+// full-history/closed-PR scan, per AGENTS.md's "keep the lookup narrow" instruction. Stage 2
+// audit finding on issue #649 (P1): that bound was originally a hard, unchecked 30, which could
+// silently truncate in a repository with more open PRs than that — see
+// `assertOpenPrListNotTruncated` and `defaultGhOpenPrList` below for the fail-closed fix.
 //
 // `ghPrListImpl`/`ghOpenPrListImpl` are injected (defaulting to the real search-based and
 // unscoped-open `gh` calls respectively) so the merge/dedup logic itself — the part this
@@ -1415,6 +1418,33 @@ export function defaultOpenExecutionLinkedPrList(
   return [...merged.values()];
 }
 
+// Stage 2 audit finding on issue #649 (P1): the prior hard `--limit 30` silently truncated in
+// any repository with more than 30 open PRs, so a branch-only-linked correction PR sitting
+// outside that window would never be examined -- `findOpenExecutionLinkedPr` would never even
+// see it as a candidate and `reconcileStage2CorrectionPr` would wrongly report `crossed: false`,
+// authorizing a duplicate correction-worker dispatch from truncated (not missing) evidence, the
+// same failure shape issue #646 already fixed for the search-index gap. Raised to an explicit,
+// generous safety bound, paired with a fail-closed truncation check immediately below: a listing
+// that comes back at (or over) the bound is refused rather than trusted as exhaustive. Throwing
+// here is deliberate -- `reconcileStage2CorrectionPr`'s existing try/catch already converts a
+// thrown error into `{ operationalError: true }`, which `resolvePostMerge` already fails closed
+// to `AMBIGUOUS` instead of authorizing a fresh dispatch on unverified "no PR exists" evidence.
+export const OPEN_PR_RECONCILIATION_LIMIT = 500;
+
+// Pure. Refuses (throws) a listing that came back at or over `limit` — GitHub's own signal
+// that more open PRs may exist beyond what was fetched — rather than letting a caller trust
+// it as the complete set. Exported and factored out of `defaultGhOpenPrList` below so this
+// fail-closed guard is directly unit-testable without shelling out to the real `gh` CLI.
+export function assertOpenPrListNotTruncated(parsedList, limit = OPEN_PR_RECONCILIATION_LIMIT) {
+  if (Array.isArray(parsedList) && parsedList.length >= limit) {
+    throw new Error(
+      `gh pr list --state open returned ${parsedList.length} PRs, at or over the ${limit}-PR reconciliation ` +
+        "safety bound -- refusing to treat a possibly-truncated open-PR listing as exhaustive",
+    );
+  }
+  return parsedList;
+}
+
 function defaultGhOpenPrList({ repo }) {
   const raw = execFileSync(
     "gh",
@@ -1428,11 +1458,11 @@ function defaultGhOpenPrList({ repo }) {
       "--json",
       "number,url,state,headRefName,headRefOid,body",
       "--limit",
-      "30",
+      String(OPEN_PR_RECONCILIATION_LIMIT),
     ],
     { encoding: "utf8" },
   );
-  return JSON.parse(raw);
+  return assertOpenPrListNotTruncated(JSON.parse(raw));
 }
 
 // Issue #456 unit 456-B (the #447/#448/#453 live reproduction): before authorizing
