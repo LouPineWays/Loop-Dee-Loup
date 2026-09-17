@@ -53,6 +53,34 @@ test("invokedGateScriptBasenames: tolerates non-string/empty input", async () =>
   assert.deepEqual(invokedGateScriptBasenames(null), []);
 });
 
+// Stage 1 review finding on PR #642: a real Claude Code Bash invocation commonly quotes the
+// script path via $CLAUDE_PROJECT_DIR, e.g.
+// `node "$CLAUDE_PROJECT_DIR/tools/orchestration/next-review-transition-gate.mjs" --control-issue 487`.
+// Splitting on whitespace alone previously left the closing quote attached to the basename
+// (`next-review-transition-gate.mjs"`), so this exact shape was never recognized.
+test("invokedGateScriptBasenames: recognizes a double-quoted $CLAUDE_PROJECT_DIR-prefixed invocation", async () => {
+  const { invokedGateScriptBasenames } = await import("./action-envelope-hook.mjs");
+  assert.deepEqual(
+    invokedGateScriptBasenames(
+      'node "$CLAUDE_PROJECT_DIR/tools/orchestration/next-review-transition-gate.mjs" --control-issue 487',
+    ),
+    ["next-review-transition-gate.mjs"],
+  );
+});
+
+test("invokedGateScriptBasenames: recognizes a single-quoted script path", async () => {
+  const { invokedGateScriptBasenames } = await import("./action-envelope-hook.mjs");
+  assert.deepEqual(
+    invokedGateScriptBasenames("node 'tools/orchestration/ready-dispatch-gate.mjs' --control-issue 301"),
+    ["ready-dispatch-gate.mjs"],
+  );
+});
+
+test("invokedGateScriptBasenames: a quoted non-gate script still does not match", async () => {
+  const { invokedGateScriptBasenames } = await import("./action-envelope-hook.mjs");
+  assert.deepEqual(invokedGateScriptBasenames('node "some-other-tool.mjs" --flag'), []);
+});
+
 // -- extractVerdict: robust last-JSON-line parsing -----------------------------------------
 
 test("extractVerdict: parses the gate script's single JSON stdout line", async () => {
@@ -155,6 +183,46 @@ test("detectNoActionVerdict: ignores a none-mode-shaped JSON line from an unrela
   const { detectNoActionVerdict } = await import("./action-envelope-hook.mjs");
   const stdout = JSON.stringify({ state: "NO_ACTION_YET", actionEnvelope: { mode: "none", authorizedActions: [] } });
   assert.equal(detectNoActionVerdict("node some-other-script.mjs", stdout), null);
+});
+
+// -- extractFailureOutput: PostToolUseFailure payload field tolerance ----------------------
+//
+// Stage 1 review finding on PR #642: several no-action gate verdicts (BLOCKED, AMBIGUOUS,
+// STAGE2_RESPONSE_UNUSABLE) intentionally exit nonzero, which Claude Code routes through
+// PostToolUseFailure rather than PostToolUse — a wiring gap this module previously had no
+// coverage for at all.
+
+test("extractFailureOutput: reads the documented tool_output field", async () => {
+  const { extractFailureOutput } = await import("./action-envelope-hook.mjs");
+  const body = JSON.stringify({ state: "BLOCKED", actionEnvelope: { mode: "none", authorizedActions: [] } });
+  assert.equal(extractFailureOutput({ tool_output: body }), body);
+});
+
+test("extractFailureOutput: falls back to tool_response.stdout, then error, then empty string", async () => {
+  const { extractFailureOutput } = await import("./action-envelope-hook.mjs");
+  assert.equal(extractFailureOutput({ tool_response: { stdout: "fallback-stdout" } }), "fallback-stdout");
+  assert.equal(extractFailureOutput({ error: "fallback-error" }), "fallback-error");
+  assert.equal(extractFailureOutput({}), "");
+  assert.equal(extractFailureOutput(null), "");
+});
+
+test("detectNoActionVerdict: marks a nonzero-exit BLOCKED verdict delivered via PostToolUseFailure's tool_output", async () => {
+  const { detectNoActionVerdict, extractFailureOutput } = await import("./action-envelope-hook.mjs");
+  const failurePayload = {
+    hook_event_name: "PostToolUseFailure",
+    tool_name: "Bash",
+    tool_input: { command: "node tools/orchestration/ready-dispatch-gate.mjs --control-issue 301" },
+    tool_output: JSON.stringify({
+      state: "BLOCKED",
+      stopAfter: true,
+      actionEnvelope: { mode: "none", authorizedActions: [] },
+    }),
+  };
+  const verdict = detectNoActionVerdict(
+    failurePayload.tool_input.command,
+    extractFailureOutput(failurePayload),
+  );
+  assert.equal(verdict?.state, "BLOCKED");
 });
 
 // -- decidePreToolUse: pure allow/deny decision --------------------------------------------

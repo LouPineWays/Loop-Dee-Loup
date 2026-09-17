@@ -31,6 +31,20 @@
 //   small session-scoped marker recording that this controller context's action authority is
 //   exhausted.
 //
+//   PostToolUseFailure (Bash only, issue #641/Stage 1 review on PR #642): Claude Code routes a
+//   Bash invocation through this distinct event — not PostToolUse — whenever the underlying
+//   command exits nonzero, times out, or otherwise errors. Several no-action gate verdicts
+//   (`BLOCKED`, `AMBIGUOUS`, `STAGE2_RESPONSE_UNUSABLE`, among others) intentionally exit
+//   nonzero while still printing a complete `actionEnvelope`-stamped verdict to stdout, so a
+//   PostToolUse-only wiring never observed them and the stop boundary went unenforced for
+//   exactly the verdicts most likely to need it. This hook applies the identical
+//   detect-and-mark logic to PostToolUseFailure's own payload, reading the failed command's
+//   captured output from whichever field the payload actually carries (`tool_output`, then
+//   `tool_response.stdout`, then `error` — the first is Claude Code's documented failure-output
+//   field; the others are tolerated defensively since this repository had no prior
+//   PostToolUseFailure wiring to cross-check against, consistent with this module's fail-open
+//   philosophy on payload-shape uncertainty).
+//
 //   PreToolUse (every tool): if this session already has that marker, deny the call —
 //   unconditionally, regardless of tool or intent — with a reason naming the verdict and
 //   pointing at the fresh-invocation path. A denial does not itself end the turn (Claude Code
@@ -65,29 +79,62 @@
 // "no verdict observed yet in this session," which is the correct default allow state for
 // every session before it ever runs a gate script.
 //
-// Wired in .claude/settings.json for PreToolUse (all tools) and PostToolUse (Bash only).
+// Wired in .claude/settings.json for PreToolUse (all tools), PostToolUse (Bash only), and
+// PostToolUseFailure (Bash only).
 // Tests: node --test tools/orchestration/action-envelope-hook.test.mjs
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pathToFileURL } from "node:url";
-import { sanitizeSessionId } from "../telemetry/collect.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const STATE_DIR = process.env.LDL_ACTION_ENVELOPE_STATE_DIR || join(ROOT, ".claude", "action-envelope-state");
+
+// Inlined rather than imported from tools/telemetry/collect.mjs (Stage 1 review finding on
+// PR #642): tools/orchestration/** is a MANAGED_ITEMS-installed path for consumer repositories
+// (docs/consumer-contract.md), but tools/telemetry/** deliberately is not, so an installed
+// consumer hook importing from it would throw ERR_MODULE_NOT_FOUND before main()'s own
+// fail-open try ever runs. Keeping this hook self-contained inside its own already-managed
+// path means it resolves correctly wherever tools/orchestration/** itself is installed.
+// Identical behavior to collect.mjs's own sanitizeSessionId — same path-traversal defense.
+export function sanitizeSessionId(id) {
+  return String(id).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 200);
+}
 
 // The only two scripts that ever emit an action-envelope-stamped verdict. Kept as a literal
 // set (not derived from a directory scan) so an unrelated script sharing a stdout shape by
 // coincidence is never treated as a verdict source.
 const GATE_SCRIPT_BASENAMES = new Set(["ready-dispatch-gate.mjs", "next-review-transition-gate.mjs"]);
 
+// Strips one layer of matching surrounding quotes (both '"' and "'") from a single shell
+// token, e.g. the `"$CLAUDE_PROJECT_DIR/tools/orchestration/next-review-transition-gate.mjs"`
+// shape real Claude Code Bash invocations of this repository's own gate scripts commonly use.
+// Deliberately minimal — not a general shell tokenizer — because the only thing that matters
+// here is recognizing the gate script's own basename regardless of whether the invoking
+// command happened to quote its path.
+function stripSurroundingQuotes(token) {
+  if (token.length >= 2) {
+    const first = token[0];
+    const last = token[token.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return token.slice(1, -1);
+    }
+  }
+  return token;
+}
+
 // Structural parse of an executed shell command's own "&&"-separated segments: only the token
 // immediately after a literal "node" token in each segment is ever treated as "the script
 // being invoked" — never a raw substring match that could fire on an unrelated argument's own
 // value (e.g. a `--label` containing the gate script's name in prose). Mirrors
 // action-envelope.mjs's `parseChainedCommands` discipline, applied here to a real invoked
-// command line rather than an internally-generated `nextCommand` chain string.
+// command line rather than an internally-generated `nextCommand` chain string. The script-path
+// token is quote-stripped before computing its basename (Stage 1 review finding on PR #642):
+// a normal quoted invocation such as
+// `node "$CLAUDE_PROJECT_DIR/tools/orchestration/next-review-transition-gate.mjs" --control-issue 487`
+// previously produced the literal basename `next-review-transition-gate.mjs"` — carrying the
+// closing quote character — and was never recognized as a gate script invocation at all.
 export function invokedGateScriptBasenames(command) {
   if (typeof command !== "string" || command.length === 0) return [];
   const found = [];
@@ -95,7 +142,7 @@ export function invokedGateScriptBasenames(command) {
     const tokens = segment.trim().split(/\s+/).filter(Boolean);
     const nodeIdx = tokens.indexOf("node");
     if (nodeIdx === -1) continue;
-    const scriptPath = tokens[nodeIdx + 1] ?? "";
+    const scriptPath = stripSurroundingQuotes(tokens[nodeIdx + 1] ?? "");
     const basename = scriptPath.split(/[\\/]/).pop() ?? "";
     if (GATE_SCRIPT_BASENAMES.has(basename)) found.push(basename);
   }
@@ -204,6 +251,17 @@ export function decidePreToolUse(marker) {
   };
 }
 
+// Extracts the captured output text from a PostToolUseFailure payload. Claude Code's
+// documented field is `tool_output`; `tool_response.stdout` and `error` are tolerated as
+// defensive fallbacks (see module header) in case the running harness version shapes this
+// payload differently. Returns "" — never throws — when none of them hold a string.
+export function extractFailureOutput(payload) {
+  if (typeof payload?.tool_output === "string") return payload.tool_output;
+  if (typeof payload?.tool_response?.stdout === "string") return payload.tool_response.stdout;
+  if (typeof payload?.error === "string") return payload.error;
+  return "";
+}
+
 function readStdinJson() {
   try {
     const raw = readFileSync(0, "utf8");
@@ -223,6 +281,17 @@ function main() {
       if (payload.tool_name === "Bash") {
         const command = payload.tool_input?.command;
         const stdout = payload.tool_response?.stdout;
+        const verdict = detectNoActionVerdict(command, stdout);
+        if (verdict) writeMarker(sessionId, verdict);
+      }
+      process.exit(0);
+      return;
+    }
+
+    if (payload?.hook_event_name === "PostToolUseFailure" && sessionId) {
+      if (payload.tool_name === "Bash") {
+        const command = payload.tool_input?.command;
+        const stdout = extractFailureOutput(payload);
         const verdict = detectNoActionVerdict(command, stdout);
         if (verdict) writeMarker(sessionId, verdict);
       }
