@@ -32,7 +32,7 @@ The step immediately before this cycle starts is its own bounded role, not part 
 
 It reads only the durable surfaces that job needs: the parent execution contract and its acceptance/verification authority, the durable execution plan and shared contracts, the completed implementation state, and governing repository authority. It then:
 
-1. compares the durable plan against the actual repository result;
+1. merges every unit's durable commit/branch reference (`docs/operating-model.md` § Concurrent subagent directory isolation) into its own integration checkout, then compares the durable plan against the actual repository result;
 2. identifies missing units, violated shared contracts, unintegrated seams, and inconsistencies between units;
 3. synthesizes or fixes those seams itself when the correction is within the already-authorized execution scope — escalating rather than expanding scope when it is not;
 4. verifies the integrated vertical outcome against the Entry check above;
