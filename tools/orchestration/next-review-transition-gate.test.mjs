@@ -245,6 +245,17 @@ test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED whose body_exce
   assert.notEqual(v.state, "NO_ACTION_YET");
 });
 
+test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED with a leading blank line (live PR #647 `/pulls/{n}/reviews` shape) -> STAGE1_CORRECTION_REQUIRED", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("RESPONSE_RECEIVED", {
+      matches: [{ body_excerpt: "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request." }],
+      unboundGenuineMatches: [],
+    }),
+    mergeReady: mergeReady("MERGE_READY"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+});
+
 test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED + Stage 1 disposition satisfied at this head + MERGE_READY -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", () => {
   const v = resolvePreMergeVerdict({
     stage1: stage1("RESPONSE_RECEIVED", {

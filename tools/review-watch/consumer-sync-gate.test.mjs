@@ -586,6 +586,18 @@ test("isCleanStage1Response: false for a findings-bearing match alone (regressio
   );
 });
 
+test("isCleanStage1Response: false for a findings-bearing match with a leading blank line (live PR #647 `/pulls/{n}/reviews` shape, regression)", () => {
+  assert.equal(
+    isCleanStage1Response({
+      state: "RESPONSE_RECEIVED",
+      matches: [
+        { body_excerpt: "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request." },
+      ],
+    }),
+    false,
+  );
+});
+
 test("isCleanStage1Response: true for a generic ack/kickoff match followed by a clean-pass match", () => {
   assert.equal(
     isCleanStage1Response({

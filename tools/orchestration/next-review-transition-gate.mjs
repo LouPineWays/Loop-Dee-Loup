@@ -329,7 +329,12 @@ export function stage1DispositionMatchesHead(disposition, head) {
   return head.toLowerCase().startsWith(disposition.sha);
 }
 
-const FINDINGS_PREAMBLE_PATTERN = /^### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request\./;
+// Kept as its own copy of consumer-sync-gate.mjs's `FINDINGS_PREAMBLE_PATTERN` (this gate does
+// not import it) — see that file's comment for why the leading `\s*` is required: live PR #647
+// evidence showed `/pulls/{n}/reviews` submission bodies carry one leading blank line before
+// this exact heading, which the un-anchored-tolerant version of this pattern silently never
+// matched, misclassifying a findings-bearing response as NO_ACTION_YET.
+const FINDINGS_PREAMBLE_PATTERN = /^\s*### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request\./;
 
 // Live regression evidence on PR #435 itself: the genuine Codex review bound to commit
 // `30b36035c9` opens with an insignificant leading newline before "### 💡 Codex Review",

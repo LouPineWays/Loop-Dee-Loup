@@ -227,8 +227,13 @@ const CLEAN_REVIEW_PATTERN = /^Codex Review: Didn't find any major issues\./;
 // preambles keeps this inside issue #274's explicit non-goal: "semantically adjudicating
 // arbitrary Codex findings with a regex and calling that review complete" is out of scope,
 // and this never inspects finding content -- only which of two fixed, previously-observed
-// preambles (if either) a message opens with.
-const FINDINGS_PREAMBLE_PATTERN = /^### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request\./;
+// preambles (if either) a message opens with. Live #647 evidence: `/pulls/{n}/reviews`
+// submission bodies for this exact preamble consistently carry one leading blank line before
+// the heading (confirmed via raw byte read of PR #647 review id 5238075955 and PR #642's),
+// unlike the plain issue-comment `CLEAN_REVIEW_PATTERN` case above, which never does — so the
+// leading `\s*` below tolerates that endpoint-specific formatting without weakening the anchor
+// to match the preamble anywhere but the start of the (whitespace-trimmed) message.
+const FINDINGS_PREAMBLE_PATTERN = /^\s*### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request\./;
 
 // Pure. Both fixed preambles above are anchored with `^`, matching only when the excerpt's
 // very first character starts the phrase. PR #435's own live regression: the genuine review
