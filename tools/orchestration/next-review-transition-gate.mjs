@@ -62,19 +62,25 @@
 //         lifecycle-gate merge-ready MERGE_READY(*)      -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2
 //         lifecycle-gate merge-ready BLOCKED_CLOSING_REFERENCE -> STAGE1_CORRECTION_REQUIRED
 //           (correctionReason: "closing-reference")
-//     - stage1-gate RESPONSE_RECEIVED with a clean-pass response (consumer-sync-gate.mjs's
-//       `isCleanStage1Response`), and lifecycle-gate merge-ready MERGE_READY(*) -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2;
-//       BLOCKED_CLOSING_REFERENCE instead -> STAGE1_CORRECTION_REQUIRED (correctionReason: "closing-reference")
-//     - stage1-gate RESPONSE_RECEIVED with findings preamble -> STAGE1_CORRECTION_REQUIRED
+//     - stage1-gate RESPONSE_RECEIVED with findings content -- either the fixed old findings
+//       preamble, or (issue #638/PR #640 correction) any match on a formal review endpoint
+//       whose body stage1-findings.mjs's shared classifier reports as findings-bearing, e.g.
+//       raw "P1: ..." text with no fixed heading at all -- checked *before* the clean-pass
+//       check below, so a formal review that opens with the fixed clean-pass preamble and then
+//       appends a real finding is never misread as clean -> STAGE1_CORRECTION_REQUIRED
 //       (correctionReason: "findings"), except a control Issue Stage 1 bullet that is both
 //       satisfied/exempt and explicitly head-scoped to this same current head also allows
 //       merge-ready progression
+//     - stage1-gate RESPONSE_RECEIVED with a clean-pass response (consumer-sync-gate.mjs's
+//       `isCleanStage1Response`), and lifecycle-gate merge-ready MERGE_READY(*) -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2;
+//       BLOCKED_CLOSING_REFERENCE instead -> STAGE1_CORRECTION_REQUIRED (correctionReason: "closing-reference")
 //
 //     Issue #611/PR #613 (Stage 1 review, P1): every STAGE1_CORRECTION_REQUIRED verdict above
 //     now also carries a `correctionReason` field ("findings" or "closing-reference"). The one
-//     genuinely findings-bearing path (RESPONSE_RECEIVED with findings preamble) is the #611
-//     #438/PR #610 regression -- format-dispatch-prompt.mjs's formatStage1CorrectionWorkerDispatchPrompt
-//     mandates finalize-correction-breakpoint.mjs only for that reason. The other three paths
+//     genuinely findings-bearing path (RESPONSE_RECEIVED with findings content, per the #638
+//     extension above) is the #611 #438/PR #610 regression --
+//     format-dispatch-prompt.mjs's formatStage1CorrectionWorkerDispatchPrompt mandates
+//     finalize-correction-breakpoint.mjs only for that reason. The other three paths
 //     (an already correction-satisfied disposition, EXEMPT, or a clean-pass response) are all
 //     blocked solely by the closing reference -- finalize-correction-breakpoint.mjs's own
 //     findings-bearing/strict-descendant requirements would reject them, so the dispatched
@@ -136,10 +142,14 @@
 //       this gate does not recognize)                                      -> AMBIGUOUS
 //
 // `stage1-gate.mjs` signals whether a genuine response happened at the current head. Whether
-// that response is a clean pass or a findings-bearing reply is resolved with
-// consumer-sync-gate.mjs's `isCleanStage1Response` helper, which is deliberately anchored to
-// Codex's own known fixed Stage 1 preambles (clean pass vs findings) and does not semantically
-// adjudicate arbitrary findings.
+// that response carries findings is resolved first with `hasFindingsStage1Response` (this
+// file), which composes stage1-findings.mjs's shared, fail-closed content classifier for any
+// match on a formal review endpoint (plus the older fixed findings preamble, kept for
+// fixtures/history with no `endpoint` field at all); only when that is false is a clean pass
+// resolved with consumer-sync-gate.mjs's `isCleanStage1Response` helper, which is deliberately
+// anchored to Codex's own known fixed Stage 1 preambles and does not semantically adjudicate
+// arbitrary findings. Neither helper re-parses review content for meaning beyond these fixed,
+// narrow, structural checks.
 //
 // AMBIGUOUS is a founder-interrupt-eligible fail-closed stop (AGENTS.md § Founder interrupt
 // conditions, "a failed safety/correctness gate with no authorized recovery path"), never
@@ -209,6 +219,7 @@ import {
 import { run as stage1Run } from "../review-watch/stage1-gate.mjs";
 import { checkMergeReady, checkPostAudit } from "../review-watch/lifecycle-gate.mjs";
 import { isCleanStage1Response } from "../review-watch/consumer-sync-gate.mjs";
+import { isFindingsBearingResponse, isFormalReviewEndpoint } from "../review-watch/stage1-findings.mjs";
 // Issue #454, unit 454-C: stage1-correction-gate.mjs itself imports `stage1DispositionMatchesHead`
 // from this module (see that export's own comment below), so this is a deliberate circular
 // import between the two modules. Both directions only reference the other's bindings from
@@ -331,6 +342,9 @@ export function stage1DispositionMatchesHead(disposition, head) {
   return head.toLowerCase().startsWith(disposition.sha);
 }
 
+// Codex's other known fixed Stage 1 preamble (observed live on PRs #275/#276), kept as its own
+// unconditional check for backward compatibility with fixtures/history that predate stage1-
+// findings.mjs's shared classifier and never carry a match `endpoint` field at all.
 const FINDINGS_PREAMBLE_PATTERN = /^### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request\./;
 
 // Live regression evidence on PR #435 itself: the genuine Codex review bound to commit
@@ -347,10 +361,22 @@ function stripOuterWhitespace(text) {
   return (text ?? "").trim();
 }
 
+// PR #640 Stage 1 review finding #1: this gate used to recognize a findings-bearing round
+// only via the fixed preamble above, so a genuine formal-review artifact whose body was
+// ordinary finding text (e.g. "P1: missing null check...", with no fixed heading at all --
+// exactly what stage1-gate.mjs's own new formal-artifact requirement, issue #638, now accepts
+// as RESPONSE_RECEIVED) fell through to NO_ACTION_YET instead of STAGE1_CORRECTION_REQUIRED,
+// stalling the deterministic workflow permanently. Propagating stage1-findings.mjs's shared,
+// fail-closed content classifier -- but only for a match on a formal review endpoint
+// (`isFormalReviewEndpoint`) -- recognizes that case without also flipping an ambiguous
+// ack/kickoff comment (no formal endpoint, no recognized clean phrase) to findings-bearing;
+// see the "kickoff/ack shape" regression test this gate's own test file still requires.
 function hasFindingsStage1Response(stage1) {
-  return [...(stage1.matches ?? []), ...(stage1.unboundGenuineMatches ?? [])].some((m) =>
-    FINDINGS_PREAMBLE_PATTERN.test(stripOuterWhitespace(m.body_excerpt)),
-  );
+  return [...(stage1.matches ?? []), ...(stage1.unboundGenuineMatches ?? [])].some((m) => {
+    const bodyExcerpt = stripOuterWhitespace(m.body_excerpt);
+    if (FINDINGS_PREAMBLE_PATTERN.test(bodyExcerpt)) return true;
+    return isFormalReviewEndpoint(m.endpoint) && isFindingsBearingResponse(bodyExcerpt);
+  });
 }
 
 export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition = null, correctionDelta = null }, context = {}) {
@@ -505,6 +531,23 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
   }
 
   if (stage1.state === "RESPONSE_RECEIVED") {
+    // Findings-bearing is checked first and takes precedence over isCleanStage1Response
+    // (PR #640 Stage 1 review finding #2's own root cause applies here too):
+    // isCleanStage1Response's CLEAN_REVIEW_PATTERN is, by design, a prefix match, so a formal
+    // review whose body opens with the fixed clean-pass preamble and then appends a real
+    // trailing finding would otherwise be misread as clean before this gate ever reached the
+    // findings check. Checking findings first, using stage1-findings.mjs's severity-marker-
+    // aware classifier, means that case now routes to correction instead of a false merge
+    // authorization -- without changing consumer-sync-gate.mjs's own separately-tested
+    // automated-sync classifier at all.
+    if (hasFindingsStage1Response(stage1)) {
+      if (stage1DispositionSatisfiedAtHead && isMergeReadyState(mergeReady.state)) {
+        return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
+      }
+      // The one genuinely findings-bearing path: #611's #438/PR #610 regression.
+      // finalize-correction-breakpoint.mjs remains mandatory here.
+      return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context, correctionReason: "findings" };
+    }
     if (isCleanStage1Response(stage1)) {
       if (isMergeReadyState(mergeReady.state)) {
         return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
@@ -514,13 +557,6 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
       if (mergeReady.state === "BLOCKED_CLOSING_REFERENCE") {
         return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context, correctionReason: "closing-reference" };
       }
-    } else if (hasFindingsStage1Response(stage1)) {
-      if (stage1DispositionSatisfiedAtHead && isMergeReadyState(mergeReady.state)) {
-        return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
-      }
-      // The one genuinely findings-bearing path: #611's #438/PR #610 regression.
-      // finalize-correction-breakpoint.mjs remains mandatory here.
-      return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context, correctionReason: "findings" };
     }
     return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
   }
