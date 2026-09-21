@@ -36,17 +36,35 @@
 // primary/main checkout and never to a path outside that root:
 //
 //   - No ledger entry at all (legacy/unattributed, e.g. an old `new-session-*` Dispatch
-//     checkout that predates this mechanism): reconciled ONLY under the bounded legacy path --
-//     its branch tip must be independently provable as merged into the repository's own default
-//     branch, and `git worktree remove` (no `--force`) must itself succeed. Directory-name
-//     pattern alone never authorizes removal (requirement/acceptance: "Directory-name pattern
-//     alone is insufficient to authorize deletion").
+//     checkout that predates this mechanism): reconciled ONLY under the bounded legacy path, and
+//     ONLY when independent evidence establishes both durability and staleness -- neither alone
+//     is attribution or obsolescence proof. Durability: its branch tip must be independently
+//     provable as merged into the repository's own default branch. Staleness: the worktree's own
+//     git-administrative directory (its `HEAD` file, updated by any checkout/commit activity in
+//     that worktree) must not have been touched within `legacyGracePeriodMs` (default: see
+//     `DEFAULT_LEGACY_GRACE_PERIOD_MS` below) -- a checkout Claude Dispatch just created for a
+//     session that has not yet run this preflight to register itself is otherwise
+//     indistinguishable from a genuinely abandoned one merely by merged/clean state (Stage 1
+//     review finding on PR #683). Unknown activity evidence fails closed to retention. Finally
+//     `git worktree remove` (no `--force`) must itself succeed. Directory-name pattern alone
+//     never authorizes removal (requirement/acceptance: "Directory-name pattern alone is
+//     insufficient to authorize deletion").
 //   - A ledger entry whose live branch no longer matches what was recorded: treated as
-//     "ambiguous association" and left untouched.
+//     "ambiguous association" and left untouched. Detached-HEAD state is normalized to the same
+//     `null` representation on both the registration and live-enumeration paths so a genuinely
+//     unchanged detached predecessor compares equal rather than becoming permanently ambiguous
+//     (Stage 1 review finding on PR #683).
 //   - A ledger entry whose logical lineage (controlIssue, else executionIssue, else its own
 //     sessionKey as a never-shared fallback) has NOT been superseded by any other entry with a
 //     strictly later `lastConfirmedAt` is "active" for that lineage and left untouched --
-//     including a lone predecessor nobody has proven obsolete yet.
+//     including a lone predecessor nobody has proven obsolete yet. Reusing an existing checkout
+//     path for a genuinely new session (a `sessionKey` that does not match what is already
+//     recorded there) never inherits that path's prior lineage merely because IDs were not
+//     repeated -- lineage resets to whatever this call explicitly supplies (`null` otherwise)
+//     precisely so an unrelated new session can never make an active predecessor from the OLD
+//     lineage look superseded (Stage 1 review finding on PR #683). Only a matching `sessionKey`
+//     -- i.e. the same session confirming itself again -- is treated as a refresh that preserves
+//     unset lineage fields.
 //   - A ledger entry whose lineage HAS been superseded (this run's own current entry, or an
 //     earlier run's, recorded a *different* path for the same controlIssue/executionIssue more
 //     recently) is an eligible predecessor. Safety is then delegated to git itself: `git worktree
@@ -60,10 +78,22 @@
 // `git worktree prune` runs once at the end, purely to drop administrative metadata for
 // checkouts already missing from disk -- never as a substitute for the safety checks above.
 //
+// `--dry-run` is observational only: it never removes a worktree, prunes administrative
+// metadata, or writes the ledger. Rather than skipping only ledger persistence and prune after
+// mutation already happened (the exact defect Stage 1 review found on PR #683), it swaps the
+// real `git worktree remove` for a non-mutating `git status`-based check that reports what a
+// real removal would find without ever invoking it.
+//
+// A corrupt or unreadable-but-present ledger file fails the whole run closed with an error --
+// it is never silently treated as an empty/fresh ledger, which would discard every recorded
+// association and route every managed-root worktree into the bounded legacy path as if none of
+// them were ever registered (Stage 1 review finding on PR #683). A genuinely missing ledger file
+// (first run ever) is the only case that legitimately starts from an empty ledger.
+//
 // Usage:
 //   node tools/orchestration/worktree-preflight.mjs
 //     [--session-key K] [--control-issue N] [--execution-issue N] [--pr N]
-//     [--managed-root PATH] [--dry-run]
+//     [--managed-root PATH] [--legacy-grace-period-ms N] [--dry-run true]
 //     Registers the CURRENT checkout (cwd) and reconciles its predecessors. This is the normal
 //     fresh-session startup invocation.
 //
@@ -74,13 +104,21 @@
 //     knowable" for a worktree this session did not itself start in.
 //
 // Exit codes: 0 on a completed run (see the JSON `outcomes` summary for what happened to each
-// candidate); 1 on an operational error (git plumbing failed, ledger unreadable/unwritable).
+// candidate); 1 on an operational error (git plumbing failed, ledger corrupt/unwritable).
 //
 // Tests: node --test tools/orchestration/worktree-preflight.test.mjs
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+
+// A legacy/unattributed worktree is reclaimed only once its own administrative activity is at
+// least this old -- see `worktreeLastActivityAt` and the legacy branch of `reconcile` below.
+// This is the "positive evidence of staleness" the merged/clean check alone cannot provide
+// (Stage 1 review finding on PR #683): a checkout Claude Dispatch just created for a session that
+// has not yet run this preflight to register itself is otherwise indistinguishable, by
+// merged/clean state alone, from one genuinely abandoned.
+export const DEFAULT_LEGACY_GRACE_PERIOD_MS = 30 * 60 * 1000; // 30 minutes
 
 // ---------------------------------------------------------------------------------------------
 // Git plumbing (thin, injectable so tests never require the real repository under test to be a
@@ -99,8 +137,14 @@ export function defaultGitImpl() {
     toplevel(cwd) {
       return runGit(["rev-parse", "--show-toplevel"], { cwd });
     },
+    // Detached HEAD normalizes to `null`, the same representation `parseWorktreeListPorcelain`
+    // already uses for a live `detached` worktree -- `git rev-parse --abbrev-ref HEAD` otherwise
+    // returns the literal string `"HEAD"`, permanently mismatching the live enumeration and
+    // making a legitimately-associated detached predecessor unretireable (Stage 1 review finding
+    // on PR #683).
     currentBranch(cwd) {
-      return runGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd });
+      const branch = runGit(["rev-parse", "--abbrev-ref", "HEAD"], { cwd });
+      return branch === "HEAD" ? null : branch;
     },
     currentCommit(cwd) {
       return runGit(["rev-parse", "HEAD"], { cwd });
@@ -118,6 +162,34 @@ export function defaultGitImpl() {
         return { ok: true };
       } catch (err) {
         return { ok: false, reason: String(err.stderr || err.message || err).trim() };
+      }
+    },
+    // Non-mutating stand-in for `removeWorktree`, used only under `--dry-run` (issue: dry-run
+    // must never call the real mutating removal -- Stage 1 review finding on PR #683). Reports
+    // whether a real `git worktree remove` would currently succeed without ever invoking it,
+    // ledger-writing, or pruning. `git status --porcelain` mirrors the one precondition this
+    // script itself does not already check independently (locked state is checked separately);
+    // it is not byte-for-byte identical to git's own internal remove precondition, but it never
+    // mutates the worktree it inspects.
+    checkRemovable(_cwd, path) {
+      try {
+        const status = runGit(["status", "--porcelain"], { cwd: path });
+        if (status) return { ok: false, reason: "worktree contains modified or untracked files" };
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, reason: String(err.stderr || err.message || err).trim() };
+      }
+    },
+    // Returns an ISO timestamp for the most recent git-administrative activity recorded for the
+    // worktree at `path` (its own `HEAD` file, updated by any checkout/commit inside it), or
+    // `null` when it cannot be determined -- callers must fail closed on `null` rather than
+    // treating unknown activity as either stale or fresh.
+    worktreeLastActivityAt(_cwd, path) {
+      try {
+        const gitDir = runGit(["rev-parse", "--absolute-git-dir"], { cwd: path });
+        return statSync(`${gitDir}/HEAD`).mtime.toISOString();
+      } catch {
+        return null;
       }
     },
     prune(cwd) {
@@ -193,17 +265,32 @@ export function ledgerPathFor(gitCommonDir) {
   return `${gitCommonDir}/ldl/worktrees.json`;
 }
 
+// A genuinely missing ledger file (first run ever at this git-common-dir) legitimately starts
+// from an empty ledger. A ledger file that EXISTS but is truncated, malformed, or otherwise
+// unreadable/unparseable must never be treated the same way: silently substituting `[]` would
+// discard every recorded association and route every currently-live managed-root worktree into
+// the bounded legacy path as if none of them were ever registered -- exactly the failure mode
+// Stage 1 review found on PR #683. This throws instead, so the whole run fails closed with an
+// explicit error (surfaced by `main()` as a non-zero exit) rather than reconciling on
+// manufactured "fresh ledger" evidence.
 export function loadLedger(path, { readFileImpl = readFileSync } = {}) {
   if (!existsSync(path)) return [];
+  let raw;
   try {
-    const raw = readFileImpl(path, "utf8");
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    // A corrupt ledger fails closed to "start fresh" rather than crashing the whole preflight --
-    // durable branch/commit state lives in git itself, never only in this cache.
-    return [];
+    raw = readFileImpl(path, "utf8");
+  } catch (err) {
+    throw new Error(`worktree ledger at ${path} exists but could not be read: ${err.message}`);
   }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`worktree ledger at ${path} is corrupt (invalid JSON): ${err.message}`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`worktree ledger at ${path} is corrupt (expected a JSON array)`);
+  }
+  return parsed;
 }
 
 export function saveLedger(path, ledger, { writeFileImpl = writeFileSync, mkdirImpl = mkdirSync } = {}) {
@@ -222,12 +309,21 @@ export function lineageKeyOf(entry) {
 }
 
 // Pure. Inserts or refreshes the ledger entry for `info.path`. Association fields
-// (controlIssue/executionIssue/pr) are updated only when explicitly supplied (non-undefined),
-// so a later plain reconciliation run never blanks out lineage recorded at registration time.
+// (controlIssue/executionIssue/pr) are updated only when explicitly supplied (non-undefined) --
+// EXCEPT that reusing an already-registered path under a DIFFERENT `sessionKey` is a new session,
+// never a same-session refresh, and must never inherit the prior occupant's lineage merely
+// because this call did not repeat its IDs: a fresh session for unrelated (or no) work that
+// happens to reuse a path -- most plausibly the persistent primary checkout -- would otherwise be
+// recorded as the newest member of the OLD lineage, making an active predecessor worktree from
+// that old control/execution issue look superseded and eligible for removal (Stage 1 review
+// finding on PR #683). Only a matching `sessionKey` is treated as the same session confirming
+// itself again, which preserves unset lineage fields exactly as before.
 export function upsertEntry(ledger, info, now) {
   const idx = ledger.findIndex((e) => e.path === info.path);
+  const previous = idx === -1 ? null : ledger[idx];
+  const isContinuation = previous != null && info.sessionKey != null && previous.sessionKey === info.sessionKey;
   const base =
-    idx === -1
+    previous == null
       ? {
           path: info.path,
           gitCommonDir: info.gitCommonDir,
@@ -242,8 +338,16 @@ export function upsertEntry(ledger, info, now) {
           retiredAt: null,
           outcome: null,
         }
-      : { ...ledger[idx] };
-  if (idx !== -1) {
+      : {
+          ...previous,
+          // A new session reusing this path resets stale lineage before this call's own explicit
+          // values (below) are applied; a continuation preserves it, as before.
+          controlIssue: isContinuation ? previous.controlIssue : null,
+          executionIssue: isContinuation ? previous.executionIssue : null,
+          pr: isContinuation ? previous.pr : null,
+        };
+  if (previous != null) {
+    base.sessionKey = info.sessionKey;
     base.branch = info.branch ?? base.branch;
     base.commit = info.commit ?? base.commit;
     if (info.controlIssue !== undefined) base.controlIssue = info.controlIssue;
@@ -276,10 +380,29 @@ function isUnderRoot(path, root) {
   return path === root || path.startsWith(normalizedRoot);
 }
 
+// Removal attempt shared by both the legacy and superseded-predecessor branches below. Under
+// `--dry-run` this calls the non-mutating `checkRemovable` instead of the real `removeWorktree`,
+// so a dry run never removes a worktree regardless of which branch decided it was eligible
+// (Stage 1 review finding on PR #683: the previous dry-run guard only skipped ledger/prune AFTER
+// the real removal had already run).
+function attemptRemoval(git, primaryPath, path, dryRun) {
+  return dryRun ? git.checkRemovable(primaryPath, path) : git.removeWorktree(primaryPath, path);
+}
+
 // Core reconciliation pass. Pure with respect to the outside world except through the injected
 // `git`/`now` -- makes the whole decision procedure independently testable without a real
 // multi-worktree checkout for every scenario. Returns `{ ledger: <next ledger>, outcomes: {...} }`.
-export function reconcile({ ledger, liveWorktrees, currentPath, primaryPath, managedRoot, git, now }) {
+export function reconcile({
+  ledger,
+  liveWorktrees,
+  currentPath,
+  primaryPath,
+  managedRoot,
+  git,
+  now,
+  dryRun = false,
+  legacyGracePeriodMs = DEFAULT_LEGACY_GRACE_PERIOD_MS,
+}) {
   const outcomes = {
     current: currentPath,
     retired: [],
@@ -317,14 +440,19 @@ export function reconcile({ ledger, liveWorktrees, currentPath, primaryPath, man
     const entry = nextLedger.find((e) => e.path === live.path);
 
     if (!entry) {
-      // Legacy/unattributed: only reclaim under independently-proven safety (requirement 11).
+      // Legacy/unattributed: only reclaim under independently-proven durability AND staleness
+      // (requirement 11; Stage 1 review finding on PR #683 for the staleness half -- "merged and
+      // clean" alone proves durability, never that no live/not-yet-registered session still owns
+      // this checkout). Unknown activity evidence fails closed to retention.
       const defaultRef = git.resolveDefaultBranchRef(primaryPath);
       const merged = defaultRef && live.headCommit ? git.isAncestor(primaryPath, live.headCommit, defaultRef) : false;
-      if (!merged || live.locked) {
+      const lastActivityAt = git.worktreeLastActivityAt(primaryPath, live.path);
+      const staleEnough = lastActivityAt != null && new Date(now).getTime() - new Date(lastActivityAt).getTime() >= legacyGracePeriodMs;
+      if (!merged || live.locked || !staleEnough) {
         outcomes.legacyRetained.push(live.path);
         continue;
       }
-      const result = git.removeWorktree(primaryPath, live.path);
+      const result = attemptRemoval(git, primaryPath, live.path, dryRun);
       if (result.ok) {
         outcomes.legacyReclaimed.push(live.path);
       } else {
@@ -351,7 +479,7 @@ export function reconcile({ ledger, liveWorktrees, currentPath, primaryPath, man
       continue;
     }
 
-    const result = git.removeWorktree(primaryPath, live.path);
+    const result = attemptRemoval(git, primaryPath, live.path, dryRun);
     if (result.ok) {
       outcomes.retired.push(live.path);
       nextLedger = nextLedger.map((e) => (e.path === entry.path ? { ...e, retiredAt: now, outcome: "retired" } : e));
@@ -403,10 +531,16 @@ export function runPreflight({ args, git = defaultGitImpl(), now = new Date().to
   // assumed from the caller's cwd. `--branch`/`--commit` remain available to override when the
   // target path is not (or is no longer) a live worktree to inspect directly.
   const branchCwd = registerOnly ? targetPath : cwd;
+  // The default sessionKey folds in `now` (not just the path's own basename) precisely so a
+  // genuinely NEW session reusing an already-registered path -- without an explicit
+  // `--session-key` -- is never mistaken by `upsertEntry` for the same session confirming itself
+  // again, which would otherwise let it inherit and refresh that path's stale prior lineage
+  // (Stage 1 review finding on PR #683). A caller that legitimately wants same-session refresh
+  // semantics across multiple invocations passes an explicit, stable `--session-key`.
   const info = {
     path: targetPath,
     gitCommonDir,
-    sessionKey: args["session-key"] || targetPath.split(/[\\/]/).filter(Boolean).pop(),
+    sessionKey: args["session-key"] || `${targetPath.split(/[\\/]/).filter(Boolean).pop()}-${now}`,
     branch: args.branch || git.currentBranch(branchCwd),
     commit: args.commit || git.currentCommit(branchCwd),
     controlIssue: args["control-issue"] !== undefined ? toIntOrNull(args["control-issue"]) : undefined,
@@ -414,9 +548,11 @@ export function runPreflight({ args, git = defaultGitImpl(), now = new Date().to
     pr: args.pr !== undefined ? toIntOrNull(args.pr) : undefined,
   };
   const { ledger: ledgerAfterUpsert, entry } = upsertEntry(ledger, info, now);
+  const dryRun = Boolean(args["dry-run"]);
+  const legacyGracePeriodMs = args["legacy-grace-period-ms"] !== undefined ? (toIntOrNull(args["legacy-grace-period-ms"]) ?? DEFAULT_LEGACY_GRACE_PERIOD_MS) : DEFAULT_LEGACY_GRACE_PERIOD_MS;
 
   if (registerOnly) {
-    if (!args["dry-run"]) saveLedger(ledgerPath, ledgerAfterUpsert);
+    if (!dryRun) saveLedger(ledgerPath, ledgerAfterUpsert);
     return { exitCode: 0, result: { registered: entry } };
   }
 
@@ -429,9 +565,11 @@ export function runPreflight({ args, git = defaultGitImpl(), now = new Date().to
     managedRoot,
     git,
     now,
+    dryRun,
+    legacyGracePeriodMs,
   });
 
-  if (!args["dry-run"]) {
+  if (!dryRun) {
     saveLedger(ledgerPath, finalLedger);
     git.prune(primaryPath);
   }
