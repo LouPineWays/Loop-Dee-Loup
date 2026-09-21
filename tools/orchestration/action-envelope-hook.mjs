@@ -68,8 +68,9 @@
 // Marker storage mirrors tools/telemetry/collect.mjs's own TELEMETRY_DIR convention: a
 // gitignored, session-scoped directory outside durable repository state
 // (`LDL_ACTION_ENVELOPE_STATE_DIR` overrides it, primarily so tests never touch a real
-// session's on-disk marker). `sanitizeSessionId` is imported directly from collect.mjs rather
-// than reimplemented, for the same path-traversal defense that module already documents.
+// session's on-disk marker). `sanitizeSessionId` is defined locally below (Stage 1 review
+// finding on PR #642), with behavior matching collect.mjs's own function of the same name —
+// the same path-traversal defense that module already documents — rather than imported from it.
 //
 // This module intentionally never throws and never exits non-zero for a data problem (a
 // missing/malformed hook payload, an unwritable state directory): a fail-open default on
