@@ -111,7 +111,120 @@ test("an authorized Stage 1/Stage 2 correction dispatch is execution authority",
   assert.equal(stage2.authorized, true);
 });
 
-test("correction dispatch missing a controlIssue or a PR/Audit reference fails closed", () => {
-  assert.equal(classifyExecutionAuthority({ origin: "correction_dispatch", pr: 628 }).authorized, false);
+// Stage 1 review finding (inline P2, "Preserve authorized direct-reference corrections"):
+// next-review-transition-gate.mjs's STAGE1_CORRECTION_REQUIRED/STAGE2_CORRECTION_REQUIRED
+// verdicts, and both correction prompt formatters, already support a genuine
+// controlIssue: null / absent direct-reference shape (no thin control Issue exists).
+// Requiring controlIssue unconditionally would strand those authorized corrections.
+test("a direct-reference correction dispatch with no thin control Issue is still execution authority", () => {
+  const stage1 = classifyExecutionAuthority({ origin: "correction_dispatch", pr: 628 });
+  const stage2 = classifyExecutionAuthority({ origin: "correction_dispatch", auditIssue: 629 });
+  assert.equal(stage1.authorized, true);
+  assert.match(stage1.reason, /direct-reference/);
+  assert.equal(stage2.authorized, true);
+});
+
+test("correction dispatch missing both a controlIssue and a PR/Audit reference fails closed", () => {
+  assert.equal(classifyExecutionAuthority({ origin: "correction_dispatch" }).authorized, false);
   assert.equal(classifyExecutionAuthority({ origin: "correction_dispatch", controlIssue: 631 }).authorized, false);
+});
+
+// --- Malformed truthy values must fail closed, not merely missing fields ---------------
+// Stage 1 review finding (top-level P1 + inline "Validate envelope values before granting
+// authority"): every positive path previously accepted arbitrary truthy values —
+// controlIssue: "not-an-issue", executionIssue: {}, route: [], an object-valued
+// founderInstruction, and controlIssue: "x" alongside pr: [] all produced authorized: true.
+
+test("control-plane dispatch with malformed truthy fields fails closed", () => {
+  assert.equal(
+    classifyExecutionAuthority({
+      origin: "control_plane_dispatch",
+      controlIssue: "not-an-issue",
+      executionIssue: {},
+      route: [],
+    }).authorized,
+    false,
+  );
+  assert.equal(
+    classifyExecutionAuthority({ origin: "control_plane_dispatch", controlIssue: -1, executionIssue: 630, route: "worker" })
+      .authorized,
+    false,
+  );
+  assert.equal(
+    classifyExecutionAuthority({ origin: "control_plane_dispatch", controlIssue: 631, executionIssue: 630, route: "   " })
+      .authorized,
+    false,
+  );
+});
+
+test("founder_direct with an object-valued or empty founderInstruction fails closed", () => {
+  assert.equal(
+    classifyExecutionAuthority({ origin: "founder_direct", founderInstruction: { text: "work on #631" } }).authorized,
+    false,
+  );
+  assert.equal(classifyExecutionAuthority({ origin: "founder_direct", founderInstruction: "   " }).authorized, false);
+});
+
+test("correction dispatch with malformed truthy fields fails closed", () => {
+  assert.equal(
+    classifyExecutionAuthority({ origin: "correction_dispatch", controlIssue: "x", pr: [] }).authorized,
+    false,
+  );
+  assert.equal(
+    classifyExecutionAuthority({ origin: "correction_dispatch", controlIssue: "x", pr: 628 }).authorized,
+    false,
+  );
+  assert.equal(
+    classifyExecutionAuthority({ origin: "correction_dispatch", auditIssue: -1 }).authorized,
+    false,
+  );
+});
+
+// --- Pre-PR pipeline dispatch envelopes (Stage 1 review finding, inline P1 "Recognize the
+// actual pre-PR dispatch envelopes") ----------------------------------------------------
+
+test("planning and integration dispatches are execution authority without a route field", () => {
+  const planning = classifyExecutionAuthority({ origin: "planning_dispatch", controlIssue: 631, executionIssue: 630 });
+  const integration = classifyExecutionAuthority({ origin: "integration_dispatch", controlIssue: 631, executionIssue: 630 });
+  assert.equal(planning.authorized, true);
+  assert.equal(integration.authorized, true);
+});
+
+test("planning/integration dispatch with malformed or missing fields fails closed", () => {
+  assert.equal(
+    classifyExecutionAuthority({ origin: "planning_dispatch", controlIssue: "631", executionIssue: 630 }).authorized,
+    false,
+  );
+  assert.equal(classifyExecutionAuthority({ origin: "integration_dispatch", controlIssue: 631 }).authorized, false);
+});
+
+test("a worker-unit dispatch is execution authority via its unit/shared-contract comment URLs", () => {
+  const result = classifyExecutionAuthority({
+    origin: "worker_unit_dispatch",
+    unitCommentUrl: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/630#issuecomment-1",
+    parentExecutionIssue: 630,
+    sharedContractUrl: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/630#issuecomment-2",
+  });
+  assert.equal(result.authorized, true);
+});
+
+test("a worker-unit dispatch with a malformed comment URL or issue number fails closed", () => {
+  assert.equal(
+    classifyExecutionAuthority({
+      origin: "worker_unit_dispatch",
+      unitCommentUrl: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/630",
+      parentExecutionIssue: 630,
+      sharedContractUrl: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/630#issuecomment-2",
+    }).authorized,
+    false,
+  );
+  assert.equal(
+    classifyExecutionAuthority({
+      origin: "worker_unit_dispatch",
+      unitCommentUrl: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/630#issuecomment-1",
+      parentExecutionIssue: "630",
+      sharedContractUrl: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/630#issuecomment-2",
+    }).authorized,
+    false,
+  );
 });
