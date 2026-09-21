@@ -81,7 +81,17 @@ const CLEAN_REVIEW_PATTERN = /^Codex Review: Didn't find any major issues\./;
 // findings-bearing. Same discipline as LEADING_SUMMARY_CLAUSE_PATTERN below: each entry here
 // must be a trailing clause actually observed live, not a guess at what a harmless one might
 // look like.
-const CLEAN_PREAMBLE_TRAILING_PATTERN = /^(?:\s*nice work[!.]?)?\s*$/i;
+//
+// PR #673 Stage 1 review finding (P2): "Nice work!" was the only allowlisted trailing clause,
+// but consumer-sync-gate.mjs's own CLEAN_REVIEW_PATTERN documents this preamble's second
+// sentence as varying, and consumer-sync-gate.test.mjs's own long-standing fixture (line ~506)
+// already treats "Codex Review: Didn't find any major issues. Can't wait for the next one!" as
+// a genuine clean response. Without also allowlisting it here, this module's own fail-closed
+// default reported that same genuine clean-pass reply as findings-bearing
+// (FINDINGS_LACK_FORMAL_REVIEW), blocking the plain issue-comments-only surface
+// consumer-sync-gate.mjs's whole automated flow depends on before its own downstream clean
+// check ever ran — the two independent classifiers must keep the same known-clean-suffix set.
+const CLEAN_PREAMBLE_TRAILING_PATTERN = /^(?:\s*(?:nice work|can't wait for the next one)[!.]?)?\s*$/i;
 
 const FORMAL_REVIEW_ENDPOINTS = new Set(["pull-comments", "pull-reviews"]);
 

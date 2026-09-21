@@ -54,6 +54,10 @@ test("isCleanReviewResponse: recognizes Codex's own fixed clean-pass preamble 'C
   assert.equal(isCleanReviewResponse("Codex Review: Didn't find any major issues. Nice work!"), true);
 });
 
+test("isCleanReviewResponse: recognizes 'Can't wait for the next one!' as a known harmless trailing clause (PR #673 Stage 1 review finding #1; consumer-sync-gate.test.mjs's own long-standing fixture, and consumer-sync-gate.mjs's own CLEAN_REVIEW_PATTERN comment documenting this preamble's second sentence as varying)", () => {
+  assert.equal(isCleanReviewResponse("Codex Review: Didn't find any major issues. Can't wait for the next one!"), true);
+});
+
 test("isCleanReviewResponse: rejects the fixed clean-pass preamble when a real finding trails it (PR #640 Stage 1 review finding #2)", () => {
   const body = "Codex Review: Didn't find any major issues. However, P1: credentials are logged.";
   assert.equal(isCleanReviewResponse(body), false);

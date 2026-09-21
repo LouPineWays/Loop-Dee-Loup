@@ -83,7 +83,7 @@ function cleanStage1Result({ createdAt = PRE_MERGE_RESPONSE_AT } = {}) {
   return {
     exitCode: 0,
     state: "RESPONSE_RECEIVED",
-    matches: [{ body_excerpt: "Codex Review: Didn't find any major issues. Looks good to merge.", created_at: createdAt }],
+    matches: [{ body_excerpt: "Codex Review: Didn't find any major issues. Nice work!", created_at: createdAt }],
     unboundGenuineMatches: [],
   };
 }
@@ -814,7 +814,7 @@ test("run(): --recover true derives ordering only from the qualifying clean-pass
         state: "RESPONSE_RECEIVED",
         matches: [
           { body_excerpt: "Starting review shortly.", created_at: PRE_MERGE_RESPONSE_AT },
-          { body_excerpt: "Codex Review: Didn't find any major issues. Looks good to merge.", created_at: POST_MERGE_RESPONSE_AT },
+          { body_excerpt: "Codex Review: Didn't find any major issues. Nice work!", created_at: POST_MERGE_RESPONSE_AT },
         ],
         unboundGenuineMatches: [],
       }),
@@ -846,7 +846,7 @@ test("run(): --recover true still succeeds when a non-qualifying acknowledgement
         exitCode: 0,
         state: "RESPONSE_RECEIVED",
         matches: [
-          { body_excerpt: "Codex Review: Didn't find any major issues. Looks good to merge.", created_at: PRE_MERGE_RESPONSE_AT },
+          { body_excerpt: "Codex Review: Didn't find any major issues. Nice work!", created_at: PRE_MERGE_RESPONSE_AT },
           { body_excerpt: "Thanks for the update.", created_at: POST_MERGE_RESPONSE_AT },
         ],
         unboundGenuineMatches: [],
@@ -909,7 +909,7 @@ test("run(): --recover true fails closed when the qualifying response carries no
       stage1GateRunImpl: async () => ({
         exitCode: 0,
         state: "RESPONSE_RECEIVED",
-        matches: [{ body_excerpt: "Codex Review: Didn't find any major issues. Looks good to merge." }], // no created_at
+        matches: [{ body_excerpt: "Codex Review: Didn't find any major issues. Nice work!" }], // no created_at
         unboundGenuineMatches: [],
       }),
       writeControlSnapshotImpl: async () => ({ exitCode: 0, state: "WRITTEN" }),

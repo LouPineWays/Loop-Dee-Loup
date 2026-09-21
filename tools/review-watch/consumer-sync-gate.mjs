@@ -102,6 +102,7 @@
 import { execFileSync } from "node:child_process";
 import { findExistingTrigger, headMarker } from "./trigger.mjs";
 import { run as runMergeReadyGate } from "./merge-ready-gate.mjs";
+import { isCleanReviewResponse, isFindingsBearingResponse } from "./stage1-findings.mjs";
 
 const TRIGGER_TEXT = "@codex review";
 
@@ -250,8 +251,19 @@ function stripOuterWhitespace(text) {
 // e.g. to derive a historical-provenance timestamp from only the qualifying reply, never a
 // generic earlier acknowledgement on the same thread -- reuses this exact fixed-phrase test
 // rather than re-deriving a second, possibly divergent, copy of it.
+//
+// PR #673 Stage 1 review finding (P1): a genuine finding can hide as an unlabeled trailing
+// clause behind this exact preamble (Stage 2 audit #672's live reproduction, "Codex Review:
+// Didn't find any major issues. However, credentials are logged."). A bare CLEAN_REVIEW_PATTERN
+// prefix test alone would misclassify that reply as a genuine clean-pass match. Deferring to
+// stage1-findings.mjs's own `isCleanReviewResponse` -- once the prefix itself already matched,
+// so this can never widen recognition to that classifier's other known-clean shapes (LGTM/"no
+// issues found"/etc.), which this function has never recognized and still must not -- reuses
+// the same hardened trailing-clause allowlist stage1-gate.mjs's own Stage 1 evidence rule now
+// applies, so this independent classifier can't silently diverge from it again.
 export function isCleanPassMatch(match) {
-  return CLEAN_REVIEW_PATTERN.test(stripOuterWhitespace(match?.body_excerpt));
+  const body = stripOuterWhitespace(match?.body_excerpt);
+  return CLEAN_REVIEW_PATTERN.test(body) && isCleanReviewResponse(body);
 }
 
 // Pure. `stage1` is stage1-gate.mjs's own result (nested under merge-ready-gate.mjs's
@@ -279,7 +291,18 @@ export function isCleanStage1Response(stage1) {
   // an otherwise-clean round, while a genuine findings-bearing review among the matches still
   // does.
   const hasCleanMatch = matches.some((m) => isCleanPassMatch(m));
-  const hasFindingsMatch = matches.some((m) => FINDINGS_PREAMBLE_PATTERN.test(stripOuterWhitespace(m.body_excerpt)));
+  // PR #673 Stage 1 review finding (P1): the formal findings preamble alone missed the same
+  // hidden-trailing-finding shape isCleanPassMatch's own comment above describes -- a match
+  // that opens with the clean-pass preamble but isn't genuinely clean (per the shared
+  // classifier) must also count as a findings match here, or a thread with exactly that one
+  // bad match plus a separately genuine clean-pass match would still report clean. Gated on
+  // the clean-pass prefix first, exactly like isCleanPassMatch, so an unrelated ack/kickoff
+  // comment (matching neither preamble) still never counts as a finding.
+  const hasFindingsMatch = matches.some((m) => {
+    const body = stripOuterWhitespace(m.body_excerpt);
+    if (FINDINGS_PREAMBLE_PATTERN.test(body)) return true;
+    return CLEAN_REVIEW_PATTERN.test(body) && isFindingsBearingResponse(body);
+  });
   return hasCleanMatch && !hasFindingsMatch;
 }
 
