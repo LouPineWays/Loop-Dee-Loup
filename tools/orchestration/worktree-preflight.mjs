@@ -41,8 +41,9 @@
 //     is attribution or obsolescence proof. Durability: its branch tip must be independently
 //     provable as merged into the repository's own default branch. Staleness: the worktree's own
 //     git-administrative directory (its `HEAD` file, updated by any checkout/commit activity in
-//     that worktree) must not have been touched within `legacyGracePeriodMs` (default: see
-//     `DEFAULT_LEGACY_GRACE_PERIOD_MS` below) -- a checkout Claude Dispatch just created for a
+//     that worktree) must not have been touched within `obsolescenceGracePeriodMs` (default: see
+//     `DEFAULT_OBSOLESCENCE_GRACE_PERIOD_MS` below; the same test also gates the same-lineage
+//     superseded-predecessor branch below) -- a checkout Claude Dispatch just created for a
 //     session that has not yet run this preflight to register itself is otherwise
 //     indistinguishable from a genuinely abandoned one merely by merged/clean state (Stage 1
 //     review finding on PR #683). Unknown activity evidence fails closed to retention. Finally
@@ -67,9 +68,20 @@
 //     unset lineage fields.
 //   - A ledger entry whose lineage HAS been superseded (this run's own current entry, or an
 //     earlier run's, recorded a *different* path for the same controlIssue/executionIssue more
-//     recently) is an eligible predecessor. Safety is then delegated to git itself: `git worktree
-//     remove <path>` without `--force` already refuses a dirty, locked, or otherwise unsafe
-//     worktree, so this script never reimplements that judgment and never force-deletes.
+//     recently) is a CANDIDATE predecessor, never yet an eligible one: a newer registration for
+//     the same lineage proves only ordering, never that this older worktree is no longer active
+//     or needed (Stage 2 audit finding on issue #686 / control #667 -- the correction to PR #683's
+//     original rule, which retired a same-lineage predecessor on registration-order alone). It
+//     becomes eligible only once the SAME durability-AND-staleness test the legacy branch above
+//     already applies also holds for it: its own commit must be independently provable as an
+//     ancestor of the repository's default branch (durability -- the work is captured elsewhere),
+//     AND its own git-administrative directory must show no activity within the configured grace
+//     period (staleness -- nothing about it looks currently in use). A superseded predecessor that
+//     fails either half is retained exactly like a not-yet-superseded one (`retainedActive`) --
+//     ordering alone never authorizes removal. Only once BOTH the ordering and the
+//     durability/staleness tests hold is safety delegated to git itself: `git worktree remove
+//     <path>` without `--force` already refuses a dirty, locked, or otherwise unsafe worktree, so
+//     this script never reimplements that judgment and never force-deletes.
 //
 // Removing a worktree only detaches the checkout directory; it never deletes the branch or any
 // commit reachable from it, so branch/commit provenance required by Worker Unit Contracts, PRs,
@@ -93,9 +105,22 @@
 // Usage:
 //   node tools/orchestration/worktree-preflight.mjs
 //     [--session-key K] [--control-issue N] [--execution-issue N] [--pr N]
-//     [--managed-root PATH] [--legacy-grace-period-ms N] [--dry-run true]
+//     [--managed-root PATH] [--obsolescence-grace-period-ms N] [--dry-run true]
+//     (`--legacy-grace-period-ms` remains accepted as a compatibility alias for the renamed
+//     `--obsolescence-grace-period-ms` -- Stage 1 review finding on this PR.)
 //     Registers the CURRENT checkout (cwd) and reconciles its predecessors. This is the normal
-//     fresh-session startup invocation.
+//     fresh-session startup invocation -- AGENTS.md's own mandatory form of this command supplies
+//     `--control-issue`/`--execution-issue` whenever this session's own founder instruction or
+//     dispatch prompt already names one (nearly always): passing an already-known identity here is
+//     not the "manual optional flag" the #686 Stage 2 audit's second finding warned against, it is
+//     the required substitution of a value this session already has. Omitting both when neither is
+//     genuinely known falls back to a session-scoped identity that can never match any other
+//     session's, so it registers safely but reconciles no cross-session predecessor by design --
+//     never an error, merely narrower scope than the mandatory form provides. When the fresh
+//     session genuinely cannot yet tell whether its known number is a control or execution issue
+//     (the READY gate that determines this has not run yet), pass it as either flag -- lineage
+//     grouping is role-neutral by issue number (Stage 1 review finding on this PR, `lineageKeyOf`),
+//     so a later session that learns the correct role still reconciles the same lineage.
 //
 //   node tools/orchestration/worktree-preflight.mjs register --path PATH
 //     [--session-key K] [--control-issue N] [--execution-issue N] [--pr N]
@@ -112,13 +137,16 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-// A legacy/unattributed worktree is reclaimed only once its own administrative activity is at
-// least this old -- see `worktreeLastActivityAt` and the legacy branch of `reconcile` below.
-// This is the "positive evidence of staleness" the merged/clean check alone cannot provide
-// (Stage 1 review finding on PR #683): a checkout Claude Dispatch just created for a session that
-// has not yet run this preflight to register itself is otherwise indistinguishable, by
-// merged/clean state alone, from one genuinely abandoned.
-export const DEFAULT_LEGACY_GRACE_PERIOD_MS = 30 * 60 * 1000; // 30 minutes
+// A legacy/unattributed worktree -- or, since the #686 Stage 2 audit correction, an attributed
+// same-lineage predecessor that a newer registration has merely superseded by ordering -- is only
+// ever reclaimed once its own administrative activity is at least this old. See
+// `worktreeLastActivityAt` and `isDurablyObsolete` below. This is the "positive evidence of
+// staleness" the merged/clean check alone cannot provide (Stage 1 review finding on PR #683): a
+// checkout Claude Dispatch just created for a session that has not yet run this preflight to
+// register itself is otherwise indistinguishable, by merged/clean state alone, from one genuinely
+// abandoned -- and, per the #686 correction, a same-lineage predecessor that IS still actively
+// running is otherwise indistinguishable, by registration-order alone, from one that is finished.
+export const DEFAULT_OBSOLESCENCE_GRACE_PERIOD_MS = 30 * 60 * 1000; // 30 minutes
 
 // ---------------------------------------------------------------------------------------------
 // Git plumbing (thin, injectable so tests never require the real repository under test to be a
@@ -227,7 +255,46 @@ export function defaultGitImpl() {
         return false;
       }
     },
+    // `merge-base --is-ancestor` can never see a SQUASH merge: this repository's own normal
+    // merge path (AGENTS.md's bounded review cycle references "the squash-merge commit message
+    // GitHub proposes" throughout) replaces the branch's commit(s) with one brand-new commit on
+    // the default branch whose parents do not include the branch tip, so the ancestor check
+    // above is permanently false for every properly-merged worktree -- defeating durability
+    // proof entirely and letting every reclaimed-in-practice worktree accumulate forever (Stage
+    // 1 review finding on this PR). Detects squash-merge content-equivalence instead: the total
+    // change the branch introduced since its merge-base, compared via `git patch-id`'s
+    // content-stable hash against the total change already on the default branch since that same
+    // merge-base. Patch-id (not a per-commit `git cherry` comparison) is used specifically
+    // because it is robust to the branch having any number of its own commits collapsed into the
+    // single squash commit -- `git cherry` only matches when commit boundaries line up on both
+    // sides, which a squash by definition breaks. Returns false (never treated as merged)
+    // whenever any step cannot be established -- unknown/undeterminable content evidence fails
+    // closed exactly like every other durability signal in this file.
+    isContentMergedIntoDefault(cwd, commit, ref) {
+      try {
+        const mergeBase = runGit(["merge-base", commit, ref], { cwd });
+        if (!mergeBase) return false;
+        const branchPatchId = diffPatchId(cwd, mergeBase, commit);
+        const defaultPatchId = diffPatchId(cwd, mergeBase, ref);
+        if (!branchPatchId || !defaultPatchId) return false;
+        return branchPatchId === defaultPatchId;
+      } catch {
+        return false;
+      }
+    },
   };
+}
+
+// Returns `git patch-id --stable`'s content hash for the total diff from `from` to `to`, or
+// `null` when there is no diff (an empty patch has no stable id) or the underlying git commands
+// fail. `--stable` pins the hash to a form independent of the invoking git version's defaults, so
+// two separately-computed ids for equivalent content always compare equal.
+function diffPatchId(cwd, from, to) {
+  const diff = execFileSync("git", ["diff", `${from}..${to}`], { cwd, encoding: "utf8" });
+  if (!diff.trim()) return null;
+  const out = execFileSync("git", ["patch-id", "--stable"], { cwd, encoding: "utf8", input: diff }).trim();
+  const [id] = out.split(/\s+/);
+  return id || null;
 }
 
 // Parses `git worktree list --porcelain` output into an array of
@@ -302,9 +369,22 @@ export function saveLedger(path, ledger, { writeFileImpl = writeFileSync, mkdirI
 // known, else executionIssue, else the entry's own sessionKey (a fallback that can never be
 // shared with any other entry, so an unassociated worktree is never treated as superseded by
 // anything -- "directory-name pattern alone is insufficient" applies here too).
+//
+// Deliberately role-NEUTRAL: an entry with `controlIssue: 5` and another with
+// `executionIssue: 5` key identically (`issue:5`), rather than to distinguishable
+// `control:5`/`execution:5` strings. AGENTS.md's mandatory startup form runs before a fresh
+// `work on #N` session can know whether `#N` is itself the control issue or an execution/
+// legacy issue -- the READY gate that determines this is the very next step, not something the
+// preflight call can wait for -- so different sessions for the exact same real-world lineage can
+// legitimately guess opposite roles for the same number (Stage 1 review finding on this PR). A
+// role-keyed split would then never let one supersede or reconcile the other. This is safe
+// specifically because GitHub issue numbers are unique per repository: `#5` denotes exactly one
+// issue with exactly one true role, so folding `control:5` and `execution:5` into one key can
+// never conflate two genuinely different lineages -- it only ever reunites two records of the
+// same one under whichever role each session guessed.
 export function lineageKeyOf(entry) {
-  if (entry.controlIssue != null) return `control:${entry.controlIssue}`;
-  if (entry.executionIssue != null) return `execution:${entry.executionIssue}`;
+  if (entry.controlIssue != null) return `issue:${entry.controlIssue}`;
+  if (entry.executionIssue != null) return `issue:${entry.executionIssue}`;
   return `session:${entry.sessionKey}`;
 }
 
@@ -389,6 +469,53 @@ function attemptRemoval(git, primaryPath, path, dryRun) {
   return dryRun ? git.checkRemovable(primaryPath, path) : git.removeWorktree(primaryPath, path);
 }
 
+// Pure decision, impure only through the injected `git`. True only when BOTH independently hold
+// for the live worktree `live`:
+//   - durability: its own head commit is a provable ancestor of the repository's resolved default
+//     branch, so whatever it contains is captured elsewhere and this specific checkout is no
+//     longer uniquely required;
+//   - staleness: its own git-administrative directory (its `HEAD` file) shows no activity within
+//     `gracePeriodMs`.
+// Neither alone is obsolescence proof. This was originally the legacy/unattributed branch's own
+// test (Stage 1 review finding on PR #683: "merged and clean" alone never proves no live session
+// still owns the checkout). The #686 Stage 2 audit found the SAME gap one level up: `reconcile`'s
+// same-lineage branch treated a newer registration's mere existence as sufficient obsolescence
+// proof for an older, still-possibly-active predecessor sharing that lineage. This helper is now
+// shared by both branches below so a same-lineage predecessor is never removed on registration-
+// order alone -- ordering (`isSuperseded`) establishes which entry is the candidate; this
+// establishes whether removing it is actually safe. Unknown/undeterminable activity evidence
+// fails closed to `false`.
+//
+// Durability accepts either an ordinary ancestor (fast-forward/merge-commit) or a content-
+// equivalent squash merge (`isContentMergedIntoDefault` -- Stage 1 review finding on this PR:
+// `isAncestor` alone can never see this repository's own normal squash-merge path).
+//
+// `entryLastConfirmedAt` (optional) is the OWNING session's own most recent ledger
+// self-confirmation for this exact worktree -- set only by that worktree's own preflight
+// invocation, so it is a genuine (if coarse) liveness signal distinct from git-administrative
+// mtime, which a session that reads/tests/reviews without committing never refreshes (Stage 1
+// review finding on this PR). Folding in the LATER of the two signals closes the gap for a
+// session that registered recently but has not since touched `HEAD`; it does not, by itself,
+// prove a still-running session with no recent registration and no recent commit is inactive --
+// a continuous liveness/heartbeat signal would require a lease-service-like mechanism #668's own
+// non-goals explicitly rule out ("deliberately not a scheduler, lease service, or daemon"), so
+// this remains a best-effort mitigation bounded by that design constraint, not a complete proof.
+export function isDurablyObsolete(git, primaryPath, live, now, gracePeriodMs, entryLastConfirmedAt = null) {
+  const defaultRef = git.resolveDefaultBranchRef(primaryPath);
+  const merged =
+    defaultRef && live.headCommit
+      ? git.isAncestor(primaryPath, live.headCommit, defaultRef) ||
+        Boolean(git.isContentMergedIntoDefault?.(primaryPath, live.headCommit, defaultRef))
+      : false;
+  if (!merged) return false;
+  const gitActivityAt = git.worktreeLastActivityAt(primaryPath, live.path);
+  if (gitActivityAt == null && entryLastConfirmedAt == null) return false;
+  const gitActivityMs = gitActivityAt == null ? -Infinity : new Date(gitActivityAt).getTime();
+  const confirmedMs = entryLastConfirmedAt == null ? -Infinity : new Date(entryLastConfirmedAt).getTime();
+  const lastActivityMs = Math.max(gitActivityMs, confirmedMs);
+  return new Date(now).getTime() - lastActivityMs >= gracePeriodMs;
+}
+
 // Core reconciliation pass. Pure with respect to the outside world except through the injected
 // `git`/`now` -- makes the whole decision procedure independently testable without a real
 // multi-worktree checkout for every scenario. Returns `{ ledger: <next ledger>, outcomes: {...} }`.
@@ -401,7 +528,7 @@ export function reconcile({
   git,
   now,
   dryRun = false,
-  legacyGracePeriodMs = DEFAULT_LEGACY_GRACE_PERIOD_MS,
+  obsolescenceGracePeriodMs = DEFAULT_OBSOLESCENCE_GRACE_PERIOD_MS,
 }) {
   const outcomes = {
     current: currentPath,
@@ -444,11 +571,7 @@ export function reconcile({
       // (requirement 11; Stage 1 review finding on PR #683 for the staleness half -- "merged and
       // clean" alone proves durability, never that no live/not-yet-registered session still owns
       // this checkout). Unknown activity evidence fails closed to retention.
-      const defaultRef = git.resolveDefaultBranchRef(primaryPath);
-      const merged = defaultRef && live.headCommit ? git.isAncestor(primaryPath, live.headCommit, defaultRef) : false;
-      const lastActivityAt = git.worktreeLastActivityAt(primaryPath, live.path);
-      const staleEnough = lastActivityAt != null && new Date(now).getTime() - new Date(lastActivityAt).getTime() >= legacyGracePeriodMs;
-      if (!merged || live.locked || !staleEnough) {
+      if (live.locked || !isDurablyObsolete(git, primaryPath, live, now, obsolescenceGracePeriodMs)) {
         outcomes.legacyRetained.push(live.path);
         continue;
       }
@@ -468,6 +591,20 @@ export function reconcile({
     }
 
     if (!isSuperseded(entry, nextLedger)) {
+      outcomes.retainedActive.push(live.path);
+      nextLedger = nextLedger.map((e) => (e.path === entry.path ? { ...e, outcome: "retained_active" } : e));
+      continue;
+    }
+
+    // A newer same-lineage registration proves ORDERING only, never obsolescence (Stage 2 audit
+    // finding on #686 / control #667). Apply the identical durability-AND-staleness test the
+    // legacy branch above already uses before treating this candidate as removal-eligible -- a
+    // superseded predecessor that is not independently proven durable and stale is retained
+    // exactly like one that has not been superseded at all. Unlike the legacy branch, a same-
+    // lineage candidate HAS its own ledger entry, so its own most recent self-confirmation
+    // (`entry.lastConfirmedAt`) is passed as an additional liveness signal alongside git-
+    // administrative mtime (Stage 1 review finding on this PR).
+    if (!isDurablyObsolete(git, primaryPath, live, now, obsolescenceGracePeriodMs, entry.lastConfirmedAt)) {
       outcomes.retainedActive.push(live.path);
       nextLedger = nextLedger.map((e) => (e.path === entry.path ? { ...e, outcome: "retained_active" } : e));
       continue;
@@ -549,7 +686,18 @@ export function runPreflight({ args, git = defaultGitImpl(), now = new Date().to
   };
   const { ledger: ledgerAfterUpsert, entry } = upsertEntry(ledger, info, now);
   const dryRun = Boolean(args["dry-run"]);
-  const legacyGracePeriodMs = args["legacy-grace-period-ms"] !== undefined ? (toIntOrNull(args["legacy-grace-period-ms"]) ?? DEFAULT_LEGACY_GRACE_PERIOD_MS) : DEFAULT_LEGACY_GRACE_PERIOD_MS;
+  // `--legacy-grace-period-ms` was this option's name before this PR broadened its scope beyond
+  // the legacy branch and renamed it to `--obsolescence-grace-period-ms`. The already-merged
+  // predecessor (PR #683) documented the old name as the mandatory form's own flag, so a caller
+  // that has not yet picked up the rename must not have its configured window silently replaced
+  // by the default (Stage 1 review finding on this PR). Accepted as a compatibility alias with
+  // `--obsolescence-grace-period-ms` taking precedence when both are supplied.
+  const obsolescenceGracePeriodMs =
+    args["obsolescence-grace-period-ms"] !== undefined
+      ? (toIntOrNull(args["obsolescence-grace-period-ms"]) ?? DEFAULT_OBSOLESCENCE_GRACE_PERIOD_MS)
+      : args["legacy-grace-period-ms"] !== undefined
+        ? (toIntOrNull(args["legacy-grace-period-ms"]) ?? DEFAULT_OBSOLESCENCE_GRACE_PERIOD_MS)
+        : DEFAULT_OBSOLESCENCE_GRACE_PERIOD_MS;
 
   if (registerOnly) {
     if (!dryRun) saveLedger(ledgerPath, ledgerAfterUpsert);
@@ -566,7 +714,7 @@ export function runPreflight({ args, git = defaultGitImpl(), now = new Date().to
     git,
     now,
     dryRun,
-    legacyGracePeriodMs,
+    obsolescenceGracePeriodMs,
   });
 
   if (!dryRun) {
