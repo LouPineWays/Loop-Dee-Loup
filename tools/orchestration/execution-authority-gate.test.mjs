@@ -228,3 +228,59 @@ test("a worker-unit dispatch with a malformed comment URL or issue number fails 
     false,
   );
 });
+
+// Stage 2 audit finding on this PR (#677, P1 "Worker-unit dispatch accepts non-GitHub URLs
+// as durable execution authority"): isCommentUrl only checked for an http(s) scheme and a
+// trailing `#issuecomment-<digits>` fragment, so an adversarial probe classified
+// non-GitHub and lookalike-host URLs as authorized worker-unit dispatches. These reproduce
+// that exact probe and must all fail closed.
+test("a worker-unit dispatch with a non-GitHub or lookalike-host comment URL fails closed", () => {
+  const goodShared = "https://github.com/LouPineWays/Loop-Dee-Loup/issues/630#issuecomment-2";
+
+  assert.equal(
+    classifyExecutionAuthority({
+      origin: "worker_unit_dispatch",
+      unitCommentUrl: "https://evil.example/fake#issuecomment-1",
+      parentExecutionIssue: 630,
+      sharedContractUrl: goodShared,
+    }).authorized,
+    false,
+  );
+  assert.equal(
+    classifyExecutionAuthority({
+      origin: "worker_unit_dispatch",
+      unitCommentUrl: "http://example.com/#issuecomment-999",
+      parentExecutionIssue: 630,
+      sharedContractUrl: goodShared,
+    }).authorized,
+    false,
+  );
+  assert.equal(
+    classifyExecutionAuthority({
+      origin: "worker_unit_dispatch",
+      unitCommentUrl: "https://github.com.evil.example/issues/1#issuecomment-2",
+      parentExecutionIssue: 630,
+      sharedContractUrl: goodShared,
+    }).authorized,
+    false,
+  );
+  assert.equal(
+    classifyExecutionAuthority({
+      origin: "worker_unit_dispatch",
+      unitCommentUrl: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/630#issuecomment-1",
+      parentExecutionIssue: 630,
+      sharedContractUrl: "https://github.com.evil.example/issues/1#issuecomment-2",
+    }).authorized,
+    false,
+  );
+});
+
+test("a worker-unit dispatch accepts a GitHub pull-request comment URL", () => {
+  const result = classifyExecutionAuthority({
+    origin: "worker_unit_dispatch",
+    unitCommentUrl: "https://github.com/LouPineWays/Loop-Dee-Loup/pull/637#issuecomment-5712321853",
+    parentExecutionIssue: 630,
+    sharedContractUrl: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/630#issuecomment-2",
+  });
+  assert.equal(result.authorized, true);
+});

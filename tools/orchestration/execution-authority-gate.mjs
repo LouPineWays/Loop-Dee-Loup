@@ -85,12 +85,28 @@ function isNonEmptyTrimmedString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-// Pure. A GitHub issue-comment permalink, mirroring format-unit-dispatch-prompt.mjs's own
-// isCommentUrl — required for the worker-unit dispatch envelope below.
+// Pure. A GitHub issue/PR-comment permalink — required for the worker-unit dispatch
+// envelope below. Stage 2 audit finding on this PR (#677, P1 "Worker-unit dispatch accepts
+// non-GitHub URLs as durable execution authority"): the prior version only checked for an
+// http(s) scheme and a trailing `#issuecomment-<digits>` fragment, so
+// `https://evil.example/fake#issuecomment-1` and lookalike hosts such as
+// `https://github.com.evil.example/issues/1#issuecomment-2` were both classified as
+// authorized. This now requires the exact "github.com" host (mirroring
+// format-execution-plan.mjs's own isCommentPermalink, established for the identical #507
+// finding), an `/owner/repo/(issues|pull)/<digits>` path, and an exact
+// `#issuecomment-<digits>` fragment — never a substring match against the raw string.
 function isCommentUrl(value) {
   if (!isNonEmptyTrimmedString(value)) return false;
-  if (!/^https?:\/\//i.test(value)) return false;
-  return /#issuecomment-\d+$/.test(value);
+  let parsed;
+  try {
+    parsed = new URL(value.trim());
+  } catch {
+    return false;
+  }
+  if (!/^https?:$/.test(parsed.protocol)) return false;
+  if (parsed.hostname.toLowerCase() !== "github.com") return false;
+  if (!/^\/[^/]+\/[^/]+\/(issues|pull)\/\d+\/?$/.test(parsed.pathname)) return false;
+  return /^#issuecomment-\d+$/.test(parsed.hash);
 }
 
 // Pure. `trigger` describes how an agent session/task came to be running and what
