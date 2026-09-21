@@ -1482,6 +1482,32 @@ test("run: 7b. RESPONSE_RECEIVED — Codex's own real fixed clean-pass preamble 
   assert.equal(result.matches[0].endpoint, "issue-comments");
 });
 
+test("run: 7c. FINDINGS_LACK_FORMAL_REVIEW — the fixed clean-pass preamble with an unlabeled trailing finding (no P0-P3 marker), delivered as a plain issue-comments-only match, is not misclassified as clean (Stage 2 audit #672 P1)", async () => {
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
+            {
+              id: 2,
+              user: { login: "chatgpt-codex-connector[bot]" },
+              body: "Codex Review: Didn't find any major issues. However, credentials are logged.",
+              created_at: "2026-08-23T13:05:00Z",
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "FINDINGS_LACK_FORMAL_REVIEW");
+  assert.equal(result.findingsMatches.length, 1);
+});
+
 // 8. Non-genuine reviewer responses (BLOCKED/permission/setup-prompt) remain fail-closed:
 // already covered by the pre-existing PENDING fixtures above — isGenuineResponse filtering
 // runs before findings-bearing classification, so this issue does not change that behavior.

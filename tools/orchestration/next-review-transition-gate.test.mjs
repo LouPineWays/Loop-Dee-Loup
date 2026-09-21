@@ -279,6 +279,25 @@ test("resolvePreMergeVerdict: a formal review artifact whose body opens with the
   assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
 });
 
+test("resolvePreMergeVerdict: a formal review artifact whose body opens with the fixed clean-pass preamble but appends a real finding with no severity marker at all -> STAGE1_CORRECTION_REQUIRED, never merge-ready (Stage 2 audit #672 P1)", () => {
+  // The prior check only rejected a trailing finding that carried an explicit "P0"-"P3" label,
+  // so an unlabeled trailing finding on a formal endpoint was misclassified clean and could
+  // reach STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2 with an outstanding finding.
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("RESPONSE_RECEIVED", {
+      matches: [
+        {
+          body_excerpt: "Codex Review: Didn't find any major issues. However, credentials are logged.",
+          endpoint: "pull-reviews",
+        },
+      ],
+      unboundGenuineMatches: [],
+    }),
+    mergeReady: mergeReady("MERGE_READY"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+});
+
 test("resolvePreMergeVerdict: an ambiguous ack/kickoff comment on a formal review endpoint still does not satisfy the old fixed-preamble check, but is now findings-bearing via the shared classifier -- fail-closed is the intended direction here, unlike a plain-endpoint ack", () => {
   const v = resolvePreMergeVerdict({
     stage1: stage1("RESPONSE_RECEIVED", {

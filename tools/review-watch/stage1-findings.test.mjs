@@ -60,6 +60,16 @@ test("isCleanReviewResponse: rejects the fixed clean-pass preamble when a real f
   assert.equal(isFindingsBearingResponse(body), true);
 });
 
+test("isCleanReviewResponse: rejects the fixed clean-pass preamble when a real finding trails it with no severity marker at all (Stage 2 audit #672 P1)", () => {
+  // The prior check only rejected a trailing finding that carried Codex's own explicit
+  // "P0"-"P3" label. An unlabeled trailing finding has no severity marker either, so it was
+  // misclassified clean and could bypass FINDINGS_LACK_FORMAL_REVIEW entirely -- exactly this
+  // shape, cited verbatim in the audit report.
+  const body = "Codex Review: Didn't find any major issues. However, credentials are logged.";
+  assert.equal(isCleanReviewResponse(body), false);
+  assert.equal(isFindingsBearingResponse(body), true);
+});
+
 test("isCleanReviewResponse: recognizes 'Looks good, no issues found.' (documented clean-response contract, PR #640 Stage 1 review finding #3)", () => {
   assert.equal(isCleanReviewResponse("Looks good, no issues found."), true);
 });
