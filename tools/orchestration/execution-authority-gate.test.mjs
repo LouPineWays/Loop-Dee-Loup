@@ -234,45 +234,44 @@ test("a worker-unit dispatch with a malformed comment URL or issue number fails 
 // trailing `#issuecomment-<digits>` fragment, so an adversarial probe classified
 // non-GitHub and lookalike-host URLs as authorized worker-unit dispatches. These reproduce
 // that exact probe and must all fail closed.
+// Stage 2 audit finding on PR #679 (#680, P2 "The required adversarial regression matrix
+// does not exercise all three rejected URLs through both worker-unit URL fields"): the
+// prior version of this test exercised all three adversarial strings against
+// unitCommentUrl, but only the lookalike-host string against sharedContractUrl, leaving
+// the evil.example and example.com probes unproven in the sharedContractUrl position even
+// though the shared validator applies identically to both fields. Parameterize so every
+// adversarial URL is asserted `authorized: false` once in each field.
 test("a worker-unit dispatch with a non-GitHub or lookalike-host comment URL fails closed", () => {
   const goodShared = "https://github.com/LouPineWays/Loop-Dee-Loup/issues/630#issuecomment-2";
+  const goodUnit = "https://github.com/LouPineWays/Loop-Dee-Loup/issues/630#issuecomment-1";
+  const adversarialUrls = [
+    "https://evil.example/fake#issuecomment-1",
+    "http://example.com/#issuecomment-999",
+    "https://github.com.evil.example/issues/1#issuecomment-2",
+  ];
 
-  assert.equal(
-    classifyExecutionAuthority({
-      origin: "worker_unit_dispatch",
-      unitCommentUrl: "https://evil.example/fake#issuecomment-1",
-      parentExecutionIssue: 630,
-      sharedContractUrl: goodShared,
-    }).authorized,
-    false,
-  );
-  assert.equal(
-    classifyExecutionAuthority({
-      origin: "worker_unit_dispatch",
-      unitCommentUrl: "http://example.com/#issuecomment-999",
-      parentExecutionIssue: 630,
-      sharedContractUrl: goodShared,
-    }).authorized,
-    false,
-  );
-  assert.equal(
-    classifyExecutionAuthority({
-      origin: "worker_unit_dispatch",
-      unitCommentUrl: "https://github.com.evil.example/issues/1#issuecomment-2",
-      parentExecutionIssue: 630,
-      sharedContractUrl: goodShared,
-    }).authorized,
-    false,
-  );
-  assert.equal(
-    classifyExecutionAuthority({
-      origin: "worker_unit_dispatch",
-      unitCommentUrl: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/630#issuecomment-1",
-      parentExecutionIssue: 630,
-      sharedContractUrl: "https://github.com.evil.example/issues/1#issuecomment-2",
-    }).authorized,
-    false,
-  );
+  for (const badUrl of adversarialUrls) {
+    assert.equal(
+      classifyExecutionAuthority({
+        origin: "worker_unit_dispatch",
+        unitCommentUrl: badUrl,
+        parentExecutionIssue: 630,
+        sharedContractUrl: goodShared,
+      }).authorized,
+      false,
+      `unitCommentUrl=${badUrl} must fail closed`,
+    );
+    assert.equal(
+      classifyExecutionAuthority({
+        origin: "worker_unit_dispatch",
+        unitCommentUrl: goodUnit,
+        parentExecutionIssue: 630,
+        sharedContractUrl: badUrl,
+      }).authorized,
+      false,
+      `sharedContractUrl=${badUrl} must fail closed`,
+    );
+  }
 });
 
 test("a worker-unit dispatch accepts a GitHub pull-request comment URL", () => {
