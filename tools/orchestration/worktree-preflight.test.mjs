@@ -10,12 +10,13 @@ import {
   lineageKeyOf,
   upsertEntry,
   isSuperseded,
+  isDurablyObsolete,
   reconcile,
   runPreflight,
   ledgerPathFor,
   loadLedger,
   saveLedger,
-  DEFAULT_LEGACY_GRACE_PERIOD_MS,
+  DEFAULT_OBSOLESCENCE_GRACE_PERIOD_MS,
 } from "./worktree-preflight.mjs";
 
 // -------------------------------------------------------------------------------------------
@@ -99,6 +100,25 @@ test("isSuperseded is true only when another entry with the same lineage was con
   assert.equal(isSuperseded(a, [a, bEarlier]), false, "an earlier sibling never supersedes");
   assert.equal(isSuperseded(a, [a, bLater]), true, "a later sibling with the same lineage supersedes");
   assert.equal(isSuperseded(a, [a, cUnrelated]), false, "a later entry with a different lineage never supersedes");
+});
+
+test("isDurablyObsolete requires BOTH provable durability (merged into default) AND independent staleness -- neither alone is obsolescence proof (Stage 2 audit finding on #686)", () => {
+  const live = { path: "/p", headCommit: "c1", branch: "b" };
+  const now = "2026-01-01T12:00:00.000Z";
+  const oldActivity = "2020-01-01T00:00:00.000Z";
+  const recentActivity = "2026-01-01T11:59:00.000Z"; // 1 minute before `now`
+
+  const mergedAndStale = { resolveDefaultBranchRef: () => "refs/heads/main", isAncestor: () => true, worktreeLastActivityAt: () => oldActivity };
+  assert.equal(isDurablyObsolete(mergedAndStale, "/repo", live, now, DEFAULT_OBSOLESCENCE_GRACE_PERIOD_MS), true);
+
+  const mergedButRecent = { resolveDefaultBranchRef: () => "refs/heads/main", isAncestor: () => true, worktreeLastActivityAt: () => recentActivity };
+  assert.equal(isDurablyObsolete(mergedButRecent, "/repo", live, now, DEFAULT_OBSOLESCENCE_GRACE_PERIOD_MS), false, "recently-active state is never obsolete merely because it is merged");
+
+  const staleButUnmerged = { resolveDefaultBranchRef: () => "refs/heads/main", isAncestor: () => false, worktreeLastActivityAt: () => oldActivity };
+  assert.equal(isDurablyObsolete(staleButUnmerged, "/repo", live, now, DEFAULT_OBSOLESCENCE_GRACE_PERIOD_MS), false, "unmerged state is never obsolete merely because it looks stale");
+
+  const unknownActivity = { resolveDefaultBranchRef: () => "refs/heads/main", isAncestor: () => true, worktreeLastActivityAt: () => null };
+  assert.equal(isDurablyObsolete(unknownActivity, "/repo", live, now, DEFAULT_OBSOLESCENCE_GRACE_PERIOD_MS), false, "unknown activity evidence fails closed to not-obsolete");
 });
 
 function fakeGit({
@@ -287,8 +307,33 @@ test("reconcile: a not-yet-superseded predecessor is retained as active", () => 
   assert.deepEqual(git._removed, []);
 });
 
-test("reconcile: a superseded, locked predecessor is retained (never force-unlocked)", () => {
+test("reconcile: a superseded same-lineage predecessor that is NOT independently proven durable/stale remains active -- a newer registration establishes ordering, never obsolescence (Stage 2 audit finding on #686)", () => {
+  // Plain fakeGit() defaults mergedCommits to empty -- this predecessor's own commit is never
+  // proven to be an ancestor of the default branch, i.e. never proven durable -- even though a
+  // newer entry for the same lineage was registered a full day later.
   const git = fakeGit();
+  const ledger = [
+    { path: "/repo/.claude/worktrees/p", sessionKey: "s1", branch: "b", commit: "x", controlIssue: 1, lastConfirmedAt: "2026-01-01T00:00:00.000Z" },
+    { path: "/repo/.claude/worktrees/current", sessionKey: "s2", branch: "b2", controlIssue: 1, lastConfirmedAt: "2026-01-02T00:00:00.000Z" },
+  ];
+  const { outcomes } = reconcile({
+    ledger,
+    liveWorktrees: [
+      { path: "/repo/.claude/worktrees/p", headCommit: "x", branch: "b", locked: false },
+      { path: "/repo/.claude/worktrees/current", headCommit: "y", branch: "b2", locked: false },
+    ],
+    currentPath: "/repo/.claude/worktrees/current",
+    primaryPath: "/repo",
+    managedRoot: "/repo/.claude/worktrees",
+    git,
+    now: "2026-01-03T00:00:00.000Z",
+  });
+  assert.deepEqual(outcomes.retainedActive, ["/repo/.claude/worktrees/p"], "registration order alone must never make an unproven-obsolete predecessor removal-eligible");
+  assert.deepEqual(git._removed, []);
+});
+
+test("reconcile: a superseded, locked predecessor is retained (never force-unlocked)", () => {
+  const git = fakeGit({ mergedCommits: new Set(["x"]) });
   const ledger = [
     { path: "/repo/.claude/worktrees/p", sessionKey: "s1", branch: "b", controlIssue: 1, lastConfirmedAt: "2026-01-01T00:00:00.000Z" },
     { path: "/repo/.claude/worktrees/current", sessionKey: "s2", branch: "b2", controlIssue: 1, lastConfirmedAt: "2026-01-02T00:00:00.000Z" },
@@ -310,7 +355,7 @@ test("reconcile: a superseded, locked predecessor is retained (never force-unloc
 });
 
 test("reconcile: a superseded, dirty predecessor is retained without force (git itself refuses)", () => {
-  const git = fakeGit({ removals: { "/repo/.claude/worktrees/p": { ok: false, reason: "contains modified or untracked files" } } });
+  const git = fakeGit({ mergedCommits: new Set(["x"]), removals: { "/repo/.claude/worktrees/p": { ok: false, reason: "contains modified or untracked files" } } });
   const ledger = [
     { path: "/repo/.claude/worktrees/p", sessionKey: "s1", branch: "b", controlIssue: 1, lastConfirmedAt: "2026-01-01T00:00:00.000Z" },
     { path: "/repo/.claude/worktrees/current", sessionKey: "s2", branch: "b2", controlIssue: 1, lastConfirmedAt: "2026-01-02T00:00:00.000Z" },
@@ -333,8 +378,8 @@ test("reconcile: a superseded, dirty predecessor is retained without force (git 
   assert.equal(next.find((e) => e.path === "/repo/.claude/worktrees/p").outcome, "retained_dirty");
 });
 
-test("reconcile: a superseded, clean predecessor is retired and its branch/commit is untouched by the ledger", () => {
-  const git = fakeGit();
+test("reconcile: a superseded, clean predecessor is retired only once independently proven durable AND stale, and its branch/commit is untouched by the ledger (Stage 2 audit finding on #686)", () => {
+  const git = fakeGit({ mergedCommits: new Set(["c1"]) });
   const ledger = [
     { path: "/repo/.claude/worktrees/p", sessionKey: "s1", branch: "b", commit: "c1", controlIssue: 1, lastConfirmedAt: "2026-01-01T00:00:00.000Z" },
     { path: "/repo/.claude/worktrees/current", sessionKey: "s2", branch: "b2", controlIssue: 1, lastConfirmedAt: "2026-01-02T00:00:00.000Z" },
@@ -359,7 +404,7 @@ test("reconcile: a superseded, clean predecessor is retired and its branch/commi
 });
 
 test("reconcile: --dry-run reports a would-be retirement without ever calling the real removal, and the superseded predecessor is untouched (Stage 1 review, PR #683)", () => {
-  const git = fakeGit();
+  const git = fakeGit({ mergedCommits: new Set(["c1"]) });
   const ledger = [
     { path: "/repo/.claude/worktrees/p", sessionKey: "s1", branch: "b", commit: "c1", controlIssue: 1, lastConfirmedAt: "2026-01-01T00:00:00.000Z" },
     { path: "/repo/.claude/worktrees/current", sessionKey: "s2", branch: "b2", controlIssue: 1, lastConfirmedAt: "2026-01-02T00:00:00.000Z" },
@@ -403,7 +448,7 @@ test("reconcile: --dry-run also suppresses the real removal for the legacy/unatt
 });
 
 test("reconcile is idempotent: retiring the same predecessor twice reports already_absent the second time", () => {
-  const git = fakeGit();
+  const git = fakeGit({ mergedCommits: new Set(["x"]) });
   let ledger = [
     { path: "/repo/.claude/worktrees/p", sessionKey: "s1", branch: "b", controlIssue: 1, lastConfirmedAt: "2026-01-01T00:00:00.000Z" },
     { path: "/repo/.claude/worktrees/current", sessionKey: "s2", branch: "b2", controlIssue: 1, lastConfirmedAt: "2026-01-02T00:00:00.000Z" },
@@ -473,7 +518,47 @@ function makeRepo() {
   return dir;
 }
 
-test("end-to-end: a superseded predecessor Dispatch worktree is actually removed while current/dirty/unrelated survive", () => {
+test("end-to-end: two CLEAN same-lineage worktrees, one registered later -- the older is retained, never removed merely because a newer registration exists (Stage 2 audit finding on #686)", () => {
+  const repo = makeRepo();
+  try {
+    const worktreesRoot = join(repo, ".claude", "worktrees");
+    mkdirSync(worktreesRoot, { recursive: true });
+
+    const predecessorPath = join(worktreesRoot, "new-session-predecessor").replace(/\\/g, "/");
+    const currentPath = join(worktreesRoot, "agent-current").replace(/\\/g, "/");
+
+    git(repo, ["worktree", "add", "-b", "predecessor-branch", predecessorPath]);
+    git(repo, ["worktree", "add", "-b", "current-branch", currentPath]);
+
+    // Register the predecessor under a control-issue lineage, then register `current` under the
+    // SAME lineage with a later timestamp -- reproducing the #639/#638 correction-chain shape (PR
+    // A's session worktree superseded by a fresh session for the same control lineage). This is
+    // also the documented MANDATORY invocation shape: both calls supply the control-issue
+    // identity this session's own dispatch already names.
+    const args1 = { "control-issue": "42" };
+    const result1 = runPreflight({ args: { ...args1, _: ["register"], path: predecessorPath }, cwd: predecessorPath, now: "2026-01-01T00:00:00.000Z" });
+    assert.equal(result1.exitCode, 0);
+
+    // The predecessor worktree was created moments ago (real git-administrative activity is
+    // fresh), and this preflight run's own `now` is a fabricated PAST timestamp relative to that
+    // real activity -- standing in for "the predecessor session might still genuinely be running
+    // right now". Both worktrees are clean. A newer same-lineage registration existing is not, by
+    // itself, proof the predecessor is done: it must remain retained-active rather than being
+    // removed on ordering alone (the exact defect the #686 Stage 2 audit found in PR #683's
+    // original supersession rule).
+    const preflight = runPreflight({ args: { "control-issue": "42" }, cwd: currentPath, now: "2026-01-02T00:00:00.000Z" });
+    assert.equal(preflight.exitCode, 0);
+    assert.deepEqual(preflight.result.retired, [], "a still-recently-active same-lineage predecessor must never be retired merely because a newer registration exists");
+    assert.deepEqual(preflight.result.retainedActive, [predecessorPath]);
+
+    assert.equal(existsSync(predecessorPath), true, "the still-active predecessor checkout survives");
+    assert.equal(existsSync(currentPath), true, "the current session's own checkout is always excluded");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("end-to-end: a superseded same-lineage predecessor retires once independently proven durable AND stale, not merely because a newer registration exists (Stage 2 audit finding on #686)", () => {
   const repo = makeRepo();
   try {
     const worktreesRoot = join(repo, ".claude", "worktrees");
@@ -488,23 +573,23 @@ test("end-to-end: a superseded predecessor Dispatch worktree is actually removed
     git(repo, ["worktree", "add", "-b", "current-branch", currentPath]);
     writeFileSync(join(dirtyPath, "uncommitted.txt"), "wip\n");
 
-    // Register the predecessor and the dirty worktree under the SAME control-issue lineage,
-    // then register `current` under the same lineage with a later timestamp -- reproducing the
-    // #639/#638 correction-chain shape (PR A's session worktree superseded by a fresh session
-    // for the same control lineage).
     const args1 = { "control-issue": "42" };
-    const result1 = runPreflight({ args: { ...args1, _: ["register"], path: predecessorPath }, cwd: predecessorPath, now: "2026-01-01T00:00:00.000Z" });
-    assert.equal(result1.exitCode, 0);
-    const resultDirty = runPreflight({ args: { ...args1, _: ["register"], path: dirtyPath }, cwd: dirtyPath, now: "2026-01-01T00:00:05.000Z" });
-    assert.equal(resultDirty.exitCode, 0);
+    runPreflight({ args: { ...args1, _: ["register"], path: predecessorPath }, cwd: predecessorPath, now: "2026-01-01T00:00:00.000Z" });
+    runPreflight({ args: { ...args1, _: ["register"], path: dirtyPath }, cwd: dirtyPath, now: "2026-01-01T00:00:05.000Z" });
 
-    const preflight = runPreflight({ args: { "control-issue": "42" }, cwd: currentPath, now: "2026-01-02T00:00:00.000Z" });
+    // Real wall-clock `now`, and the obsolescence grace period explicitly collapsed to zero,
+    // stand in for "enough real time has passed to independently prove the predecessor is no
+    // longer active" -- the same pattern the pre-existing legacy-reclamation e2e test below
+    // already uses. Neither worktree diverged from `main`, so both are trivially provable
+    // ancestors of it (durability); with staleness now trivially satisfied too, the clean
+    // predecessor becomes genuinely removal-eligible.
+    const preflight = runPreflight({ args: { "control-issue": "42", "obsolescence-grace-period-ms": "0" }, cwd: currentPath, now: new Date().toISOString() });
     assert.equal(preflight.exitCode, 0);
     assert.deepEqual(preflight.result.retired, [predecessorPath]);
     assert.equal(preflight.result.retainedDirty.length, 1);
     assert.equal(preflight.result.retainedDirty[0].path, dirtyPath);
 
-    assert.equal(existsSync(predecessorPath), false, "the superseded, clean predecessor checkout was actually removed from disk");
+    assert.equal(existsSync(predecessorPath), false, "the superseded, clean, durably-obsolete predecessor checkout was actually removed from disk");
     assert.equal(existsSync(dirtyPath), true, "the dirty predecessor checkout was left untouched");
     assert.equal(existsSync(currentPath), true, "the current session's own checkout is always excluded");
 
@@ -514,10 +599,42 @@ test("end-to-end: a superseded predecessor Dispatch worktree is actually removed
 
     // Idempotence: a second preflight run from `current` must not error and must report the
     // already-removed predecessor as already_absent rather than attempting it again.
-    const second = runPreflight({ args: { "control-issue": "42" }, cwd: currentPath, now: "2026-01-03T00:00:00.000Z" });
+    const second = runPreflight({ args: { "control-issue": "42", "obsolescence-grace-period-ms": "0" }, cwd: currentPath, now: new Date().toISOString() });
     assert.equal(second.exitCode, 0);
     assert.deepEqual(second.result.retired, []);
     assert.deepEqual(second.result.alreadyAbsent, [predecessorPath]);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("end-to-end: the bare no-argument form can never reconcile a same-lineage predecessor -- the mandatory startup invocation must supply the known control/execution identity explicitly (Stage 2 audit finding on #686)", () => {
+  const repo = makeRepo();
+  try {
+    const worktreesRoot = join(repo, ".claude", "worktrees");
+    mkdirSync(worktreesRoot, { recursive: true });
+    const predecessorPath = join(worktreesRoot, "new-session-predecessor-bare").replace(/\\/g, "/");
+    const currentPath = join(worktreesRoot, "agent-current-bare").replace(/\\/g, "/");
+
+    git(repo, ["worktree", "add", "-b", "predecessor-bare-branch", predecessorPath]);
+    git(repo, ["worktree", "add", "-b", "current-bare-branch", currentPath]);
+
+    // The predecessor session ran the BARE, argument-less form the pre-#686-correction AGENTS.md
+    // text authorized as the normal fresh-session invocation, even though a control/execution
+    // Issue number was in fact knowable to its own dispatch prompt.
+    const predecessorRun = runPreflight({ args: {}, cwd: predecessorPath, now: "2026-01-01T00:00:00.000Z" });
+    assert.equal(predecessorRun.exitCode, 0);
+
+    // A fresh session for the SAME logical lineage later also runs the bare form.
+    const currentRun = runPreflight({ args: {}, cwd: currentPath, now: "2026-01-02T00:00:00.000Z" });
+    assert.equal(currentRun.exitCode, 0);
+    // Each bare invocation falls back to its own never-shared session-scoped lineage key
+    // (`session:<path-basename>-<timestamp>`), so the two sessions can never recognize each other
+    // as the same lineage -- the predecessor is left retained-active indefinitely, reproducing the
+    // accumulation gap #686 found in the previously-documented mandatory form.
+    assert.deepEqual(currentRun.result.retired, [], "the bare form can never supersede a predecessor -- known lineage identity must be supplied explicitly");
+    assert.deepEqual(currentRun.result.retainedActive, [predecessorPath]);
+    assert.equal(existsSync(predecessorPath), true);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
@@ -574,7 +691,7 @@ test("end-to-end: a fully merged legacy worktree with no ledger entry is reclaim
 
     // With the grace period explicitly collapsed to zero (this run stands in for "enough real
     // time has passed"), the same merged/clean worktree is now reclaimed.
-    const result = runPreflight({ args: { "legacy-grace-period-ms": "0" }, cwd: currentPath, now: new Date().toISOString() });
+    const result = runPreflight({ args: { "obsolescence-grace-period-ms": "0" }, cwd: currentPath, now: new Date().toISOString() });
     assert.equal(result.exitCode, 0);
     assert.deepEqual(result.result.legacyReclaimed, [legacyPath]);
     assert.equal(existsSync(legacyPath), false);
@@ -603,7 +720,10 @@ test("end-to-end: a superseded DETACHED-HEAD predecessor retires -- registration
     assert.equal(result1.exitCode, 0);
     assert.equal(result1.result.registered.branch, null, "a detached predecessor registers with branch: null, not the literal string HEAD");
 
-    const preflight = runPreflight({ args: { "control-issue": "68" }, cwd: currentPath, now: "2026-01-02T00:00:00.000Z" });
+    // Real wall-clock `now` plus a collapsed grace period stand in for "enough time has passed to
+    // independently prove the predecessor obsolete" (Stage 2 audit finding on #686) -- the point
+    // of this test is detached-HEAD normalization, not the durability/staleness gate itself.
+    const preflight = runPreflight({ args: { "control-issue": "68", "obsolescence-grace-period-ms": "0" }, cwd: currentPath, now: new Date().toISOString() });
     assert.equal(preflight.exitCode, 0);
     assert.deepEqual(preflight.result.retainedAmbiguous, [], "a genuinely unchanged detached predecessor must never be misclassified as ambiguous");
     assert.deepEqual(preflight.result.retired, [predecessorPath], "the superseded detached predecessor is retireable, closing the accumulation gap for repeated detached Dispatch sessions");
