@@ -1,0 +1,18 @@
+Stage 2 audit report
+
+Exact merge commit audited: `816646bc0183fbd4035b71cde57c9955de52648c`
+
+Verdict: **CLEAN**
+
+Verification results:
+
+1. **Missing Verdict heading:** Confirmed `replaceVerdictField()` appends a fresh `### Verdict` section while preserving the existing non-trailing body content, and the regression test verifies parsing round-trips to the written value.
+2. **Empty Verdict field:** Confirmed the function inserts the value directly below the existing heading and preserves the following section unchanged; end-of-body empty fields are also covered.
+3. **Fresh evidence revalidation:** Confirmed `checkRecordVerdict()` freshly reads the audit body, reparses its evidence anchors, and reruns `findStage2ReportEvidence()` before deciding `RECORDED`, `ALREADY_RECORDED`, or `CONFLICTING_VERDICT`. Regression coverage proves a newer opposite-verdict report is authoritative over stale precondition evidence.
+4. **Fail-closed behavior:** Confirmed missing freshly revalidated completed-report evidence returns exit 1 before either edit or comment mutation.
+5. **Documentation contract:** Confirmed the Verdict handling section documents the three promotion outcomes and the unchanged pass-through outcomes, including `READY_TO_CLOSE`, `ACCEPTED_NO_WORK_ISSUE`, `OK`, and `PREMATURE_CLOSURE`.
+6. **Regression suite:** `node --test tools/review-watch tools/orchestration` passed all 779 tests; `node tools/check-startup-budget.mjs` and `node tools/check-control-plane-paths.mjs` both reported OK.
+7. **Required workflow:** GitHub Actions run 34148602348 (`Control-plane paths`) completed successfully at frozen reviewed head `911cac6d6bd56059020574ad4de5ef3f54d552cd`.
+8. **Original acceptance behavior:** Regression coverage confirms CLEAN/NOT CLEAN promotion, pending/wrong-commit/incomplete evidence refusal, unchanged settled-verdict and premature-closure behavior, and idempotent post-record reruns without duplicate mutation.
+
+No actionable findings.

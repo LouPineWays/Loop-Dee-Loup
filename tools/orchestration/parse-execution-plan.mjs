@@ -64,7 +64,10 @@ import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 
 const PLAN_INDEX_HEADING = /^## Execution Plan Index \(v1\)$/;
 const SHARED_CONTRACT_HEADING = /^## Shared Contract \(v1\)$/;
-const WORKER_UNIT_HEADING = /^## Worker Unit: (\S+) \(v1\)$/;
+// Exported (issue #618) so correct-unit-dependency.mjs's own heading-identity check reuses
+// this exact grammar rather than duplicating it -- the same one-authority discipline
+// dependency-grammar.mjs already applies to the "Prerequisites/dependencies" clause.
+export const WORKER_UNIT_HEADING = /^## Worker Unit: (\S+) \(v1\)$/;
 
 // The Worker Unit Contract comment's required bold-label bullets, in the order the Shared
 // Contract fixes them. `key` is the camelCase field name used in this script's JSON output.
@@ -231,6 +234,23 @@ export function parseExecutionPlan(comments, { executionIssue } = {}) {
       'the Execution Plan Index comment has no "- **Shared contract:**" bullet referencing the Shared Contract comment',
     );
   }
+  // Stage 1 review finding on PR #521 (ready-dispatch-gate.mjs P1): a Plan Index with a
+  // valid Shared Contract but an empty "- **Units:**" block and missing plan-state/parent/
+  // dependency bullets used to return ok:true with zero units. probeExistingPlan then
+  // treated that as an already-complete plan and let checkReadyDispatch project
+  // `Lifecycle: PLAN_READY` (or ROUTED, via the analogous manifest check) without any
+  // worker unit ever having been dispatched. These bullets are part of the durable Plan
+  // Index shape docs/operating-model.md § Execution-stage session boundaries requires, so a
+  // Plan Index missing any of them is not a valid plan, not merely one with optional gaps.
+  if (!planState) {
+    errors.push('the Execution Plan Index comment has no "- **Plan state:**" bullet');
+  }
+  if (!parentExecutionIssue) {
+    errors.push('the Execution Plan Index comment has no "- **Parent execution issue:**" bullet');
+  }
+  if (!dependencies) {
+    errors.push('the Execution Plan Index comment has no "- **Dependencies:**" bullet');
+  }
 
   let sharedContract = null;
   if (sharedContractUrl) {
@@ -256,6 +276,8 @@ export function parseExecutionPlan(comments, { executionIssue } = {}) {
 
   if (unitLines === null) {
     errors.push('the Execution Plan Index comment has no "- **Units:**" bullet listing worker units');
+  } else if (unitLines.length === 0) {
+    errors.push('the Execution Plan Index comment "- **Units:**" bullet lists no worker units');
   }
 
   const units = {};

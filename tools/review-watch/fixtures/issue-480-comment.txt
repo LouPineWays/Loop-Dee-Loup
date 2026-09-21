@@ -1,0 +1,36 @@
+## Stage 2 Audit Report
+
+**Target:** exact merge commit `816646bc0183fbd4035b71cde57c9955de52648c`
+
+**Verdict: NOT CLEAN**
+
+### Findings
+
+1. **P2 — Missing-field repair does not preserve the existing body byte-for-byte.**  
+   `replaceVerdictField()` removes all trailing whitespace with `src.replace(/\s+$/, "")` before appending the missing `### Verdict` section. This changes pre-existing content, contrary to the audit requirement that every existing section survive byte-for-byte. The associated test only uses partial regular-expression assertions, so it does not detect the loss. Preserve `src` exactly and add only the separator and new section. 
+
+2. **P2 — A concurrent settled verdict can still be overwritten.**  
+   `checkRecordVerdict()` reads `currentRawVerdict`, then performs a separate report-evidence API request, and only afterward edits the body captured by the earlier read. If another invocation records a settled verdict between that issue read and the edit, this invocation can overwrite it without reaching `ALREADY_RECORDED` or `CONFLICTING_VERDICT`. Thus the implementation narrows, but does not close, the advertised mutation race. Re-read and re-check the durable verdict after evidence revalidation immediately before editing, or use a conditional mutation mechanism. 
+
+### Verification Checklist
+
+1. Missing-heading promotion round-trips through `parseStage2Verdict()`, but byte-for-byte preservation fails because trailing whitespace is removed.
+2. Empty-heading promotion inserts the verdict beneath the heading and preserves neighboring sections.
+3. Report evidence is re-evaluated using `findStage2ReportEvidence()`, but the separate read/revalidate/edit sequence retains the durable-verdict race described above.
+4. Revalidation with no completed report exits 1 without mutation.
+5. Documentation describes the pass-through outcomes, including `READY_TO_CLOSE`, `ACCEPTED_NO_WORK_ISSUE`, `OK`, and `PREMATURE_CLOSURE`. 
+6. The complete 779-test regression suite passes at the audited merge commit.
+7. The `Control-plane paths` workflow completed successfully for frozen reviewed head `911cac6d6bd56059020574ad4de5ef3f54d552cd`.
+8. Existing promotion, fail-closed, settled-verdict, premature-closure, and idempotent-rerun tests pass, subject to the unresolved concurrency issue above.
+
+**Testing**
+
+* ✅ `node --test tools/review-watch tools/orchestration` — 779 passed, 0 failed.
+* ✅ `node tools/check-startup-budget.mjs`
+* ✅ `node tools/check-control-plane-paths.mjs`
+* ✅ `gh api 'repos/LouPineWays/Loop-Dee-Loup/actions/runs?head_sha=911cac6d6bd56059020574ad4de5ef3f54d552cd' --jq '.workflow_runs[] | [.name,.status,.conclusion,.html_url] | @tsv'`
+* ✅ `git diff HEAD^ HEAD -- tools/review-watch/lifecycle-gate.mjs tools/review-watch/lifecycle-gate.test.mjs docs/bounded-review-cycle.md`
+
+No repository changes were made because this was a read-only Stage 2 audit; therefore no commit or follow-up pull request was created.
+
+ [View task →](https://chatgpt.com/s/cd_6aa1d63c9f1c8191a97060ac0f0d3ad9)

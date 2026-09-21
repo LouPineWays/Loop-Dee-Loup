@@ -1,8 +1,11 @@
 // Tests for tools/orchestration/next-review-transition-gate.mjs -- worker unit 397-B's
-// deterministic post-PR transition gate. Every composed check (stage1-gate.mjs's `run`,
-// lifecycle-gate.mjs's `checkMergeReady`/`checkPostAudit`) is faked via injected
-// stage1RunImpl/checkMergeReadyImpl/checkPostAuditImpl -- never touch the real network or
-// `gh` CLI here, mirroring tools/review-watch/merge-ready-gate.test.mjs's own style.
+// deterministic post-PR transition gate, extended by issue #454 unit 454-C for the
+// "correction-satisfied" Stage 1 disposition. Every composed check (stage1-gate.mjs's `run`,
+// lifecycle-gate.mjs's `checkMergeReady`/`checkPostAudit`, stage1-correction-gate.mjs's
+// `checkCorrectionDelta`) is faked via injected
+// stage1RunImpl/checkMergeReadyImpl/checkPostAuditImpl/checkCorrectionDeltaImpl -- never touch
+// the real network or `gh` CLI here, mirroring tools/review-watch/merge-ready-gate.test.mjs's
+// own style.
 //
 // Run with:
 //   node --test tools/orchestration/next-review-transition-gate.test.mjs
@@ -11,9 +14,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   parseOptionalIssueRef,
+  parseOptionalIssueRefGuarded,
   resolvePreMergeVerdict,
   resolvePostMergeVerdict,
   runNextReviewTransitionGate,
+  reconcileStage2CorrectionPr,
+  composeStage2CorrectionFinalizeCommand,
 } from "./next-review-transition-gate.mjs";
 
 // -- parseOptionalIssueRef ------------------------------------------------------------------
@@ -32,6 +38,99 @@ test("parseOptionalIssueRef: 'none' sentinel, a settled #N reference, missing, a
   assert.match(invalid.reason, /#400/);
   const empty = parseOptionalIssueRef("", "PR");
   assert.equal(empty.kind, "invalid");
+});
+
+// Issue #450 (the #428 live reproduction): the "Stage 2" bullet specifically tolerates the one
+// demonstrated legacy pre-Stage-2 synonym ("not started") as equivalent to "none" -- narrow,
+// scoped to exactly this label and this exact wording, never a broader acceptance.
+test("parseOptionalIssueRef: the legacy 'not started' synonym is tolerated for the Stage 2 label only, never for PR or any other unsupported synonym", () => {
+  assert.deepEqual(parseOptionalIssueRef("not started", "Stage 2"), { kind: "none" });
+  assert.deepEqual(parseOptionalIssueRef("Not Started", "Stage 2"), { kind: "none" });
+  assert.deepEqual(parseOptionalIssueRef("not started — audit not yet triggered", "Stage 2"), { kind: "none" });
+
+  // Never the same tolerance for a different label -- "PR" fails closed exactly as before.
+  const prInvalid = parseOptionalIssueRef("not started", "PR");
+  assert.equal(prInvalid.kind, "invalid");
+
+  // #450 Non-goals explicitly excludes accepting broader natural-language synonyms even for
+  // "Stage 2" itself -- "pending"/"later"/"not yet" must still fail closed.
+  for (const phrase of ["pending", "later", "not yet"]) {
+    const result = parseOptionalIssueRef(phrase, "Stage 2");
+    assert.equal(result.kind, "invalid", `expected "${phrase}" to remain fail-closed for Stage 2`);
+  }
+});
+
+// Stage 1 review finding on PR #569: a "not started" value whose trailing explanation carries a
+// real issue/PR pointer is not mechanically unambiguous as pre-Stage-2 "none" -- it must fall
+// through to the ordinary reference parser (and resolve/invalidate exactly as any other Stage 2
+// value would) instead of being silently swallowed as "none".
+test("parseOptionalIssueRef: a 'not started' value contradicted by a real pointer in its suffix is never treated as 'none'", () => {
+  const hashForm = parseOptionalIssueRef("not started — previous audit #480", "Stage 2");
+  assert.notEqual(hashForm.kind, "none");
+  assert.deepEqual(hashForm, { kind: "issue", issue: 480 });
+
+  const urlForm = parseOptionalIssueRef(
+    "not started — see https://github.com/LouPineWays/Loop-Dee-Loup/issues/480",
+    "Stage 2",
+  );
+  assert.notEqual(urlForm.kind, "none");
+  assert.deepEqual(urlForm, { kind: "issue", issue: 480 });
+});
+
+// -- parseOptionalIssueRefGuarded (issue #493, the #440 near-duplicate-label regression) ----
+
+test("parseOptionalIssueRefGuarded: the exact #440 regression -- stale canonical 'Stage 2: #480' coexisting with live 'Stage 2 (current): #492' fails closed as ambiguous", () => {
+  const body = "- **Stage 2:** #480\n- **Stage 2 (current):** #492\n";
+  const result = parseOptionalIssueRefGuarded(body, "Stage 2");
+  assert.equal(result.kind, "ambiguous");
+  assert.match(result.reason, /#480/);
+  assert.match(result.reason, /#492/);
+  assert.match(result.reason, /Stage 2 \(current\)/);
+});
+
+test("parseOptionalIssueRefGuarded: representative (current)/(updated) Stage 2 lookalikes are each rejected", () => {
+  assert.equal(parseOptionalIssueRefGuarded("- **Stage 2:** #480\n- **Stage 2 (current):** #492\n", "Stage 2").kind, "ambiguous");
+  assert.equal(parseOptionalIssueRefGuarded("- **Stage 2:** #480\n- **Stage 2 (updated):** #492\n", "Stage 2").kind, "ambiguous");
+});
+
+test("parseOptionalIssueRefGuarded: PR equivalent -- canonical PR pointer plus an unrecognized near-duplicate PR label cannot silently route through the canonical pointer", () => {
+  const result = parseOptionalIssueRefGuarded("- **PR:** #376\n- **PR (current):** #400\n", "PR");
+  assert.equal(result.kind, "ambiguous");
+  assert.match(result.reason, /#376/);
+  assert.match(result.reason, /#400/);
+});
+
+// Stage 1 review finding on this PR: a punctuation-delimited qualifier (not just "("-style
+// or whitespace) must also be caught, or a stale canonical field stays authoritative.
+test("parseOptionalIssueRefGuarded: punctuation-delimited Stage 2 lookalikes (hyphen, slash) fail closed beside the canonical field", () => {
+  assert.equal(parseOptionalIssueRefGuarded("- **Stage 2:** #480\n- **Stage 2-current:** #492\n", "Stage 2").kind, "ambiguous");
+  assert.equal(parseOptionalIssueRefGuarded("- **Stage 2:** #480\n- **Stage 2/current:** #492\n", "Stage 2").kind, "ambiguous");
+});
+
+test("parseOptionalIssueRefGuarded: a punctuation-delimited PR near-duplicate cannot silently route through a stale canonical pointer", () => {
+  const result = parseOptionalIssueRefGuarded("- **PR:** #376\n- **PR-current:** #400\n", "PR");
+  assert.equal(result.kind, "ambiguous");
+  assert.match(result.reason, /#376/);
+  assert.match(result.reason, /#400/);
+});
+
+test("parseOptionalIssueRefGuarded: normal control -- exactly one canonical value for Stage 2 and PR resolves unchanged", () => {
+  assert.deepEqual(parseOptionalIssueRefGuarded("- **Stage 2:** #480\n", "Stage 2"), { kind: "issue", issue: 480 });
+  assert.deepEqual(parseOptionalIssueRefGuarded("- **PR:** #376\n", "PR"), { kind: "issue", issue: 376 });
+  assert.deepEqual(parseOptionalIssueRefGuarded("- **Stage 2:** none\n", "Stage 2"), { kind: "none" });
+});
+
+test("parseOptionalIssueRefGuarded: false-positive control -- unrelated bold bullets/prose containing similar words do not trigger the guard", () => {
+  const body =
+    "- **PR:** #376\n" +
+    "- **Previous PR:** #100\n" +
+    "Some prose about Stage 2 review timing does not use the bullet shape.\n";
+  assert.deepEqual(parseOptionalIssueRefGuarded(body, "PR"), { kind: "issue", issue: 376 });
+});
+
+test("parseOptionalIssueRefGuarded: missing/malformed-value fields retain their existing fail-closed behavior", () => {
+  assert.equal(parseOptionalIssueRefGuarded("", "PR").kind, "missing");
+  assert.equal(parseOptionalIssueRefGuarded("- **PR:** #376 and also #400\n", "PR").kind, "invalid");
 });
 
 // -- resolvePreMergeVerdict ------------------------------------------------------------------
@@ -95,11 +194,16 @@ test("resolvePreMergeVerdict: RESPONSE_RECEIVED + BLOCKED_CLOSING_REFERENCE -> S
   assert.equal(v.stopAfter, true);
   assert.equal("stage1" in v, false);
   assert.equal("mergeReady" in v, false);
+  // Stage 1 review finding on PR #613 (P1): a clean-pass response blocked only by the closing
+  // reference carries no findings -- format-dispatch-prompt.mjs must not mandate
+  // finalize-correction-breakpoint.mjs for this shape.
+  assert.equal(v.correctionReason, "closing-reference");
 });
 
 test("resolvePreMergeVerdict: EXEMPT + BLOCKED_CLOSING_REFERENCE -> STAGE1_CORRECTION_REQUIRED", () => {
   const v = resolvePreMergeVerdict({ stage1: stage1("EXEMPT"), mergeReady: mergeReady("BLOCKED_CLOSING_REFERENCE") });
   assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.equal(v.correctionReason, "closing-reference");
 });
 
 test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED -> STAGE1_CORRECTION_REQUIRED even when merge-ready is otherwise ready", () => {
@@ -111,6 +215,36 @@ test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED -> STAGE1_CORRE
     mergeReady: mergeReady("MERGE_READY"),
   });
   assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+  // The one genuinely findings-bearing path -- #611's #438/PR #610 regression --
+  // finalize-correction-breakpoint.mjs remains mandatory here.
+  assert.equal(v.correctionReason, "findings");
+});
+
+// PR #435's own live regression: the genuine Codex review body_excerpt for commit
+// `30b36035c9` began with an insignificant leading newline before "### 💡 Codex Review",
+// which the findings-preamble classifier's `^`-anchored pattern then failed to match --
+// silently falling through to NO_ACTION_YET instead of STAGE1_CORRECTION_REQUIRED. Mirrors
+// #435's actual evidence shape: a head-marked Stage 1 trigger, four bound inline-finding
+// matches, a commit-bound review match whose body_excerpt carries the observed leading
+// newline, and a concurrent commit-unbound "No findings" task-summary comment (real live
+// evidence: matches neither fixed preamble, and must not itself flip the verdict).
+test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED whose body_excerpt begins with a leading newline (PR #435's own live regression shape) still resolves to STAGE1_CORRECTION_REQUIRED, never NO_ACTION_YET", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("RESPONSE_RECEIVED", {
+      matches: [
+        { body_excerpt: "**P1 Badge** Close the gated work issue before stopping\n\nWhen `checkPostAudit` returns..." },
+        { body_excerpt: "**P1 Badge** Route already-consumed CLEAN audits to close-audit\n\nIn the motivating..." },
+        { body_excerpt: "**P2 Badge** Classify closed audit issues before the open-state guard\n\nFor a directly..." },
+        { body_excerpt: "**P2 Badge** Fetch all candidate successor audits\n\nOnce a repository has more than..." },
+        { body_excerpt: "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request." },
+        { body_excerpt: "No findings. The changes are internally consistent, fail closed on ambiguous evidence..." },
+      ],
+      unboundGenuineMatches: [],
+    }),
+    mergeReady: mergeReady("MERGE_READY"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.notEqual(v.state, "NO_ACTION_YET");
 });
 
 test("resolvePreMergeVerdict: a formal review artifact with ordinary finding text (no fixed preamble) -> STAGE1_CORRECTION_REQUIRED (PR #640 Stage 1 review finding #1)", () => {
@@ -204,6 +338,121 @@ test("resolvePreMergeVerdict: NOT_REQUESTED + stale/non-head-scoped Stage 1 disp
   assert.equal(v.state, "NO_ACTION_YET");
 });
 
+// -- resolvePreMergeVerdict: correctionDelta (issue #454, unit 454-C) ------------------------
+
+function correctionDelta(state, overrides = {}) {
+  const base =
+    state === "CORRECTION_SATISFIED" || state === "NOT_SATISFIED" || state === "HEAD_MISMATCH"
+      ? { reviewedHead: "reviewed1234567", correctedHead: "corrected1234567" }
+      : {};
+  return { exitCode: state === "CORRECTION_SATISFIED" ? 0 : 2, state, ...base, ...overrides };
+}
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + MERGE_READY -> STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2, carrying reviewedHead/correctedHead", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+  assert.equal(v.stopAfter, true);
+  assert.equal(v.reviewedHead, "reviewed1234567");
+  assert.equal(v.correctedHead, "corrected1234567");
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + MERGE_READY_NO_WORK_ISSUE -> STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY_NO_WORK_ISSUE"),
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + BLOCKED_CLOSING_REFERENCE -> STAGE1_CORRECTION_REQUIRED", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("BLOCKED_CLOSING_REFERENCE"),
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.equal(v.stopAfter, true);
+  // Stage 1 review finding on PR #613 (P1): a correction-satisfied disposition already exists
+  // and re-verified clean -- the only remaining blocker is the closing reference, not a fresh
+  // findings-bearing correction, so finalize-correction-breakpoint.mjs must not run again.
+  assert.equal(v.correctionReason, "closing-reference");
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + an unrecognized-but-exitCode-0 merge-ready state still resolves to STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 (P1 finding on PR #459: authorization is derived from merge-ready-gate.mjs's own combineMergeReadyResult, which -- like the real lifecycle-gate.mjs merge-ready check it composes -- trusts exitCode as authoritative, never a state-string allowlist a real component's exitCode-0 output could fall outside of)", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("SOMETHING_NEW"),
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + an operational-error mergeReady result falls through to the bottom-of-function AMBIGUOUS, never NO_ACTION_YET or a silent merge authorization", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: { exitCode: 1, state: "OPERATIONAL_ERROR", message: "lifecycle-gate merge-ready threw" },
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
+  });
+  assert.equal(v.state, "AMBIGUOUS");
+  assert.notEqual(v.state, "NO_ACTION_YET");
+  assert.notEqual(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + NOT_SATISFIED -> AMBIGUOUS, carrying the underlying reason", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: correctionDelta("NOT_SATISFIED", { reason: "reviewed head has no findings-bearing match" }),
+  });
+  assert.equal(v.state, "AMBIGUOUS");
+  assert.equal(v.stopAfter, true);
+  assert.match(v.reason, /reviewed head has no findings-bearing match/);
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + HEAD_MISMATCH -> NO_ACTION_YET (unchanged from today's behavior with no disposition at all)", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: correctionDelta("HEAD_MISMATCH"),
+  });
+  assert.equal(v.state, "NO_ACTION_YET");
+  assert.equal(v.stopAfter, true);
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + no correction-satisfied-shaped disposition present at all -> NO_ACTION_YET", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: null,
+  });
+  assert.equal(v.state, "NO_ACTION_YET");
+  assert.equal(v.stopAfter, true);
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + an operational error from checkCorrectionDelta -> AMBIGUOUS, never silently treated as a state", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: { exitCode: 1, message: "gh api compare call failed" },
+  });
+  assert.equal(v.state, "AMBIGUOUS");
+  assert.match(v.reason, /checkCorrectionDelta/);
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + malformed correctionDelta (no exitCode) fails closed to AMBIGUOUS", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: { state: "CORRECTION_SATISFIED" },
+  });
+  assert.equal(v.state, "AMBIGUOUS");
+});
+
 test("resolvePreMergeVerdict: RESPONSE_RECEIVED without clean-pass or findings preamble (kickoff/ack shape) -> NO_ACTION_YET", () => {
   const v = resolvePreMergeVerdict({
     stage1: stage1("RESPONSE_RECEIVED", {
@@ -281,18 +530,72 @@ test("resolvePreMergeVerdict: carries the given context through on every verdict
 // -- resolvePostMergeVerdict -----------------------------------------------------------------
 
 function postAudit(state, overrides = {}) {
-  return { exitCode: state === "PREMATURE_CLOSURE" ? 2 : 0, state, ...overrides };
+  return { exitCode: state === "PREMATURE_CLOSURE" || state === "RESPONSE_UNUSABLE" ? 2 : 0, state, ...overrides };
 }
 
 test("resolvePostMergeVerdict: READY_TO_CLOSE -> STAGE2_CLOSE_READY", () => {
-  const v = resolvePostMergeVerdict({ postAudit: postAudit("READY_TO_CLOSE", { verdict: "CLEAN" }) });
+  const v = resolvePostMergeVerdict({ postAudit: postAudit("READY_TO_CLOSE", { verdict: "CLEAN", workIssue: 379 }) });
   assert.equal(v.state, "STAGE2_CLOSE_READY");
   assert.equal(v.stopAfter, true);
 });
 
 test("resolvePostMergeVerdict: ACCEPTED_NO_WORK_ISSUE -> STAGE2_CLOSE_READY", () => {
-  const v = resolvePostMergeVerdict({ postAudit: postAudit("ACCEPTED_NO_WORK_ISSUE", { verdict: "CLEAN" }) });
+  const v = resolvePostMergeVerdict({ postAudit: postAudit("ACCEPTED_NO_WORK_ISSUE", { verdict: "CLEAN", workIssue: null }) });
   assert.equal(v.state, "STAGE2_CLOSE_READY");
+});
+
+// Issue #407 unit 407-B, carried one step further by a Stage 1 review finding on PR #435:
+// `close-audit` alone deliberately never touches the gated work issue (Shared Contract item
+// 3), so `nextCommand` must also close it when READY_TO_CLOSE names a real one -- otherwise a
+// CLEAN cycle leaves the work issue open indefinitely, one step down from the original
+// #380/#384 defect this whole mechanism exists to fix.
+test("resolvePostMergeVerdict: READY_TO_CLOSE with a real gated work issue carries a deterministic close-work-issue-then-close-audit nextCommand (Stage 1 review finding on PR #435)", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("READY_TO_CLOSE", { verdict: "CLEAN", workIssue: 379 }) },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 380 },
+  );
+  assert.equal(v.state, "STAGE2_CLOSE_READY");
+  assert.equal(
+    v.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo LouPineWays/Loop-Dee-Loup --work-issue 379 --audit-issue 380 && " +
+      "node tools/review-watch/lifecycle-gate.mjs close-audit --repo LouPineWays/Loop-Dee-Loup --audit-issue 380",
+  );
+});
+
+test("resolvePostMergeVerdict: ACCEPTED_NO_WORK_ISSUE carries only the audit-only close-audit nextCommand (no work issue exists to close)", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("ACCEPTED_NO_WORK_ISSUE", { verdict: "CLEAN", workIssue: null }) },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 384 },
+  );
+  assert.equal(v.state, "STAGE2_CLOSE_READY");
+  assert.equal(
+    v.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-audit --repo LouPineWays/Loop-Dee-Loup --audit-issue 384",
+  );
+});
+
+// Issue #542: resolvePostMergeVerdict's own pure-function-level coverage of the close-control
+// chaining, independent of the full runNextReviewTransitionGate end-to-end tests above.
+test("resolvePostMergeVerdict: READY_TO_CLOSE with a controlIssue in context chains close-control after close-work-issue/close-audit", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("READY_TO_CLOSE", { verdict: "CLEAN", workIssue: 486 }) },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 538, controlIssue: 487 },
+  );
+  assert.equal(v.state, "STAGE2_CLOSE_READY");
+  assert.equal(
+    v.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo LouPineWays/Loop-Dee-Loup --work-issue 486 --audit-issue 538 && " +
+      "node tools/review-watch/lifecycle-gate.mjs close-audit --repo LouPineWays/Loop-Dee-Loup --audit-issue 538 && " +
+      "node tools/orchestration/close-control.mjs --repo LouPineWays/Loop-Dee-Loup --control-issue 487 --audit-issue 538 --work-issue 486",
+  );
+});
+
+test("resolvePostMergeVerdict: READY_TO_CLOSE with controlIssue explicitly null (direct-reference mode) never chains close-control", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("READY_TO_CLOSE", { verdict: "CLEAN", workIssue: 486 }) },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 538, controlIssue: null },
+  );
+  assert.ok(!v.nextCommand.includes("close-control"));
 });
 
 test("resolvePostMergeVerdict: OK with rawVerdict NOT CLEAN -> STAGE2_CORRECTION_REQUIRED", () => {
@@ -318,6 +621,92 @@ test("resolvePostMergeVerdict: OK with rawVerdict CLEAN but not backed by a comp
   // silently treated as ready to close.
   const v = resolvePostMergeVerdict({ postAudit: postAudit("OK", { rawVerdict: "CLEAN", verdict: null }) });
   assert.equal(v.state, "NO_ACTION_YET");
+});
+
+// Stage 1 review finding on PR #435: the motivating resume case -- the work issue is already
+// closed but its backed-CLEAN audit was never consumed -- reaches checkPostAudit's generic
+// `OK` branch (never `READY_TO_CLOSE`, which requires the work issue to still be open) as
+// `verdict: "CLEAN"` / `workIssueState: "CLOSED"`, and previously fell through to
+// `NO_ACTION_YET` below, preserving the exact #380/#384 defect. Must route to
+// `STAGE2_CLOSE_READY` too, audit-only -- the work issue is already closed, so `nextCommand`
+// must never re-attempt closing it.
+test("resolvePostMergeVerdict: OK with verdict CLEAN and workIssueState CLOSED (already-consumed CLEAN, work issue closed but audit issue still open) -> STAGE2_CLOSE_READY, audit-only nextCommand", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("OK", { rawVerdict: "CLEAN", verdict: "CLEAN", workIssueState: "CLOSED", workIssue: 379 }) },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 380 },
+  );
+  assert.equal(v.state, "STAGE2_CLOSE_READY");
+  assert.equal(v.stopAfter, true);
+  assert.equal(
+    v.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-audit --repo LouPineWays/Loop-Dee-Loup --audit-issue 380",
+  );
+});
+
+test("resolvePostMergeVerdict: OK with verdict CLEAN but workIssueState still OPEN is not the already-consumed shape -> falls through to NO_ACTION_YET unchanged", () => {
+  // Defensive: checkPostAudit's own branching means CLEAN + still-open should always resolve
+  // to READY_TO_CLOSE, never plain OK -- but this gate must not itself invent a STAGE2_CLOSE_READY
+  // result from workIssueState alone without also requiring a backed CLEAN verdict.
+  const v = resolvePostMergeVerdict({
+    postAudit: postAudit("OK", { rawVerdict: "CLEAN", verdict: "CLEAN", workIssueState: "OPEN", workIssue: 379 }),
+  });
+  assert.equal(v.state, "NO_ACTION_YET");
+});
+
+// -- REPORT_READY_TO_RECORD -> STAGE2_REPORT_READY_TO_RECORD (issue #439, the live #408/#436
+// gap) -----------------------------------------------------------------------------------------
+
+test("resolvePostMergeVerdict: REPORT_READY_TO_RECORD -> STAGE2_REPORT_READY_TO_RECORD, carrying the exact record-verdict nextCommand", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("REPORT_READY_TO_RECORD", { rawVerdict: "PENDING", reportEvidence: { verdict: "CLEAN" } }) },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 436 },
+  );
+  assert.equal(v.state, "STAGE2_REPORT_READY_TO_RECORD");
+  assert.equal(v.stopAfter, true);
+  assert.equal(
+    v.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs record-verdict --repo LouPineWays/Loop-Dee-Loup --audit-issue 436",
+  );
+});
+
+test("resolvePostMergeVerdict: REPORT_READY_TO_RECORD with a NOT CLEAN-backed report also maps to STAGE2_REPORT_READY_TO_RECORD (promotion is verdict-agnostic; correction routing happens after a fresh gate re-run)", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("REPORT_READY_TO_RECORD", { rawVerdict: null, reportEvidence: { verdict: "NOT CLEAN" } }) },
+    { repo: "owner/repo", auditIssue: 160 },
+  );
+  assert.equal(v.state, "STAGE2_REPORT_READY_TO_RECORD");
+  assert.equal(
+    v.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs record-verdict --repo owner/repo --audit-issue 160",
+  );
+});
+
+// -- RESPONSE_UNUSABLE -> STAGE2_RESPONSE_UNUSABLE (issue #447, live reproductions #446 and
+// #380's first round) -------------------------------------------------------------------------
+
+test("resolvePostMergeVerdict: RESPONSE_UNUSABLE -> STAGE2_RESPONSE_UNUSABLE, a distinct fail-closed stop, never ordinary NO_ACTION_YET and never generic AMBIGUOUS", () => {
+  const v = resolvePostMergeVerdict(
+    {
+      postAudit: postAudit("RESPONSE_UNUSABLE", {
+        rawVerdict: "PENDING",
+        workIssue: 439,
+        reportEvidence: { backed: false, hasGenuineResponse: true, genuineResponsesSeen: 1 },
+      }),
+    },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 446 },
+  );
+  assert.equal(v.state, "STAGE2_RESPONSE_UNUSABLE");
+  assert.equal(v.stopAfter, true);
+  assert.equal(v.postAudit.reportEvidence.hasGenuineResponse, true, "the exact genuine-response evidence must reach the composed verdict, not be summarized away");
+});
+
+test("resolvePostMergeVerdict: RESPONSE_UNUSABLE carries no nextCommand — it authorizes a bounded recovery/founder-interrupt stop, never an automatic mutation", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("RESPONSE_UNUSABLE", { rawVerdict: "PENDING", workIssue: 374 }) },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 380 },
+  );
+  assert.equal(v.state, "STAGE2_RESPONSE_UNUSABLE");
+  assert.equal("nextCommand" in v, false, "unlike STAGE2_CLOSE_READY/STAGE2_REPORT_READY_TO_RECORD, this state must never carry an automatic next mutation");
 });
 
 test("resolvePostMergeVerdict: PREMATURE_CLOSURE -> AMBIGUOUS (a recoverable-but-abnormal state this read-only gate does not resolve on its own)", () => {
@@ -367,6 +756,56 @@ test("runNextReviewTransitionGate: direct --pr/--head/--issue mode resolves with
   assert.equal(result.stopAfter, true);
 });
 
+test("runNextReviewTransitionGate: direct --pr/--head/--issue mode accepts --stage1-disposition and resolves a correction-satisfied head to STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 (Stage 1 review finding on PR #459)", async () => {
+  let issueReadCalls = 0;
+  let correctionDeltaCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    {
+      repo: "o/r",
+      pr: "376",
+      head: "0009c54b18",
+      issue: "375",
+      stage1Disposition: "correction-satisfied at 0009c54b18 (reviewed 30b36035c9)",
+    },
+    {
+      ghIssueViewImpl: async () => {
+        issueReadCalls++;
+        return { body: "", state: "OPEN" };
+      },
+      stage1RunImpl: async () => stage1("NOT_REQUESTED"),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async (args) => {
+        correctionDeltaCalls++;
+        assert.equal(args.reviewedHead, "30b36035c9");
+        assert.equal(args.correctedHead, "0009c54b18");
+        return { exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: "0009c54b18" };
+      },
+    },
+  );
+  assert.equal(issueReadCalls, 0);
+  assert.equal(correctionDeltaCalls, 1);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("runNextReviewTransitionGate: direct --pr/--head/--issue mode without --stage1-disposition never invokes checkCorrectionDeltaImpl (unchanged default behavior)", async () => {
+  let correctionDeltaCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", pr: "376", head: "sha1", issue: "375" },
+    {
+      ghIssueViewImpl: async () => ({ body: "", state: "OPEN" }),
+      stage1RunImpl: async () => stage1("NOT_REQUESTED"),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => {
+        correctionDeltaCalls++;
+        throw new Error("should never be called when no correction-satisfied disposition is supplied");
+      },
+    },
+  );
+  assert.equal(correctionDeltaCalls, 0);
+  assert.equal(result.state, "NO_ACTION_YET");
+});
+
 test("runNextReviewTransitionGate: direct --pr without --head fails closed with exit 1", async () => {
   const result = await runNextReviewTransitionGate({ repo: "o/r", pr: "376" });
   assert.equal(result.exitCode, 1);
@@ -400,6 +839,52 @@ test("runNextReviewTransitionGate: direct --audit-issue mode resolves without an
   assert.equal(result.state, "STAGE2_CLOSE_READY");
 });
 
+test("runNextReviewTransitionGate: direct --audit-issue mode resolves REPORT_READY_TO_RECORD to STAGE2_REPORT_READY_TO_RECORD, exit 0, with the exact record-verdict nextCommand (issue #439)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", auditIssue: "436" },
+    {
+      checkPostAuditImpl: async (args) => {
+        assert.equal(args["audit-issue"], "436");
+        return { exitCode: 0, state: "REPORT_READY_TO_RECORD", rawVerdict: "PENDING", reportEvidence: { verdict: "CLEAN" } };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_REPORT_READY_TO_RECORD");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.nextCommand, "node tools/review-watch/lifecycle-gate.mjs record-verdict --repo o/r --audit-issue 436");
+  // Issue #486: this verdict authorizes exactly its recorded nextCommand and nothing else —
+  // never a same-context re-resolution into STAGE2_CLOSE_READY (the #494 incident shape).
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["run-lifecycle-gate-record-verdict"],
+  });
+});
+
+test("runNextReviewTransitionGate: direct --audit-issue mode resolves RESPONSE_UNUSABLE to STAGE2_RESPONSE_UNUSABLE, exit 4, a distinct fail-closed stop (issue #447)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: "446" },
+    {
+      checkPostAuditImpl: async (args) => {
+        assert.equal(args["audit-issue"], "446");
+        return {
+          exitCode: 2,
+          state: "RESPONSE_UNUSABLE",
+          rawVerdict: "PENDING",
+          workIssue: 439,
+          reportEvidence: { backed: false, hasGenuineResponse: true, genuineResponsesSeen: 1 },
+        };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "STAGE2_RESPONSE_UNUSABLE");
+  assert.equal(result.stopAfter, true);
+  // Issue #486: this no-action verdict (the #440 incident shape) authorizes zero further
+  // operational tool calls — never diagnosis, issue creation, source edits, or a PR.
+  assert.deepEqual(result.actionEnvelope, { mode: "none", authorizedActions: [] });
+});
+
 test("runNextReviewTransitionGate: --audit-issue takes precedence over --control-issue when both are given", async () => {
   const result = await runNextReviewTransitionGate(
     { repo: "o/r", controlIssue: "322", auditIssue: "378" },
@@ -412,6 +897,73 @@ test("runNextReviewTransitionGate: --audit-issue takes precedence over --control
   );
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "STAGE2_CLOSE_READY");
+});
+
+// -- runNextReviewTransitionGate: direct --audit-issue mode, checkPostAudit redirect propagation
+// (issue #550 correction, Stage 1 finding P1: the #548/#457 incident's own downstream half --
+// checkPostAudit can resolve a mistaken thin-control input to the real Audit Issue, but every
+// composed nextCommand must use *that* resolved Audit Issue, never the original control input,
+// while the original input survives separately as the control identity so close-control.mjs still
+// terminalizes the right thin control.) ----------------------------------------------------------
+
+test("runNextReviewTransitionGate: STAGE2_CLOSE_READY after a checkPostAudit redirect uses the resolved Audit Issue for every nextCommand and chains close-control against the original thin-control input (#457 -> #548)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", auditIssue: "457" },
+    {
+      checkPostAuditImpl: async (args) => {
+        assert.equal(args["audit-issue"], "457");
+        // Mirrors lifecycle-gate.mjs's real checkPostAudit contract: a redirected result
+        // reports the resolved Audit Issue as `auditIssue`, distinct from the "457" input.
+        return { exitCode: 0, state: "READY_TO_CLOSE", verdict: "CLEAN", workIssue: 456, auditIssue: 548 };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_CLOSE_READY");
+  assert.equal(result.auditIssue, 548, "the resolved Audit Issue, not the original control input, is the audit identity from here on");
+  assert.equal(result.controlIssue, 457, "the original input becomes the control identity so it can still be terminalized");
+  assert.equal(
+    result.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo o/r --work-issue 456 --audit-issue 548 && " +
+      "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 548 && " +
+      "node tools/orchestration/close-control.mjs --repo o/r --control-issue 457 --audit-issue 548 --work-issue 456",
+    "every command must act on Audit Issue #548, never #457, and close-control must terminalize #457",
+  );
+});
+
+test("runNextReviewTransitionGate: STAGE2_REPORT_READY_TO_RECORD report-promotion path also targets the resolved Audit Issue after a redirect (issue #550 correction, Stage 1 finding P1)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", auditIssue: "457" },
+    {
+      checkPostAuditImpl: async () => ({
+        exitCode: 0,
+        state: "REPORT_READY_TO_RECORD",
+        rawVerdict: "PENDING",
+        reportEvidence: { verdict: "CLEAN" },
+        auditIssue: 548,
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_REPORT_READY_TO_RECORD");
+  assert.equal(result.nextCommand, "node tools/review-watch/lifecycle-gate.mjs record-verdict --repo o/r --audit-issue 548");
+});
+
+test("runNextReviewTransitionGate: direct --audit-issue mode with no redirect (checkPostAudit's own resolved auditIssue equals the input) behaves exactly as before -- no spurious controlIssue is introduced", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", auditIssue: "548" },
+    {
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "READY_TO_CLOSE", verdict: "CLEAN", auditIssue: 548 }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.auditIssue, 548);
+  assert.equal(result.controlIssue, undefined, "no redirect occurred, so no control identity is invented");
+  assert.equal(
+    result.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 548",
+    "unchanged from before this correction -- no close-control chaining without a real thin-control identity",
+  );
 });
 
 // -- runNextReviewTransitionGate: control-Issue mode -------------------------------------------
@@ -493,6 +1045,22 @@ test("runNextReviewTransitionGate: control-Issue mode with a settled PR (no Stag
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
   assert.equal(result.controlIssue, 322);
+  // Issue #486: authorizes exactly the merge + Stage 2 trigger + persisting refs, then
+  // stops — not Stage 2 waiting/result handling in the same context. Issue #561 (live
+  // #559/#445/PR #558 reproduction): the reviewer trigger is authorized only after the
+  // control snapshot is projected and verified, never before. Issue #586 (live #582/PR #583
+  // reproduction): finalize-stage1-satisfied is authorized first, strictly before merge-pr, so
+  // the durable Stage 1 disposition is persisted before merge/Stage 2 setup can begin.
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: [
+      "finalize-stage1-satisfied",
+      "merge-pr",
+      "create-stage2-audit-issue",
+      "write-control-snapshot",
+      "post-stage2-reviewer-trigger",
+    ],
+  });
 });
 
 test("runNextReviewTransitionGate: Stage 1 satisfied text does not override NOT_REQUESTED at a different live head", async () => {
@@ -509,6 +1077,306 @@ test("runNextReviewTransitionGate: Stage 1 satisfied text does not override NOT_
     },
   );
   assert.equal(result.state, "NO_ACTION_YET");
+});
+
+// -- Issue #450: the exact #428 / PR #449 live regression -----------------------------------
+//
+// Control #428 was durably `Lifecycle: REVIEW` / `PR: #449` / `Stage 2: not started` while PR
+// #449 already carried one genuine findings-bearing Codex Stage 1 review. Before this fix,
+// `runNextReviewTransitionGate` returned AMBIGUOUS on the malformed "Stage 2" reference before
+// ever evaluating Stage 1 -- stranding the existing STAGE1_CORRECTION_REQUIRED transition
+// behind an unrelated field-serialization defect. Do not special-case issue #428 or PR #449 in
+// production logic (#450 Required Behavior #4) -- this fixture reproduces the shape generically.
+const CONTROL_BODY_428_SHAPE = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #427
+- **PR:** #449
+- **Stage 1:** requested
+- **Stage 2:** not started
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("runNextReviewTransitionGate: the exact #428/#449 regression -- a legacy 'Stage 2: not started' bullet no longer strands the transition as AMBIGUOUS before Stage 1 is evaluated", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "428" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        assert.equal(number, "428");
+        return { body: CONTROL_BODY_428_SHAPE, state: "OPEN" };
+      },
+      ghPrHeadImpl: async () => "67fa0c28fde901e721afe30a91451130668f0bb0",
+      stage1RunImpl: async () =>
+        stage1("RESPONSE_RECEIVED", {
+          matches: [
+            {
+              body_excerpt:
+                "### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.",
+            },
+          ],
+        }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+    },
+  );
+  // The composed post-PR transition reaches the existing Stage 1 findings path -- never
+  // AMBIGUOUS from Stage-2-reference parsing, and never a NO_ACTION_YET/other misroute either.
+  assert.equal(result.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.correctionReason, "findings");
+});
+
+test("runNextReviewTransitionGate: the same #428-shaped body with a clean/no-findings Stage 1 response stays on the ordinary satisfied/merge path -- this fix does not force correction merely because Stage 2 is absent", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "428" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_428_SHAPE, state: "OPEN" }),
+      ghPrHeadImpl: async () => "67fa0c28fde901e721afe30a91451130668f0bb0",
+      stage1RunImpl: async () => stage1("RESPONSE_RECEIVED"),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+    },
+  );
+  assert.equal(result.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+// -- runNextReviewTransitionGate: correction-satisfied disposition (issue #454, unit 454-C) --
+
+const CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #375
+- **Route:** implementation worker
+- **PR:** #376
+- **Stage 1:** correction-satisfied at 0009c54b18 (reviewed 30b36035c9)
+- **Stage 2:** none
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfied Stage 1 disposition and MERGE_READY resolves to STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2, invoking checkCorrectionDeltaImpl with the parsed heads and the live gated head", async () => {
+  let correctionDeltaCallArgs = null;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrHeadImpl: async () => "0009c54b18",
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async (args) => {
+        correctionDeltaCallArgs = args;
+        return { exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: "0009c54b18" };
+      },
+    },
+  );
+  assert.deepEqual(correctionDeltaCallArgs, {
+    repo: "o/r",
+    pr: 376,
+    reviewedHead: "30b36035c9",
+    correctedHead: "0009c54b18",
+    gatedHead: "0009c54b18",
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.reviewedHead, "30b36035c9");
+  assert.equal(result.correctedHead, "0009c54b18");
+  // Issue #561: the correction-satisfied path carries the same corrected merge/create-audit-
+  // issue/project-verify-control/trigger ordering as the ordinary satisfied path.
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["merge-pr", "create-stage2-audit-issue", "write-control-snapshot", "post-stage2-reviewer-trigger"],
+  });
+});
+
+test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfied disposition but BLOCKED_CLOSING_REFERENCE resolves to STAGE1_CORRECTION_REQUIRED", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrHeadImpl: async () => "0009c54b18",
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 2, state: "BLOCKED_CLOSING_REFERENCE" }),
+      checkCorrectionDeltaImpl: async () => ({ exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: "0009c54b18" }),
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.equal(result.correctionReason, "closing-reference");
+});
+
+test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfied disposition whose evidence does not check out (NOT_SATISFIED) resolves to AMBIGUOUS", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrHeadImpl: async () => "0009c54b18",
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => ({
+        exitCode: 2,
+        state: "NOT_SATISFIED",
+        reviewedHead: "30b36035c9",
+        correctedHead: "0009c54b18",
+        reason: "compare(30b36035c9...0009c54b18) reported status \"identical\"",
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /compare\(30b36035c9\.\.\.0009c54b18\)/);
+});
+
+test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfied disposition naming a different (stale) head than the live gated head resolves to NO_ACTION_YET (HEAD_MISMATCH)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrHeadImpl: async () => "somesupersededhead",
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => ({
+        exitCode: 2,
+        state: "HEAD_MISMATCH",
+        reviewedHead: "30b36035c9",
+        correctedHead: "0009c54b18",
+        gatedHead: "somesupersededhead",
+      }),
+    },
+  );
+  assert.equal(result.state, "NO_ACTION_YET");
+});
+
+// -- issue #611: the exact live #438/PR #610 regression -----------------------------------
+//
+// #611's own reproduction: PR #610's Stage 1 review was genuinely requested and reviewed at
+// frozen head `100801f442cd2538c6667eec9a6f935484d856f8` (seven actionable findings), the
+// consolidated correction advanced the PR to `f3fc2adaa35febe586fce838c027177b869c2739`, and
+// control Issue #438 stayed durably `Stage 1: requested` because the correction worker's own
+// dispatch prompt (`format-dispatch-prompt.mjs`'s `formatStage1CorrectionWorkerDispatchPrompt`)
+// never instructed it to run `finalize-correction-breakpoint.mjs` before stopping -- a
+// prose-only obligation living solely in `docs/bounded-review-cycle.md`. These two tests pin
+// both halves of that regression using the incident's own real PR/head values: the stuck loop
+// this gate reproduces when finalization never ran, and the exact same inputs resolving cleanly
+// once the canonical `correction-satisfied` disposition the finalizer persists is present --
+// proving issue #611's fix (the dispatch-prompt mandate added above) actually unblocks it.
+const ISSUE_611_REVIEWED_HEAD = "100801f442cd2538c6667eec9a6f935484d856f8";
+const ISSUE_611_CORRECTED_HEAD = "f3fc2adaa35febe586fce838c027177b869c2739";
+
+const CONTROL_BODY_438_STALE_STAGE1_REQUESTED = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #437
+- **Route:** implementation worker
+- **PR:** #610
+- **Stage 1:** requested
+- **Stage 2:** none
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("runNextReviewTransitionGate: exact #438/PR #610 regression, before finalization -- a stale 'Stage 1: requested' bullet at the corrected head reproduces the stuck NO_ACTION_YET loop", async () => {
+  let correctionDeltaCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "438" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_438_STALE_STAGE1_REQUESTED, state: "OPEN" }),
+      ghPrHeadImpl: async () => ISSUE_611_CORRECTED_HEAD,
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => {
+        correctionDeltaCalls += 1;
+        throw new Error("should never be called: the stale 'requested' bullet carries no reviewed/corrected head pair to derive evidence from");
+      },
+    },
+  );
+  assert.equal(correctionDeltaCalls, 0);
+  assert.equal(result.state, "NO_ACTION_YET");
+  assert.equal(result.stopAfter, true);
+});
+
+const CONTROL_BODY_438_CORRECTION_SATISFIED = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #437
+- **Route:** implementation worker
+- **PR:** #610
+- **Stage 1:** correction-satisfied at ${ISSUE_611_CORRECTED_HEAD} (reviewed ${ISSUE_611_REVIEWED_HEAD})
+- **Stage 2:** none
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("runNextReviewTransitionGate: exact #438/PR #610 regression, after finalization -- the same PR/head inputs resolve to STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 once finalize-correction-breakpoint.mjs's canonical disposition is durably recorded", async () => {
+  let correctionDeltaCallArgs = null;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "438" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_438_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrHeadImpl: async () => ISSUE_611_CORRECTED_HEAD,
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async (args) => {
+        correctionDeltaCallArgs = args;
+        return {
+          exitCode: 0,
+          state: "CORRECTION_SATISFIED",
+          reviewedHead: ISSUE_611_REVIEWED_HEAD,
+          correctedHead: ISSUE_611_CORRECTED_HEAD,
+        };
+      },
+    },
+  );
+  assert.deepEqual(correctionDeltaCallArgs, {
+    repo: "o/r",
+    pr: 610,
+    reviewedHead: ISSUE_611_REVIEWED_HEAD,
+    correctedHead: ISSUE_611_CORRECTED_HEAD,
+    gatedHead: ISSUE_611_CORRECTED_HEAD,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.reviewedHead, ISSUE_611_REVIEWED_HEAD);
+  assert.equal(result.correctedHead, ISSUE_611_CORRECTED_HEAD);
+});
+
+test("runNextReviewTransitionGate: control-Issue mode with no correction-satisfied-shaped Stage 1 disposition at all never invokes checkCorrectionDeltaImpl (no wasted gh call on the common path)", async () => {
+  let correctionDeltaCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE, state: "OPEN" }),
+      ghPrHeadImpl: async () => "livehead123",
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => {
+        correctionDeltaCalls++;
+        throw new Error("should never be called when no correction-satisfied disposition parses");
+      },
+    },
+  );
+  assert.equal(correctionDeltaCalls, 0);
+  assert.equal(result.state, "NO_ACTION_YET");
+});
+
+test("runNextReviewTransitionGate: control-Issue mode never invokes checkCorrectionDeltaImpl when stage1-gate is not NOT_REQUESTED, even if a correction-satisfied disposition is present (a fresh Stage 1 round already applies)", async () => {
+  let correctionDeltaCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrHeadImpl: async () => "0009c54b18",
+      stage1RunImpl: async () => stage1("RESPONSE_RECEIVED"),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => {
+        correctionDeltaCalls++;
+        throw new Error("should never be called when stage1-gate is not NOT_REQUESTED");
+      },
+    },
+  );
+  assert.equal(correctionDeltaCalls, 0);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
 });
 
 test("runNextReviewTransitionGate: control-Issue mode honors an explicit --head, skipping the PR-head read", async () => {
@@ -532,21 +1400,358 @@ test("runNextReviewTransitionGate: control-Issue mode honors an explicit --head,
   assert.equal(result.exitCode, 0);
 });
 
-test("runNextReviewTransitionGate: control-Issue mode with a settled Stage 2 (Audit) reference resolves the post-merge phase", async () => {
+test("runNextReviewTransitionGate: the exact #440 regression -- stale 'Stage 2: #480' plus live 'Stage 2 (current): #492' fails closed as AMBIGUOUS before either audit reference can select a Stage 2 transition, never calling checkPostAudit", async () => {
+  const body = CONTROL_BODY_POST_MERGE.replace("- **Stage 2:** #378", "- **Stage 2:** #480\n- **Stage 2 (current):** #492");
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      checkPostAuditImpl: async () => {
+        throw new Error("should never be called -- the near-duplicate guard must fail closed first");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /#480/);
+  assert.match(result.reason, /#492/);
+});
+
+// Stage 1 review finding on this PR: the same #440 shape recurs with a punctuation-delimited
+// qualifier instead of a parenthetical, and must fail closed the same way end to end.
+test("runNextReviewTransitionGate: a punctuation-delimited Stage 2 near-duplicate ('Stage 2-current') fails closed as AMBIGUOUS the same way as the parenthetical form", async () => {
+  const body = CONTROL_BODY_POST_MERGE.replace("- **Stage 2:** #378", "- **Stage 2:** #480\n- **Stage 2-current:** #492");
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      checkPostAuditImpl: async () => {
+        throw new Error("should never be called -- the near-duplicate guard must fail closed first");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /#480/);
+  assert.match(result.reason, /#492/);
+});
+
+// Issue #537, verification case 4: once the relevant PR is actually MERGED, a settled Stage 2
+// reference continues to own the transition exactly as before -- CONTROL_BODY_POST_MERGE has
+// both a settled "PR" (#376) and a settled "Stage 2" (#378) bullet, so this now also exercises
+// the new live-PR-state read (ghPrStateImpl) that decides between the pre-merge and post-merge
+// phase when both references coexist.
+test("runNextReviewTransitionGate: control-Issue mode with a settled Stage 2 (Audit) reference resolves the post-merge phase once the PR is MERGED", async () => {
+  let prStateReadFor = null;
   const result = await runNextReviewTransitionGate(
     { repo: "o/r", controlIssue: "322" },
     {
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async ({ number }) => {
+        prStateReadFor = number;
+        return { headRefOid: "mergedhead", state: "MERGED" };
+      },
       checkPostAuditImpl: async (args) => {
         assert.equal(args["audit-issue"], 378);
         return { exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN" };
       },
     },
   );
+  assert.equal(prStateReadFor, 376);
   assert.equal(result.exitCode, 3);
   assert.equal(result.state, "STAGE2_CORRECTION_REQUIRED");
   assert.equal(result.controlIssue, 322);
   assert.equal(result.auditIssue, 378);
+});
+
+// -- Issue #542: thin-control terminalization chained onto a control-Issue-mode
+// STAGE2_CLOSE_READY verdict — the #486/#487/#538 reproduction: work and audit terminalize
+// correctly, but without this chaining the founder-facing thin control Issue itself was left
+// open with stale fields. --------------------------------------------------------------------
+
+test("runNextReviewTransitionGate: control-Issue mode with a backed CLEAN Stage 2 (real gated work issue) chains close-work-issue, close-audit, then close-control in nextCommand, and the actionEnvelope authorizes exactly that chain in order", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      checkPostAuditImpl: async (args) => {
+        assert.equal(args["audit-issue"], 378);
+        return { exitCode: 0, state: "READY_TO_CLOSE", verdict: "CLEAN", workIssue: 375 };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_CLOSE_READY");
+  assert.equal(result.controlIssue, 322);
+  assert.equal(
+    result.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo o/r --work-issue 375 --audit-issue 378 && " +
+      "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 378 && " +
+      "node tools/orchestration/close-control.mjs --repo o/r --control-issue 322 --audit-issue 378 --work-issue 375",
+  );
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["run-lifecycle-gate-close-work-issue", "run-lifecycle-gate-close-audit", "run-close-control"],
+  });
+});
+
+test("runNextReviewTransitionGate: control-Issue mode with ACCEPTED_NO_WORK_ISSUE chains only close-audit then close-control (no work issue to close)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "ACCEPTED_NO_WORK_ISSUE", verdict: "CLEAN", workIssue: null }),
+    },
+  );
+  assert.equal(result.state, "STAGE2_CLOSE_READY");
+  assert.equal(
+    result.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 378 && " +
+      "node tools/orchestration/close-control.mjs --repo o/r --control-issue 322 --audit-issue 378",
+  );
+});
+
+test("runNextReviewTransitionGate: control-Issue mode with the already-consumed-CLEAN OK shape (work issue already closed) still chains close-audit then close-control", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      checkPostAuditImpl: async () => ({
+        exitCode: 0,
+        state: "OK",
+        rawVerdict: "CLEAN",
+        verdict: "CLEAN",
+        workIssueState: "CLOSED",
+        workIssue: 375,
+      }),
+    },
+  );
+  assert.equal(result.state, "STAGE2_CLOSE_READY");
+  assert.equal(
+    result.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 378 && " +
+      "node tools/orchestration/close-control.mjs --repo o/r --control-issue 322 --audit-issue 378 --work-issue 375",
+  );
+});
+
+test("runNextReviewTransitionGate: direct --audit-issue mode (no control Issue at all) never chains close-control -- fail-closed on control identity (issue #542 requirement 3)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", auditIssue: "378" },
+    {
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "READY_TO_CLOSE", verdict: "CLEAN", workIssue: 375 }),
+    },
+  );
+  assert.equal(result.state, "STAGE2_CLOSE_READY");
+  assert.equal(
+    result.nextCommand,
+    "node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo o/r --work-issue 375 --audit-issue 378 && " +
+      "node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 378",
+  );
+  assert.ok(!result.nextCommand.includes("close-control"), "a direct-reference invocation has no control Issue and must never guess or chain one");
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["run-lifecycle-gate-close-work-issue", "run-lifecycle-gate-close-audit"],
+  });
+});
+
+// -- Issue #537: control-Issue mode phase selection when PR and Stage 2 coexist -------------
+//
+// The #487/#535/#536 incident: control #487 carried a still-open correction PR (#536), a
+// correction-satisfied Stage 1 disposition for that PR's corrected head, and a prior NOT CLEAN
+// Stage 2 audit (#535) that predated the correction PR. Control-Issue mode used to select the
+// post-merge Stage 2 branch as soon as "Stage 2" parsed as a valid Issue reference, regardless
+// of PR #536 still being open -- these cases lock in the fix's live-PR-state precedence.
+
+const CONTROL_BODY_OPEN_PR_WITH_PRIOR_STAGE2 = `## Current state
+
+- **Lifecycle:** CORRECTION
+- **Execution:** #375
+- **Route:** implementation worker
+- **PR:** #536
+- **Stage 1:** correction-satisfied at 0009c54b18 (reviewed 30b36035c9)
+- **Stage 2:** #535
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("runNextReviewTransitionGate: issue #537 verification case 1 -- exact #487/#536 regression: an open PR with a correction-satisfied Stage 1 disposition resolves the merge-and-trigger-Stage-2 transition, never routing through the stale prior Stage 2 audit", async () => {
+  let postAuditCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "487" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        assert.equal(number, "487");
+        return { body: CONTROL_BODY_OPEN_PR_WITH_PRIOR_STAGE2, state: "OPEN" };
+      },
+      ghPrStateImpl: async ({ number }) => {
+        assert.equal(number, 536);
+        return { headRefOid: "0009c54b18", state: "OPEN" };
+      },
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async (args) => {
+        assert.equal(args.pr, 536);
+        return { exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: "0009c54b18" };
+      },
+      checkPostAuditImpl: async () => {
+        postAuditCalls++;
+        throw new Error("should never be called -- the still-open PR #536 owns the transition, not stale Stage 2 #535");
+      },
+    },
+  );
+  assert.equal(postAuditCalls, 0);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+  assert.equal(result.controlIssue, 487);
+});
+
+const CONTROL_BODY_OPEN_PR_FINDINGS_WITH_PRIOR_STAGE2 = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #375
+- **Route:** implementation worker
+- **PR:** #536
+- **Stage 1:** requested
+- **Stage 2:** #535
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("runNextReviewTransitionGate: issue #537 verification case 2 -- an open PR with a findings-bearing Stage 1 response reaches STAGE1_CORRECTION_REQUIRED despite a prior Stage 2 reference remaining on the control Issue", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "487" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_OPEN_PR_FINDINGS_WITH_PRIOR_STAGE2, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "livehead", state: "OPEN" }),
+      stage1RunImpl: async () =>
+        stage1("RESPONSE_RECEIVED", {
+          matches: [
+            { body_excerpt: "### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request." },
+          ],
+        }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkPostAuditImpl: async () => {
+        throw new Error("should never be called -- the still-open PR owns the transition");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE1_CORRECTION_REQUIRED");
+});
+
+test("runNextReviewTransitionGate: issue #537 verification case 3 -- an open PR with Stage 1 still PENDING resolves NO_ACTION_YET, never falling through to a prior Stage 2 reference", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "487" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_OPEN_PR_FINDINGS_WITH_PRIOR_STAGE2, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "livehead", state: "OPEN" }),
+      stage1RunImpl: async () => ({ exitCode: 2, state: "PENDING", triggerTimestamp: "2026-09-01T00:00:00Z" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkPostAuditImpl: async () => {
+        throw new Error("should never be called -- the still-open PR owns the transition");
+      },
+    },
+  );
+  assert.equal(result.state, "NO_ACTION_YET");
+});
+
+const CONTROL_BODY_STAGE2_ONLY_NO_PR = `## Current state
+
+- **Lifecycle:** AUDIT
+- **Execution:** #375
+- **Route:** implementation worker
+- **PR:** none
+- **Stage 1:** none
+- **Stage 2:** #480
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+test("runNextReviewTransitionGate: issue #537 verification case 5 -- no live PR pointer (PR: none) plus a valid active Stage 2 pointer retains post-merge routing, with no live-PR-state read at all", async () => {
+  let prStateCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_STAGE2_ONLY_NO_PR, state: "OPEN" }),
+      ghPrStateImpl: async () => {
+        prStateCalls++;
+        throw new Error("should never be called -- no settled PR reference exists");
+      },
+      checkPostAuditImpl: async (args) => {
+        assert.equal(args["audit-issue"], 480);
+        return { exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN" };
+      },
+    },
+  );
+  assert.equal(prStateCalls, 0);
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE2_CORRECTION_REQUIRED");
+});
+
+test("runNextReviewTransitionGate: issue #537 verification case 6 -- a closed-but-unmerged PR is never silently treated as merged merely because a Stage 2 reference exists; fails closed to AMBIGUOUS", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "487" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_OPEN_PR_WITH_PRIOR_STAGE2, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "0009c54b18", state: "CLOSED" }),
+      checkPostAuditImpl: async () => {
+        throw new Error("should never be called -- a closed-unmerged PR must not be treated as merged");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /CLOSED/);
+  assert.match(result.reason, /536/);
+});
+
+test("runNextReviewTransitionGate: issue #537 verification case 7 -- a malformed PR reference fails closed to AMBIGUOUS even when Stage 2 also parses as a valid reference, without ever performing a live-PR-state read", async () => {
+  const body = CONTROL_BODY_POST_MERGE.replace("- **PR:** #376", "- **PR:** #376 and also #400");
+  let prStateCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      ghPrStateImpl: async () => {
+        prStateCalls++;
+        throw new Error("should never be called for a malformed PR reference");
+      },
+      checkPostAuditImpl: async () => {
+        throw new Error("should never be called for a malformed PR reference");
+      },
+    },
+  );
+  assert.equal(prStateCalls, 0);
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /PR reference is malformed/);
+});
+
+test("runNextReviewTransitionGate: issue #537 verification case 8 -- direct-reference parity: the same open-PR correction-satisfied inputs as case 1 reach the identical transition in direct-reference mode", async () => {
+  const result = await runNextReviewTransitionGate(
+    {
+      repo: "o/r",
+      pr: 536,
+      head: "0009c54b18",
+      issue: 375,
+      stage1Disposition: "correction-satisfied at 0009c54b18 (reviewed 30b36035c9)",
+    },
+    {
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => ({
+        exitCode: 0,
+        state: "CORRECTION_SATISFIED",
+        reviewedHead: "30b36035c9",
+        correctedHead: "0009c54b18",
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
 });
 
 test("runNextReviewTransitionGate: closed control Issues fail closed before transition resolution", async () => {
@@ -622,6 +1827,9 @@ test("runNextReviewTransitionGate: missing every required arg fails closed with 
   const result = await runNextReviewTransitionGate({ repo: "o/r" });
   assert.equal(result.exitCode, 1);
   assert.match(result.message, /--control-issue/);
+  // Issue #486: an operational error is not a verdict on durable evidence at all, so it must
+  // never carry an actionEnvelope that could be mistaken for one.
+  assert.ok(!("actionEnvelope" in result));
 });
 
 test("runNextReviewTransitionGate: a gh issue view failure for --control-issue fails closed with exit 1", async () => {
@@ -684,4 +1892,223 @@ test("runNextReviewTransitionGate: a #375-shaped mid-cycle control Issue (PR req
   );
   assert.equal(result.state, "NO_ACTION_YET");
   assert.equal(result.stopAfter, true);
+});
+
+// -- Issue #646: Stage 2 correction-worker PR/Stage 1 breakpoint gap ------------------------
+//
+// The #487/#643/#644/#645 live reproduction: a Stage 2 NOT CLEAN correction worker opened PR
+// #644, but nothing projected that onto the thin control Issue -- #487 stayed durably on PR
+// #642 / Stage 2 #643, so a fresh dispatch re-ran the correction and produced duplicate PR
+// #645. reconcileStage2CorrectionPr/composeStage2CorrectionFinalizeCommand are the narrow
+// recovery that closes this: before authorizing another STAGE2_CORRECTION_REQUIRED dispatch,
+// reconcile against any already-open, work-Issue-linked correction PR.
+
+test("reconcileStage2CorrectionPr: no open execution-linked PR -> not crossed (the ordinary, genuinely fresh case)", async () => {
+  const result = await reconcileStage2CorrectionPr(
+    { repo: "o/r", workIssue: 375 },
+    { ghPrListImpl: async () => [{ number: 376, state: "MERGED", headRefName: "issue-375-fix", body: "" }] },
+  );
+  assert.deepEqual(result, { crossed: false });
+});
+
+test("reconcileStage2CorrectionPr: an OPEN execution-linked PR already exists -> crossed, carrying that PR", async () => {
+  const result = await reconcileStage2CorrectionPr(
+    { repo: "o/r", workIssue: 375 },
+    {
+      ghPrListImpl: async () => [
+        { number: 376, state: "MERGED", headRefName: "issue-375-fix", body: "", headRefOid: "mergedhead" },
+        { number: 644, state: "OPEN", headRefName: "issue-375-correction", body: "", headRefOid: "correctionhead" },
+      ],
+    },
+  );
+  assert.equal(result.crossed, true);
+  assert.equal(result.pr.number, 644);
+  assert.equal(result.pr.headRefOid, "correctionhead");
+});
+
+test("reconcileStage2CorrectionPr: an operational gh failure fails closed, never silently reports not-crossed", async () => {
+  const result = await reconcileStage2CorrectionPr(
+    { repo: "o/r", workIssue: 375 },
+    {
+      ghPrListImpl: async () => {
+        throw new Error("network timeout");
+      },
+    },
+  );
+  assert.equal(result.crossed, false);
+  assert.equal(result.operationalError, true);
+  assert.match(result.reason, /network timeout/);
+});
+
+// Stage 2 audit finding on issue #649 (P1): `defaultOpenExecutionLinkedPrList`'s unscoped
+// open-PR listing (`ready-dispatch-gate.mjs`'s `defaultGhOpenPrList`) used to hard-limit at 30
+// results with no truncation check, so a branch-only-linked correction PR sitting outside that
+// window in a repo with >30 open PRs would silently never be examined, and this reconciliation
+// would wrongly report `crossed: false` -- authorizing a duplicate correction-worker dispatch
+// from truncated, not missing, evidence. `defaultGhOpenPrList` now throws via
+// `assertOpenPrListNotTruncated` when its listing comes back at/over its bound; this proves that
+// thrown error reaches this function's own caller as the same fail-closed `operationalError`
+// shape as any other `gh` failure, never silently swallowed into `crossed: false`.
+test("reconcileStage2CorrectionPr: a truncated open-PR listing (its ghPrListImpl throws) fails closed as operationalError, never crossed:false", async () => {
+  const result = await reconcileStage2CorrectionPr(
+    { repo: "o/r", workIssue: 375 },
+    {
+      ghPrListImpl: async () => {
+        throw new Error(
+          "gh pr list --state open returned 500 PRs, at or over the 500-PR reconciliation safety bound -- " +
+            "refusing to treat a possibly-truncated open-PR listing as exhaustive",
+        );
+      },
+    },
+  );
+  assert.equal(result.crossed, false);
+  assert.equal(result.operationalError, true);
+  assert.match(result.reason, /possibly-truncated/);
+});
+
+test("composeStage2CorrectionFinalizeCommand: control-Issue mode chains trigger.mjs then finalize-pr-breakpoint.mjs", () => {
+  const command = composeStage2CorrectionFinalizeCommand({
+    repo: "o/r",
+    controlIssue: 487,
+    workIssue: 375,
+    pr: 644,
+    head: "correctionhead",
+  });
+  assert.equal(
+    command,
+    "node tools/review-watch/trigger.mjs --repo o/r --kind pr --number 644 --head correctionhead && " +
+      "node tools/orchestration/finalize-pr-breakpoint.mjs --control-issue 487 --execution-issue 375 --pr 644 --head correctionhead",
+  );
+});
+
+test("composeStage2CorrectionFinalizeCommand: direct-reference mode (no thin control) only triggers Stage 1 -- there is no control Issue to project onto", () => {
+  const command = composeStage2CorrectionFinalizeCommand({
+    repo: "o/r",
+    controlIssue: null,
+    workIssue: 375,
+    pr: 644,
+    head: "correctionhead",
+  });
+  assert.equal(command, "node tools/review-watch/trigger.mjs --repo o/r --kind pr --number 644 --head correctionhead");
+});
+
+test("runNextReviewTransitionGate: NOT CLEAN with a real work Issue and no existing correction PR still dispatches ordinarily (STAGE2_CORRECTION_REQUIRED, carrying workIssue)", async () => {
+  let reconcileCalledWith = null;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 375 }),
+      reconcileStage2CorrectionPrImpl: async (args) => {
+        reconcileCalledWith = args;
+        return { crossed: false };
+      },
+    },
+  );
+  assert.deepEqual(reconcileCalledWith, { repo: "o/r", workIssue: 375 });
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE2_CORRECTION_REQUIRED");
+  assert.equal(result.workIssue, 375);
+});
+
+test("runNextReviewTransitionGate: NOT CLEAN with no resolvable work Issue never spends a reconciliation lookup at all (issue #190 no-work-issue state)", async () => {
+  let reconcileCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN" }),
+      reconcileStage2CorrectionPrImpl: async () => {
+        reconcileCalls++;
+        return { crossed: false };
+      },
+    },
+  );
+  assert.equal(reconcileCalls, 0);
+  assert.equal(result.state, "STAGE2_CORRECTION_REQUIRED");
+  assert.equal(result.workIssue, null);
+});
+
+test("runNextReviewTransitionGate: the exact #487/#643/#644 shape -- an already-open correction PR reconciles to STAGE2_CORRECTION_PR_NEEDS_FINALIZATION instead of authorizing a duplicate dispatch", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 375 }),
+      reconcileStage2CorrectionPrImpl: async ({ repo, workIssue }) => {
+        assert.equal(repo, "o/r");
+        assert.equal(workIssue, 375);
+        return { crossed: true, pr: { number: 644, headRefOid: "correctionhead", state: "OPEN" } };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.equal(result.pr, 644);
+  assert.equal(result.head, "correctionhead");
+  assert.equal(result.workIssue, 375);
+  assert.equal(result.controlIssue, 322);
+  assert.equal(
+    result.nextCommand,
+    "node tools/review-watch/trigger.mjs --repo o/r --kind pr --number 644 --head correctionhead && " +
+      "node tools/orchestration/finalize-pr-breakpoint.mjs --control-issue 322 --execution-issue 375 --pr 644 --head correctionhead",
+  );
+  assert.equal(result.actionEnvelope.mode, "bounded");
+  assert.deepEqual(
+    result.actionEnvelope.authorizedActions.slice().sort(),
+    ["run-finalize-pr-breakpoint", "run-review-watch-trigger"].sort(),
+  );
+});
+
+test("runNextReviewTransitionGate: direct-reference mode (--audit-issue only, no thin control) reconciles the same way, nextCommand only triggers Stage 1", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", auditIssue: "378" },
+    {
+      checkPostAuditImpl: async (args) => {
+        assert.equal(args["audit-issue"], "378");
+        return { exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 375 };
+      },
+      reconcileStage2CorrectionPrImpl: async () => ({
+        crossed: true,
+        pr: { number: 644, headRefOid: "correctionhead", state: "OPEN" },
+      }),
+    },
+  );
+  assert.equal(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.equal(result.controlIssue, undefined);
+  assert.equal(result.nextCommand, "node tools/review-watch/trigger.mjs --repo o/r --kind pr --number 644 --head correctionhead");
+});
+
+test("runNextReviewTransitionGate: a reconciliation operational failure fails closed to AMBIGUOUS -- never silently authorizes a duplicate dispatch", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 375 }),
+      reconcileStage2CorrectionPrImpl: async () => ({ crossed: false, operationalError: true, reason: "network timeout" }),
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /network timeout/);
+  assert.equal(result.actionEnvelope.mode, "none");
+});
+
+test("runNextReviewTransitionGate: a reconciled correction PR with no usable headRefOid fails closed to AMBIGUOUS rather than composing an unverifiable finalize command", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 375 }),
+      reconcileStage2CorrectionPrImpl: async () => ({ crossed: true, pr: { number: 644, state: "OPEN" } }),
+    },
+  );
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /644/);
+  assert.match(result.reason, /headRefOid/);
 });

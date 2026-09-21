@@ -64,6 +64,7 @@ import {
   derivePendingManualIntegration,
   deriveActivatedCapabilityReminder,
   deriveSyncPrerequisiteWarnings,
+  findHardDependencyCollisions,
   findUnsafeDestReason,
   findUnsafeLdlDirReason,
   isValidManifest,
@@ -245,6 +246,12 @@ export async function run(args, deps = {}) {
     destRoot,
     existingManifest: withResolvedBridgesManaged(parsedManifest, resolvedManifestPatch),
   });
+
+  // #522: an unmanaged consumer file occupying a path a newly-installed managed file hard-
+  // imports (see findHardDependencyCollisions' own comment in tools/ldl-init/index.mjs) is
+  // folded into `conflicts` here so the existing whole-run refusal below covers this hazard
+  // too, rather than a second independent abort path with its own message shape.
+  conflicts.push(...findHardDependencyCollisions({ toInstall, toSkip }));
 
   // If a prior run parked a bridge's derived/copied content at its templateDestRel (because
   // the consumer had its own same-named file at the time) and this run is now installing

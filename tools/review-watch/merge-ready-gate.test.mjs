@@ -138,6 +138,31 @@ test("run: Stage 1 trigger with no genuine response (PENDING) is non-zero", asyn
   assert.equal(result.state, "BLOCKED");
 });
 
+// Issue #616: a PR that self-declares a `Stage 1 exemption:` marker conflicting with a
+// mandatory-review control-plane path never reaches stage1-gate.mjs's EXEMPT state — it
+// falls through to the ordinary NOT_REQUESTED/PENDING/RESPONSE_RECEIVED evaluation instead,
+// carrying a `rejectedExemption` field (see stage1-gate.test.mjs for that component's own
+// coverage). This composed-gate regression proves the #615-shaped PR (docs/diagnostic-
+// traces/*.md changed, self-declared exemption) still cannot become PRE_MERGE_READY through
+// that rejected marker: the same NOT_REQUESTED/PENDING component states that already block
+// an ordinary un-exempted PR block this one too, and merge-ready-gate.mjs needs no special-
+// casing of `rejectedExemption` itself to enforce that — it never looks at that field.
+test("run: a #615-shaped rejected exemption (NOT_REQUESTED with rejectedExemption) still blocks composed pre-merge readiness", async () => {
+  const rejectedExemptionStage1 = stage1Result({
+    exitCode: 2,
+    state: "NOT_REQUESTED",
+    rejectedExemption: {
+      reason: "evidence-only diagnostic trace, not review-worthy.",
+      conflictingPaths: ["docs/diagnostic-traces/441-a.md"],
+    },
+  });
+  const result = await run(ARGS, impls({ stage1: rejectedExemptionStage1 }));
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "BLOCKED");
+  assert.deepEqual(result.blockedBy, [{ component: "stage1", state: "NOT_REQUESTED" }]);
+  assert.notEqual(result.state, "PRE_MERGE_READY");
+});
+
 test("run: a successful Stage 1 result alone cannot be represented as the authoritative merge-ready result", async () => {
   // Stage 1 succeeds but lifecycle is blocked: the composed result must not be a success.
   const result = await run(
@@ -146,6 +171,120 @@ test("run: a successful Stage 1 result alone cannot be represented as the author
   );
   assert.notEqual(result.exitCode, 0);
   assert.notEqual(result.state, "PRE_MERGE_READY");
+});
+
+// -- correction-satisfied heads (issue #454, Stage 1 review finding on PR #459) -------------
+//
+// P1 finding: the corrected-head verdict previously authorized merge via
+// next-review-transition-gate.mjs's own private composition without this documented
+// authoritative command (docs/bounded-review-cycle.md step 8/10) ever being able to agree.
+// These tests drive `--reviewed-head` end-to-end through this script's own composed result.
+
+function correctionImpls({ stage1 = stage1Result({ exitCode: 2, state: "NOT_REQUESTED" }), lifecycle = lifecycleResult(), correctionDelta } = {}) {
+  return {
+    stage1RunImpl: async () => stage1,
+    checkMergeReadyImpl: async () => lifecycle,
+    checkCorrectionDeltaImpl: async () => correctionDelta,
+  };
+}
+
+test("run: NOT_REQUESTED stage1 + CORRECTION_SATISFIED delta + MERGE_READY lifecycle -> PRE_MERGE_READY_CORRECTION_SATISFIED, exit 0", async () => {
+  const result = await run(
+    { ...ARGS, reviewedHead: "reviewed-sha" },
+    correctionImpls({ correctionDelta: { exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "reviewed-sha", correctedHead: ARGS.head } }),
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "PRE_MERGE_READY_CORRECTION_SATISFIED");
+  assert.equal(result.correctionDelta.state, "CORRECTION_SATISFIED");
+});
+
+test("run: NOT_REQUESTED stage1 + CORRECTION_SATISFIED delta + MERGE_READY_NO_WORK_ISSUE lifecycle -> PRE_MERGE_READY_CORRECTION_SATISFIED_NO_WORK_ISSUE", async () => {
+  const result = await run(
+    { ...ARGS, reviewedHead: "reviewed-sha" },
+    correctionImpls({
+      lifecycle: lifecycleResult({ state: "MERGE_READY_NO_WORK_ISSUE" }),
+      correctionDelta: { exitCode: 0, state: "CORRECTION_SATISFIED" },
+    }),
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "PRE_MERGE_READY_CORRECTION_SATISFIED_NO_WORK_ISSUE");
+});
+
+test("run: NOT_REQUESTED stage1 + CORRECTION_SATISFIED delta but lifecycle still BLOCKED_CLOSING_REFERENCE -> BLOCKED naming only the lifecycle component", async () => {
+  const result = await run(
+    { ...ARGS, reviewedHead: "reviewed-sha" },
+    correctionImpls({
+      lifecycle: lifecycleResult({ exitCode: 2, state: "BLOCKED_CLOSING_REFERENCE" }),
+      correctionDelta: { exitCode: 0, state: "CORRECTION_SATISFIED" },
+    }),
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "BLOCKED");
+  assert.deepEqual(result.blockedBy, [{ component: "lifecycle", state: "BLOCKED_CLOSING_REFERENCE" }]);
+});
+
+test("run: NOT_REQUESTED stage1 + HEAD_MISMATCH correction delta stays BLOCKED on stage1, unchanged from the no-correction case", async () => {
+  const result = await run(
+    { ...ARGS, reviewedHead: "reviewed-sha" },
+    correctionImpls({ correctionDelta: { exitCode: 2, state: "HEAD_MISMATCH" } }),
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "BLOCKED");
+  assert.deepEqual(result.blockedBy, [{ component: "stage1", state: "NOT_REQUESTED" }]);
+});
+
+test("run: NOT_REQUESTED stage1 + NOT_SATISFIED correction delta stays BLOCKED on stage1", async () => {
+  const result = await run(
+    { ...ARGS, reviewedHead: "reviewed-sha" },
+    correctionImpls({ correctionDelta: { exitCode: 2, state: "NOT_SATISFIED", reason: "no findings-bearing match" } }),
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "BLOCKED");
+  assert.deepEqual(result.blockedBy, [{ component: "stage1", state: "NOT_REQUESTED" }]);
+});
+
+test("run: an operational error from checkCorrectionDeltaImpl is reported as OPERATIONAL_ERROR, not silently BLOCKED", async () => {
+  const result = await run(
+    { ...ARGS, reviewedHead: "reviewed-sha" },
+    correctionImpls({ correctionDelta: { exitCode: 1, message: "compare failed" } }),
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.state, "OPERATIONAL_ERROR");
+  assert.match(result.message, /stage1-correction-gate/);
+  assert.match(result.message, /compare failed/);
+});
+
+test("run: no --reviewed-head supplied never invokes checkCorrectionDeltaImpl, even when stage1 is NOT_REQUESTED (no wasted gh call on the common path)", async () => {
+  let called = false;
+  const result = await run(ARGS, {
+    stage1RunImpl: async () => stage1Result({ exitCode: 2, state: "NOT_REQUESTED" }),
+    checkMergeReadyImpl: async () => lifecycleResult(),
+    checkCorrectionDeltaImpl: async () => {
+      called = true;
+      return { exitCode: 0, state: "CORRECTION_SATISFIED" };
+    },
+  });
+  assert.equal(called, false);
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "BLOCKED");
+});
+
+test("run: --reviewed-head is never consulted when stage1 already succeeds (RESPONSE_RECEIVED)", async () => {
+  let called = false;
+  const result = await run(
+    { ...ARGS, reviewedHead: "reviewed-sha" },
+    {
+      stage1RunImpl: async () => stage1Result(),
+      checkMergeReadyImpl: async () => lifecycleResult(),
+      checkCorrectionDeltaImpl: async () => {
+        called = true;
+        return { exitCode: 0, state: "CORRECTION_SATISFIED" };
+      },
+    },
+  );
+  assert.equal(called, false);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "PRE_MERGE_READY");
 });
 
 // -- operational failures -----------------------------------------------------------------

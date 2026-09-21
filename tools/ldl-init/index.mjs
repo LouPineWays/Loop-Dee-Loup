@@ -67,6 +67,7 @@ export const MANAGED_ITEMS = [
   { kind: "file", src: "docs/bounded-review-cycle.md", dest: "docs/bounded-review-cycle.md" },
   { kind: "file", src: "docs/decision-forms.md", dest: "docs/decision-forms.md" },
   { kind: "file", src: "docs/consumer-contract.md", dest: "docs/consumer-contract.md" },
+  { kind: "file", src: "docs/stage2-audit-contract.md", dest: "docs/stage2-audit-contract.md" },
   { kind: "dir", src: ".github/ISSUE_TEMPLATE", dest: ".github/ISSUE_TEMPLATE" },
 ];
 
@@ -636,6 +637,74 @@ export function planInstall({ ops, destRoot, existingManifest }) {
   return { toInstall, toSkip };
 }
 
+// #522 Stage 1 review finding on PR #530: a per-file managed-path skip (an unmanaged
+// consumer file already occupying the destination, preserved per planInstall's/planUpdate's
+// own "never overwrite unmanaged content" contract above) was always safe in isolation,
+// because every MANAGED_ITEMS file was historically independently runnable. That stopped
+// being universally true the moment tools/orchestration/format-execution-plan.mjs and
+// tools/orchestration/prepare-dispatch-manifest.mjs gained a hard
+// `import ... from "./dependency-grammar.mjs"` (issue #522's shared dependency-grammar
+// extraction): if a consumer repository already owns an unmanaged
+// tools/orchestration/dependency-grammar.mjs, this script preserves it and still
+// installs/updates its hard importers, so install/update reports success while the
+// just-written importer immediately fails to load (it does not export the names those
+// importers require). Declaring known hard-import edges here lets both tools/ldl-init and
+// tools/ldl-update detect this specific hazard and refuse the whole operation atomically —
+// before anything is written — rather than reporting a partially usable managed set. This is
+// deliberately a short, explicit list of known edges, not a generalized import-graph
+// scanner: MANAGED_ITEMS is small and this hazard only exists where one managed file hard-
+// imports another.
+export const HARD_MODULE_DEPENDENCIES = [
+  { dest: "tools/orchestration/format-execution-plan.mjs", dependsOnDest: "tools/orchestration/dependency-grammar.mjs" },
+  { dest: "tools/orchestration/prepare-dispatch-manifest.mjs", dependsOnDest: "tools/orchestration/dependency-grammar.mjs" },
+  // Issue #437/#610 Stage 1 finding 7: reconcile-control-blocker.mjs hard-imports
+  // extractBlockedByIssueNumbers/hasUnrecognizedBlockerWording from blocker-grammar.mjs, the
+  // exact same unresolvable-import hazard the two edges above already close for
+  // dependency-grammar.mjs. Without this edge, a consumer's own pre-existing unmanaged
+  // tools/orchestration/blocker-grammar.mjs would be preserved while the managed reconciler is
+  // (re)installed hard-importing it, so install/update would report success while the
+  // mandated `reconcile-control-blocker.mjs` invocation fails immediately at import time.
+  { dest: "tools/orchestration/reconcile-control-blocker.mjs", dependsOnDest: "tools/orchestration/blocker-grammar.mjs" },
+  // Issue #618 Stage 1 review finding (P2): correct-unit-dependency.mjs hard-imports all four
+  // of these modules (parse-execution-plan.mjs, format-execution-plan.mjs,
+  // dependency-grammar.mjs, ready-dispatch-gate.mjs, and prepare-dispatch-manifest.mjs for its
+  // own Dispatch-Manifest-regeneration step). Without these edges, a consumer that already owns
+  // an unmanaged file at one of these paths would have it preserved while the managed importer
+  // is (re)installed hard-importing it, so install/update would report success while
+  // correct-unit-dependency.mjs then fails immediately at import time.
+  { dest: "tools/orchestration/correct-unit-dependency.mjs", dependsOnDest: "tools/orchestration/parse-execution-plan.mjs" },
+  { dest: "tools/orchestration/correct-unit-dependency.mjs", dependsOnDest: "tools/orchestration/format-execution-plan.mjs" },
+  { dest: "tools/orchestration/correct-unit-dependency.mjs", dependsOnDest: "tools/orchestration/dependency-grammar.mjs" },
+  { dest: "tools/orchestration/correct-unit-dependency.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
+  { dest: "tools/orchestration/correct-unit-dependency.mjs", dependsOnDest: "tools/orchestration/prepare-dispatch-manifest.mjs" },
+];
+
+// Pure. Given one install/update run's final toInstall/toSkip classification, returns one
+// `{ dest, reason }` entry (the same shape as a toSkip/conflicts entry) per
+// HARD_MODULE_DEPENDENCIES edge whose dependency path is being skipped (left as unmanaged
+// consumer content) while its importer is about to be written as managed content in this
+// same run — the exact unresolvable-import hazard described above. Returns `[]` when no such
+// edge applies. Pure and synchronous so tools/ldl-init's run() and tools/ldl-update's run()
+// can each call it identically, right before any file is written, and refuse atomically
+// instead of writing a broken managed set.
+export function findHardDependencyCollisions({ toInstall, toSkip }) {
+  const installingDests = new Set(toInstall.map((op) => op.destRel));
+  const skippedDests = new Set(toSkip.map((s) => s.dest));
+  const collisions = [];
+  for (const { dest, dependsOnDest } of HARD_MODULE_DEPENDENCIES) {
+    if (installingDests.has(dest) && skippedDests.has(dependsOnDest)) {
+      collisions.push({
+        dest: dependsOnDest,
+        reason:
+          `an existing unmanaged file at this path would be preserved while ${dest} is (re)installed hard-` +
+          `importing it — refusing the whole operation rather than installing a hard importer that would ` +
+          `immediately fail to load`,
+      });
+    }
+  }
+  return collisions;
+}
+
 function applyInstall(ops, destRoot) {
   const installed = [];
   for (const op of ops) {
@@ -889,11 +958,37 @@ export async function run(args, deps = {}) {
   }
   ops.push(...bridgeOps);
 
+  // Bridges planBridgeOp resolved by content match must be treated as LDL-managed by
+  // planInstall's own ownership check even though existingManifest doesn't yet record them —
+  // see withResolvedBridgesManaged's own comment. Only affects this local copy; existingManifest
+  // itself (already consulted above) is left untouched.
+  const { toInstall, toSkip } = planInstall({
+    ops,
+    destRoot,
+    existingManifest: withResolvedBridgesManaged(existingManifest, resolvedManifestPatch),
+  });
+
+  // #522: refuse atomically, before any file is written, rather than reporting a successful
+  // install that leaves a hard importer unable to load — see findHardDependencyCollisions'
+  // own comment.
+  const hardDependencyCollisions = findHardDependencyCollisions({ toInstall, toSkip });
+  if (hardDependencyCollisions.length > 0) {
+    const detail = hardDependencyCollisions.map((c) => `${c.dest} (${c.reason})`).join("; ");
+    return {
+      exitCode: 1,
+      message: `Refusing to install: ${hardDependencyCollisions.length} managed hard-import dependency collision(s) would leave the managed set unusable: ${detail}`,
+    };
+  }
+
   // If a prior run parked a bridge's derived template at its templateDestRel (because the
   // consumer had its own file at the time) and this run is now installing straight to the
   // bridge's own destRel instead (the consumer's own file is gone, or its content now matches
   // the target — see planBridgeOp's resolvedByContentMatch), the old template is superseded —
-  // remove it so it doesn't linger on disk unrecorded by the new manifest.
+  // remove it so it doesn't linger on disk unrecorded by the new manifest. Deferred until after
+  // the hard-dependency collision refusal above (Stage 2 audit #531 P2 finding): this removal is
+  // a mutation of existing consumer state, so it must not happen on a run this function is about
+  // to refuse — otherwise a refused run could still delete the stale template and leave the
+  // manifest referencing a now-missing file.
   for (const { bridge, op } of bridgePlans) {
     const previousTemplateFile = existingManifest?.files?.some((f) => f.dest === bridge.templateDestRel);
     if (op.destRel === bridge.destRel && previousTemplateFile) {
@@ -904,15 +999,6 @@ export async function run(args, deps = {}) {
     }
   }
 
-  // Bridges planBridgeOp resolved by content match must be treated as LDL-managed by
-  // planInstall's own ownership check even though existingManifest doesn't yet record them —
-  // see withResolvedBridgesManaged's own comment. Only affects this local copy; existingManifest
-  // itself (already consulted above) is left untouched.
-  const { toInstall, toSkip } = planInstall({
-    ops,
-    destRoot,
-    existingManifest: withResolvedBridgesManaged(existingManifest, resolvedManifestPatch),
-  });
   const installedFiles = applyInstall(toInstall, destRoot).sort((a, b) => a.dest.localeCompare(b.dest));
 
   // Computed from the actual install outcome (toSkip), not merely from planBridgeOp's

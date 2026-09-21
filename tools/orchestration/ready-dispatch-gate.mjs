@@ -64,10 +64,76 @@
 // created it.
 //
 // Verdicts:
+//   Every verdict that authorizes exactly one bounded next action for the pre-PR pipeline —
+//   READY_TO_DISPATCH, READY_TO_DISPATCH_PLANNING, READY_TO_RUN_DISPATCH_MANIFEST,
+//   READY_TO_DISPATCH_UNITS, READY_TO_DISPATCH_INTEGRATION, READY_TO_PROJECT_PLAN_READY,
+//   READY_TO_PROJECT_ROUTED, and REPLAN_REQUIRED (issue #498 unit 498-B) — carries a literal
+//   `stopAfter: true` field (issue #498 unit 498-A), mirroring the convention
+//   `tools/orchestration/next-review-transition-gate.mjs` already established. This is a
+//   mandatory, literal stop only after the authorized transition's own durable output (and,
+//   for the two PROJECT verdicts, the required
+//   thin-control projection) has already been verified by the gate itself — never license to
+//   continue reasoning past the stop in the same invocation.
+//   AUDIT_ISSUE_DETECTED — issue #407 unit 407-B (Shared Contract item 8), the #432 fix: the
+//     directly-dispatched Issue is itself a canonical Stage 2 Audit Issue (a real
+//     "audit-control-issue.yml"-rendered body — parseStage2Verdict, "### Merged PR", and
+//     "### Work issue" all resolve non-null; see classifyAuditIssue), never inferred from the
+//     issue title. Checked before every other classification below, so it never falls through
+//     to generic NOT_READY reasoning merely because a Stage 2 Audit Issue has no Lifecycle/
+//     Blocker/Founder-decision bullets at all. Stage 1 review finding on PR #435: checkReadyDispatch
+//     classifies this shape from the fetched body *before* applying its own control-Issue
+//     open-state guard, not after — a directly-dispatched audit Issue that is already closed
+//     (e.g. a founder re-invoking `work on #N` against a Stage 2 Audit Issue `close-audit`
+//     already closed) must still route through AUDIT_ISSUE_DETECTED to
+//     next-review-transition-gate.mjs's own idempotent ALREADY_TERMINAL result, not fall into
+//     the same ordinary "control Issue is CLOSED, not OPEN" NOT_READY that a closed *thin
+//     control* Issue correctly reports. exit 9. Result carries { auditIssue,
+//     nextCommand } — run `nextCommand` (tools/orchestration/next-review-transition-gate.mjs
+//     --audit-issue <N>) and act on *its* verdict per AGENTS.md § Session execution:
+//     STAGE2_CLOSE_READY invokes `lifecycle-gate.mjs close-audit` and stops;
+//     STAGE2_CORRECTION_REQUIRED dispatches correction by reference and stops; NO_ACTION_YET/
+//     AMBIGUOUS stop per their existing meaning. Never read the linked execution/work Issue,
+//     inspect stage2-report.mjs's source, or write an ad hoc parser script to resolve this by
+//     hand.
 //   READY_TO_DISPATCH — every gate field satisfied. exit 0. Result carries
 //     { controlIssue, executionIssue, route } — the exact reference-only triple to hand
 //     the dispatched worker; nothing else belongs in that prompt (AGENTS.md § Subagent
 //     dispatch).
+//   READY_TO_PROJECT_PLAN_READY / READY_TO_PROJECT_ROUTED — issue #498 unit 498-A, the
+//     2026-09-10 #500 live-trace fix: `Lifecycle` is READY_FOR_PLAN (respectively PLAN_READY)
+//     but durable state shows the transition already happened — a valid Execution Plan Index
+//     already exists (respectively a Dispatch Manifest already verifies), just never
+//     projected into thin control state before the prior controller stopped. exit 10
+//     (respectively 11). Result carries { controlIssue, executionIssue, planIndexUrl,
+//     proposedBody } — `proposedBody` is the control Issue's current body with `Lifecycle`
+//     already updated (to PLAN_READY plus a `Plan:` bullet, or to ROUTED) via
+//     upsertControlBullet, ready to pipe into `write-control-snapshot.mjs --body-file -`
+//     verbatim (AGENTS.md § Session execution). Every verdict in this pair carries a literal
+//     `stopAfter: true` (mirroring next-review-transition-gate.mjs's own convention): persist
+//     and stop, never also dispatch a (now-redundant) planning worker or manifest-prep run in
+//     the same breath. See probeExistingPlan's own comment for why this recognition is
+//     necessary rather than merely a nice-to-have.
+//   REPLAN_REQUIRED — issue #498 unit 498-B, closing the #407/#408 and #454/#455 (via #434)
+//     live reproductions: while evaluating `Lifecycle: PLAN_READY` (before authorizing a fresh
+//     Route/Prepare run), `probeReplanRequired` finds that `prepare-dispatch-manifest.mjs`'s
+//     own routing computation (reused as a dry run — no comment is persisted) would resolve
+//     one or more plan units to `route=REPLAN_REQUIRED`. Modeled explicitly on
+//     next-review-transition-gate.mjs's `STAGE2_CORRECTION_REQUIRED` shape: compact and
+//     reference-only, never the diagnosis itself. exit 12. Result carries { controlIssue,
+//     executionIssue, planIndexUrl, replanRequiredUnitIds, reason, route: "planning worker" } —
+//     `reason` is composed only from each failing unit's own mechanically-emitted `note`
+//     field (never re-derived by reading Worker Unit Contract bodies, the Shared Contract
+//     body, or router/parser source), and `route` is always the literal "planning worker"
+//     value, the same capability READY_FOR_PLAN's Route field already requires — a
+//     planning-correction is the same planning capability revisiting its own prior output, not
+//     a new worker role. Dispatch a planning-correction worker by reference only and stop; that
+//     worker reads the plan/unit authority directly, uses #497's deterministic writer/validator
+//     to persist a corrected plan, and returns only a compact reference — the next invocation
+//     of this gate then re-evaluates PLAN_READY exactly as it would for a plan that never hit
+//     REPLAN_REQUIRED (`probeReplanRequired` finding nothing to report), converging on the
+//     identical READY_TO_RUN_DISPATCH_MANIFEST / READY_TO_PROJECT_ROUTED stop boundary 498-A
+//     already establishes. A genuinely ambiguous routing failure still fails closed here —
+//     this verdict never invents a default/fuzzy route on the controller's behalf.
 //   BLOCKED — issue #368: the control Issue was read successfully and its own recorded
 //     fields *explicitly* say the current invocation must not advance — a blocking
 //     lifecycle value (the ad hoc bullet convention's `Lifecycle: BLOCKED`, or the shipped
@@ -87,10 +153,19 @@
 //     explicitly says to stop: wrong non-BLOCKED mid-cycle lifecycle state (EXECUTING,
 //     VERIFYING, REVIEW, AUDIT, CORRECTION), a missing/malformed/multi-valued field, or a
 //     control Issue shape the gate cannot classify at all (e.g. a legacy unsplit Issue).
-//     exit 3. Falls through to normal Decomposition-boundary / Direct-inspection
-//     reasoning — this script has no opinion on what to do next, only on whether the
-//     immediate-dispatch shortcut applies. See BLOCKED above for the narrower case where
-//     control state instead says to stop outright.
+//     exit 3. Also returned — issue #456 unit 456-B, the #447/#448/#453 and #537/#539/#540
+//     live reproductions — when a plain `Lifecycle: READY` or `ROUTED` control Issue's own
+//     durable state is stale: `reconcileReadyPrBreakpoint`'s narrow execution-linked PR
+//     lookup finds a PR already exists for a READY control Issue despite its own "PR" bullet
+//     saying otherwise, or `verifyRoutedDispatchManifest` finds every currently
+//     `dispatch_ready=true` manifest unit already records `State: DONE` on its own Worker
+//     Unit Contract. Neither case authorizes a fresh dispatch; both fall through to this same
+//     NOT_READY so a fresh controller's normal reasoning discovers and reconciles the real
+//     post-PR state, per AGENTS.md's Decomposition-boundary fallthrough below. Falls through
+//     to normal Decomposition-boundary / Direct-inspection reasoning — this script has no
+//     opinion on what to do next, only on whether the immediate-dispatch shortcut applies.
+//     See BLOCKED above for the narrower case where control state instead says to stop
+//     outright.
 //   ERROR — the control Issue could not be read, --control-issue was missing/invalid, or
 //     (issue #344) the current repository identity could not be established from the
 //     checkout (no configured `origin` remote, or a remote URL that isn't a recognizable
@@ -113,6 +188,15 @@
 // Tests: node --test tools/orchestration/ready-dispatch-gate.test.mjs
 
 import { execFileSync } from "node:child_process";
+// Deliberate, documented exception to this file's usual practice of not importing
+// tools/review-watch internals (issue #407 unit 407-B, Shared Contract item 8) — the same
+// exception next-review-transition-gate.mjs's own module comment already documents for its
+// own imports from tools/review-watch. classifyAuditIssue below reuses lifecycle-gate.mjs's
+// own field parsers rather than re-deriving a second, competing reading of the
+// audit-control-issue template's rendered shape.
+import { parseStage2Verdict, parseFormField } from "../review-watch/lifecycle-gate.mjs";
+// Issue #486: the deterministic action-envelope table every verdict below is stamped with.
+import { getActionEnvelope } from "./action-envelope.mjs";
 
 const KNOWN_LIFECYCLE_STATES = [
   "READY",
@@ -129,6 +213,34 @@ const KNOWN_LIFECYCLE_STATES = [
   "BLOCKED_FAILURE",
   "BLOCKED_EXTERNAL",
 ];
+
+// Pure. True when `value` (case-insensitive) is one of this file's own recognized Lifecycle
+// vocabulary — issue #437/#610 Stage 1 finding 4: `reconcile-control-blocker.mjs`'s own
+// "Blocked lifecycle" companion field records the value a blocked control must be restored
+// to, authored by hand at block time; a typo (e.g. "READY_FOR_PALN") was previously accepted
+// as valid solely because it was non-empty, persisting an unknown Lifecycle value that the
+// next `ready-dispatch-gate.mjs` invocation would only discover as ordinary NOT_READY
+// fallthrough — silently losing the intended resume stage rather than failing closed at the
+// point the value was about to become durable. Exported so that reconciliation script can
+// validate against the exact same vocabulary this gate itself recognizes, never a second,
+// independently drifting list.
+export function isKnownLifecycleValue(value) {
+  return typeof value === "string" && KNOWN_LIFECYCLE_STATES.includes(value.toUpperCase());
+}
+
+// Pure. True unless `lifecycle` is specifically READY_FOR_PLAN and `route` is not (trimmed,
+// case-insensitive) "planning worker" — the one Lifecycle/Route compatibility rule this file
+// enforces (see the identical inline check inside evaluateReadyDispatchGate below, which this
+// function now backs, and #397's Shared Contract: "Route: must be planning worker"). Exported
+// so `reconcile-control-blocker.mjs` can apply the exact same compatibility rule to its own
+// "Blocked lifecycle"/"Blocked route" companion fields before persisting them (issue #437/#610
+// Stage 1 finding 4), rather than re-deriving a second version of this one rule.
+export function isRouteCompatibleWithLifecycle(lifecycle, route) {
+  if (typeof lifecycle === "string" && lifecycle.toUpperCase() === "READY_FOR_PLAN") {
+    return typeof route === "string" && route.trim().toLowerCase() === "planning worker";
+  }
+  return true;
+}
 
 // #397's four new pre-PR Lifecycle values (docs/operating-model.md's "Execution-stage
 // session boundaries" Plan/Route/Execute/Integrate pipeline), sitting between the existing
@@ -155,6 +267,15 @@ const KNOWN_LIFECYCLE_STATES = [
 // against durable execution-plan/manifest state before returning READY_TO_DISPATCH_UNITS.
 const PRE_PR_DISPATCH_LIFECYCLE_VALUES = new Set(["READY_FOR_PLAN", "PLAN_READY", "ROUTED", "EXECUTION_COMPLETE"]);
 const DISPATCH_MANIFEST_HEADING = /^## Dispatch Manifest \(v1\)$/;
+
+// Stage 1 finding on PR #534 (issue #486's own action-envelope table): a NOT_READY verdict
+// produced because Lifecycle holds one of these five values is AGENTS.md § Session execution's
+// explicit post-PR exception — it must route through next-review-transition-gate.mjs, never
+// fall through to free reasoning the way an ordinary NOT_READY does. Tagging the verdict with
+// which value triggered it (see the `postPrLifecycle` field below) lets action-envelope.mjs's
+// `getActionEnvelope` classify this case as `chain`, not `fallthrough`, without this script and
+// that module maintaining two competing copies of "which lifecycle values are post-PR."
+const POST_PR_MID_CYCLE_LIFECYCLE_VALUES = new Set(["EXECUTING", "VERIFYING", "REVIEW", "AUDIT", "CORRECTION"]);
 
 // Issue #370 (Stage 1 finding on #368's PR): the ad hoc "- **Lifecycle:**" bullet
 // convention uses the bare word "BLOCKED", but `.github/ISSUE_TEMPLATE/parent-execution.yml`'s
@@ -186,6 +307,167 @@ export function parseControlBullet(body, label) {
     if (m) match = m;
   }
   return match ? match[1].trim() : null;
+}
+
+// Pure. Replaces an existing "- **Label:** value" bullet line in `body` with a freshly
+// composed one (every matching occurrence gets the same replacement line, mirroring
+// prepare-dispatch-manifest.mjs's updateDispatchManifestPointer bullet-replace precedent),
+// or — when no such bullet exists yet — inserts it immediately after the
+// "- **Lifecycle:**" bullet (appending to the body instead, when even that anchor is
+// absent). Issue #498 unit 498-A: the PLAN_READY/ROUTED thin-control projection this
+// enables introduces a "- **Plan:**" bullet a genuine READY_FOR_PLAN control Issue does not
+// yet carry at all, so a replace-only helper (like updateDispatchManifestPointer) cannot by
+// itself converge that transition — this is that helper generalized to also handle the
+// insert case. Case-insensitive on the label, matching parseControlBullet's own read-side
+// convention.
+// Pure. Finds the last "### <label>" heading in `lines` and replaces that field's first
+// non-blank content line (or its "_No response_" placeholder) with `newLine` verbatim; a
+// field with no content line at all gets `newLine` inserted right after the heading.
+// Returns null when the heading isn't present at all. Mirrors parseHeadingField's own
+// last-occurrence, first-non-blank-line convention so a write here is always visible to a
+// subsequent read through that same function.
+function replaceHeadingFieldValue(lines, label, newLine) {
+  const heading = `### ${label}`;
+  let headingIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim() === heading) {
+      headingIdx = i;
+      break;
+    }
+  }
+  if (headingIdx === -1) return null;
+  const next = [...lines];
+  for (let i = headingIdx + 1; i < next.length; i++) {
+    const trimmed = next[i].trim();
+    if (trimmed.startsWith("### ")) {
+      next.splice(i, 0, newLine);
+      return next;
+    }
+    if (trimmed === "") continue;
+    next[i] = newLine;
+    return next;
+  }
+  next.push(newLine);
+  return next;
+}
+
+// Pure. Finds the last "### <label>" heading in `lines` and appends `newLine` at the end
+// of that field's own block (immediately before the next "### " heading, or end of body),
+// replacing a lone "_No response_" placeholder outright rather than appending alongside
+// it. Returns null when the heading isn't present. Used to place a new ad hoc "- **Label:**
+// value" bullet inside the template's own intended control-state field instead of past
+// every later template field.
+function insertIntoHeadingBlock(lines, label, newLine) {
+  const heading = `### ${label}`;
+  let headingIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim() === heading) {
+      headingIdx = i;
+      break;
+    }
+  }
+  if (headingIdx === -1) return null;
+  const next = [...lines];
+  let insertAt = next.length;
+  for (let i = headingIdx + 1; i < next.length; i++) {
+    if (next[i].trim().startsWith("### ")) {
+      insertAt = i;
+      break;
+    }
+  }
+  if (insertAt > headingIdx + 1 && next[insertAt - 1].trim() === "_No response_") {
+    next.splice(insertAt - 1, 1, newLine);
+    return next;
+  }
+  next.splice(insertAt, 0, newLine);
+  return next;
+}
+
+// Every ad hoc bullet label that corresponds to one of `.github/ISSUE_TEMPLATE/
+// parent-execution.yml`'s own dedicated "### Heading" fields (see parseHeadingField's read-side
+// fallback table above) -- keyed lower-case since upsertControlBullet's own label matching is
+// case-insensitive. Stage 1 review finding on PR #544: kept as one small table rather than a
+// second `/^lifecycle$/i`-style special case per label, so a future template field added here
+// only needs one new entry, not a new branch.
+const HEADING_FIELD_LABELS = {
+  lifecycle: "State",
+  blocker: "Current blocker",
+  "founder decision": "Founder interrupt",
+};
+
+export function upsertControlBullet(body, label, value) {
+  const lines = (body ?? "").split("\n");
+  const pattern = new RegExp(`^-\\s*\\*\\*${label}:\\*\\*`, "i");
+  let replaced = false;
+  const next = lines.map((line) => {
+    if (pattern.test(line)) {
+      replaced = true;
+      return `- **${label}:** ${value}`;
+    }
+    return line;
+  });
+  if (replaced) {
+    // Issue #581 (the #577 live reproduction): a hybrid body can carry *both* the ad hoc
+    // "- **Label:**" bullet just replaced above *and* this label's dedicated template heading
+    // (e.g. a control Issue authored with both "### State" and a redundant "- **Lifecycle:**"
+    // bullet). Updating only the bullet — the prior behavior — left the heading stale and
+    // durably contradictory the instant a lifecycle transition ran (#577: "### State" stayed
+    // READY while "- **Lifecycle:**" alone advanced to REVIEW). When the corresponding heading
+    // genuinely exists in the body too, this update is applied atomically to both
+    // representations so neither can be left behind — the same single call always converges
+    // both to the one new value, never silently updating only one and returning success. A body
+    // with only the bullet (the supported legacy-only shape) or only the heading (the supported
+    // template-only shape, handled further below) is unaffected: this branch only fires when
+    // both representations are actually present.
+    const headingLabel = HEADING_FIELD_LABELS[label.toLowerCase()];
+    if (headingLabel) {
+      const headingExists = lines.some((line) => line.trim() === `### ${headingLabel}`);
+      if (headingExists) {
+        const alsoUpdated = replaceHeadingFieldValue(next, headingLabel, value);
+        if (alsoUpdated) return alsoUpdated.join("\n");
+      }
+    }
+    return next.join("\n");
+  }
+
+  const lifecycleIdx = lines.findIndex((line) => /^-\s*\*\*Lifecycle:\*\*/i.test(line));
+  if (lifecycleIdx !== -1) {
+    const inserted = [...lines];
+    inserted.splice(lifecycleIdx + 1, 0, `- **${label}:** ${value}`);
+    return inserted.join("\n");
+  }
+
+  // Stage 1 review finding on PR #521: no ad hoc "- **Lifecycle:**" bullet exists at all --
+  // the shape `.github/ISSUE_TEMPLATE/parent-execution.yml` actually renders, whose
+  // Lifecycle-equivalent is the "### State" dropdown heading, not a bullet
+  // (readExecutionBulletField's own Lifecycle read already falls back to
+  // parseHeadingField(body, "State") for exactly this case). Updating "Lifecycle" here used
+  // to always append a brand-new bullet past every template field instead, leaving "### State"
+  // stale and contradictory. For the Lifecycle label, update "### State" in place.
+  //
+  // Stage 1 review finding on PR #544: the same template renders "Blocker" and "Founder
+  // decision" as their own dedicated heading fields too ("### Current blocker", "### Founder
+  // interrupt" -- see parseHeadingField's own read-side fallback for these exact same three
+  // labels above). Before this, only "Lifecycle" got this heading-in-place treatment; updating
+  // "Blocker" or "Founder decision" on a template-shaped body instead inserted a brand-new ad
+  // hoc bullet into "### Current state", leaving the template's own "### Current blocker"/
+  // "### Founder interrupt" text unchanged -- e.g. a control Issue terminalized by
+  // `close-control.mjs` kept a stale, contradictory unresolved blocker/founder-interrupt block
+  // even though its truthful terminal snapshot promises "none". `HEADING_FIELD_LABELS` names
+  // every label with a dedicated template heading; any other ad hoc label (e.g. "Plan") still
+  // falls to the template's own "### Current state" field, which its own field description
+  // names as where such bullets belong for a thin control Issue.
+  const headingLabel = HEADING_FIELD_LABELS[label.toLowerCase()];
+  if (headingLabel) {
+    const headingUpdated = replaceHeadingFieldValue(lines, headingLabel, value);
+    if (headingUpdated) return headingUpdated.join("\n");
+  } else {
+    const blockInserted = insertIntoHeadingBlock(lines, "Current state", `- **${label}:** ${value}`);
+    if (blockInserted) return blockInserted.join("\n");
+  }
+
+  const trimmedBody = (body ?? "").replace(/\n+$/, "");
+  return trimmedBody ? `${trimmedBody}\n- **${label}:** ${value}\n` : `- **${label}:** ${value}\n`;
 }
 
 // Pure. Reads one GitHub issue-form field's rendered value by its "### Label" heading —
@@ -318,6 +600,110 @@ export function isNoneSentinel(value) {
   return typeof value === "string" && /^none\b/i.test(value.trim());
 }
 
+// Pure. Issue #450 (the #428 live reproduction): the one specifically demonstrated legacy
+// pre-Stage-2 synonym this repository's own thin-control bodies have been observed to carry
+// ("Stage 2: not started") — distinct from, and narrower than, isNoneSentinel's own "none"
+// recognition above. Control #428 was durably `Stage 2: not started` when
+// `next-review-transition-gate.mjs`'s Execution-pointer-shaped bullet parser (which expects
+// either the canonical "none" sentinel or exactly one "#N"/URL reference) correctly rejected
+// it as malformed, stranding a genuine findings-bearing Stage 1 correction transition behind
+// an unrelated Stage-2-reference error.
+//
+// Deliberately scoped to exactly this one wording — never a broader set of natural-language
+// phrases such as "pending"/"later"/"not yet" (#450 Non-goals explicitly excludes those) — and
+// this predicate has no opinion on which field it is being checked against; callers gate its
+// use on the "Stage 2" label themselves (see next-review-transition-gate.mjs's
+// parseOptionalIssueRef and finalize-pr-breakpoint.mjs's canonicalizePreStage2Bullet). This is
+// read-time/normalization tolerance for state that predates finalize-pr-breakpoint.mjs's
+// write-time canonicalization fix, never a second, equally-valid way to author new state —
+// control-field-validator.mjs's write-time validator continues to reject this value outright
+// (it is not the canonical "none" sentinel and does not parse as a pointer), so a new write
+// cannot persist it and report success.
+//
+// Stage 1 review finding on PR #569: the original pattern was a bare `^not started\b` prefix
+// test, so a contradictory value such as "not started — previous audit #480" also matched —
+// the trailing explanation was never inspected for a real pointer before the whole field was
+// treated as pre-Stage-2 `none`, letting `canonicalizePreStage2Bullet` erase a genuine audit
+// reference instead of leaving it to fail closed. The tolerated trailing explanation (e.g.
+// "not started — audit not yet triggered", #450's own demonstrated shape) is still accepted,
+// but only when it contains no parseable issue/PR reference — the same "#N" / ".../pull/N" /
+// ".../issues/N" shapes `parseExecutionPointer` above recognizes. A suffix carrying one of
+// those is no longer "mechanically unambiguous as Stage 2 has not started" (#450's own Required
+// Behavior #3), so it must not be canonicalized away.
+const LEGACY_STAGE2_NOT_STARTED_PATTERN = /^not started\b(.*)$/i;
+const SUFFIX_REFERENCE_PATTERN = /#\d+|\/(?:pull|issues)\/\d+/;
+export function isLegacyStage2NotStartedSentinel(value) {
+  if (typeof value !== "string") return false;
+  const match = LEGACY_STAGE2_NOT_STARTED_PATTERN.exec(value.trim());
+  if (!match) return false;
+  return !SUFFIX_REFERENCE_PATTERN.test(match[1]);
+}
+
+// Pure. True when a raw `gh pr list` entry's own `headRefName`/`body` names execution Issue
+// `executionIssue` via the Shared Contract's PR-to-execution-Issue linkage convention (issue
+// #456's Shared Contract, "PR-to-execution-Issue linkage convention"): a branch name
+// containing "issue-<N>-" (the #447/#453 and #537/#540 organic shape), or a PR body using the
+// documented non-auto-close reference marker (`docs/bounded-review-cycle.md`'s "Reference the
+// work issue non-auto-closing instead (e.g. `Addresses #N` or `Implements #N`)") naming
+// `executionIssue`. The trailing `(?!\d)` on the body pattern keeps executionIssue 447 from
+// matching a marker that merely names a longer number starting with the same digits (e.g.
+// "Addresses #4470"); the branch pattern's leading class keeps "issue-4470-" from matching
+// executionIssue 447 the same way.
+//
+// Stage 1 review finding on PR #547: the body pattern previously matched a bare "#<N>" (any
+// whole-number mention of the execution Issue) anywhere in the PR body, not only the
+// "Addresses #N"/"Implements #N" marker the Shared Contract actually requires workers to
+// leave. This repository's own PR descriptions routinely cross-reference several issues as
+// background/comparison (this very correction's dispatch prompt names #456, #457, and #547
+// together) — a bare mention risked misclassifying an unrelated open PR as "linked" to an
+// execution Issue it never touched, which could suppress a genuinely pre-PR READY control's
+// dispatch (`reconcileReadyPrBreakpoint`) on a false positive. Requiring the explicit
+// Addresses/Implements marker matches exactly what 456-A's own finalize step is required to
+// leave (Shared Contract: "must ensure this linkage is present/discoverable") and what
+// `defaultGhPrList`'s search below is already documented as keying off.
+export function referencesExecutionIssue({ headRefName, body }, executionIssue) {
+  const branchPattern = new RegExp(`(^|[^0-9A-Za-z])issue-${executionIssue}-`, "i");
+  if (typeof headRefName === "string" && branchPattern.test(headRefName)) return true;
+  const bodyPattern = new RegExp(`\\b(?:Addresses|Implements)\\s*:?\\s*#${executionIssue}(?!\\d)`, "i");
+  return typeof body === "string" && bodyPattern.test(body);
+}
+
+// Pure. Selects the single most relevant execution-linked PR out of a raw `gh pr list`
+// result (see `defaultGhPrList` below) — only the entries that actually reference
+// `executionIssue` per `referencesExecutionIssue` above. Prefers an OPEN PR (the live
+// in-flight case a fresh controller most needs to know about) over a closed/merged one;
+// among ties, the numerically highest (most recent) PR number — mirroring this repository's
+// existing deterministic "numerically highest wins" tie-break convention
+// (parse-execution-plan.mjs's `pickLatestComment`). Returns null when nothing in `prList`
+// references the execution Issue at all — the ordinary, ordinary-cost outcome for a
+// genuinely fresh pre-PR control Issue.
+export function findExecutionLinkedPr(prList, executionIssue) {
+  const candidates = (Array.isArray(prList) ? prList : []).filter((pr) => referencesExecutionIssue(pr ?? {}, executionIssue));
+  if (candidates.length === 0) return null;
+  const open = candidates.filter((pr) => String(pr?.state ?? "").toUpperCase() === "OPEN");
+  const pool = open.length > 0 ? open : candidates;
+  return pool.reduce((best, pr) => (Number(pr.number) > Number(best.number) ? pr : best), pool[0]);
+}
+
+// Pure. Issue #646 (the #487/#643/#644/#645 live reproduction): a strict-OPEN-only sibling of
+// `findExecutionLinkedPr` above. That function deliberately falls back to the highest-numbered
+// candidate of ANY state when no open one exists — correct for its own pre-dispatch use, where
+// an already-merged linked PR is itself valid "the PR boundary was already crossed" evidence.
+// A Stage 2 NOT CLEAN correction's own audited PR is, by definition, always already merged/
+// closed by the time this reconciliation ever runs — so reusing that same fallback here would
+// misidentify the just-audited PR itself as if it were a not-yet-created correction PR, and
+// authorize dispatching a correction worker that genuinely has nothing left to correct (or
+// worse, silently "reconcile" onto the wrong PR). Returns null (never crossed) whenever no
+// OPEN linked PR exists, so a genuinely fresh STAGE2_CORRECTION_REQUIRED state is never
+// confused with a stranded post-PR one.
+export function findOpenExecutionLinkedPr(prList, executionIssue) {
+  const open = (Array.isArray(prList) ? prList : []).filter(
+    (pr) => referencesExecutionIssue(pr ?? {}, executionIssue) && String(pr?.state ?? "").toUpperCase() === "OPEN",
+  );
+  if (open.length === 0) return null;
+  return open.reduce((best, pr) => (Number(pr.number) > Number(best.number) ? pr : best), open[0]);
+}
+
 function extractCommentIdFromUrl(url) {
   if (typeof url !== "string") return null;
   const m = url.match(/#issuecomment-(\d+)$/);
@@ -346,6 +732,31 @@ function parseManifestPlanIndexUrl(body) {
     if (m) match = m;
   }
   return match ? match[1] : null;
+}
+
+// Pure. Extracts every "- <UnitID>: route=<route> dispatch_ready=<true|false> note=<note>"
+// entry from a Dispatch Manifest comment body — the exact line shape
+// prepare-dispatch-manifest.mjs's own `renderDispatchManifest` writes (see its "- ${unitId}:
+// route=${route} dispatch_ready=${dispatchReady} note=${note}" template). Returns a Map
+// keyed by unitId; a manifest with a duplicate unitId keeps only the last occurrence in the
+// map but the caller (verifyRoutedDispatchManifest) counts raw matches separately so a
+// duplicate is still detected rather than silently collapsed.
+function parseManifestUnitEntries(body) {
+  // `route` is a non-greedy match up to the next " dispatch_ready=" token, not `\S+` --
+  // prepare-dispatch-manifest.mjs's own resolved route values can contain a space (e.g.
+  // "stronger/general worker", the real #498 manifest's own shape), which `\S+` would
+  // truncate at, making every real manifest line fail to match at all.
+  const pattern = /^-\s*(\S+):\s*route=(.*?)\s+dispatch_ready=(true|false)\s+note=(.*)$/i;
+  const entries = new Map();
+  const unitIdsSeen = [];
+  for (const rawLine of (body ?? "").split("\n")) {
+    const m = pattern.exec(rawLine.trim());
+    if (!m) continue;
+    const [, unitId, route, dispatchReady, note] = m;
+    unitIdsSeen.push(unitId);
+    entries.set(unitId, { route, dispatchReady: dispatchReady === "true", note: note.trim() });
+  }
+  return { entries, unitIdsSeen };
 }
 
 // Pure. Extracts a comment permalink's identity: origin (scheme+host), owner/repo, issue
@@ -395,6 +806,94 @@ export function parseExecutionPointer(value) {
   return { ok: true, issue: refs[0] };
 }
 
+// Pure. Extracts every bold-bullet label appearing in the body as "- **Label:** value" (the
+// same line shape parseControlBullet reads), returning { label, raw } for each matching
+// line regardless of what label text it carries. Originally used only to scan for
+// near-duplicate labels of one specific parser-sensitive field below; also exported for
+// control-field-validator.mjs's exact-duplicate-label detection (Stage 1 review finding on
+// PR #519, issue #510) — never to interpret arbitrary body prose, and never applied to plain
+// paragraphs or "### Heading" template fields (issue #493 is scoped to the ad hoc bold-bullet
+// convention only, the shape #440's own reproduction used).
+export function extractBoldBulletLabels(body) {
+  const pattern = /^-\s*\*\*(.+?):\*\*\s*(.*)$/;
+  const result = [];
+  for (const line of (body ?? "").split("\n")) {
+    const m = pattern.exec(line);
+    if (m) result.push({ label: m[1].trim(), raw: m[2].trim() });
+  }
+  return result;
+}
+
+// Pure. True when `label` is a near-duplicate of `canonical`: it begins with the canonical
+// label text (case-insensitive) followed by a non-word boundary and additional non-empty
+// qualifier content before the colon — a parenthetical like "(current)"/"(updated)", a bare
+// trailing word like "note", or a punctuation-delimited qualifier like "-current"/"/current"/
+// "[current]"/an em-dash form — while not itself being an exact (case-insensitive) match for
+// `canonical`. Issue #493's #440 regression: "Stage 2 (current):" and "Stage 2 (updated):"
+// both take this shape relative to canonical "Stage 2". Stage 1 review finding on this PR:
+// the original boundary recognized only whitespace/"(" and missed punctuation-delimited
+// qualifiers such as "Stage 2-current" or "Stage 2/current", which could still leave a stale
+// canonical field authoritative. Deliberately a structural prefix-plus-leftover-content rule,
+// not a fixed whitelist of qualifier words or separator spellings — the issue explicitly
+// rejects special-casing only the literal observed spellings, so any future lookalike
+// qualifier is caught the same way. The boundary requirement (the character immediately after
+// the canonical prefix must be a non-word character — i.e. not a letter, digit, or
+// underscore) keeps an unrelated label that merely shares a character prefix — e.g. canonical
+// "PR" against a hypothetical "Precondition", or canonical "Stage 2" against a hypothetical
+// "Stage 20" — from being misread as a near-duplicate, while still catching any punctuation or
+// whitespace separator as a genuine qualifier boundary.
+function isNearDuplicateLabel(label, canonical) {
+  const normalizedLabel = label.trim().toLowerCase();
+  const normalizedCanonical = canonical.trim().toLowerCase();
+  if (normalizedLabel === normalizedCanonical) return false;
+  if (!normalizedLabel.startsWith(normalizedCanonical)) return false;
+  const remainder = normalizedLabel.slice(normalizedCanonical.length);
+  if (!/^\W/.test(remainder)) return false;
+  return remainder.trim().length > 0;
+}
+
+// Pure. Scans the body for every bold-bullet label that is a near-duplicate (per
+// isNearDuplicateLabel) of `canonical` or of any of `allowedAliases`, while not itself being
+// an exact match for `canonical` or any allowed alias — the recognized/unrecognized-label
+// split issue #493 requires. `allowedAliases` preserves intentionally supported alternate
+// spellings (e.g. "Execution issue" alongside "Execution") as recognized fields in their own
+// right, never themselves flagged as near-duplicates. Returns the list of near-duplicate
+// labels found (each with its own raw value), or [] when none exist.
+export function findNearDuplicateBulletLabels(body, canonical, allowedAliases = []) {
+  const recognized = new Set([canonical, ...allowedAliases].map((s) => s.trim().toLowerCase()));
+  const seen = new Set();
+  const conflicts = [];
+  for (const { label, raw } of extractBoldBulletLabels(body)) {
+    const normalized = label.trim().toLowerCase();
+    if (recognized.has(normalized)) continue;
+    const isNearDup = [canonical, ...allowedAliases].some((c) => isNearDuplicateLabel(label, c));
+    if (!isNearDup) continue;
+    const key = `${normalized}::${raw}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    conflicts.push({ label, raw });
+  }
+  return conflicts;
+}
+
+// Pure. Composes a human-readable ambiguity reason from a `readExecutionBulletField`
+// conflict result — shared by both callers (evaluateReadyDispatchGate below, and
+// next-review-transition-gate.mjs's own Execution-pointer resolution) so the two reason
+// strings can never silently drift apart.
+export function describeExecutionConflict(executionField) {
+  if (executionField.nearDuplicate) {
+    return (
+      "Execution reference is ambiguous: a recognized Execution bullet coexists with unrecognized near-duplicate " +
+      `label(s) ${executionField.matches.map((m) => `"- **${m.label}:**" (${JSON.stringify(m.raw)})`).join(", ")} that ` +
+      "could represent the same live field — refusing to select the canonical value as authoritative"
+    );
+  }
+  return (
+    `Execution pointer is ambiguous: "- **Execution:**" names ${JSON.stringify(executionField.legacy)} ` +
+    `while "- **Execution issue:**" names ${JSON.stringify(executionField.liveSpelling)} — these must resolve to the same execution Issue`
+  );
+}
+
 // Pure. Reads the control Issue's execution-pointer bullet under either observed spelling
 // as one field: the legacy ad hoc "- **Execution:**" bullet (control Issues #311/#322) and
 // the live "- **Execution issue:**" spelling real thin controls #398/#408 actually use.
@@ -407,6 +906,14 @@ export function parseExecutionPointer(value) {
 // dispatching against a guess. Malformed values on one side (e.g. "none") do not by
 // themselves trigger a conflict — parseExecutionPointer's own missing/multi-valued
 // handling still applies to whichever value is selected.
+//
+// Issue #493 (the #440 regression): when a recognized "Execution"/"Execution issue" bullet
+// is present at all, an unrecognized near-duplicate label that could represent the same
+// live field (e.g. "- **Execution (current):**") also produces { conflict: true } —
+// `nearDuplicate: true` plus the offending `matches` — before the recognized value, possibly
+// stale, is ever selected. This is a distinct conflict shape from the alias-mismatch one
+// above (kept separate rather than merged, so existing callers/tests that destructure the
+// alias-mismatch shape verbatim are unaffected).
 export function readExecutionBulletField(body) {
   const legacy = parseControlBullet(body, "Execution");
   const liveSpelling = parseControlBullet(body, "Execution issue");
@@ -417,7 +924,120 @@ export function readExecutionBulletField(body) {
       return { conflict: true, legacy, liveSpelling };
     }
   }
+  if (legacy !== null || liveSpelling !== null) {
+    const nearDuplicates = findNearDuplicateBulletLabels(body, "Execution", ["Execution issue"]);
+    if (nearDuplicates.length > 0) {
+      return { conflict: true, nearDuplicate: true, matches: nearDuplicates };
+    }
+  }
   return { conflict: false, value: liveSpelling ?? legacy };
+}
+
+// Pure. Issue #407 unit 407-B (Shared Contract item 8) — the #432 fix: recognizes a
+// directly-dispatched Issue as a canonical Stage 2 Audit Issue via positive multi-field
+// classification, never inferred from the issue title (compare defaultGhIssueList's own
+// "[Audit]" title-prefix caveat in lifecycle-gate.mjs — a title is candidate-discovery only,
+// never closure/classification evidence). True only when every one of these independently
+// resolves non-null against the body: `parseStage2Verdict` (a real PENDING/CLEAN/NOT CLEAN
+// dropdown reading — lifecycle-gate.mjs's own audit-control-issue.yml parser, reused rather
+// than re-derived), the "### Merged PR" heading, and the "### Work issue" heading. A thin
+// control Issue using the ad hoc "- **Label:**" bullet convention (parseControlBullet) never
+// has a "### Verdict"-shaped dropdown field at all, so this never misfires against an
+// ordinary control Issue — only a real audit-control-issue.yml-rendered body can satisfy all
+// three simultaneously.
+export function classifyAuditIssue(body) {
+  return parseStage2Verdict(body ?? "") !== null && isAuditShapedBody(body);
+}
+
+// Pure. Issue #437/#610 Stage 1 finding 2: the audit-control-issue.yml *shape* alone (the
+// "### Merged PR"/"### Work issue" headings), independent of whether the "### Verdict"
+// dropdown itself parses to a recognized value. classifyAuditIssue above additionally
+// requires `parseStage2Verdict(body) !== null`, which is exactly right for detecting a
+// canonical, closable Audit Issue — but a caller deciding whether a *prerequisite* satisfies
+// a control's "Blocked by ..." condition must not let a missing/malformed Verdict field
+// silently reclassify a genuine audit-shaped issue as an "ordinary closed issue" that
+// satisfies on closure alone (`reconcile-control-blocker.mjs`'s own `isPrerequisiteSatisfied`
+// is exactly that caller). This function answers only "is this an audit-control-issue.yml body
+// at all", leaving what to require of the Verdict field to the caller.
+export function isAuditShapedBody(body) {
+  return parseFormField(body ?? "", "Merged PR") !== null && parseFormField(body ?? "", "Work issue") !== null;
+}
+
+// Pure. Issue #444 unit 444-A — the #439/#440/#443 live reproduction: a control body's own
+// "- **PR:**"/"- **Stage 1:**" bullets already showing the execution crossed the PR/review
+// boundary must prevent a fresh `READY_TO_DISPATCH_INTEGRATION` verdict, even while
+// `Lifecycle` still literally reads `EXECUTION_COMPLETE` (Required behavior item 5 — "Stage 1
+// evidence is stronger than stale lifecycle text"). Scoped to the EXECUTION_COMPLETE path
+// only; called from evaluateReadyDispatchGate below, never from any other lifecycle branch.
+//
+// Field-parsing decisions (Shared Contract for #444):
+//   - "PR": `raw === null` (bullet absent) or `isNoneSentinel(raw)` is "not crossed". Any
+//     other value that resolves to exactly one #N/URL reference (parseExecutionPointer, the
+//     same primitive the "Execution" bullet already uses) is "crossed". A value that is
+//     present but neither "none" nor a single resolvable reference — including a recognized
+//     "PR" bullet coexisting with an unrecognized near-duplicate label that could hold the
+//     same live field (findNearDuplicateBulletLabels, the same ambiguity guard
+//     readExecutionBulletField already applies to "Execution") — is malformed and must also
+//     not authorize integration dispatch (fail closed on ambiguity). Issue #558 Stage 1
+//     finding 1: the near-duplicate scan is only run once `parseControlBullet(body, "PR")`
+//     is non-null — a noncanonical bullet (e.g. "PR notes") with no canonical "PR" bullet at
+//     all must never manufacture PR state by itself, mirroring
+//     parseOptionalIssueRefGuarded's own `raw !== null` gate in next-review-transition-gate.mjs.
+//   - "Stage 1": plain text (`requested`, `exempt: ...`, `correction-satisfied at ...`, or
+//     `none`), never an issue pointer — read with parseControlBullet only, never
+//     parseExecutionPointer. `raw === null` or `isNoneSentinel(raw)` is "not crossed"; any
+//     other non-empty value is "crossed".
+//
+// Returns { established: false } when neither field shows the boundary crossed (the genuine
+// no-PR path every existing EXECUTION_COMPLETE fixture already uses), or
+// { established: true, reason } otherwise — crossed and malformed both fail closed the same
+// way, since either must equally prevent a fresh Integration/PR worker. Mirrors
+// next-review-transition-gate.mjs's own parseOptionalIssueRefGuarded missing/none/issue/
+// invalid/ambiguous result shape as a small local helper, per the Shared Contract's
+// no-new-circular-import note, rather than importing it back from that module.
+function checkExecutionCompletePrBoundary(body) {
+  // Issue #558 Stage 1 finding 1 (P2): the near-duplicate scan is only meaningful once a
+  // canonical "- **PR:**" bullet actually exists — mirrors parseOptionalIssueRefGuarded's own
+  // `raw !== null` gate above near-duplicate detection. An unrelated noncanonical bullet (e.g.
+  // "- **PR notes:** not created yet") must never manufacture PR state on its own when no
+  // canonical field coexists with it.
+  const prRaw = parseControlBullet(body, "PR");
+  if (prRaw !== null) {
+    const prNearDuplicates = findNearDuplicateBulletLabels(body, "PR", []);
+    if (prNearDuplicates.length > 0) {
+      return {
+        established: true,
+        reason:
+          'PR reference is ambiguous: a recognized "- **PR:**" bullet coexists with unrecognized near-duplicate ' +
+          `label(s) ${prNearDuplicates.map((m) => `"- **${m.label}:**" (${JSON.stringify(m.raw)})`).join(", ")} that could ` +
+          "represent the same live field — refusing to treat the PR/review boundary as not-yet-crossed",
+      };
+    }
+
+    if (!isNoneSentinel(prRaw)) {
+      const prPointer = parseExecutionPointer(prRaw);
+      if (prPointer.ok) {
+        return {
+          established: true,
+          reason: `PR is already recorded (#${prPointer.issue}) — a fresh Integration/PR worker must not be dispatched for an execution that already has a PR`,
+        };
+      }
+      return {
+        established: true,
+        reason: `"PR" bullet is present but neither "none" nor a single resolvable reference (found: ${JSON.stringify(prRaw)}) — failing closed rather than authorizing integration dispatch`,
+      };
+    }
+  }
+
+  const stage1Raw = parseControlBullet(body, "Stage 1");
+  if (stage1Raw !== null && !isNoneSentinel(stage1Raw)) {
+    return {
+      established: true,
+      reason: `Stage 1 is already "${stage1Raw}", not "none" — Stage 1 evidence is stronger than stale Lifecycle text and must not be re-authorized for integration dispatch`,
+    };
+  }
+
+  return { established: false };
 }
 
 // Pure core: evaluates AGENTS.md's immediate-dispatch gate against an already-fetched
@@ -457,6 +1077,23 @@ export function readExecutionBulletField(body) {
 // must include an explicit "- **Route:**" bullet somewhere in its body regardless of
 // which template created it.
 export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
+  // Issue #407 unit 407-B: evaluated first, before any of the generic Lifecycle-bullet
+  // parsing below — a directly-dispatched canonical Stage 2 Audit Issue is a disjoint
+  // classification, never a variant of NOT_READY the caller could fall through from (the
+  // #432 regression this exists to close). `nextCommand` names the exact next deterministic
+  // step (AGENTS.md § Session execution): the composed post-PR transition gate, never a
+  // freeform re-derivation of Stage 2 evidence.
+  if (classifyAuditIssue(body)) {
+    return {
+      status: "AUDIT_ISSUE_DETECTED",
+      auditIssue: controlIssueNumber != null ? Number(controlIssueNumber) : null,
+      nextCommand:
+        controlIssueNumber != null
+          ? `node tools/orchestration/next-review-transition-gate.mjs --audit-issue ${Number(controlIssueNumber)}`
+          : null,
+    };
+  }
+
   const lifecycleRaw = parseControlBullet(body, "Lifecycle") ?? parseHeadingField(body, "State");
   const executionField = readExecutionBulletField(body);
   const executionRaw = executionField.conflict
@@ -478,6 +1115,23 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   // validated, exactly mirroring how the pre-existing READY path already defers its own
   // verdict construction to the end of this function.
   let dispatchLifecycle = null;
+  // Issue #437/#610 Stage 1 finding 1: set only when the Blocker field itself (never Founder
+  // decision or a blocking Lifecycle value alone) is the reason this control Issue is BLOCKED —
+  // the exact "reasons name a non-none Blocker" condition AGENTS.md § Session execution's own
+  // BLOCKED paragraph already names as the sole trigger for the one authorized
+  // reconcile-control-blocker.mjs step. Threaded onto the BLOCKED verdict below so
+  // action-envelope.mjs can authorize that step mechanically instead of only in prose.
+  let blockerActive = false;
+  // Set either when the unrecognized-lifecycle branch below fires with one of the five
+  // post-PR mid-cycle values (see POST_PR_MID_CYCLE_LIFECYCLE_VALUES's own comment above), or
+  // — issue #444 unit 444-A — when EXECUTION_COMPLETE's own PR/Stage 1 boundary guard fires
+  // with the literal "EXECUTION_COMPLETE_PR_ESTABLISHED" marker below. That literal is a
+  // marker for this guard only, never a member of POST_PR_MID_CYCLE_LIFECYCLE_VALUES itself
+  // (that Set stays exactly {EXECUTING, VERIFYING, REVIEW, AUDIT, CORRECTION}) — only the
+  // field's truthiness is ever inspected by action-envelope.mjs's chain classification, never
+  // its exact literal value, so introducing a second distinct literal here requires no change
+  // there.
+  let postPrLifecycle = null;
 
   if (lifecycleRaw === null) {
     reasons.push('no "- **Lifecycle:**" bullet or "### State" heading found in the control Issue body');
@@ -491,21 +1145,20 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   } else if (PRE_PR_DISPATCH_LIFECYCLE_VALUES.has(lifecycleRaw.toUpperCase())) {
     dispatchLifecycle = lifecycleRaw.toUpperCase();
   } else {
+    const upperLifecycle = lifecycleRaw.toUpperCase();
+    if (POST_PR_MID_CYCLE_LIFECYCLE_VALUES.has(upperLifecycle)) {
+      postPrLifecycle = upperLifecycle;
+    }
     reasons.push(
       `lifecycle is "${lifecycleRaw}", not READY` +
-        (KNOWN_LIFECYCLE_STATES.includes(lifecycleRaw.toUpperCase())
+        (KNOWN_LIFECYCLE_STATES.includes(upperLifecycle)
           ? " — this control Issue is already mid-cycle and should continue its own current step, not receive a fresh immediate dispatch"
           : ""),
     );
   }
 
   const execution = executionField.conflict
-    ? {
-        ok: false,
-        reason:
-          `Execution pointer is ambiguous: "- **Execution:**" names ${JSON.stringify(executionField.legacy)} ` +
-          `while "- **Execution issue:**" names ${JSON.stringify(executionField.liveSpelling)} — these must resolve to the same execution Issue`,
-      }
+    ? { ok: false, reason: describeExecutionConflict(executionField) }
     : parseExecutionPointer(executionRaw);
   if (!execution.ok) {
     reasons.push(execution.reason);
@@ -517,7 +1170,7 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
 
   if (routeRaw === null || routeRaw === "" || isNoneSentinel(routeRaw)) {
     reasons.push(`Route is not settled (found: ${JSON.stringify(routeRaw)})`);
-  } else if (dispatchLifecycle === "READY_FOR_PLAN" && routeRaw.trim().toLowerCase() !== "planning worker") {
+  } else if (!isRouteCompatibleWithLifecycle(dispatchLifecycle, routeRaw)) {
     // READY_FOR_PLAN is the one new pre-PR value whose Route must be a specific literal
     // value, not merely "settled" — it always dispatches the planning worker specifically
     // (#397's Shared Contract: "Route: must be planning worker").
@@ -532,6 +1185,7 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
     const msg = `Blocker is not "none" (found: "${blockerRaw}") — an active blocker must not be reinterpreted as authorization to advance`;
     reasons.push(msg);
     blockingReasons.push(msg);
+    blockerActive = true;
   }
 
   if (founderDecisionRaw === null) {
@@ -542,12 +1196,30 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
     blockingReasons.push(msg);
   }
 
+  // Issue #444 unit 444-A: EXECUTION_COMPLETE's own PR/Stage 1 boundary guard, evaluated only
+  // once every other field above has already resolved dispatchLifecycle to EXECUTION_COMPLETE
+  // specifically (never for READY/READY_FOR_PLAN/PLAN_READY/ROUTED — the Shared Contract's
+  // non-goals reiterate those paths stay untouched). Reuses the existing NOT_READY +
+  // postPrLifecycle shape below (action-envelope.mjs's existing chain classification already
+  // routes any NOT_READY verdict carrying a truthy postPrLifecycle to
+  // next-review-transition-gate.mjs — zero changes needed there) rather than inventing a new
+  // verdict shape. Set before the blockingReasons/reasons checks below run, so a boundary
+  // already crossed can never fall through to the switch's own
+  // `case "EXECUTION_COMPLETE": return { status: "READY_TO_DISPATCH_INTEGRATION", ... }`.
+  if (dispatchLifecycle === "EXECUTION_COMPLETE") {
+    const prBoundary = checkExecutionCompletePrBoundary(body);
+    if (prBoundary.established) {
+      postPrLifecycle = "EXECUTION_COMPLETE_PR_ESTABLISHED";
+      reasons.push(prBoundary.reason);
+    }
+  }
+
   if (blockingReasons.length > 0) {
-    return { status: "BLOCKED", reasons: blockingReasons };
+    return { status: "BLOCKED", reasons: blockingReasons, blockerActive };
   }
 
   if (reasons.length > 0) {
-    return { status: "NOT_READY", reasons };
+    return { status: "NOT_READY", reasons, ...(postPrLifecycle ? { postPrLifecycle } : {}) };
   }
 
   // Every field required for dispatchLifecycle's own path has already been validated above
@@ -671,6 +1343,155 @@ function defaultGhCommentView({ repo, commentId }) {
   return JSON.parse(raw);
 }
 
+// Issue #456 unit 456-B: the one narrow, repo-scoped `gh pr list` this Shared Contract
+// authorizes as the READY-lifecycle recovery path's own evidence source — a single search
+// keyed to the exact execution Issue about to be dispatched, never an unscoped scan. GitHub's
+// PR search matches title/body text for a bare query term, so searching the literal
+// "#<executionIssue>" surfaces the "Addresses #N" convention 456-A's own finalize step is
+// required to leave on every PR it opens; `findExecutionLinkedPr` above still re-validates
+// every candidate this returns against the exact linkage convention rather than trusting
+// GitHub's own text-search relevance.
+//
+// Exported (issue #646) so `next-review-transition-gate.mjs`'s own Stage 2 NOT CLEAN
+// correction-PR reconciliation (`findOpenExecutionLinkedPr` below) can reuse this exact same
+// evidence source rather than a second, competing `gh pr list` call. `headRefOid` was added to
+// the requested JSON fields for that same reuse: the reconciliation path needs the linked PR's
+// live head to compose a Stage 1 trigger/finalize command, and `defaultGhPrView`-style callers
+// already trust `gh pr view`'s own `headRefOid` field name for this.
+export function defaultGhPrList({ repo, executionIssue }) {
+  const raw = execFileSync(
+    "gh",
+    [
+      "pr",
+      "list",
+      "--repo",
+      repo,
+      "--search",
+      `#${executionIssue}`,
+      "--state",
+      "all",
+      "--json",
+      "number,url,state,headRefName,headRefOid,body",
+      "--limit",
+      "30",
+    ],
+    { encoding: "utf8" },
+  );
+  return JSON.parse(raw);
+}
+
+// Stage 1 review finding on PR #647 (issue #646, P1): GitHub's PR search (what `defaultGhPrList`
+// above keys `--search` off) indexes title/body text only — it never indexes a PR's own head ref
+// name. A correction PR linked purely by the permitted branch-name convention
+// ("issue-<executionIssue>-...", no "Addresses #N"/"Implements #N" body marker) can therefore
+// never surface from that search, so `findOpenExecutionLinkedPr` never even receives it as a
+// candidate and `reconcileStage2CorrectionPr` below wrongly reports `crossed: false`, authorizing
+// a duplicate correction-worker dispatch — the exact #487/#643/#644/#645 failure this
+// reconciliation exists to prevent.
+//
+// This is Stage 2 correction-PR reconciliation's own acquisition boundary, deliberately separate
+// from `defaultGhPrList` above rather than a change to it: `reconcileReadyPrBreakpoint`'s
+// established pre-dispatch READY-lifecycle route (issue #456 unit 456-B) already works correctly
+// off the search-only lookup and stays untouched. One additional bounded, unscoped listing of
+// currently OPEN PRs (`--state open --limit <OPEN_PR_RECONCILIATION_LIMIT>`, no `--search`) is
+// merged in by PR number so a branch-only-linked candidate is discoverable via
+// `referencesExecutionIssue`'s own headRefName check — bounded to open PRs only, never a
+// full-history/closed-PR scan, per AGENTS.md's "keep the lookup narrow" instruction. Stage 2
+// audit finding on issue #649 (P1): that bound was originally a hard, unchecked 30, which could
+// silently truncate in a repository with more open PRs than that — see
+// `assertOpenPrListNotTruncated` and `defaultGhOpenPrList` below for the fail-closed fix.
+//
+// `ghPrListImpl`/`ghOpenPrListImpl` are injected (defaulting to the real search-based and
+// unscoped-open `gh` calls respectively) so the merge/dedup logic itself — the part this
+// correction actually changes — is directly unit-testable without touching the real network/`gh`
+// CLI, matching this file's existing injection convention.
+export function defaultOpenExecutionLinkedPrList(
+  { repo, executionIssue },
+  { ghPrListImpl = defaultGhPrList, ghOpenPrListImpl = defaultGhOpenPrList } = {},
+) {
+  const bySearch = ghPrListImpl({ repo, executionIssue });
+  const openUnscoped = ghOpenPrListImpl({ repo });
+  const merged = new Map();
+  for (const pr of [...bySearch, ...openUnscoped]) {
+    if (pr && typeof pr.number === "number") merged.set(pr.number, pr);
+  }
+  return [...merged.values()];
+}
+
+// Stage 2 audit finding on issue #649 (P1): the prior hard `--limit 30` silently truncated in
+// any repository with more than 30 open PRs, so a branch-only-linked correction PR sitting
+// outside that window would never be examined -- `findOpenExecutionLinkedPr` would never even
+// see it as a candidate and `reconcileStage2CorrectionPr` would wrongly report `crossed: false`,
+// authorizing a duplicate correction-worker dispatch from truncated (not missing) evidence, the
+// same failure shape issue #646 already fixed for the search-index gap. Raised to an explicit,
+// generous safety bound, paired with a fail-closed truncation check immediately below: a listing
+// that comes back at (or over) the bound is refused rather than trusted as exhaustive. Throwing
+// here is deliberate -- `reconcileStage2CorrectionPr`'s existing try/catch already converts a
+// thrown error into `{ operationalError: true }`, which `resolvePostMerge` already fails closed
+// to `AMBIGUOUS` instead of authorizing a fresh dispatch on unverified "no PR exists" evidence.
+export const OPEN_PR_RECONCILIATION_LIMIT = 500;
+
+// Pure. Refuses (throws) a listing that came back at or over `limit` — GitHub's own signal
+// that more open PRs may exist beyond what was fetched — rather than letting a caller trust
+// it as the complete set. Exported and factored out of `defaultGhOpenPrList` below so this
+// fail-closed guard is directly unit-testable without shelling out to the real `gh` CLI.
+export function assertOpenPrListNotTruncated(parsedList, limit = OPEN_PR_RECONCILIATION_LIMIT) {
+  if (Array.isArray(parsedList) && parsedList.length >= limit) {
+    throw new Error(
+      `gh pr list --state open returned ${parsedList.length} PRs, at or over the ${limit}-PR reconciliation ` +
+        "safety bound -- refusing to treat a possibly-truncated open-PR listing as exhaustive",
+    );
+  }
+  return parsedList;
+}
+
+function defaultGhOpenPrList({ repo }) {
+  const raw = execFileSync(
+    "gh",
+    [
+      "pr",
+      "list",
+      "--repo",
+      repo,
+      "--state",
+      "open",
+      "--json",
+      "number,url,state,headRefName,headRefOid,body",
+      "--limit",
+      String(OPEN_PR_RECONCILIATION_LIMIT),
+    ],
+    { encoding: "utf8" },
+  );
+  return assertOpenPrListNotTruncated(JSON.parse(raw));
+}
+
+// Issue #456 unit 456-B (the #447/#448/#453 live reproduction): before authorizing
+// READY_TO_DISPATCH off a plain `Lifecycle: READY` control Issue, reconcile against one
+// narrow, execution-Issue-scoped PR lookup — the recovery safety net the Shared Contract
+// authorizes for exactly this route, since a direct/READY control Issue carries no plan/
+// unit machinery whose own durable state could otherwise prove the PR boundary was already
+// crossed. `ghPrListImpl` is injected so tests never touch the real network/`gh` CLI, matching
+// this file's existing injection convention. Returns `{ crossed: false }` for the ordinary,
+// genuinely pre-PR case (the expected outcome for a fresh READY control Issue), or
+// `{ crossed: true, pr }` when a linked PR already exists — the caller must not authorize a
+// fresh dispatch in that case, per Required behavior item 4's "route toward post-PR handling
+// instead of dispatching when reconciliation finds the boundary already crossed."
+export async function reconcileReadyPrBreakpoint({ repo, executionIssue }, { ghPrListImpl = defaultGhPrList } = {}) {
+  let prList;
+  try {
+    prList = await ghPrListImpl({ repo, executionIssue });
+  } catch (err) {
+    return {
+      crossed: false,
+      operationalError: true,
+      reason: `operational failure searching for an execution-linked PR for ${repo}#${executionIssue}: ${err.message}`,
+    };
+  }
+  const pr = findExecutionLinkedPr(prList, executionIssue);
+  if (!pr) return { crossed: false };
+  return { crossed: true, pr };
+}
+
 async function defaultParseExecutionPlanImpl({ repo, executionIssue }) {
   const { runParseExecutionPlan } = await import("./parse-execution-plan.mjs");
   return runParseExecutionPlan({ repo, executionIssue });
@@ -785,12 +1606,159 @@ export async function verifyRoutedDispatchManifest(
         `expected canonical URL ${JSON.stringify(parsed.plan.planIndex.url)}.`,
     };
   }
+
+  // Stage 1 review finding on PR #521 (ready-dispatch-gate.mjs P2): the checks above only
+  // confirm the manifest comment has the required heading and correctly backlinks the Plan
+  // Index — a manifest carrying zero (or incomplete/duplicated) per-unit `route=`/
+  // `dispatch_ready=` entries used to pass this probe anyway, letting checkReadyDispatch
+  // project `Lifecycle: ROUTED` with no authoritative unit routes for the Execute stage to
+  // dispatch from. Every unit id the Plan Index's own Units list names (parsed.plan.units,
+  // including a REPLAN_REQUIRED one — prepare-dispatch-manifest.mjs still emits an entry
+  // for those, just with route=REPLAN_REQUIRED) must appear in the manifest exactly once.
+  const planUnitIds = Object.keys(parsed.plan.units ?? {});
+  const { entries: manifestEntries, unitIdsSeen } = parseManifestUnitEntries(manifestComment?.body ?? "");
+  const missingUnitIds = planUnitIds.filter((unitId) => !manifestEntries.has(unitId));
+  const duplicateUnitIds = [...new Set(unitIdsSeen.filter((unitId) => unitIdsSeen.filter((id) => id === unitId).length > 1))];
+  const unknownUnitIds = [...manifestEntries.keys()].filter((unitId) => !planUnitIds.includes(unitId));
+  if (missingUnitIds.length > 0 || duplicateUnitIds.length > 0 || unknownUnitIds.length > 0) {
+    const problems = [];
+    if (missingUnitIds.length > 0) problems.push(`missing entries for unit(s): ${missingUnitIds.join(", ")}`);
+    if (duplicateUnitIds.length > 0) problems.push(`duplicate entries for unit(s): ${duplicateUnitIds.join(", ")}`);
+    if (unknownUnitIds.length > 0) problems.push(`entries for unit(s) not in the Plan Index: ${unknownUnitIds.join(", ")}`);
+    return {
+      ok: false,
+      reason: `Dispatch manifest comment #${manifestCommentId} does not have exactly one route/dispatch_ready entry per Plan Index unit -- ${problems.join("; ")}.`,
+    };
+  }
+
+  // Issue #456 unit 456-B (the #537/#539/#540 live reproduction): a manifest entry's own
+  // `dispatch_ready=true` flag is dependency-readiness computed once at Route/Prepare time —
+  // it is never re-derived per wave — so it must never outrank a later authoritative `DONE`
+  // state on that same unit's own Worker Unit Contract. `parsed.plan.units[unitId].state` is
+  // parse-execution-plan.mjs's own fresh read of that live Worker Unit Contract comment (not
+  // the Plan Index's own possibly-stale `indexState`), so this reconciliation costs no
+  // additional `gh` call beyond the ones this function already performs. `dispatchReadyUnitIds`
+  // is the reconciled, currently-actionable subset the caller may dispatch; `alreadyDoneUnitIds`
+  // is the excluded subset — `dispatch_ready=true` entries whose own contract already recorded
+  // `DONE` — kept separate (not silently dropped) so the caller can report exactly what was
+  // reconciled away rather than authorizing a redispatch or staying silent about why a unit
+  // that looks dispatch_ready in the raw manifest text is absent from the dispatchable list.
+  const dispatchReadyManifestUnitIds = [...manifestEntries.entries()]
+    .filter(([, entry]) => entry.dispatchReady)
+    .map(([unitId]) => unitId);
+  // The State bullet's value is parseBulletBlock's full multi-line capture, not a bare
+  // token -- the established convention (AGENTS.md Parent snapshots edit-ownership rule)
+  // is "DONE — <completion note>", so an exact `=== "DONE"` equality never matches a real
+  // Worker Unit Contract and this reconciliation silently never fires. Match the leading
+  // "DONE" token instead, the same way a human skimming the bullet would.
+  const alreadyDoneUnitIds = dispatchReadyManifestUnitIds.filter((unitId) =>
+    /^done\b/i.test(String(parsed.plan.units?.[unitId]?.state ?? "").trim()),
+  );
+  const dispatchReadyUnitIds = dispatchReadyManifestUnitIds.filter((unitId) => !alreadyDoneUnitIds.includes(unitId));
+
   return {
     ok: true,
     executionIssue: Number(executionIssue),
     planIndexUrl: parsed.plan.planIndex.url,
     manifestCommentId,
     manifestUrl,
+    dispatchReadyUnitIds,
+    alreadyDoneUnitIds,
+  };
+}
+
+// Pure async (given injected `parseExecutionPlanImpl`). Issue #498 unit 498-A, the 2026-09-10
+// #500 live-trace fix: probes whether a valid Execution Plan Index already exists for
+// `executionIssue` before authorizing a fresh planning-worker dispatch off a control Issue
+// still recording `Lifecycle: READY_FOR_PLAN`. Returns { alreadyPlanned: true, planIndexUrl }
+// when parse-execution-plan.mjs resolves a valid plan (exitCode 0) — the #500 shape, where a
+// planning worker already persisted and correctly returned `PLAN_READY <ref>`, but the prior
+// controller stopped without projecting that result into thin control state, leaving
+// `Lifecycle: READY_FOR_PLAN` / `Plan: none` durable and licensing a second, duplicate
+// planning dispatch on the next invocation. Returns { alreadyPlanned: false } for the
+// ordinary "no plan yet" case (exitCode 2 — comments were read but no valid Plan Index
+// parses, the expected shape for a genuine fresh READY_FOR_PLAN control Issue), so the
+// caller falls through to dispatching planning exactly as before this fix. Returns
+// { alreadyPlanned: false, operationalError: true, reason } for exitCode 1 (a real
+// read/network/repository-identity failure) — mirroring verifyRoutedDispatchManifest's own
+// operational-vs-malformed distinction above: authoritative state was never actually
+// reached, so this must never be silently read as "no plan yet" and used to license a
+// possibly-duplicate planning dispatch.
+export async function probeExistingPlan({ repo, executionIssue }, { parseExecutionPlanImpl = defaultParseExecutionPlanImpl } = {}) {
+  const parsed = await parseExecutionPlanImpl({ repo, executionIssue });
+  if (!parsed || parsed.exitCode === 1) {
+    return {
+      alreadyPlanned: false,
+      operationalError: true,
+      reason:
+        "operational failure probing for an already-existing Execution Plan Index while evaluating READY_FOR_PLAN: " +
+        (parsed?.message ?? "unknown operational failure"),
+    };
+  }
+  if (parsed.exitCode !== 0) {
+    return { alreadyPlanned: false };
+  }
+  const planIndexUrl = parsed.plan?.planIndex?.url;
+  if (typeof planIndexUrl !== "string" || !planIndexUrl.trim()) {
+    return { alreadyPlanned: false };
+  }
+  return { alreadyPlanned: true, planIndexUrl };
+}
+
+async function defaultRunPrepareDispatchManifestImpl({ repo, executionIssue }) {
+  const { runPrepareDispatchManifest } = await import("./prepare-dispatch-manifest.mjs");
+  return runPrepareDispatchManifest({ repo, executionIssue });
+}
+
+// Pure async (given injected `runPrepareDispatchManifestImpl`). Issue #498 unit 498-B: probes
+// whether the plan's own units would resolve to route="REPLAN_REQUIRED" -- the exact
+// fail-closed condition `prepare-dispatch-manifest.mjs`'s own persist path (module comment
+// above, its exitCode 3 `REPLAN_REQUIRED` state) already refuses to persist a Dispatch
+// Manifest over -- before a fresh Route/Prepare run is authorized off `Lifecycle: PLAN_READY`.
+// Reuses `runPrepareDispatchManifest` itself as a dry run (no `commentId`/`create`, so nothing
+// is persisted and no comment is written) rather than re-deriving `resolveUnitRoute`'s
+// script/skill/persona/capability-class dispatch tree a second time: the routing computation
+// this performs is byte-for-byte the one the real Route/Prepare invocation would run next, so
+// this can never drift from what `prepare-dispatch-manifest.mjs` itself would decide.
+//
+// Returns { replanRequired: true, planIndexUrl, replanRequiredUnitIds, reason } when one or
+// more units resolve to `REPLAN_REQUIRED` -- `reason` is composed from each such entry's own
+// `note` field (`buildNote`'s exact per-unit escalation reason, e.g. an unresolved capability
+// class), never re-derived or paraphrased. Returns { replanRequired: false } for the ordinary
+// case (every unit routes deterministically -- the expected shape for a genuine PLAN_READY
+// control Issue, and also the expected shape once a planning-correction worker has persisted a
+// corrected plan). Returns { replanRequired: false, operationalError: true, reason } for a
+// real read/network failure -- mirrors probeExistingPlan/verifyRoutedDispatchManifest's own
+// operational-vs-malformed distinction, so a transient failure here is never silently read as
+// "no replan needed" and used to license an unroutable manifest.
+export async function probeReplanRequired(
+  { repo, executionIssue },
+  { runPrepareDispatchManifestImpl = defaultRunPrepareDispatchManifestImpl } = {},
+) {
+  const result = await runPrepareDispatchManifestImpl({ repo, executionIssue });
+  if (!result || result.exitCode === 1) {
+    return {
+      replanRequired: false,
+      operationalError: true,
+      reason:
+        "operational failure computing unit routes while evaluating PLAN_READY for REPLAN_REQUIRED: " +
+        (result?.message ?? "unknown operational failure"),
+    };
+  }
+  if (result.exitCode !== 0) {
+    // exitCode 2 (plan could not be parsed) is not this probe's own concern -- the ordinary
+    // READY_TO_RUN_DISPATCH_MANIFEST path (or verifyRoutedDispatchManifest immediately above
+    // it in checkReadyDispatch) already surfaces a malformed plan as NOT_READY with its own
+    // reason, so this probe stays silent rather than reporting a second, competing diagnosis.
+    return { replanRequired: false };
+  }
+  const replanEntries = (result.entries ?? []).filter((e) => e.route === "REPLAN_REQUIRED");
+  if (replanEntries.length === 0) return { replanRequired: false };
+  return {
+    replanRequired: true,
+    planIndexUrl: result.plan?.planIndex?.url ?? null,
+    replanRequiredUnitIds: replanEntries.map((e) => e.unitId),
+    reason: replanEntries.map((e) => `${e.unitId}: ${e.note}`).join(" | "),
   };
 }
 
@@ -798,18 +1766,43 @@ export async function verifyRoutedDispatchManifest(
 // real network or `gh` CLI. This function always starts from one control-Issue read; when
 // lifecycle is ROUTED it then performs deterministic durable manifest verification reads
 // through verifyRoutedDispatchManifest before authorizing unit dispatch.
-export async function checkReadyDispatch(
+//
+// Named "...Core" and wrapped below (issue #486) so every verdict this returns picks up its
+// `actionEnvelope` field in exactly one place, rather than at each of this function's many
+// individual return sites.
+async function checkReadyDispatchCore(
   { repo, controlIssue },
   {
     ghIssueViewImpl = defaultGhIssueView,
     resolveRepoIdentityImpl = resolveRepoIdentity,
     parseExecutionPlanImpl = defaultParseExecutionPlanImpl,
     ghCommentViewImpl = defaultGhCommentView,
+    // Issue #456 unit 456-B: the READY-lifecycle PR-breakpoint reconciliation's own narrow
+    // lookup (reconcileReadyPrBreakpoint below) is injected the same way as every other
+    // `gh`-backed call in this file, so tests never touch the real network/`gh` CLI.
+    ghPrListImpl = defaultGhPrList,
+    // Issue #498 unit 498-B: left un-defaulted here (rather than defaulting straight to
+    // `defaultRunPrepareDispatchManifestImpl`) so the effective default below can thread this
+    // invocation's own `parseExecutionPlanImpl` through to `probeReplanRequired`'s dry-run
+    // routing computation instead of independently defaulting to the real `gh`-backed plan
+    // parser -- a caller/test that has already injected `parseExecutionPlanImpl` (matching
+    // this file's existing convention for verifyRoutedDispatchManifest/probeExistingPlan)
+    // must not have that isolation silently bypassed by a second, uninjected network call
+    // here. An explicit `runPrepareDispatchManifestImpl` still overrides this entirely, for a
+    // test that wants to control the resolved manifest entries directly.
+    runPrepareDispatchManifestImpl,
   } = {},
 ) {
   if (!controlIssue) {
     return { exitCode: 1, message: "Missing required arg: --control-issue is required." };
   }
+
+  const effectiveRunPrepareDispatchManifestImpl =
+    runPrepareDispatchManifestImpl ??
+    (async ({ repo: prepareRepo, executionIssue }) => {
+      const { runPrepareDispatchManifest } = await import("./prepare-dispatch-manifest.mjs");
+      return runPrepareDispatchManifest({ repo: prepareRepo, executionIssue }, { parseExecutionPlanImpl });
+    });
 
   // Repository identity resolution (issue #344): an explicit `repo` is accepted verbatim
   // only as the documented tests/exceptional-invocation override. The normal production
@@ -836,6 +1829,27 @@ export async function checkReadyDispatch(
     return { exitCode: 1, message: `gh issue view failed for ${resolvedRepo}#${controlIssue}: ${err.message}` };
   }
 
+  const result = evaluateReadyDispatchGate(data.body ?? "", controlIssue);
+  // Issue #407 unit 407-B: AUDIT_ISSUE_DETECTED is disjoint from every other verdict below —
+  // checked first, before even the open-state guard, so a directly-dispatched Stage 2 Audit
+  // Issue never falls into BLOCKED/NOT_READY handling merely because it has no Lifecycle/
+  // Blocker/Founder-decision bullets at all (the #432 regression), and an *already-closed*
+  // directly-dispatched Audit Issue still reaches next-review-transition-gate.mjs's own
+  // idempotent ALREADY_TERMINAL result instead of the generic "is CLOSED, not OPEN" NOT_READY
+  // below (Stage 1 review finding on PR #435: the open-state guard used to run first, so a
+  // closed canonical Audit Issue could never reach this classification at all). exit 9 is the
+  // next unused integer after this file's existing 0/1/3/4/5/6/7/8.
+  if (result.status === "AUDIT_ISSUE_DETECTED") {
+    return {
+      exitCode: 9,
+      state: "AUDIT_ISSUE_DETECTED",
+      controlIssue: Number(controlIssue),
+      repo: resolvedRepo,
+      auditIssue: result.auditIssue,
+      nextCommand: result.nextCommand,
+    };
+  }
+
   if (data.state !== "OPEN") {
     return {
       exitCode: 3,
@@ -846,25 +1860,210 @@ export async function checkReadyDispatch(
     };
   }
 
-  const result = evaluateReadyDispatchGate(data.body ?? "", controlIssue);
   if (result.status === "BLOCKED") {
-    return { exitCode: 4, state: "BLOCKED", controlIssue: Number(controlIssue), repo: resolvedRepo, reasons: result.reasons };
+    return {
+      exitCode: 4,
+      state: "BLOCKED",
+      controlIssue: Number(controlIssue),
+      repo: resolvedRepo,
+      reasons: result.reasons,
+      // Issue #437/#610 Stage 1 finding 1: the one mechanically-recognizable condition under
+      // which AGENTS.md § Session execution's BLOCKED paragraph authorizes a single
+      // reconcile-control-blocker.mjs step before treating this as a genuine stop.
+      // action-envelope.mjs's getActionEnvelope reads this exact field to decide BLOCKED's
+      // envelope — never a substring match over `reasons` prose.
+      blockerReconciliationEligible: result.blockerActive === true,
+    };
   }
   if (result.status === "NOT_READY") {
-    return { exitCode: 3, state: "NOT_READY", controlIssue: Number(controlIssue), repo: resolvedRepo, reasons: result.reasons };
+    return {
+      exitCode: 3,
+      state: "NOT_READY",
+      controlIssue: Number(controlIssue),
+      repo: resolvedRepo,
+      reasons: result.reasons,
+      ...(result.postPrLifecycle ? { postPrLifecycle: result.postPrLifecycle } : {}),
+    };
   }
 
   // #397's four new pre-PR pipeline verdicts each get their own exit code, distinct from
   // READY_TO_DISPATCH's 0 and from each other, so a caller (or a test) can never mistake one
   // for another purely from the exit code alone. Chosen to avoid every exit code already
   // fixed above (0, 1, 3, 4) and below (none currently used past 4), documented together
-  // here since there is no established prior convention this had to match.
+  // here since there is no established prior convention this had to match. Issue #498 unit
+  // 498-A adds READY_TO_PROJECT_PLAN_READY (10) and READY_TO_PROJECT_ROUTED (11) — the next
+  // unused integers after 9 (AUDIT_ISSUE_DETECTED) — for the idempotent-recovery verdicts
+  // below. Unit 498-B adds REPLAN_REQUIRED (12) — the next unused integer after 11 — per the
+  // Shared Contract's own exit-code-discipline requirement: never reuse 3 (NOT_READY) or 4
+  // (BLOCKED), since AGENTS.md's controller contract treats those as license to fall through
+  // to free reasoning, which REPLAN_REQUIRED must never permit.
   const EXIT_CODES_BY_STATUS = {
     READY_TO_DISPATCH_PLANNING: 5,
     READY_TO_RUN_DISPATCH_MANIFEST: 6,
     READY_TO_DISPATCH_UNITS: 7,
     READY_TO_DISPATCH_INTEGRATION: 8,
+    READY_TO_PROJECT_PLAN_READY: 10,
+    READY_TO_PROJECT_ROUTED: 11,
+    REPLAN_REQUIRED: 12,
   };
+
+  // Issue #498 unit 498-A, the 2026-09-10 #500 live-trace fix: before authorizing a fresh
+  // planning-worker dispatch off `Lifecycle: READY_FOR_PLAN`, check whether a valid
+  // Execution Plan Index already exists (probeExistingPlan's own comment above has the full
+  // rationale — this is the #500 stranded-state shape). A hit converges thin control state
+  // in one step: it returns the exact `proposedBody` (current body with Lifecycle replaced
+  // to PLAN_READY and a Plan bullet upserted with the canonical Plan Index permalink) ready
+  // to pipe into write-control-snapshot.mjs verbatim, so the controller never composes this
+  // edit by hand. A miss (exitCode 2 — no plan yet) falls through to the ordinary
+  // READY_TO_DISPATCH_PLANNING verdict below, unchanged from before this fix.
+  if (result.status === "READY_TO_DISPATCH_PLANNING") {
+    const probe = await probeExistingPlan({ repo: resolvedRepo, executionIssue: result.executionIssue }, { parseExecutionPlanImpl });
+    if (probe.operationalError) {
+      return {
+        exitCode: 1,
+        message:
+          `Operational failure probing for an already-existing Execution Plan Index for ${resolvedRepo}#${result.executionIssue} ` +
+          `while evaluating READY_FOR_PLAN: ${probe.reason}`,
+      };
+    }
+    if (probe.alreadyPlanned) {
+      const proposedBody = upsertControlBullet(upsertControlBullet(data.body ?? "", "Lifecycle", "PLAN_READY"), "Plan", probe.planIndexUrl);
+      return {
+        exitCode: EXIT_CODES_BY_STATUS.READY_TO_PROJECT_PLAN_READY,
+        state: "READY_TO_PROJECT_PLAN_READY",
+        stopAfter: true,
+        controlIssue: Number(controlIssue),
+        repo: resolvedRepo,
+        executionIssue: result.executionIssue,
+        planIndexUrl: probe.planIndexUrl,
+        proposedBody,
+      };
+    }
+  }
+
+  // The analogous PLAN_READY -> ROUTED case (#498 Live reproduction C, #497/#499): before
+  // running prepare-dispatch-manifest.mjs to create a first Dispatch Manifest, check whether
+  // one already exists and verifies — reusing verifyRoutedDispatchManifest itself, the exact
+  // check the ROUTED path below already performs, rather than a second competing check. A
+  // hit means a prior Route/Prepare session already persisted and verified the manifest but
+  // the controller stopped before projecting `Lifecycle: ROUTED`; a miss (no settled
+  // Dispatch manifest pointer yet — the ordinary case for a genuine fresh PLAN_READY control
+  // Issue) falls through to READY_TO_RUN_DISPATCH_MANIFEST below, unchanged.
+  if (result.status === "READY_TO_RUN_DISPATCH_MANIFEST") {
+    // Stage 1 review finding on this PR (P2): a REPLAN_REQUIRED correction publishes a *new*
+    // canonical Execution Plan Index comment (`format-execution-plan.mjs --publish` always
+    // creates a new comment rather than patching the rejected one) while the control Issue's
+    // own "- **Plan:**" bullet still names the rejected plan. Every routing computation below
+    // (`verifyRoutedDispatchManifest`, `probeReplanRequired`) already reads the *canonical*
+    // latest plan straight off the execution Issue via `parseExecutionPlanImpl` — so routing
+    // itself never targets stale content — but nothing previously re-projected that corrected
+    // reference into the control Issue's own durable snapshot before advancing. That leaves
+    // "Plan:" contradicting the plan routing is actually using throughout manifest preparation
+    // and unit dispatch, violating the same "produce -> verify -> project -> stop" invariant
+    // unit 498-A's READY_FOR_PLAN -> PLAN_READY convergence already established above.
+    //
+    // Gated on an *existing, non-null* "- **Plan:**" bullet, not merely "canonical plan found":
+    // a PLAN_READY control Issue that has never carried a "Plan:" bullet at all (every fixture
+    // predating unit 498-A's own convergence work, and the #498 Live reproduction C /
+    // READY_TO_PROJECT_ROUTED test below, which has an already-verified manifest and a body with
+    // no "Plan:" bullet) is not stale — there is nothing to reconcile, and treating "absent" the
+    // same as "stale" would force every such Issue through a spurious extra projection stop
+    // before it could ever reach ROUTED, or loop back to the same projection forever if nothing
+    // ever adds the bullet. Only a control Issue that already recorded a canonical Plan
+    // reference and now disagrees with the execution Issue's current latest plan is stale.
+    const currentPlanRaw = parseControlBullet(data.body ?? "", "Plan");
+    if (currentPlanRaw != null) {
+      const canonicalPlanProbe = await probeExistingPlan({ repo: resolvedRepo, executionIssue: result.executionIssue }, { parseExecutionPlanImpl });
+      if (canonicalPlanProbe.operationalError) {
+        return {
+          exitCode: 1,
+          message:
+            `Operational failure reading the canonical Execution Plan Index for ${resolvedRepo}#${result.executionIssue} ` +
+            `while evaluating PLAN_READY: ${canonicalPlanProbe.reason}`,
+        };
+      }
+      if (canonicalPlanProbe.alreadyPlanned && currentPlanRaw !== canonicalPlanProbe.planIndexUrl) {
+        const proposedBody = upsertControlBullet(data.body ?? "", "Plan", canonicalPlanProbe.planIndexUrl);
+        return {
+          exitCode: EXIT_CODES_BY_STATUS.READY_TO_PROJECT_PLAN_READY,
+          state: "READY_TO_PROJECT_PLAN_READY",
+          stopAfter: true,
+          controlIssue: Number(controlIssue),
+          repo: resolvedRepo,
+          executionIssue: result.executionIssue,
+          planIndexUrl: canonicalPlanProbe.planIndexUrl,
+          proposedBody,
+        };
+      }
+    }
+
+    const manifestProbe = await verifyRoutedDispatchManifest(
+      { repo: resolvedRepo, executionIssue: result.executionIssue },
+      { parseExecutionPlanImpl, ghCommentViewImpl },
+    );
+    if (manifestProbe.operationalError) {
+      return {
+        exitCode: 1,
+        message:
+          `Operational failure probing for an already-verified Dispatch Manifest for ${resolvedRepo}#${result.executionIssue} ` +
+          `while evaluating PLAN_READY: ${manifestProbe.reason}`,
+      };
+    }
+    if (manifestProbe.ok) {
+      const proposedBody = upsertControlBullet(data.body ?? "", "Lifecycle", "ROUTED");
+      return {
+        exitCode: EXIT_CODES_BY_STATUS.READY_TO_PROJECT_ROUTED,
+        state: "READY_TO_PROJECT_ROUTED",
+        stopAfter: true,
+        controlIssue: Number(controlIssue),
+        repo: resolvedRepo,
+        executionIssue: result.executionIssue,
+        planIndexUrl: manifestProbe.planIndexUrl,
+        manifestCommentId: manifestProbe.manifestCommentId,
+        manifestUrl: manifestProbe.manifestUrl,
+        proposedBody,
+      };
+    }
+
+    // Issue #498 unit 498-B: before falling through to the ordinary
+    // READY_TO_RUN_DISPATCH_MANIFEST verdict below (which would authorize the controller to
+    // run `prepare-dispatch-manifest.mjs --create`), check whether that same run would itself
+    // hit route=REPLAN_REQUIRED -- reproductions #407/#408 and #454/#455 both began exactly
+    // there, when the controller received that fail-closed result out-of-band (via the
+    // script's own stderr/exit code) and then read Worker Unit Contract bodies, the Shared
+    // Contract body, and router/parser source to diagnose it by hand instead of dispatching a
+    // planning-correction worker by reference. Surfacing it here, before the controller ever
+    // runs that command itself, means the fail-closed stop is this gate's own compact verdict
+    // from the start, not something the controller discovers only after already reaching for
+    // richer diagnostic context.
+    const replanProbe = await probeReplanRequired(
+      { repo: resolvedRepo, executionIssue: result.executionIssue },
+      { runPrepareDispatchManifestImpl: effectiveRunPrepareDispatchManifestImpl },
+    );
+    if (replanProbe.operationalError) {
+      return {
+        exitCode: 1,
+        message:
+          `Operational failure computing unit routes for ${resolvedRepo}#${result.executionIssue} ` +
+          `while evaluating PLAN_READY for REPLAN_REQUIRED: ${replanProbe.reason}`,
+      };
+    }
+    if (replanProbe.replanRequired) {
+      return {
+        exitCode: EXIT_CODES_BY_STATUS.REPLAN_REQUIRED,
+        state: "REPLAN_REQUIRED",
+        stopAfter: true,
+        controlIssue: Number(controlIssue),
+        repo: resolvedRepo,
+        executionIssue: result.executionIssue,
+        planIndexUrl: replanProbe.planIndexUrl,
+        replanRequiredUnitIds: replanProbe.replanRequiredUnitIds,
+        reason: replanProbe.reason,
+        route: "planning worker",
+      };
+    }
+  }
+
   if (result.status === "READY_TO_VERIFY_DISPATCH_MANIFEST") {
     const manifestCheck = await verifyRoutedDispatchManifest(
       { repo: resolvedRepo, executionIssue: result.executionIssue },
@@ -892,21 +2091,49 @@ export async function checkReadyDispatch(
         reasons: [manifestCheck.reason],
       };
     }
+    // Issue #456 unit 456-B (the #537/#539/#540 live reproduction): verifyRoutedDispatchManifest
+    // has already reconciled every dispatch_ready=true manifest entry against that same unit's
+    // live Worker Unit Contract State. When every currently dispatch_ready=true entry already
+    // recorded DONE, there is nothing left in this wave to legitimately dispatch — the PR/
+    // Stage 1 breakpoint for that unit has already been crossed even though this control
+    // Issue's own Lifecycle is still "ROUTED". Falling back to ordinary NOT_READY (rather than
+    // authorizing READY_TO_DISPATCH_UNITS with an empty dispatch list) keeps this gate's
+    // existing contract intact: NOT_READY's own fallthrough is what routes the next fresh
+    // controller into the reasoning that discovers and reconciles the real post-PR state, per
+    // Required behavior item 4's "route toward post-PR handling instead of dispatching when
+    // reconciliation finds the boundary already crossed."
+    if (manifestCheck.dispatchReadyUnitIds.length === 0 && manifestCheck.alreadyDoneUnitIds.length > 0) {
+      return {
+        exitCode: 3,
+        state: "NOT_READY",
+        controlIssue: Number(controlIssue),
+        repo: resolvedRepo,
+        reasons: [
+          `every unit this Dispatch Manifest currently marks dispatch_ready=true (${manifestCheck.alreadyDoneUnitIds.join(", ")}) ` +
+            `already record "State: DONE" on their own Worker Unit Contract -- the PR/Stage 1 breakpoint for this wave has already been ` +
+            `crossed even though Lifecycle is still "ROUTED"; do not redispatch, reconcile toward post-PR handling instead`,
+        ],
+      };
+    }
     return {
       exitCode: EXIT_CODES_BY_STATUS.READY_TO_DISPATCH_UNITS,
       state: "READY_TO_DISPATCH_UNITS",
+      stopAfter: true,
       controlIssue: Number(controlIssue),
       repo: resolvedRepo,
       executionIssue: result.executionIssue,
       planIndexUrl: manifestCheck.planIndexUrl,
       manifestCommentId: manifestCheck.manifestCommentId,
       manifestUrl: manifestCheck.manifestUrl,
+      dispatchReadyUnitIds: manifestCheck.dispatchReadyUnitIds,
+      ...(manifestCheck.alreadyDoneUnitIds.length > 0 ? { alreadyDoneUnitIds: manifestCheck.alreadyDoneUnitIds } : {}),
     };
   }
   if (result.status in EXIT_CODES_BY_STATUS) {
     return {
       exitCode: EXIT_CODES_BY_STATUS[result.status],
       state: result.status,
+      stopAfter: true,
       controlIssue: Number(controlIssue),
       repo: resolvedRepo,
       executionIssue: result.executionIssue,
@@ -914,14 +2141,60 @@ export async function checkReadyDispatch(
     };
   }
 
+  // Issue #456 unit 456-B (the #447/#448/#453 live reproduction): the last remaining
+  // possibility once every branch above has been exhausted is the plain `Lifecycle: READY`
+  // direct-dispatch route (result.status === "READY_TO_DISPATCH", the one status
+  // evaluateReadyDispatchGate returns that is not itself a key of EXIT_CODES_BY_STATUS).
+  // Unlike the pre-PR pipeline's ROUTED path above, a direct/READY control Issue carries no
+  // plan/unit machinery whose own durable state could otherwise prove a PR already exists, so
+  // this reconciles against the one narrow execution-linked PR lookup the Shared Contract
+  // authorizes for exactly this route before ever authorizing a fresh dispatch.
+  const reconciliation = await reconcileReadyPrBreakpoint(
+    { repo: resolvedRepo, executionIssue: result.executionIssue },
+    { ghPrListImpl },
+  );
+  if (reconciliation.operationalError) {
+    return {
+      exitCode: 1,
+      message:
+        `Operational failure reconciling a possibly-already-crossed PR breakpoint for ${resolvedRepo}#${result.executionIssue} ` +
+        `while evaluating READY: ${reconciliation.reason}`,
+    };
+  }
+  if (reconciliation.crossed) {
+    return {
+      exitCode: 3,
+      state: "NOT_READY",
+      controlIssue: Number(controlIssue),
+      repo: resolvedRepo,
+      reasons: [
+        `execution Issue #${result.executionIssue} already has a linked PR (${reconciliation.pr.url}, state ${reconciliation.pr.state}) ` +
+          `even though this control Issue's own "PR" bullet does not record it -- the PR/Stage 1 breakpoint has already been crossed; ` +
+          `do not redispatch implementation, reconcile toward post-PR handling instead`,
+      ],
+    };
+  }
+
   return {
     exitCode: 0,
     state: "READY_TO_DISPATCH",
+    stopAfter: true,
     controlIssue: Number(controlIssue),
     repo: resolvedRepo,
     executionIssue: result.executionIssue,
     route: result.route,
   };
+}
+
+// Issue #486: attaches the deterministic `actionEnvelope` (see action-envelope.mjs) to every
+// verdict this gate returns, keyed off the verdict's own `state`. A result with no `state`
+// (the exitCode-1 operational-error shape) is left untouched — that is not a verdict on
+// control-Issue content at all, per AGENTS.md § Session execution, so it must not carry an
+// envelope that could be mistaken for one.
+export async function checkReadyDispatch(args, impls) {
+  const result = await checkReadyDispatchCore(args, impls);
+  if (typeof result.state !== "string") return result;
+  return { ...result, actionEnvelope: getActionEnvelope(result.state, result) };
 }
 
 function parseArgs(argv) {

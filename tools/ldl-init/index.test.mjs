@@ -23,6 +23,8 @@ import {
   derivePendingManualIntegration,
   deriveSyncPrerequisiteWarnings,
   findBridgeByDestRel,
+  findHardDependencyCollisions,
+  HARD_MODULE_DEPENDENCIES,
   isValidManifest,
   looksBinary,
   normalizeLineEndings,
@@ -587,6 +589,201 @@ test("run: skips a destination colliding with a pre-existing unmanaged file insi
   assert.ok(!manifest.files.some((f) => f.dest === ".claude/skills/context-clearing/SKILL.md"));
 });
 
+test("findHardDependencyCollisions: flags a skipped hard-import dependency whose importer is about to be (re)installed", () => {
+  const toInstall = [{ destRel: "tools/orchestration/format-execution-plan.mjs", content: Buffer.from("x") }];
+  const toSkip = [{ dest: "tools/orchestration/dependency-grammar.mjs", reason: "destination already exists and is not LDL-managed" }];
+  const collisions = findHardDependencyCollisions({ toInstall, toSkip });
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].dest, "tools/orchestration/dependency-grammar.mjs");
+  assert.match(collisions[0].reason, /format-execution-plan\.mjs/);
+});
+
+test("findHardDependencyCollisions: no collision when the dependency isn't skipped, or the importer isn't being installed", () => {
+  assert.deepEqual(
+    findHardDependencyCollisions({
+      toInstall: [{ destRel: "tools/orchestration/format-execution-plan.mjs", content: Buffer.from("x") }],
+      toSkip: [],
+    }),
+    [],
+  );
+  assert.deepEqual(
+    findHardDependencyCollisions({
+      toInstall: [],
+      toSkip: [{ dest: "tools/orchestration/dependency-grammar.mjs", reason: "destination already exists and is not LDL-managed" }],
+    }),
+    [],
+  );
+});
+
+// Issue #437/#610 Stage 1 finding 7: the analogous collision coverage for
+// reconcile-control-blocker.mjs's own hard import of blocker-grammar.mjs, mirroring the
+// dependency-grammar.mjs coverage immediately above.
+test("findHardDependencyCollisions: flags a skipped blocker-grammar.mjs dependency whose importer (reconcile-control-blocker.mjs) is about to be (re)installed", () => {
+  const toInstall = [{ destRel: "tools/orchestration/reconcile-control-blocker.mjs", content: Buffer.from("x") }];
+  const toSkip = [{ dest: "tools/orchestration/blocker-grammar.mjs", reason: "destination already exists and is not LDL-managed" }];
+  const collisions = findHardDependencyCollisions({ toInstall, toSkip });
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].dest, "tools/orchestration/blocker-grammar.mjs");
+  assert.match(collisions[0].reason, /reconcile-control-blocker\.mjs/);
+});
+
+// Issue #618 Stage 1 review finding (P2): the analogous collision coverage for
+// correct-unit-dependency.mjs's own hard imports, mirroring the dependency-grammar.mjs/
+// blocker-grammar.mjs coverage above. One representative edge (ready-dispatch-gate.mjs) is
+// enough here -- the "every declared pair is a real path" test below already structurally
+// validates every edge this importer declares.
+test("findHardDependencyCollisions: flags a skipped ready-dispatch-gate.mjs dependency whose importer (correct-unit-dependency.mjs) is about to be (re)installed", () => {
+  const toInstall = [{ destRel: "tools/orchestration/correct-unit-dependency.mjs", content: Buffer.from("x") }];
+  const toSkip = [{ dest: "tools/orchestration/ready-dispatch-gate.mjs", reason: "destination already exists and is not LDL-managed" }];
+  const collisions = findHardDependencyCollisions({ toInstall, toSkip });
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].dest, "tools/orchestration/ready-dispatch-gate.mjs");
+  assert.match(collisions[0].reason, /correct-unit-dependency\.mjs/);
+});
+
+test("HARD_MODULE_DEPENDENCIES: every declared importer/dependency pair is a real path this repository actually ships", () => {
+  for (const { dest, dependsOnDest } of HARD_MODULE_DEPENDENCIES) {
+    assert.ok(existsSync(join(REPO_ROOT, dest)), `${dest} does not exist in this repository`);
+    assert.ok(existsSync(join(REPO_ROOT, dependsOnDest)), `${dependsOnDest} does not exist in this repository`);
+  }
+});
+
+// Extends makeFixtureRoot's generic dir-item content with the two real filenames
+// HARD_MODULE_DEPENDENCIES names, so buildOps/planInstall produce ops shaped like the real
+// tools/orchestration hazard rather than only the generic SKILL.md/extra.md placeholders.
+function addHardDependencyFixtureFiles(root) {
+  mkdirSync(join(root, "tools", "orchestration"), { recursive: true });
+  writeFileSync(
+    join(root, "tools", "orchestration", "dependency-grammar.mjs"),
+    "export function extractDependencyUnitIds() { return []; }\n",
+  );
+  writeFileSync(
+    join(root, "tools", "orchestration", "format-execution-plan.mjs"),
+    'import { extractDependencyUnitIds } from "./dependency-grammar.mjs";\n',
+  );
+}
+
+// Issue #437/#610 Stage 1 finding 7: the analogous fixture-file helper for the
+// reconcile-control-blocker.mjs -> blocker-grammar.mjs hard-import edge.
+function addBlockerGrammarFixtureFiles(root) {
+  mkdirSync(join(root, "tools", "orchestration"), { recursive: true });
+  writeFileSync(
+    join(root, "tools", "orchestration", "blocker-grammar.mjs"),
+    "export function extractBlockedByIssueNumbers() { return []; }\n",
+  );
+  writeFileSync(
+    join(root, "tools", "orchestration", "reconcile-control-blocker.mjs"),
+    'import { extractBlockedByIssueNumbers } from "./blocker-grammar.mjs";\n',
+  );
+}
+
+test("run: refuses atomically, writing nothing, when installing reconcile-control-blocker.mjs would leave it unable to load an unmanaged, preserved blocker-grammar.mjs (Stage 1 finding 7 on #610, mirroring the #522/PR #530 dependency-grammar.mjs precedent)", async (t) => {
+  const root = makeFixtureRoot(t);
+  addBlockerGrammarFixtureFiles(root);
+  const dest = tempDir(t);
+  mkdirSync(join(dest, "tools", "orchestration"), { recursive: true });
+  writeFileSync(
+    join(dest, "tools", "orchestration", "blocker-grammar.mjs"),
+    "// consumer-owned file, predates LDL's own blocker-grammar.mjs, exports nothing LDL needs\n",
+  );
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /blocker-grammar\.mjs/);
+  assert.match(result.message, /reconcile-control-blocker\.mjs/);
+  assert.ok(!existsSync(join(dest, ".ldl", "manifest.json")), "no manifest must be written when the operation is refused");
+  assert.equal(
+    readFileSync(join(dest, "tools", "orchestration", "blocker-grammar.mjs"), "utf8"),
+    "// consumer-owned file, predates LDL's own blocker-grammar.mjs, exports nothing LDL needs\n",
+    "the consumer's own file must be left untouched",
+  );
+  assert.ok(
+    !existsSync(join(dest, "tools", "orchestration", "reconcile-control-blocker.mjs")),
+    "the hard importer must not be written either -- the whole operation is refused atomically",
+  );
+});
+
+test("run: refuses atomically, writing nothing, when installing a hard importer would leave it unable to load its unmanaged, preserved dependency (#522 Stage 1 review finding on PR #530)", async (t) => {
+  const root = makeFixtureRoot(t);
+  addHardDependencyFixtureFiles(root);
+  const dest = tempDir(t);
+  mkdirSync(join(dest, "tools", "orchestration"), { recursive: true });
+  writeFileSync(
+    join(dest, "tools", "orchestration", "dependency-grammar.mjs"),
+    "// consumer-owned file, predates LDL's own dependency-grammar.mjs, exports nothing LDL needs\n",
+  );
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /dependency-grammar\.mjs/);
+  assert.match(result.message, /format-execution-plan\.mjs/);
+  assert.ok(!existsSync(join(dest, ".ldl", "manifest.json")), "no manifest must be written when the operation is refused");
+  assert.equal(
+    readFileSync(join(dest, "tools", "orchestration", "dependency-grammar.mjs"), "utf8"),
+    "// consumer-owned file, predates LDL's own dependency-grammar.mjs, exports nothing LDL needs\n",
+    "the consumer's own file must be left untouched",
+  );
+  assert.ok(
+    !existsSync(join(dest, "tools", "orchestration", "format-execution-plan.mjs")),
+    "the hard importer must not be written either -- the whole operation is refused atomically",
+  );
+});
+
+test("run: a repeat run refusing a hard-dependency collision must not first delete a superseded bridge template (Stage 2 audit #531 P2 finding)", async (t) => {
+  // Deliberately built WITHOUT the hard-dependency fixture files yet, so the first run below
+  // has nothing to collide on and can succeed normally.
+  const root = makeFixtureRoot(t);
+  const dest = tempDir(t);
+  writeFileSync(join(dest, "AGENTS.md"), "MY PROJECT'S OWN AGENTS.md\n");
+
+  const first = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+  assert.equal(first.exitCode, 0);
+  assert.ok(existsSync(join(dest, ".ldl", "AGENTS.template.md")), "first run must park the derived template");
+  const manifestAfterFirst = readManifest(dest);
+
+  // Between runs: the LDL source root gains the hard-import pair (as if updating to a newer
+  // LDL revision); the consumer removes their own AGENTS.md (so this run would supersede the
+  // parked template by installing AGENTS.md directly); and the consumer separately already owns
+  // an unmanaged tools/orchestration/dependency-grammar.mjs (so this same run must also refuse on
+  // the hard-dependency collision).
+  addHardDependencyFixtureFiles(root);
+  rmSync(join(dest, "AGENTS.md"));
+  mkdirSync(join(dest, "tools", "orchestration"), { recursive: true });
+  writeFileSync(
+    join(dest, "tools", "orchestration", "dependency-grammar.mjs"),
+    "// consumer-owned file, predates LDL's own dependency-grammar.mjs, exports nothing LDL needs\n",
+  );
+
+  const second = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(second.exitCode, 1);
+  assert.match(second.message, /dependency-grammar\.mjs/);
+  assert.ok(
+    existsSync(join(dest, ".ldl", "AGENTS.template.md")),
+    "the refused run must not delete the still-referenced, superseded template",
+  );
+  assert.deepEqual(
+    readManifest(dest),
+    manifestAfterFirst,
+    "the refused run must leave the existing manifest completely unchanged",
+  );
+});
+
+test("run: still installs normally when the consumer has no pre-existing dependency-grammar.mjs at all", async (t) => {
+  const root = makeFixtureRoot(t);
+  addHardDependencyFixtureFiles(root);
+  const dest = tempDir(t);
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  const manifest = readManifest(dest);
+  assert.ok(manifest.files.some((f) => f.dest === "tools/orchestration/dependency-grammar.mjs"));
+  assert.ok(manifest.files.some((f) => f.dest === "tools/orchestration/format-execution-plan.mjs"));
+});
+
 test("run: skips, without crashing, a destination whose parent already exists as a plain file", async (t) => {
   const root = makeFixtureRoot(t);
   const dest = tempDir(t);
@@ -666,6 +863,34 @@ test("run: installs .github/ISSUE_TEMPLATE content required by the installed bou
   assert.ok(existsSync(join(dest, ".github", "ISSUE_TEMPLATE", "SKILL.md")));
   const manifest = readManifest(dest);
   assert.ok(manifest.files.some((f) => f.dest.startsWith(".github/ISSUE_TEMPLATE/")));
+});
+
+// Regression guard for a Stage 1 finding on PR #449 (issue #427): docs/stage2-audit-contract.md
+// is the canonical Stage 2 response-contract authority that .github/ISSUE_TEMPLATE/
+// audit-control-issue.yml and docs/bounded-review-cycle.md both point auditors at by path. Before
+// this fix, MANAGED_ITEMS installed both referencing files but not the contract doc itself, so a
+// consumer's audit Issue and lifecycle docs sent a fresh Stage 2 auditor to a local file that
+// never existed in that repository. Installs this repository's REAL content (not a fixture, whose
+// placeholder text would never contain the reference strings this test looks for) into a
+// disposable consumer-shaped dest, the same way the spend-skill regression test above does, and
+// proves the contract doc lands in the same run as every real file that references it by path —
+// so the reference resolves locally in an actual consumer checkout.
+test("run: installs docs/stage2-audit-contract.md alongside every installed file that references it by path", async (t) => {
+  const dest = tempDir(t);
+
+  const result = await run({ dest, root: REPO_ROOT }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  assert.ok(existsSync(join(dest, "docs", "stage2-audit-contract.md")), "docs/stage2-audit-contract.md must be installed");
+  const manifest = readManifest(dest);
+  assert.ok(manifest.files.some((f) => f.dest === "docs/stage2-audit-contract.md"));
+
+  const referencingDests = [join(dest, "docs", "bounded-review-cycle.md"), join(dest, ".github", "ISSUE_TEMPLATE", "audit-control-issue.yml")];
+  for (const referencingDest of referencingDests) {
+    assert.ok(existsSync(referencingDest), `${referencingDest} must be installed`);
+    const content = readFileSync(referencingDest, "utf8");
+    assert.ok(content.includes("docs/stage2-audit-contract.md"), `${referencingDest} must reference docs/stage2-audit-contract.md`);
+  }
 });
 
 test("run: removes a superseded .ldl/AGENTS.template.md once the consumer's own AGENTS.md is gone and LDL starts managing AGENTS.md directly", async (t) => {

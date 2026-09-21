@@ -56,6 +56,14 @@
 // worker dispatched on a satisfied READY immediate-dispatch gate — and that scope is
 // deliberate, not an oversight to be widened with a second mode.
 //
+// Issue #570 extends this same table-driven selection to `next-review-transition-gate.mjs`'s
+// two post-PR correction verdicts, closing the exact #451/PR #569 reproduction where a
+// mechanically authorized `STAGE1_CORRECTION_REQUIRED` -> `dispatch-correction-worker`
+// transition (per `tools/orchestration/action-envelope.mjs`) had no deterministic prompt path:
+//   node tools/orchestration/next-review-transition-gate.mjs --control-issue 451 \
+//     | node tools/orchestration/format-dispatch-prompt.mjs
+// and the equivalent for `STAGE2_CORRECTION_REQUIRED` from a post-merge NOT CLEAN verdict.
+//
 // Tests: node --test tools/orchestration/format-dispatch-prompt.test.mjs
 
 import { readFileSync } from "node:fs";
@@ -89,12 +97,13 @@ export function formatDispatchPrompt({ controlIssue, executionIssue, route }) {
     `Implementation worker dispatch. Execution Issue: #${executionIssue}. ` +
     `Controlling Issue: #${controlIssue}. Route: ${route}.\n\n` +
     `Read #${executionIssue} directly from GitHub for its full outcome, constraints, and ` +
-    `acceptance criteria — it was not restated here on purpose. Execute it per AGENTS.md ` +
-    `and, for review-worthy work, docs/bounded-review-cycle.md. Report back using ` +
-    `AGENTS.md's Slice handoff format. Once the PR exists — Stage 1 review requested, or ` +
-    `a recorded Stage 1 exemption for non-review-worthy work — stop: do not wait, poll, ` +
-    `merge, or begin Stage 2; those are fresh-worker or deterministic steps per ` +
-    `docs/operating-model.md § Watched lifecycle breakpoints.`
+    `acceptance criteria. Execute it per AGENTS.md and, for review-worthy work, ` +
+    `docs/bounded-review-cycle.md. Once the PR exists — Stage 1 review requested, or a ` +
+    `recorded Stage 1 exemption for non-review-worthy work — run ` +
+    `tools/orchestration/finalize-pr-breakpoint.mjs (report PR_BREAKPOINT_UNVERIFIED, not ` +
+    `success, if it fails), then stop: do not wait, poll, merge, or begin Stage 2; those ` +
+    `are fresh-worker or deterministic steps per docs/operating-model.md § Watched ` +
+    `lifecycle breakpoints.`
   );
 }
 
@@ -122,6 +131,92 @@ export function formatPlanningWorkerDispatchPrompt({ controlIssue, executionIssu
   );
 }
 
+// Pure. Renders the fixed reference-only "Planning-correction worker dispatch" template for
+// issue #498 unit 498-B's new REPLAN_REQUIRED verdict (`ready-dispatch-gate.mjs`'s
+// `probeReplanRequired`). Modeled on `formatPlanningWorkerDispatchPrompt` above — a
+// planning-correction is the same planning capability revisiting its own prior output, not a
+// new worker role.
+//
+// Stage 1 review finding on this PR (P1): the first version of this template interpolated
+// every `replanRequiredUnitIds` entry verbatim into the prompt text. That makes the prompt's
+// length a function of how many units a given plan has failing at once — unbounded by
+// construction, not merely by a route string's length the way `assertReferenceOnly`'s own doc
+// comment above describes. A plan with enough failing units (or a longer realistic repository
+// permalink) pushes the rendered prompt past the 700-char reference-only threshold,
+// `assertReferenceOnly` throws, and the mandatory planning-correction dispatch cannot happen at
+// all — exactly the liveness failure REPLAN_REQUIRED exists to avoid. Rather than raise the
+// threshold (which only postpones the same failure at a larger plan size), this template no
+// longer carries the failing unit set as prose at all: it points the dispatched worker at
+// `ready-dispatch-gate.mjs` itself, re-run with the same `controlIssue`, to recover the current
+// failing unit(s) and reason from durable authority. That is the exact same deterministic
+// computation `probeReplanRequired` already performed to produce this verdict, so the worker
+// gets identical information without the controller ever having to fit an open-ended list into
+// a fixed-size template.
+//
+// Deliberately omits the verdict's own `reason` text from the prompt itself — that string is
+// for the controller's compact chat/handoff record, not the worker prompt; the dispatched
+// worker reads the authoritative routing failure directly off the Plan Index/unit contracts
+// (and, now, the gate's own re-run output) it is pointed at, exactly as every other dispatch
+// template in this file hands over references rather than restated content.
+//
+// Stage 2 audit finding on issue #526 (audited merge commit 442d19de03cd94769bac0ebaf5f8ddae0
+// cbbd515): removing the unit-list interpolation above was not by itself a structural bound —
+// `controlIssue` and `executionIssue` are only validated by `isPositiveInteger` (no digit-count
+// ceiling), a real GitHub comment permalink can carry a 39-char username, a 100-char repository
+// name (GitHub's own structural maximums), and a comment/issue id already around 10 digits and
+// growing, and the fix still rendered `controlIssue` twice and the full `planIndexUrl` once.
+// That fix's own verification test also only exercised 3-digit control/execution issue numbers,
+// so it never measured the shape this finding reproduced.
+//
+// Stage 1 review finding on the follow-up correction PR #527: even after bounding
+// `controlIssue`/`executionIssue` to a single rendering each, `planIndexUrl` embeds the
+// checkout's own git host, not merely "github.com" — `resolveRepoIdentity`/
+// `parseOwnerRepoFromRemoteUrl` in `ready-dispatch-gate.mjs` accept GitHub Enterprise remotes
+// with an arbitrarily longer hostname, and that host is not bounded by any GitHub API
+// limit the way username/repo-name length is. A 60-char Enterprise hostname alone pushed the
+// then-current worst case from 677 to 727 chars. There is no way to bound an arbitrary
+// hostname's length by construction, so the fix is not another round of prose-trimming
+// arithmetic against a slightly-wider worst case: `planIndexUrl` is no longer rendered into the
+// prompt text at all. The worker is instead told to recover the Plan Index the same way it
+// already recovers the failing unit set — by re-running `ready-dispatch-gate.mjs` against the
+// Controlling Issue above, which returns `planIndexUrl` from the exact same deterministic
+// `probeReplanRequired` computation this verdict itself used. `planIndexUrl` and
+// `replanRequiredUnitIds` remain required inputs (the caller must hold a genuine
+// REPLAN_REQUIRED result, not merely `controlIssue`/`executionIssue`), but neither is rendered
+// any more — the prompt's length is now a function of two bounded integers and fixed prose
+// only, independent of plan/unit-set size, repository name, and git host length alike: 618
+// chars even at `Number.MAX_SAFE_INTEGER` (2^53-1, 16 digits, the true upper bound
+// `isPositiveInteger` can ever accept) for both `controlIssue` and `executionIssue` (Stage 1
+// review finding on PR #620: the fixed prose grew to name `correct-unit-dependency.mjs` as the
+// only mechanism that can patch an existing unit's dependency field in place, since
+// `format-execution-plan.mjs` alone cannot and a worker following it verbatim could not perform
+// the field-scoped correction issue #618 established).
+export function formatPlanningCorrectionWorkerDispatchPrompt({ controlIssue, executionIssue, planIndexUrl, replanRequiredUnitIds }) {
+  if (
+    !isPositiveInteger(controlIssue) ||
+    !isPositiveInteger(executionIssue) ||
+    typeof planIndexUrl !== "string" ||
+    !planIndexUrl.trim() ||
+    !Array.isArray(replanRequiredUnitIds) ||
+    replanRequiredUnitIds.length === 0
+  ) {
+    throw new Error(
+      "formatPlanningCorrectionWorkerDispatchPrompt requires controlIssue and executionIssue to be positive integers, " +
+        "planIndexUrl to be a non-empty string, and replanRequiredUnitIds to be a non-empty array",
+    );
+  }
+  return (
+    `Planning-correction worker dispatch. Execution Issue: #${executionIssue}. Controlling Issue: ` +
+    `#${controlIssue}.\n\n` +
+    `Re-run ready-dispatch-gate.mjs against the Controlling Issue above to recover the Plan Index and ` +
+    `failing unit(s). Read the Plan Index and each unit's contract, then correct per ` +
+    `AGENTS.md/docs/operating-model.md — use correct-unit-dependency.mjs for an existing unit's ` +
+    `dependency field (format-execution-plan.mjs cannot patch one in place), or format-execution-plan.mjs ` +
+    `only for a new unit. Return a compact confirmation and stop — do not prepare the Dispatch Manifest, ` +
+    `advance Lifecycle, or dispatch units.`
+  );
+}
+
 // Pure. Renders the fixed reference-only "Integration/PR worker dispatch" template for
 // #397's new EXECUTION_COMPLETE pre-PR Lifecycle value (ready-dispatch-gate.mjs's
 // READY_TO_DISPATCH_INTEGRATION verdict). Also carries no `route` parameter, for the same
@@ -136,10 +231,176 @@ export function formatIntegrationWorkerDispatchPrompt({ controlIssue, executionI
     `#${controlIssue}.\n\n` +
     `Read #${executionIssue}'s own Execution Plan Index, Shared Contract, and Worker Unit Contract ` +
     `comments directly from GitHub — they were not restated here on purpose. Integrate the completed ` +
-    `units and open the one PR per docs/bounded-review-cycle.md § Integration/PR worker. Report back ` +
-    `using AGENTS.md's Slice handoff format. Once the PR exists — Stage 1 review requested, or a ` +
-    `recorded Stage 1 exemption for non-review-worthy work — stop, per docs/operating-model.md § ` +
-    `Watched lifecycle breakpoints.`
+    `units and open the one PR per docs/bounded-review-cycle.md § Integration/PR worker. Once the PR ` +
+    `exists — Stage 1 review requested, or a recorded Stage 1 exemption for non-review-worthy work — ` +
+    `run tools/orchestration/finalize-pr-breakpoint.mjs before reporting; on PR_BREAKPOINT_UNVERIFIED ` +
+    `report that reference, never ordinary success. Then stop, per docs/operating-model.md § Watched ` +
+    `lifecycle breakpoints.`
+  );
+}
+
+// Pure. Renders the fixed reference-only "Stage 1 correction worker dispatch" template for
+// issue #570 — `next-review-transition-gate.mjs`'s `STAGE1_CORRECTION_REQUIRED` verdict.
+// `action-envelope.mjs` already authorizes exactly `dispatch-correction-worker` for this state
+// (docs/operating-model.md § Watched lifecycle breakpoints, "Deterministic post-PR transition
+// resolution"), but until this issue nothing rendered that authorization into a deterministic
+// prompt — the live #451/PR #569 reproduction reached this exact verdict and then failed at
+// `format-dispatch-prompt.mjs`, which recognized no such state.
+//
+// `controlIssue` is optional (`null` when absent) because `next-review-transition-gate.mjs`'s
+// own direct-reference mode (`--pr`/`--head`/`--issue`, no `--control-issue`) can also reach
+// this verdict without a thin control Issue to name — the template renders the "Controlling
+// Issue" line only when one is actually present, never a fabricated placeholder.
+//
+// Stage 1 review finding on this PR (P1): direct-reference mode's `--issue` also accepts the
+// explicit "none" sentinel for the documented no-work-issue path (next-review-transition-gate.mjs
+// requires "--issue none" alongside "--pr"/"--head" precisely so a review-worthy PR with no
+// separate work Issue — e.g. a consumer-sync update — can still resolve). That sentinel string
+// flows straight through the gate's own `context` spread into the verdict's `issue` field
+// unmodified. Coercing it with `Number("none")` produces `NaN`, which `isPositiveInteger` rejects,
+// so this formatter previously threw for exactly that genuine, authorized verdict shape — the
+// only case `STAGE1_CORRECTION_REQUIRED` can validly carry a non-issue `issue` value. `issue` is
+// therefore accepted as either a positive integer or the literal string "none"; the Execution
+// Issue reference is rendered only when a real issue is present.
+//
+// Deliberately carries no finding text, review comment excerpts, or acceptance-criteria
+// restatement: the dispatched correction worker reads PR #<pr>'s own current Stage 1 review (and,
+// when present, Execution Issue #<issue>) directly from GitHub, exactly as every other template
+// in this file hands over durable references instead of restated content.
+//
+// Issue #611 (the post-#576 #438/PR #610 regression): this template previously stopped at "push
+// it, and stop" with no instruction to run `finalize-correction-breakpoint.mjs` at all — the
+// mandatory step lived only in `docs/bounded-review-cycle.md`'s Correction-satisfied disposition
+// prose, exactly the "prose-only worker obligation" #611 exists to close, and exactly the seam a
+// Stage 1 review finding on PR #579 already flagged (`docs/operating-model.md`'s
+// `STAGE1_CORRECTION_REQUIRED` entry) without this formatter ever being updated to carry it. This
+// mirrors `formatIntegrationWorkerDispatchPrompt`'s own established `finalize-pr-breakpoint.mjs`
+// clause immediately above: name the mandatory finalize step and its fail-closed reporting
+// contract, without restating its flags — the worker already has `controlIssue`/`issue`/`pr` from
+// this same prompt, and derives `--reviewed-head`/`--corrected-head` itself from the PR it just
+// read and corrected, the same "read it directly, don't restate it" convention this whole file
+// uses. `finalize-correction-breakpoint.mjs` itself refuses `--control-issue` without a paired
+// `--execution-issue` (or vice versa), so a worker dispatched with a Controlling Issue but the
+// "none" no-work-issue sentinel (a real, separately-tested combination below) supplies only the
+// identity it actually has and the script's own direct-reference form applies -- no partial or
+// invented identity is ever passed.
+//
+// Stage 1 review finding on PR #613 (P1): the unconditional finalizer mandate above conflated two
+// distinct `STAGE1_CORRECTION_REQUIRED` classes that `next-review-transition-gate.mjs` emits
+// through this same verdict. A CLEAN/EXEMPT Stage 1 result blocked only by
+// `BLOCKED_CLOSING_REFERENCE` has neither findings provenance nor necessarily a newer PR head, so
+// `finalize-correction-breakpoint.mjs`'s own findings-bearing/strict-descendant requirements
+// correctly reject it -- mandating the finalizer for that class turned a valid closing-reference
+// repair into `CORRECTION_BREAKPOINT_UNVERIFIED`. `correctionReason` (the gate's own new
+// discriminant field, "findings" or "closing-reference" -- see next-review-transition-gate.mjs's
+// four `STAGE1_CORRECTION_REQUIRED` return sites) carries the distinction the dispatched worker
+// needs rather than making it infer workflow class from reviewer prose. Only "findings" mandates
+// the finalizer and #611's fail-closed contract; "closing-reference" routes the worker through the
+// ordinary repair-and-stop instruction and explicitly tells it not to manufacture a
+// correction-satisfied disposition. Defaults to "findings" when absent (every pre-#613 caller,
+// including this file's own explicit-fields CLI mode, already assumed the findings-bearing shape).
+export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null, issue, pr, correctionReason }) {
+  if (!isPositiveInteger(pr)) {
+    throw new Error("formatStage1CorrectionWorkerDispatchPrompt requires pr to be a positive integer");
+  }
+  const hasExecutionIssue = issue !== "none";
+  if (hasExecutionIssue && !isPositiveInteger(issue)) {
+    throw new Error(
+      'formatStage1CorrectionWorkerDispatchPrompt requires issue to be a positive integer or the literal "none" sentinel',
+    );
+  }
+  if (controlIssue !== null && controlIssue !== undefined && !isPositiveInteger(controlIssue)) {
+    throw new Error("formatStage1CorrectionWorkerDispatchPrompt requires controlIssue to be a positive integer when present");
+  }
+  const reason = correctionReason ?? "findings";
+  if (reason !== "findings" && reason !== "closing-reference") {
+    throw new Error(
+      'formatStage1CorrectionWorkerDispatchPrompt requires correctionReason to be "findings", "closing-reference", or absent',
+    );
+  }
+  const executionLine = hasExecutionIssue ? ` Execution Issue: #${issue}.` : "";
+  const controlLine = controlIssue != null ? ` Controlling Issue: #${controlIssue}.` : "";
+  const executionReadClause = hasExecutionIssue ? ` and Execution Issue #${issue}` : "";
+  if (reason === "closing-reference") {
+    return (
+      `Stage 1 correction worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
+      `Read PR #${pr}'s current Stage 1 review${executionReadClause} directly from GitHub to recover the ` +
+      `closing-reference finding and correction authority — it was not restated here on purpose. This is a ` +
+      `closing-reference-only repair (no findings): fix it per docs/bounded-review-cycle.md, push it, and ` +
+      `stop. Do not run finalize-correction-breakpoint.mjs or record a correction-satisfied disposition. Do ` +
+      `not re-trigger review, merge, or begin Stage 2 in this context.`
+    );
+  }
+  return (
+    `Stage 1 correction worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
+    `Read PR #${pr}'s current Stage 1 review${executionReadClause} directly from GitHub to recover the ` +
+    `findings and correction authority — they were not restated here on purpose. Verify and apply one ` +
+    `consolidated correction per docs/bounded-review-cycle.md, push it. Then run ` +
+    `tools/orchestration/finalize-correction-breakpoint.mjs before reporting; on ` +
+    `CORRECTION_BREAKPOINT_UNVERIFIED report that reference, never ordinary success. Then stop: do not ` +
+    `re-trigger review, merge, or begin Stage 2 in this context.`
+  );
+}
+
+// Pure. Renders the fixed reference-only "Stage 2 correction worker dispatch" template for
+// issue #570 — `next-review-transition-gate.mjs`'s `STAGE2_CORRECTION_REQUIRED` verdict. Same
+// missing-formatter gap as the Stage 1 sibling above, for the post-merge NOT CLEAN path
+// (`action-envelope.mjs` authorizes the identical `dispatch-correction-worker` action here).
+//
+// Carries only the Audit Issue reference (plus an optional Controlling Issue reference, same
+// rule as the Stage 1 template above) — never the audit narrative or verdict text. The
+// dispatched correction worker reads Audit Issue #<auditIssue>'s completed Stage 2 report
+// directly, which itself names the work/execution Issue needing correction, so no second
+// reference is required here.
+//
+// Issue #646 (the #487/#643/#644/#645 live reproduction): the prior template mandated only
+// "apply one consolidated correction ... push it, and stop" — a bare push, with no PR creation/
+// linkage, Stage 1 trigger, or PR-breakpoint finalization required. That left a genuinely
+// successful correction indistinguishable, from a fresh controller's own durable-state read, from
+// one that never happened: control #487 stayed on PR #642/Stage 2 #643 after correction PR #644
+// existed, so a later fresh dispatch produced a duplicate PR #645 against the same finding. This
+// template now mandates the same PR/Stage-1 breakpoint the direct implementation-worker and
+// Integration/PR-worker routes already require (`docs/bounded-review-cycle.md`'s Integration/PR
+// worker step 6, and `finalize-pr-breakpoint.mjs`'s own #456 contract, extended by this same issue
+// to accept a `Lifecycle: AUDIT` source state): open or identify exactly one correction PR linked
+// to the work Issue, request Stage 1 at its live head via `trigger.mjs`, then run
+// `finalize-pr-breakpoint.mjs` before ever reporting success — on `PR_BREAKPOINT_UNVERIFIED`,
+// report that reference verbatim, never ordinary success, mirroring the Stage 1 sibling's own
+// `CORRECTION_BREAKPOINT_UNVERIFIED` contract above.
+// Stage 1 review finding on PR #647 (issue #646, P1): the unconditional finalizer mandate below
+// used to apply verbatim in direct-reference mode too (`controlIssue` absent), but
+// `finalize-pr-breakpoint.mjs` hard-requires positive-integer `--control-issue` AND
+// `--execution-issue` values and exits 1 (a plain operational failure, never the documented
+// `PR_BREAKPOINT_UNVERIFIED`) without them — an impossible instruction a direct-reference worker
+// could never satisfy. `composeStage2CorrectionFinalizeCommand` above already gets this right
+// (it omits the `finalize-pr-breakpoint.mjs` segment entirely when `controlIssue` is absent); this
+// template now mirrors that same branch in its prose. Direct-reference mode has no thin control
+// Issue to project a breakpoint onto in the first place, so its worker only requests Stage 1 at
+// the correction PR's head and reports the PR/head/work-Issue identity — a fresh invocation
+// continues via `next-review-transition-gate.mjs`'s own `--pr`/`--head`/`--issue` direct-reference
+// path, which re-derives live state without needing any control write.
+export function formatStage2CorrectionWorkerDispatchPrompt({ controlIssue = null, auditIssue }) {
+  if (!isPositiveInteger(auditIssue)) {
+    throw new Error("formatStage2CorrectionWorkerDispatchPrompt requires auditIssue to be a positive integer");
+  }
+  if (controlIssue !== null && controlIssue !== undefined && !isPositiveInteger(controlIssue)) {
+    throw new Error("formatStage2CorrectionWorkerDispatchPrompt requires controlIssue to be a positive integer when present");
+  }
+  const hasControlIssue = controlIssue != null;
+  const controlLine = hasControlIssue ? ` Controlling Issue: #${controlIssue}.` : "";
+  const breakpointClause = hasControlIssue
+    ? `request Stage 1 at its head via tools/review-watch/trigger.mjs, then run ` +
+      `tools/orchestration/finalize-pr-breakpoint.mjs before reporting; on PR_BREAKPOINT_UNVERIFIED report ` +
+      `that reference, never success.`
+    : `request Stage 1 at its head via trigger.mjs; verify it succeeded. No control Issue exists to ` +
+      `finalize onto — skip finalize-pr-breakpoint.mjs. Report the PR number, head, and work Issue for ` +
+      `a fresh invocation's direct-reference resume.`;
+  return (
+    `Stage 2 correction worker dispatch. Audit Issue: #${auditIssue}.${controlLine}\n\n` +
+    `Read Audit Issue #${auditIssue}'s completed Stage 2 report directly from GitHub to recover the audit ` +
+    `findings, the work Issue it names, and correction authority — not restated here on purpose. Apply one ` +
+    `consolidated correction per docs/bounded-review-cycle.md, open/identify one correction PR linked to the ` +
+    `work Issue, ${breakpointClause} Then stop: do not re-trigger the audit or terminalize this cycle here.`
   );
 }
 
@@ -182,23 +443,97 @@ function readStdinIfPiped() {
 // #397's two new templates are selected by the piped gate result's own `state` field —
 // ready-dispatch-gate.mjs's READY_TO_DISPATCH_PLANNING/READY_TO_DISPATCH_INTEGRATION verdicts
 // — never by a caller re-deciding which template applies. READY_TO_DISPATCH keeps using the
-// original "Implementation worker dispatch" template unchanged. Neither new template takes a
-// `route` field (see each formatter's own comment for why), so the field set piped through
-// differs by kind.
+// original "Implementation worker dispatch" template unchanged. Issue #498 unit 498-B adds
+// REPLAN_REQUIRED, selecting formatPlanningCorrectionWorkerDispatchPrompt the same way. Every
+// non-implementation template takes its own fixed field set (see each formatter's own comment
+// for why), so the fields piped through differ by kind. Issue #570 adds `STAGE1_CORRECTION_
+// REQUIRED`/`STAGE2_CORRECTION_REQUIRED` — `next-review-transition-gate.mjs`'s own verdict
+// field names (`issue`, `pr`, `auditIssue`, `controlIssue`) are used verbatim as the field keys
+// here rather than translated to `executionIssue`, so piped-JSON mode reads them straight off
+// the verdict object exactly like every other row in this table.
 const TEMPLATES_BY_STATE = {
-  READY_TO_DISPATCH: { formatter: formatDispatchPrompt, needsRoute: true },
-  READY_TO_DISPATCH_PLANNING: { formatter: formatPlanningWorkerDispatchPrompt, needsRoute: false },
-  READY_TO_DISPATCH_INTEGRATION: { formatter: formatIntegrationWorkerDispatchPrompt, needsRoute: false },
+  READY_TO_DISPATCH: { formatter: formatDispatchPrompt, fields: ["controlIssue", "executionIssue", "route"] },
+  READY_TO_DISPATCH_PLANNING: { formatter: formatPlanningWorkerDispatchPrompt, fields: ["controlIssue", "executionIssue"] },
+  READY_TO_DISPATCH_INTEGRATION: { formatter: formatIntegrationWorkerDispatchPrompt, fields: ["controlIssue", "executionIssue"] },
+  REPLAN_REQUIRED: {
+    formatter: formatPlanningCorrectionWorkerDispatchPrompt,
+    fields: ["controlIssue", "executionIssue", "planIndexUrl", "replanRequiredUnitIds"],
+  },
+  STAGE1_CORRECTION_REQUIRED: {
+    formatter: formatStage1CorrectionWorkerDispatchPrompt,
+    fields: ["controlIssue", "issue", "pr", "correctionReason"],
+  },
+  STAGE2_CORRECTION_REQUIRED: { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
 };
 
 // Explicit-fields mode's equivalent of the state-based selection above, for a caller
 // re-rendering a prompt outside a live pipe (e.g. this script's own tests). Defaults to
 // "implementation" so every pre-existing explicit-fields invocation keeps working unchanged.
+// "planning-correction" accepts --plan-index-url and comma-separated --replan-unit-ids in
+// place of --route, matching formatPlanningCorrectionWorkerDispatchPrompt's own field set.
+// CLI flag names differ from the in-memory field names for the two multi-word fields
+// (planIndexUrl -> --plan-index-url, replanRequiredUnitIds -> --replan-unit-ids, parsed as a
+// comma-separated list); every other field's flag is its own camelCase name kebab-cased.
+// Issue #570: "stage1-correction" and "stage2-correction" mirror the piped-mode field names
+// above (`issue`/`pr`/`auditIssue`), each with their own CLI flag per CLI_FLAG_BY_FIELD below.
 const FORMATTERS_BY_KIND = {
-  implementation: { formatter: formatDispatchPrompt, needsRoute: true },
-  planning: { formatter: formatPlanningWorkerDispatchPrompt, needsRoute: false },
-  integration: { formatter: formatIntegrationWorkerDispatchPrompt, needsRoute: false },
+  implementation: { formatter: formatDispatchPrompt, fields: ["controlIssue", "executionIssue", "route"] },
+  planning: { formatter: formatPlanningWorkerDispatchPrompt, fields: ["controlIssue", "executionIssue"] },
+  integration: { formatter: formatIntegrationWorkerDispatchPrompt, fields: ["controlIssue", "executionIssue"] },
+  "planning-correction": {
+    formatter: formatPlanningCorrectionWorkerDispatchPrompt,
+    fields: ["controlIssue", "executionIssue", "planIndexUrl", "replanRequiredUnitIds"],
+  },
+  "stage1-correction": {
+    formatter: formatStage1CorrectionWorkerDispatchPrompt,
+    fields: ["controlIssue", "issue", "pr", "correctionReason"],
+  },
+  "stage2-correction": { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
 };
+
+const CLI_FLAG_BY_FIELD = {
+  controlIssue: "control-issue",
+  executionIssue: "execution-issue",
+  route: "route",
+  planIndexUrl: "plan-index-url",
+  replanRequiredUnitIds: "replan-unit-ids",
+  issue: "issue",
+  pr: "pr",
+  auditIssue: "audit-issue",
+  correctionReason: "correction-reason",
+};
+
+// Pure. Reads one field's value out of an explicit-fields `args` map or a piped gate-result
+// JSON object, applying each field's own type coercion (issue numbers to Number,
+// replanRequiredUnitIds to an array — comma-split for the CLI flag, passed through as-is from
+// piped JSON where the gate already emits a real array).
+//
+// Stage 1 review finding on this PR (P1): `issue` is the one field of this group that can
+// legitimately carry the literal string "none" (next-review-transition-gate.mjs's
+// direct-reference no-work-issue path — see formatStage1CorrectionWorkerDispatchPrompt's own
+// comment). `Number("none")` is `NaN`, which is not a valid sentinel the formatter recognizes,
+// so "none" must pass through unchanged rather than being coerced. `controlIssue`/
+// `executionIssue`/`pr`/`auditIssue` have no such sentinel — a real GitHub reference or absent —
+// so they keep the plain Number coercion.
+function readField(field, source, { isCli }) {
+  if (field === "issue") {
+    const raw = isCli ? source[CLI_FLAG_BY_FIELD[field]] : source[field];
+    if (raw == null) return null;
+    return raw === "none" ? "none" : Number(raw);
+  }
+  if (field === "controlIssue" || field === "executionIssue" || field === "pr" || field === "auditIssue") {
+    const raw = isCli ? source[CLI_FLAG_BY_FIELD[field]] : source[field];
+    return raw != null ? Number(raw) : null;
+  }
+  if (field === "replanRequiredUnitIds") {
+    if (isCli) {
+      const raw = source[CLI_FLAG_BY_FIELD[field]];
+      return raw != null ? raw.split(",").map((s) => s.trim()).filter(Boolean) : null;
+    }
+    return source.replanRequiredUnitIds ?? null;
+  }
+  return isCli ? (source[CLI_FLAG_BY_FIELD[field]] ?? null) : (source[field] ?? null);
+}
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -210,17 +545,14 @@ function main() {
     const entry = FORMATTERS_BY_KIND[kind];
     if (!entry) {
       process.stderr.write(
-        `format-dispatch-prompt.mjs: unknown --kind ${JSON.stringify(kind)} — use "implementation", "planning", or "integration"\n`,
+        `format-dispatch-prompt.mjs: unknown --kind ${JSON.stringify(kind)} — use "implementation", "planning", ` +
+          `"integration", "planning-correction", "stage1-correction", or "stage2-correction"\n`,
       );
       process.exit(2);
       return;
     }
     formatter = entry.formatter;
-    fields = {
-      controlIssue: args["control-issue"] != null ? Number(args["control-issue"]) : null,
-      executionIssue: args["execution-issue"] != null ? Number(args["execution-issue"]) : null,
-      ...(entry.needsRoute ? { route: args.route ?? null } : {}),
-    };
+    fields = Object.fromEntries(entry.fields.map((f) => [f, readField(f, args, { isCli: true })]));
   } else {
     const stdin = readStdinIfPiped();
     if (!stdin) {
@@ -248,18 +580,15 @@ function main() {
     if (!entry) {
       process.stderr.write(
         `format-dispatch-prompt.mjs: input state is ${JSON.stringify(parsed.state ?? null)}, not "READY_TO_DISPATCH" ` +
-          `(or "READY_TO_DISPATCH_PLANNING"/"READY_TO_DISPATCH_INTEGRATION") — refusing to format a dispatch prompt ` +
-          "for a non-ready or malformed gate result\n",
+          `(or "READY_TO_DISPATCH_PLANNING"/"READY_TO_DISPATCH_INTEGRATION"/"REPLAN_REQUIRED"/` +
+          `"STAGE1_CORRECTION_REQUIRED"/"STAGE2_CORRECTION_REQUIRED") — refusing to format a dispatch prompt for a ` +
+          "non-ready or malformed gate result\n",
       );
       process.exit(2);
       return;
     }
     formatter = entry.formatter;
-    fields = {
-      controlIssue: parsed.controlIssue,
-      executionIssue: parsed.executionIssue,
-      ...(entry.needsRoute ? { route: parsed.route } : {}),
-    };
+    fields = Object.fromEntries(entry.fields.map((f) => [f, readField(f, parsed, { isCli: false })]));
   }
 
   let prompt;

@@ -1,31 +1,49 @@
 name: Idea intake
-description: Log something you want added to Loop-Dee-Loup without free-form writing. Gets ironed out into a priority-horizon-labeled GitHub Issue.
+description: Log something you want added to Loop-Dee-Loup using structured intake fields
 title: "[Idea] "
 labels: ["idea-intake"]
 body:
   - type: markdown
     attributes:
-      value: "For items about the Loop itself (process, tooling, templates). Not for target-repository product features — those go through that repository's own intake."
+      value: >-
+        For items about Loop-Dee-Loup itself: methodology, process, tooling, templates, or recurring
+        workflow behavior. Product features belong in the target repository's own intake.
+
   - type: textarea
     id: idea
     attributes:
       label: What do you want added or changed?
-      description: A sentence or two is enough.
+      description: State the desired outcome or observed problem in a sentence or two.
     validations:
       required: true
+
   - type: textarea
     id: why
     attributes:
-      label: Why (optional)
+      label: Why does it matter?
+      description: Optional impact, pain, cost, or expected benefit.
     validations:
       required: false
-  - type: dropdown
-    id: urgency
+
+  - type: textarea
+    id: evidence
     attributes:
-      label: Urgency
-      options:
-        - Whenever
-        - Soon
-        - Blocking something now
+      label: Evidence or example
+      description: Optional reproduction, issue/PR link, telemetry signal, or concrete example.
     validations:
       required: false
+
+  - type: dropdown
+    id: horizon
+    attributes:
+      label: Priority horizon
+      description: >-
+        Founder-selected retention priority. This records intent; execution still requires the
+        repository's normal authorization/lifecycle.
+      options:
+        - Now
+        - Soon
+        - Later
+        - Wishes
+    validations:
+      required: true

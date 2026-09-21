@@ -612,6 +612,31 @@ test("isCleanStage1Response: false for a generic ack/kickoff match followed by a
   );
 });
 
+// PR #435's own live regression: the genuine Codex review body_excerpt for commit
+// `30b36035c9` began with an insignificant leading newline before "### 💡 Codex Review",
+// which the `^`-anchored FINDINGS_PREAMBLE_PATTERN then failed to match.
+test("isCleanStage1Response: false for a findings-bearing match whose body_excerpt begins with a leading newline (PR #435's own live regression shape)", () => {
+  assert.equal(
+    isCleanStage1Response({
+      state: "RESPONSE_RECEIVED",
+      matches: [
+        { body_excerpt: "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request." },
+      ],
+    }),
+    false,
+  );
+});
+
+test("isCleanStage1Response: true for a clean-pass match whose body_excerpt carries insignificant outer whitespace", () => {
+  assert.equal(
+    isCleanStage1Response({
+      state: "RESPONSE_RECEIVED",
+      matches: [{ body_excerpt: "\n  Codex Review: Didn't find any major issues. Nice work!  \n" }],
+    }),
+    true,
+  );
+});
+
 // -- run: a genuine response that isn't recognized as clean must never report ready ----------
 
 test("run: merge-ready-gate exit 0 with a finding-bearing Stage 1 response -> blocked, never ready (Stage 1 review finding on this PR, issue #274)", async () => {

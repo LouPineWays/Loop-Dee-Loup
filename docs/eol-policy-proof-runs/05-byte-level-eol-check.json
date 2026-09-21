@@ -1,0 +1,12 @@
+{
+  "lf-checkout": {
+    "file": "docs/stage2-audit-contract.md",
+    "crlfPairs": 0,
+    "bareLF": 216
+  },
+  "crlf-checkout": {
+    "file": "docs/stage2-audit-contract.md",
+    "crlfPairs": 0,
+    "bareLF": 216
+  }
+}

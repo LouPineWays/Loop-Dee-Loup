@@ -5,7 +5,11 @@ labels: []
 body:
   - type: markdown
     attributes:
-      value: "This issue is a read-only control boundary. Modify nothing in the target repository from this issue. See docs/bounded-review-cycle.md Stage 2."
+      value: >-
+        This issue is a read-only control boundary. Modify nothing in the target repository from
+        this issue. Your role, allowed/prohibited actions, exact required response shape, and
+        verdict semantics are defined in one place: **docs/stage2-audit-contract.md** — read it in
+        full before auditing. docs/bounded-review-cycle.md Stage 2 covers lifecycle/procedure only.
   - type: input
     id: merged_pr
     attributes:
@@ -44,7 +48,18 @@ body:
     id: inline_review
     attributes:
       label: Stage 1 inline review disposition
-      description: Link the single inline review round and state how each valid finding was fixed.
+      description: >-
+        Link the single inline review round and state how each valid finding was fixed. If this
+        audit is itself a correction responding to a prior NOT CLEAN/PENDING Stage 2 verdict, say
+        so using one of these two exact recurring phrasings so tooling can find it: "This is
+        itself a correction PR responding to a prior Stage 2 NOT CLEAN verdict on audit issue
+        #<N>." or "This is itself a correction PR responding to a prior Stage 2 PENDING verdict on
+        audit issue #<N>." (see tools/review-watch/lifecycle-gate.mjs's parseCorrectsAuditRef,
+        issue #513) — it is how close-audit retires the full predecessor correction chain once it
+        reaches a CLEAN terminal, including a predecessor that itself records no Work issue. Stage
+        1 review finding on PR #515: the parser matches "NOT CLEAN"/"PENDING" immediately followed
+        by "verdict," so do not combine them into one "NOT CLEAN (or PENDING)" phrase — that
+        produces no match at all.
     validations:
       required: true
   - type: textarea
@@ -70,13 +85,22 @@ body:
         check), the checklist must include an item confirming that every workflow whose `paths:`
         trigger should match the diff actually shows a completed run — e.g. "N. Confirm
         `gh api repos/<owner>/<repo>/actions/runs?head_sha=<sha>` shows a completed run of
-        `<workflow>.yml`." — not merely that the file contents are correct. Use the PR's frozen
-        reviewed head SHA (Stage 1 step 2) for `<sha>`, not the merge commit recorded above:
-        control-plane workflows trigger only on `pull_request`, so their runs are keyed to the PR
-        branch's head SHA, and the merge commit created on `main` never appears as a `head_sha`
-        even when CI ran and passed. A workflow whose trigger silently never matches (e.g. a
-        broken `paths:` glob) will pass a content-only audit; this item exists to catch that class
-        of defect. Keep this list to the number of genuinely independent checks the diff actually
+        `<workflow>.yml`." — not merely that the file contents are correct. Do not default `<sha>`
+        to the PR's frozen reviewed head SHA (Stage 1 step 2) unconditionally — audit #508
+        (control #499, PR #507) proved that stale for a correction-satisfied PR, where the
+        reviewed head never ran CI at all and only the distinct corrected/merge-authorized head
+        did. Resolve `<sha>` deterministically with
+        `node tools/review-watch/stage2-control-plane-ci-head.mjs --control-issue <N>` against
+        the control issue this audit traces back to: it returns the frozen reviewed head for an
+        ordinary Stage 1 disposition, the corrected head for a correction-satisfied disposition
+        (`docs/bounded-review-cycle.md`'s "Correction-satisfied disposition" section), and fails
+        closed rather than guessing when the disposition is missing or malformed. Never use the
+        merge commit recorded above for this item either way: control-plane workflows trigger
+        only on `pull_request`, so their runs are keyed to a PR branch's head SHA, and the merge
+        commit created on `main` never appears as a `head_sha` even when CI ran and passed
+        (issue #98). A workflow whose trigger silently never matches (e.g. a broken `paths:`
+        glob) will pass a content-only audit; this item exists to catch that class of defect.
+        Keep this list to the number of genuinely independent checks the diff actually
         needs — group tightly related sub-checks (e.g. several failure-mode branches of the same
         function) under one numbered item rather than splitting them into many top-level items
         purely for enumeration's own sake. The response's completeness is judged by comparing its
@@ -96,29 +120,17 @@ body:
       required: true
   - type: markdown
     attributes:
-      value: |
-        **Required findings structure:** the audit response comment must replace "Pending" below
-        with: (0) a restatement of the exact merge commit named above; (1) a severity table with
-        a count per severity (e.g. Critical/High/Medium/Low or P0-P3); (2) one entry per finding,
-        deduplicated by root cause, each with exact evidence (file/line, command output, or
-        quoted text), consequence, and smallest correction; (3) a verification-performed
-        checklist that works through every item in the Verification checklist field above,
-        numbered the same way, and states its result (including an explicit "unable to
-        verify"/"blocked" result where applicable — never silently omitted); (4) whether founder
-        judgment is required for any finding; (5) an explicit `CLEAN` or `NOT CLEAN` verdict,
-        either as a leading status line ("CLEAN — ...") or a labelled "Verdict: CLEAN"/"Verdict:
-        NOT CLEAN" line. A report that nothing material remains is a successful audit — state it
-        in this full structure rather than a bare "looks fine." `tools/review-watch/lifecycle-
-        gate.mjs`'s post-audit check parses the response comment itself for the merge commit,
-        the verdict, and the verification-checklist walk-through (issue #230) — a response
-        missing any of these three cannot back a CLEAN closure, even once this issue's own
-        Verdict dropdown below is set to CLEAN by hand. Item (0)'s merge-commit restatement stays
-        mandatory even on a change where a control-plane-workflow checklist item legitimately
-        asks to be checked against the PR's frozen reviewed head instead (see the Verification
-        checklist instructions above) — citing only that reviewed head, with no separate
-        restatement of the actual merge commit, does not satisfy item (0) and will not back a
-        CLEAN closure (issue #335, audit #334: this exact omission left an otherwise-complete
-        response mechanically unbacked).
+      value: >-
+        **Required response format:** replace "Pending" below with your completed audit report,
+        in the exact shape defined by **docs/stage2-audit-contract.md** — read that document for
+        the canonical CLEAN/NOT CLEAN skeleton, verdict semantics, and invalid-response examples.
+        At minimum your response must restate the exact merge commit named above (the reviewed
+        head alone does not satisfy this — issue #335, audit #334), walk through every item in
+        the Verification checklist field below with a stated result, and end with an explicit
+        `Verdict: CLEAN` or `Verdict: NOT CLEAN` line. `tools/review-watch/stage2-report.mjs`
+        mechanically requires all three before this issue's Verdict dropdown can be promoted from
+        a response — see docs/stage2-audit-contract.md § 7 for why this file is the single
+        authority for response format, not this template.
   - type: textarea
     id: findings
     attributes:

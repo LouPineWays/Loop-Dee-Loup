@@ -1,0 +1,22 @@
+== 424: stage1-gate at reviewed head ==
+{"exitCode":0,"state":"RESPONSE_RECEIVED","triggerTimestamp":"2026-09-06T18:41:37Z","matches":[{"endpoint":"pull-comments","id":3944910741,"login":"chatgpt-codex-connector[bot]","created_at":"2026-09-06T18:44:29Z","url":"https://github.com/LouPineWays/Loop-Dee-Loup/pull/424#discussion_r3944910741","body_excerpt":"**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Reject standalone verdicts embedded in report evidence**\n\nWhen verification evidence contains a literal example ","commit_id":"95d9d45c367ad5efe0449afbb4d56d7ea30fb6b8"},{"endpoint":"pull-reviews","id":5126262899,"login":"chatgpt-codex-connector[bot]","created_at":"2026-09-06T18:44:29Z","url":"https://github.com/LouPineWays/Loop-Dee-Loup/pull/424#pullrequestreview-5126262899","body_excerpt":"\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `95d9d45c36`\n    \n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team","commit_id":"95d9d45c367ad5efe0449afbb4d56d7ea30fb6b8"}],"unboundGenuineMatches":[]}
+
+== 424: stage1-correction-gate CLI ==
+{"exitCode":0,"state":"CORRECTION_SATISFIED","reviewedHead":"95d9d45c367ad5efe0449afbb4d56d7ea30fb6b8","correctedHead":"7f3dfb275254c4f0b2f516f377993c4afb0f685d"}
+
+== 424: lifecycle-gate merge-ready ==
+{"exitCode":0,"state":"MERGE_READY"}
+
+== 424: composed next-review-transition-gate (synthetic control-issue body only) ==
+{
+  "exitCode": 0,
+  "state": "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
+  "stopAfter": true,
+  "repo": "LouPineWays/Loop-Dee-Loup",
+  "pr": 424,
+  "head": "7f3dfb275254c4f0b2f516f377993c4afb0f685d",
+  "issue": 423,
+  "controlIssue": 423,
+  "reviewedHead": "95d9d45c367ad5efe0449afbb4d56d7ea30fb6b8",
+  "correctedHead": "7f3dfb275254c4f0b2f516f377993c4afb0f685d"
+}

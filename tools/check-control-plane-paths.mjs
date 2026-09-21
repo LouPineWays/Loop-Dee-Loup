@@ -15,6 +15,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { CONTROL_PLANE_PATH_PATTERNS } from "./review-watch/control-plane-paths.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DOC_PATH = join(ROOT, "docs", "bounded-review-cycle.md");
@@ -35,6 +36,10 @@ const pathChecks = [
   { label: ".claude/**", ok: () => dirHasFiles(".claude") },
   { label: "tools/check-priority-labels.mjs", ok: () => existsSync(join(ROOT, "tools", "check-priority-labels.mjs")) },
   { label: "tools/check-startup-budget.mjs", ok: () => existsSync(join(ROOT, "tools", "check-startup-budget.mjs")) },
+  {
+    label: "tools/check-review-invocation-precedence.test.mjs",
+    ok: () => existsSync(join(ROOT, "tools", "check-review-invocation-precedence.test.mjs")),
+  },
   { label: "tools/local-worker/**", ok: () => dirHasFiles("tools/local-worker") },
   { label: "tools/review-watch/**", ok: () => dirHasFiles("tools/review-watch") },
   { label: "tools/telemetry/**", ok: () => dirHasFiles("tools/telemetry") },
@@ -47,32 +52,25 @@ const pathChecks = [
   { label: "tools/ldl-sync/**", ok: () => dirHasFiles("tools/ldl-sync") },
 ];
 
-// Cross-check: every literal path token this script relies on must still appear
-// verbatim in the governing prose, so the script and the doc cannot silently drift
-// apart from each other.
-const requiredLiterals = [
-  "AGENTS.md",
-  "CLAUDE.md",
-  "README.md",
-  "docs/*.md",
-  ".github/ISSUE_TEMPLATE/*",
-  ".github/workflows/*.yml",
-  ".claude/**",
-  "tools/check-priority-labels.mjs",
-  "tools/check-startup-budget.mjs",
-  "tools/local-worker/**",
-  "tools/review-watch/**",
-  "tools/telemetry/**",
-  "tools/orchestration/**",
-  "tools/ldl-init/**",
-  "tools/ldl-update/**",
-  "tools/ldl-ack/**",
-  "tools/ldl-activate/**",
-  "tools/mcp-server/**",
-  "tools/ldl-sync/**",
-];
-
-const failures = [];
+// The single canonical list of mandatory-review control-plane path patterns, cross-checked
+// below against the governing prose in docs/bounded-review-cycle.md.
+//
+// Defined in tools/review-watch/control-plane-paths.mjs, not here (issue #616 Stage 1
+// review, PR #622): tools/review-watch/** is a distributed subtree per
+// docs/consumer-contract.md, while this script is explicitly this repository's own
+// development state, never installed into a consumer repository. The array previously lived
+// here with tools/review-watch/control-plane-paths.mjs importing it — the reverse of this
+// import — which broke every consumer installation (tools/review-watch/** copied,
+// tools/check-control-plane-paths.mjs not, so the import target simply did not exist,
+// ERR_MODULE_NOT_FOUND). Importing it from the distributed subtree instead is safe in both
+// directions: this source-only script can depend on distributed content that is always
+// present in this repository's own checkout, while the reverse never was. Re-exported here
+// under the same name for any existing caller that still imports it from this file. This
+// script's own doc-consistency check below keeps that array in lockstep with
+// docs/bounded-review-cycle.md's governing prose enumeration, so the array and that
+// documentation can never silently diverge — there is exactly one place this list is
+// maintained, it just now lives in the distributed subtree.
+export { CONTROL_PLANE_PATH_PATTERNS };
 
 // Anchors bound the specific enumeration sentence, not the whole document — a docs-wide
 // substring search would still find e.g. "AGENTS.md" mentioned elsewhere in the file even
@@ -81,62 +79,75 @@ const failures = [];
 const ENUM_START = "a control-plane path";
 const ENUM_END = "is never trivial";
 
-if (!existsSync(DOC_PATH)) {
-  failures.push(`missing governing doc: docs/bounded-review-cycle.md`);
-} else {
-  const docText = readFileSync(DOC_PATH, "utf8");
-  const startIdx = docText.indexOf(ENUM_START);
-  const endIdx = docText.indexOf(ENUM_END);
-  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) {
-    failures.push(
-      "docs/bounded-review-cycle.md: could not locate the control-plane path enumeration (anchor phrasing changed)",
-    );
+// The full check, factored into a function so importing this module (e.g. for
+// CONTROL_PLANE_PATH_PATTERNS above) never runs the check or calls process.exit as a side
+// effect of import — only the CLI entry point at the bottom of this file does that.
+export function checkControlPlanePaths() {
+  const failures = [];
+
+  if (!existsSync(DOC_PATH)) {
+    failures.push(`missing governing doc: docs/bounded-review-cycle.md`);
   } else {
-    const enumeration = docText.slice(startIdx, endIdx);
-    for (const literal of requiredLiterals) {
-      if (!enumeration.includes(literal)) {
-        failures.push(`docs/bounded-review-cycle.md control-plane enumeration no longer mentions: ${literal}`);
+    const docText = readFileSync(DOC_PATH, "utf8");
+    const startIdx = docText.indexOf(ENUM_START);
+    const endIdx = docText.indexOf(ENUM_END);
+    if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) {
+      failures.push(
+        "docs/bounded-review-cycle.md: could not locate the control-plane path enumeration (anchor phrasing changed)",
+      );
+    } else {
+      const enumeration = docText.slice(startIdx, endIdx);
+      for (const literal of CONTROL_PLANE_PATH_PATTERNS) {
+        if (!enumeration.includes(literal)) {
+          failures.push(`docs/bounded-review-cycle.md control-plane enumeration no longer mentions: ${literal}`);
+        }
       }
     }
   }
-}
 
-for (const { label, ok } of pathChecks) {
-  if (!ok()) failures.push(`control-plane path missing or empty: ${label}`);
-}
-
-// Regression guard for issue #93: a leading-slash glob like "/*.md" silently never matches
-// (GitHub Actions path filters don't support a leading "/"), so the CI trigger can carry a
-// root-level control-plane pattern without it ever actually firing the workflow. The safe
-// root-only pattern is "*.md" with no leading slash — "*" doesn't cross "/", so it can't
-// accidentally reach into docs/ or elsewhere. Root files have no per-file literal here on
-// purpose: docs/bounded-review-cycle.md classifies control-plane root-level *.md as an open
-// pattern ("currently AGENTS.md, CLAUDE.md, README.md"), not a closed list, so a future root
-// file must trigger this workflow without a matching edit here too.
-if (!existsSync(WORKFLOW_PATH)) {
-  failures.push("missing control-plane-paths workflow: .github/workflows/control-plane-paths.yml");
-} else {
-  const workflowText = readFileSync(WORKFLOW_PATH, "utf8");
-  if (!workflowText.includes(`"*.md"`)) {
-    failures.push(
-      '.github/workflows/control-plane-paths.yml pull_request.paths no longer lists the root-level ' +
-        '"*.md" pattern (a leading-slash variant like "/*.md" silently never matches anything)',
-    );
+  for (const { label, ok } of pathChecks) {
+    if (!ok()) failures.push(`control-plane path missing or empty: ${label}`);
   }
+
+  // Regression guard for issue #93: a leading-slash glob like "/*.md" silently never matches
+  // (GitHub Actions path filters don't support a leading "/"), so the CI trigger can carry a
+  // root-level control-plane pattern without it ever actually firing the workflow. The safe
+  // root-only pattern is "*.md" with no leading slash — "*" doesn't cross "/", so it can't
+  // accidentally reach into docs/ or elsewhere. Root files have no per-file literal here on
+  // purpose: docs/bounded-review-cycle.md classifies control-plane root-level *.md as an open
+  // pattern ("currently AGENTS.md, CLAUDE.md, README.md"), not a closed list, so a future root
+  // file must trigger this workflow without a matching edit here too.
+  if (!existsSync(WORKFLOW_PATH)) {
+    failures.push("missing control-plane-paths workflow: .github/workflows/control-plane-paths.yml");
+  } else {
+    const workflowText = readFileSync(WORKFLOW_PATH, "utf8");
+    if (!workflowText.includes(`"*.md"`)) {
+      failures.push(
+        '.github/workflows/control-plane-paths.yml pull_request.paths no longer lists the root-level ' +
+          '"*.md" pattern (a leading-slash variant like "/*.md" silently never matches anything)',
+      );
+    }
+  }
+
+  return { ok: failures.length === 0, failures };
 }
 
-if (failures.length > 0) {
-  console.error("Control-plane path check FAILED:");
-  for (const failure of failures) console.error(` - ${failure}`);
-  console.error("");
-  console.error(
-    "This check only catches drift in paths already listed in docs/bounded-review-cycle.md.",
-  );
-  console.error(
-    "A new top-level location that should become control-plane still needs a human or agent",
-  );
-  console.error("judgment call, not this script.");
-  process.exit(1);
+function main() {
+  const { ok, failures } = checkControlPlanePaths();
+  if (!ok) {
+    console.error("Control-plane path check FAILED:");
+    for (const failure of failures) console.error(` - ${failure}`);
+    console.error("");
+    console.error("This check only catches drift in paths already listed in docs/bounded-review-cycle.md.");
+    console.error("A new top-level location that should become control-plane still needs a human or agent");
+    console.error("judgment call, not this script.");
+    process.exit(1);
+  }
+  console.log("OK: the control-plane path list in docs/bounded-review-cycle.md matches the repository.");
 }
 
-console.log("OK: the control-plane path list in docs/bounded-review-cycle.md matches the repository.");
+// Only run as a CLI when invoked directly, not when another module imports
+// CONTROL_PLANE_PATH_PATTERNS/checkControlPlanePaths from this file.
+if (process.argv[1] && process.argv[1].endsWith("check-control-plane-paths.mjs")) {
+  main();
+}

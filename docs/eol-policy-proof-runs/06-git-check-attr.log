@@ -1,0 +1,8 @@
+docs/stage2-audit-contract.md: text: auto
+docs/stage2-audit-contract.md: eol: lf
+tools/review-watch/stage2-report.test.mjs: text: auto
+tools/review-watch/stage2-report.test.mjs: eol: lf
+AGENTS.md: text: auto
+AGENTS.md: eol: lf
+.gitattributes: text: auto
+.gitattributes: eol: lf

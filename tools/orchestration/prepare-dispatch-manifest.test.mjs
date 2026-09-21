@@ -1126,6 +1126,28 @@ test("runPrepareDispatchManifest returns stdout-only body without persisting whe
   assert.match(result.body, /## Dispatch Manifest \(v1\)/);
 });
 
+// Issue #498 unit 498-B: the dry-run (no --create/--comment-id) result also carries the
+// parsed `plan` itself, not just `entries`/`body` -- so a caller that only needs the computed
+// routing entries (ready-dispatch-gate.mjs's probeReplanRequired, checking for a
+// REPLAN_REQUIRED route before authorizing a fresh Route/Prepare run) can reuse this one dry
+// run for the Plan Index's own canonical URL too, instead of a second, separate execution-plan
+// parse purely to read `planIndex.url`.
+test("runPrepareDispatchManifest's dry-run result also carries the parsed plan itself, not just entries/body", async () => {
+  const fakePlan = {
+    ok: true,
+    exitCode: 0,
+    repo: "LouPineWays/Loop-Dee-Loup",
+    executionIssue: 294,
+    plan: planWith({ "294-A": unit({ unitId: "294-A", state: "DONE" }) }),
+  };
+  const result = await runPrepareDispatchManifest(
+    { executionIssue: 294 },
+    { parseExecutionPlanImpl: async () => fakePlan, fileExists: fileExistsFrom([]), skillNames: [], personaNames: [] },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.plan, fakePlan.plan);
+});
+
 // --- CLI ---------------------------------------------------------------------------
 
 test("CLI: missing --execution-issue fails closed", async () => {

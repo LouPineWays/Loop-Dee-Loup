@@ -143,8 +143,18 @@ const VERDICT_TOKEN_PATTERN = /\b(NOT CLEAN|CLEAN)\b/i;
 // token with nothing else, while "Stage 2 Audit of clean-close behavior" and "Stage 2 Audit
 // status was CLEAN, now NOT CLEAN" both interpose ordinary prose between "Audit" and any
 // separator, so neither reaches the token position this pattern requires.
+// Stage 2 audit #426 (correction of PR #424's own Stage 1 finding): this pattern used to be
+// evaluated with a single body-wide, non-global `.exec(normalized)` call — before the fenced-code
+// mask existed at all, and even after that mask was added for the standalone-heading/label shapes,
+// this one was left out of it. That meant (1) a fenced `## Stage 2 Audit — CLEAN` example quoted as
+// evidence could be read as the response's own declared verdict, and (2) only the *first* combined
+// heading in the whole body was ever collected, so two genuinely conflicting combined headings
+// resolved to whichever appeared first instead of failing closed. The pattern itself is unchanged;
+// it is now checked per-line inside extractResponseVerdict's same fence-aware collection loop the
+// standalone-heading shape already uses, so every non-fenced combined heading is collected and
+// conflicts are resolved the same uniform way as the other three shapes.
 const STAGE2_HEADING_VERDICT_PATTERN =
-  /^(?:#{1,6}\s*)?stage\s*2\s+audit\b(?:\s*verdict)?\s*[:—-]\s*\*{0,2}\s*(NOT CLEAN|CLEAN)\b\*{0,2}[.!]?\s*$/im;
+  /^(?:#{1,6}\s*)?stage\s*2\s+audit\b(?:\s*verdict)?\s*[:—-]\s*\*{0,2}\s*(NOT CLEAN|CLEAN)\b\*{0,2}[.!]?\s*$/i;
 
 // A standalone verdict heading: an entire line — anywhere in the body, not anchored to the
 // start — that reduces to *exactly* the token `CLEAN` or `NOT CLEAN` and nothing else, once
@@ -177,24 +187,71 @@ const STANDALONE_VERDICT_HEADING_PATTERN = /^(?:#{1,6}\s*)?\*{0,2}\s*(NOT CLEAN|
 // verdict heading looks like — as the response's own declared verdict. Stage 1 review finding on
 // this PR (issue #422 recurred): the standalone-heading shape was checked body-wide with no
 // awareness of quoted/fenced content, so such a literal example matched before the report's own
-// real "### Verdict" / "NOT CLEAN" field was ever reached.
-const FENCE_LINE_PATTERN = /^\s*(?:`{3,}|~{3,})/;
+// real "### Verdict" / "NOT CLEAN" field was ever reached. Captures the delimiter run itself (not
+// just detecting one exists) so computeFencedCodeBlockMask can compare the closing delimiter's
+// character and length against the opener's, rather than treating every fence-looking line as an
+// interchangeable toggle.
+const FENCE_LINE_PATTERN = /^\s*(`{3,}|~{3,})/;
 
 // Pure. For each line index in `lines`, whether that line sits inside (or is itself) a fenced
-// code block delimiter. Symmetric toggle: the line that opens a fence and the line that closes it
-// are both masked, along with everything between them.
+// code block delimiter. The line that opens a fence and the line that actually closes it are both
+// masked, along with everything between them.
+//
+// Stage 1 review finding on this PR (audit #426 correction, P2): an earlier version toggled
+// `inFence` on *any* fence-looking line regardless of character or length, so a response quoting
+// Markdown fence syntax as an example — e.g. an outer four-backtick fence containing a literal
+// three-backtick line illustrating what a closing fence looks like — closed the mask early at that
+// inner line. With one such inner delimiter, the mask then re-opens at the real (four-backtick)
+// closing line instead of closing there, leaving it stuck "in fence" for everything after —
+// silently excluding a genuine, unfenced verdict declaration that follows. Per CommonMark, a
+// fence only closes on a delimiter using the *same character* and *at least as many* repeats as
+// the one that opened it; a fence-looking line that doesn't meet both conditions is content inside
+// the still-open fence, not a delimiter of its own. This tracks the open fence's character/length
+// and applies exactly that comparison — still a coarse, line-local toggle (one nesting level, not
+// full CommonMark fence parsing), consistent with this module's existing Non-goals.
 function computeFencedCodeBlockMask(lines) {
   const mask = new Array(lines.length).fill(false);
-  let inFence = false;
+  let openFence = null; // { char, length } while inside a fence, otherwise null.
   for (let i = 0; i < lines.length; i++) {
-    if (FENCE_LINE_PATTERN.test(lines[i])) {
+    const match = FENCE_LINE_PATTERN.exec(lines[i]);
+    if (match) {
+      const marker = match[1];
+      const char = marker[0];
+      const length = marker.length;
+      if (!openFence) {
+        openFence = { char, length };
+      } else if (char === openFence.char && length >= openFence.length) {
+        openFence = null;
+      }
+      // A fence-looking line that neither opens nor validly closes the current fence (wrong
+      // character, or shorter than the opener) is content inside it — still masked, and the
+      // fence stays open.
       mask[i] = true;
-      inFence = !inFence;
       continue;
     }
-    mask[i] = inFence;
+    mask[i] = openFence !== null;
   }
   return mask;
+}
+
+// A non-blank line carrying its own four-space (or one-tab) leading indentation — CommonMark's
+// plain "indented code block", which needs no ```/~~~ delimiter at all. Stage 1 review finding on
+// this PR (audit #426 correction, P1): STAGE2_HEADING_VERDICT_PATTERN and
+// STANDALONE_VERDICT_HEADING_PATTERN are matched against each line's *trimmed* content, so an
+// indented example quoting one of these headings was misread as a genuine declaration —
+// FENCE_LINE_PATTERN only recognizes fenced blocks, not plain indentation, and trimming discards
+// the very indentation that would have identified it as quoted content. Coarse and line-local
+// (matching this module's existing Non-goals: no arbitrary CommonMark parsing, no list-context
+// continuation rules) — it only asks "does this line itself carry four-space/tab indentation."
+const INDENTED_CODE_LINE_PATTERN = /^(?:\t| {4,})\S/;
+
+// Pure. Lines that must never be read as a genuine verdict declaration: fenced code block content
+// (computeFencedCodeBlockMask) plus any line carrying its own four-space/tab indentation
+// (INDENTED_CODE_LINE_PATTERN) — the same exclusion an indented example deserves whether or not it
+// also happens to sit inside a fence.
+function computeExcludedLineMask(lines) {
+  const fencedMask = computeFencedCodeBlockMask(lines);
+  return lines.map((line, i) => fencedMask[i] || INDENTED_CODE_LINE_PATTERN.test(line));
 }
 
 function normalizeVerdictToken(token) {
@@ -209,14 +266,21 @@ function normalizeVerdictToken(token) {
 // non-blank line is checked after a label with no same-line token, so an unrelated later mention
 // of CLEAN/NOT CLEAN elsewhere in the body is never mistaken for the labelled value.
 //
-// The standalone-heading and label shapes are scanned line-by-line with fenced code block content
-// excluded (computeFencedCodeBlockMask) — a quoted/fenced example must never itself count as a
-// declaration. Every genuine (non-excluded) declaration found across all four shapes is collected
-// rather than returning on the first match: when they all agree, that is the verdict; when the
-// body carries none, the verdict is null; when two or more disagree, this fails closed and
-// returns null rather than silently picking whichever declaration happened to appear first
-// (Stage 1 review finding on this PR) — an explicit genuine verdict must never be overridable by
-// an incidental or conflicting declaration elsewhere in the same body.
+// Every shape except the leading status line (which, by construction, can only ever match the very
+// start of the whole trimmed response — there is nothing to scan line-by-line) is scanned
+// line-by-line with quoted/excluded content masked out (computeExcludedLineMask: fenced code
+// block content plus plain four-space/tab-indented lines) — a quoted example must never itself
+// count as a declaration, however it is quoted. This applies uniformly to the combined "Stage 2
+// Audit — <verdict>" heading and the standalone heading together in the same loop (audit #426: an
+// earlier revision left the combined-heading shape on a separate, non-fence-aware, first-match-only
+// body scan, so a fenced example of it could be read as a genuine declaration and a second genuine
+// combined heading was never collected at all) as well as the "Verdict" label shape below. Every
+// genuine (non-excluded) declaration found across all four shapes is collected rather than
+// returning on the first match: when they all agree, that is the verdict; when the body carries
+// none, the verdict is null; when two or more disagree, this fails closed and returns null rather
+// than silently picking whichever declaration happened to appear first (Stage 1 review finding on
+// PR #424) — an explicit genuine verdict must never be overridable by an incidental or conflicting
+// declaration elsewhere in the same body.
 export function extractResponseVerdict(text) {
   const normalized = (text ?? "").trim();
   if (!normalized) return null;
@@ -226,20 +290,20 @@ export function extractResponseVerdict(text) {
   const leading = LEADING_VERDICT_PATTERN.exec(normalized);
   if (leading) tokens.add(normalizeVerdictToken(leading[1]));
 
-  const stage2Heading = STAGE2_HEADING_VERDICT_PATTERN.exec(normalized);
-  if (stage2Heading) tokens.add(normalizeVerdictToken(stage2Heading[1]));
-
   const lines = normalized.split("\n");
-  const fencedMask = computeFencedCodeBlockMask(lines);
+  const excludedMask = computeExcludedLineMask(lines);
 
   for (let i = 0; i < lines.length; i++) {
-    if (fencedMask[i]) continue;
-    const standaloneMatch = STANDALONE_VERDICT_HEADING_PATTERN.exec(lines[i].trim());
+    if (excludedMask[i]) continue;
+    const trimmedLine = lines[i].trim();
+    const stage2Match = STAGE2_HEADING_VERDICT_PATTERN.exec(trimmedLine);
+    if (stage2Match) tokens.add(normalizeVerdictToken(stage2Match[1]));
+    const standaloneMatch = STANDALONE_VERDICT_HEADING_PATTERN.exec(trimmedLine);
     if (standaloneMatch) tokens.add(normalizeVerdictToken(standaloneMatch[1]));
   }
 
   for (let i = 0; i < lines.length; i++) {
-    if (fencedMask[i]) continue;
+    if (excludedMask[i]) continue;
     const labelMatch = VERDICT_LABEL_LINE_PATTERN.exec(lines[i].trim());
     if (!labelMatch) continue;
     const rest = (labelMatch[1] ?? "").trim();
@@ -249,7 +313,7 @@ export function extractResponseVerdict(text) {
       continue;
     }
     for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
-      if (fencedMask[j]) break;
+      if (excludedMask[j]) break;
       const candidate = lines[j].trim();
       if (candidate === "") continue;
       const match = VERDICT_TOKEN_PATTERN.exec(candidate);
@@ -320,15 +384,37 @@ function isTopLevelBoundaryLine(line) {
 // can compare heading levels (computeHeadingSectionMask, below).
 const HEADING_LEVEL_PATTERN = /^(#{1,6})\s+\S/;
 
+// The command-log word set shared by both the heading shape (CHECKS_SECTION_HEADING_PATTERN,
+// below) and the bold-label shape (BOLD_LABEL_LINE_PATTERN/computeBoldLabelSectionMask, below).
+// Issue #481: a genuine Stage 2 response (issue #480, comment 5609327800) used a standalone
+// "**Testing**" bold label for the identical literal-command-log concept "### Checks" already
+// covers, rather than the word "Checks" itself — both words name the same "commands actually
+// run" results section, so both are recognized synonyms.
+const COMMAND_LOG_WORD_PATTERN_SOURCE = "(?:checks?|tests?|testing)";
+
 // A heading whose own text names a *literal command log* rather than a checklist walk-through —
 // observed real shape: "### Checks" (issue #381, comment 5541924356), each of whose lines is
 // "- ✅ `<command run>`" — the exact same top-level marker-bullet shape CHECKLIST_MARKER_ITEM_
 // PATTERN matches for a genuine per-item checklist walk-through. The two are structurally
 // indistinguishable by bullet shape alone; the heading is the only signal that separates "this
 // bullet asserts a checklist item was verified" from "this bullet records that a command was
-// run." Matches "Checks", "Checks:", "Checks performed", "### **Checks**", etc. — the heading
-// text alone, not exact punctuation/emphasis around it.
-const CHECKS_SECTION_HEADING_PATTERN = /^#{1,6}\s*\*{0,2}\s*checks?\b/i;
+// run." Matches "Checks", "Checks:", "Checks performed", "### **Checks**", "### Testing", etc. —
+// the heading text alone, not exact punctuation/emphasis around it.
+// Captures the matched word itself (group 1) so callers can tell a "Checks" heading — excluded
+// on label alone, per issue #381's established behavior — apart from a "Tests"/"Testing" heading,
+// which Stage 1 review finding 2 on PR #485 (correcting issue #481) requires further content
+// confirmation for; see isTestOnlyWord and spanLooksLikeCommandLog below.
+const CHECKS_SECTION_HEADING_PATTERN = new RegExp(`^#{1,6}\\s*\\*{0,2}\\s*(${COMMAND_LOG_WORD_PATTERN_SOURCE})\\b`, "i");
+
+// A line consisting of nothing but a bold-only label — "**Testing**", "**Checks:**" — no heading
+// marker and no trailing content on the same line. Issue #481's genuine response used exactly
+// this shape instead of a "### Checks"-style heading for its literal command-log section, which
+// CHECKS_SECTION_HEADING_PATTERN's heading-only match could never see: the section was never
+// excluded, so its command-log bullets stood in as if they were the real checklist walk-through.
+// Captures the label text (trimmed of an optional trailing colon) for computeBoldLabelSectionMask
+// to test against COMMAND_LOG_WORD_PATTERN_SOURCE, the same way a heading's text is tested.
+const BOLD_LABEL_LINE_PATTERN = /^\*\*\s*([^*\n]+?)\s*:?\s*\*\*\s*$/;
+const COMMAND_LOG_BOLD_LABEL_PATTERN = new RegExp(`^${COMMAND_LOG_WORD_PATTERN_SOURCE}$`, "i");
 
 // A heading whose own text names the response's *findings* section (the required response
 // structure's item (2), one numbered entry per finding — docs/bounded-review-cycle.md) rather
@@ -354,37 +440,173 @@ const FINDINGS_SECTION_HEADING_PATTERN = /^#{1,6}\s*\*{0,2}\s*findings?\b/i;
 // subheading that didn't itself say "checks" incorrectly closed the section early, exposing its
 // remaining bullets to being counted as checklist items again. Lines before the first matching
 // heading are never inside a section.
-function computeHeadingSectionMask(lines, startPattern) {
+// Stage 1 review finding 2 on PR #485 (correcting issue #481): matches a standalone label word —
+// "Checks"/"Check" only, not "Tests"/"Testing" — that this module has excluded on label alone
+// since issue #381, before #481 ever introduced the "tests"/"testing" alias. Used by
+// requireCommandLogContent below to leave that established "### Checks" (and bold "**Checks**")
+// behavior exactly as it was, while gating only the new alias words on actual content shape.
+const CHECKS_ONLY_WORD_PATTERN = /^checks?$/i;
+function isTestOnlyWord(word) {
+  return !CHECKS_ONLY_WORD_PATTERN.test((word ?? "").trim());
+}
+
+// A command-log bullet's own observed content shape (issue #480, comment 5609327800): a top-level
+// marker-bullet item whose text, immediately after the status glyph, *is* a backtick-quoted
+// command — "* ✅ `node --test ...`" — not prose that merely happens to mention one. A genuine
+// PASS/FAIL verification walk-through item is prose ("- ✅ Confirmed the fix works."), never a
+// bare command quoted as the entire remaining line content.
+// Stage 2 audit finding on issue #488 (correcting PR #485): the pattern below was previously
+// anchored only at the opening backtick ("^[-*+]\\s*STATUS\\s+`"), so a genuine prose walk-through
+// item that merely *begins* with an inline-code span — "- ✅ `node --test` confirms the
+// regression is fixed." — also matched, because nothing required the line to end at (or shortly
+// after) the closing backtick. That let a real checklist item be misclassified as command-log
+// content and masked out of the count.
+// The naive fix of requiring the closing backtick to end the line outright is too strict: every
+// real observed command-log bullet that carries trailing content after its command does so in one
+// consistent, established shape — an em dash introducing a short result annotation, e.g.
+// "* ✅ `node --test tools/review-watch tools/orchestration` — 779 passed, 0 failed." (issue #480,
+// comment 5609327800) and the same "`command` — result" shape in the real issue #330, #334, #380,
+// #381, and #436 fixtures. None of those annotations is a free-standing prose sentence continuing
+// straight off the closing backtick the way the bug case is.
+// Stage 1 review finding (P1) on PR #489 correcting this: a command bullet ending in ordinary
+// punctuation with no em dash at all — "- ✅ `npm test`." — is also real command-log shape (bare
+// command plus terminal punctuation, no words), and must stay recognized; only trailing *prose*
+// (letters/words) glued directly onto the closing backtick is the actual bug signature. The
+// pattern below therefore accepts the backtick-quoted command as the whole remaining line
+// (optional trailing whitespace only), an em-dash-introduced annotation, or trailing punctuation
+// only (no letters) — but never arbitrary prose glued directly onto the closing backtick, which is
+// what actually distinguishes a literal command log from a genuine checklist item that happens to
+// open with an inline-code span.
+const COMMAND_LOG_BULLET_CONTENT_PATTERN = new RegExp(
+  "^[-*+]\\s*" + CHECKLIST_STATUS_MARKER + "\\s+`[^`\\n]+`(?:\\s*$|\\s+—|\\s*[.,;:!?]+\\s*$)",
+);
+
+// Pure. Stage 1 review finding 2 on PR #485 (correcting issue #481): whether the lines in
+// `lines[start, end)` — a candidate command-log section's own content, excluding its opening
+// label/heading line — actually look like a literal command log rather than a genuine
+// PASS/FAIL walk-through that merely happens to sit under a "Tests"/"Testing" label. Requires at
+// least one top-level marker-bullet line in the span, and every such line to carry the
+// command-log bullet shape (COMMAND_LOG_BULLET_CONTENT_PATTERN) — a mixed or prose-only span is
+// not a command log and must not be excluded from checklist-walkthrough candidacy merely for
+// carrying a "Tests"/"Testing" label. A span with no marker-bullet lines at all is likewise not a
+// command log (nothing to log).
+function spanLooksLikeCommandLog(lines, start, end) {
+  let sawMarkerBullet = false;
+  for (let i = start; i < end; i++) {
+    if (!CHECKLIST_MARKER_ITEM_LINE_PATTERN.test(lines[i])) continue;
+    sawMarkerBullet = true;
+    if (!COMMAND_LOG_BULLET_CONTENT_PATTERN.test(lines[i])) return false;
+  }
+  return sawMarkerBullet;
+}
+
+// `options.requireCommandLogContent`: when true, a section opened by a "Tests"/"Testing" word
+// (isTestOnlyWord) is only actually included in the mask when its own content looks like a
+// command log (spanLooksLikeCommandLog); a "Checks" word keeps the unconditional, label-only
+// inclusion issue #381 established. Defaults to false (unconditional inclusion, the pre-#485
+// behavior) for callers with no word-level distinction to make, e.g. FINDINGS_SECTION_HEADING_PATTERN.
+function computeHeadingSectionMask(lines, startPattern, options = {}) {
+  const requireCommandLogContent = options.requireCommandLogContent === true;
   const mask = new Array(lines.length).fill(false);
-  let sectionLevel = null;
+  let section = null; // { level, start, word }
+  const closeSection = (endExclusive) => {
+    if (!section) return;
+    const include = !requireCommandLogContent || !isTestOnlyWord(section.word) || spanLooksLikeCommandLog(lines, section.start + 1, endExclusive);
+    if (include) {
+      for (let k = section.start; k < endExclusive; k++) mask[k] = true;
+    }
+    section = null;
+  };
   for (let i = 0; i < lines.length; i++) {
     const headingMatch = HEADING_LEVEL_PATTERN.exec(lines[i]);
     if (headingMatch) {
       const level = headingMatch[1].length;
-      if (sectionLevel !== null && level <= sectionLevel) {
-        sectionLevel = null;
+      if (section && level <= section.level) {
+        closeSection(i);
       }
-      if (sectionLevel === null && startPattern.test(lines[i])) {
-        sectionLevel = level;
+      if (!section) {
+        const startMatch = startPattern.exec(lines[i]);
+        if (startMatch) {
+          section = { level, start: i, word: startMatch[1] };
+        }
       }
     }
-    mask[i] = sectionLevel !== null;
   }
+  closeSection(lines.length);
+  return mask;
+}
+
+// Pure. For each line index in `lines`, whether that line falls inside a section opened by a
+// standalone bold-only label line (BOLD_LABEL_LINE_PATTERN) whose label text matches
+// `wordPattern` — from that label line down to (but not including) the next Markdown heading at
+// any level, the next standalone bold-only label line (matching or not — a different label
+// always ends the current one, the same way a same-or-shallower heading ends a heading section),
+// or the end of the document. Bold labels carry no heading level to compare the way
+// computeHeadingSectionMask's ATX headings do, so any subsequent heading or bold label
+// unconditionally closes the section rather than only a "same or shallower level" one. Issue
+// #481: this is the bold-label counterpart to computeHeadingSectionMask, needed because a genuine
+// response labelled its literal command-log section "**Testing**" — a standalone bold paragraph,
+// not a heading — which computeHeadingSectionMask can never see at all.
+// Stage 1 review finding 1 on PR #485 (correcting issue #481): a standalone bold label quoted
+// inside a fenced code example (e.g. an outer fence illustrating what a "**Testing**" label looks
+// like) must never open or close a real section — mirrors the fenced-code awareness
+// computeFencedCodeBlockMask already gives verdict extraction (extractResponseVerdict), reusing
+// that same primitive rather than a second Markdown parser. A fenced line is skipped entirely for
+// label/heading detection purposes; it does not itself open, close, or reopen a section. Content
+// that legitimately falls inside an already-open (validly, non-fenced-opened) section is still
+// covered by that section's own mask fill, whether or not it happens to sit inside a fence —
+// unchanged from this function's pre-existing behavior, since fenced-content-within-a-section was
+// never the reported defect.
+//
+// `options.requireCommandLogContent`: see computeHeadingSectionMask's own comment — same
+// "Checks" (label-only) vs. "Tests"/"Testing" (content-gated) distinction, Stage 1 review
+// finding 2 on this PR.
+function computeBoldLabelSectionMask(lines, wordPattern, options = {}) {
+  const requireCommandLogContent = options.requireCommandLogContent === true;
+  const fencedMask = computeFencedCodeBlockMask(lines);
+  const mask = new Array(lines.length).fill(false);
+  let section = null; // { start, word }
+  const closeSection = (endExclusive) => {
+    if (!section) return;
+    const include = !requireCommandLogContent || !isTestOnlyWord(section.word) || spanLooksLikeCommandLog(lines, section.start + 1, endExclusive);
+    if (include) {
+      for (let k = section.start; k < endExclusive; k++) mask[k] = true;
+    }
+    section = null;
+  };
+  for (let i = 0; i < lines.length; i++) {
+    if (fencedMask[i]) continue;
+    const boldMatch = BOLD_LABEL_LINE_PATTERN.exec(lines[i].trim());
+    if (boldMatch) {
+      closeSection(i);
+      const label = boldMatch[1].trim();
+      if (wordPattern.test(label)) {
+        section = { start: i, word: label };
+      }
+      continue;
+    }
+    if (HEADING_LEVEL_PATTERN.test(lines[i])) {
+      closeSection(i);
+    }
+  }
+  closeSection(lines.length);
   return mask;
 }
 
 // Pure. For each line index in `lines`, whether that line falls inside a literal-command-log
-// section (CHECKS_SECTION_HEADING_PATTERN) or a findings section (FINDINGS_SECTION_HEADING_
-// PATTERN) — see each pattern's own comment for why both are excluded from checklist-walk-
-// through candidacy. Issue #381: findNumberedWalkthroughRun and findMarkerWalkthroughRun both
-// use this to exclude those sections' own bullets/numbering from ever being mistaken for the
-// genuine requested-checklist walk-through, even though a command log reuses the identical
-// per-item status-marker glyphs a real checklist item uses, and a findings list reuses the
-// identical numbered-list shape a real walk-through uses.
+// section — a heading (CHECKS_SECTION_HEADING_PATTERN) or a standalone bold label
+// (BOLD_LABEL_LINE_PATTERN + COMMAND_LOG_BOLD_LABEL_PATTERN, issue #481) — or a findings section
+// (FINDINGS_SECTION_HEADING_PATTERN) — see each pattern's own comment for why all three are
+// excluded from checklist-walk-through candidacy. Issue #381: findNumberedWalkthroughRun and
+// findMarkerWalkthroughRun both use this to exclude those sections' own bullets/numbering from
+// ever being mistaken for the genuine requested-checklist walk-through, even though a command log
+// reuses the identical per-item status-marker glyphs a real checklist item uses, and a findings
+// list reuses the identical numbered-list shape a real walk-through uses.
 function computeExcludedSectionMask(lines) {
-  const checksMask = computeHeadingSectionMask(lines, CHECKS_SECTION_HEADING_PATTERN);
+  const checksMask = computeHeadingSectionMask(lines, CHECKS_SECTION_HEADING_PATTERN, { requireCommandLogContent: true });
   const findingsMask = computeHeadingSectionMask(lines, FINDINGS_SECTION_HEADING_PATTERN);
-  return lines.map((_, i) => checksMask[i] || findingsMask[i]);
+  const boldChecksMask = computeBoldLabelSectionMask(lines, COMMAND_LOG_BOLD_LABEL_PATTERN, { requireCommandLogContent: true });
+  return lines.map((_, i) => checksMask[i] || findingsMask[i] || boldChecksMask[i]);
 }
 
 // Pure. Counts top-level numbered list lines ("1. ...", "2) ...") in `text`. Used against the

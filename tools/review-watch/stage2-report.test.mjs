@@ -732,6 +732,16 @@ const ISSUE_381_COMMIT = "3947b0e03be816a483d8cc7117241f86f13b081c";
 const ISSUE_381_COMMENT = readFixture("issue-381-comment.txt");
 const ISSUE_381_CHECKLIST = readFixture("issue-381-checklist.txt");
 
+// Issue #481: a genuine, complete 8-item numbered "Verification Checklist" walk-through
+// (matching this issue's 8-item requested checklist), followed by a literal command-log section
+// labelled with a standalone bold "**Testing**" paragraph — not a "### Checks" heading — of 5
+// status-marker bullets. Exact real response body (comment 5609327800 on issue #480) and its
+// exact real requested checklist (issue #480's own "Verification checklist" field), not
+// paraphrased reconstructions.
+const ISSUE_480_COMMIT = "816646bc0183fbd4035b71cde57c9955de52648c";
+const ISSUE_480_COMMENT = readFixture("issue-480-comment.txt");
+const ISSUE_480_CHECKLIST = readFixture("issue-480-checklist.txt");
+
 test("hasVerificationEvidence: true for a status-marker bullet checklist ('- ✅ ...') with no numbering", () => {
   assert.equal(hasVerificationEvidence("### Verification\n\n- ✅ Confirmed the fix works."), true);
 });
@@ -1104,6 +1114,200 @@ test("isCompletedStage2AuditReport (issue #381): reproduces the real #380 CLEAN 
   assert.deepEqual(result.reasons, []);
 });
 
+// -- issue #481: a later literal command-log section labelled with a standalone bold paragraph
+// ("**Testing**") rather than a "### Checks" heading must never outrank a complete, earlier
+// numbered checklist walk-through, the same protection issue #381 already established for the
+// heading shape.
+
+test("countVerificationWalkthroughItems (issue #481): a complete numbered walk-through is not undercounted by a later, unrelated bold '**Testing**' section of fewer status-marker command bullets", () => {
+  const body = [
+    "### Verification Checklist",
+    "",
+    "1. **PASS** — first item.",
+    "2. **PASS** — second item.",
+    "3. **PASS** — third item.",
+    "4. **PASS** — fourth item.",
+    "5. **PASS** — fifth item.",
+    "6. **PASS** — sixth item.",
+    "",
+    "**Testing**",
+    "",
+    "* ✅ `command one`",
+    "* ✅ `command two`",
+    "* ✅ `command three`",
+    "",
+    "Verdict: CLEAN",
+  ].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    6,
+    "the correct, earlier, complete 6-item numbered walk-through must win over the later 3-item bold '**Testing**' section",
+  );
+});
+
+test("countVerificationWalkthroughItems (issue #481): a bold '**Checks**' label (no heading marker) is also recognized as a literal-command-log section", () => {
+  const body = ["1. one", "2. two", "", "**Checks:**", "", "- ✅ `cmd a`", "- ✅ `cmd b`", "- ✅ `cmd c`"].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 2, "the 2-item numbered run must win, not the 3-item bold 'Checks:' section");
+});
+
+test("countVerificationWalkthroughItems (issue #481): a bold label section closes at the next heading, not just the next bold label", () => {
+  const body = ["1. one", "2. two", "", "**Testing**", "", "- ✅ `cmd a`", "", "### Not Testing", "", "- ✅ `cmd b`", "- ✅ `cmd c`"].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    2,
+    "content after the '**Testing**' section's own closing heading must not still be masked as part of it",
+  );
+});
+
+test("countVerificationWalkthroughItems (issue #481): a bold-emphasized run-of-words line that happens to end in a colon is not mistaken for a standalone bold label", () => {
+  const body = ["1. one", "2. two", "", "**Verdict: NOT CLEAN**", "", "- ✅ Confirmed A.", "- ✅ Confirmed B.", "- ✅ Confirmed C."].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    3,
+    "a bold '**Verdict: NOT CLEAN**' line must not be read as a checks/testing label and must not mask the later genuine marker checklist",
+  );
+});
+
+test("countVerificationWalkthroughItems (issue #481): reproduces the real #480 response — the correct 8-item numbered walk-through, not the 5-item bold '**Testing**' section", () => {
+  assert.equal(countVerificationWalkthroughItems(ISSUE_480_COMMENT), 8);
+  assert.equal(countNumberedItems(ISSUE_480_CHECKLIST), 8);
+});
+
+test("hasCompleteVerificationEvidence (issue #481): the real response satisfies its real 8-item requested checklist", () => {
+  assert.equal(hasCompleteVerificationEvidence(ISSUE_480_COMMENT, ISSUE_480_CHECKLIST), true);
+});
+
+test("isCompletedStage2AuditReport (issue #481): reproduces the real #480 NOT CLEAN Stage 2 response as complete — previously misclassified as incomplete (5 of 8) due to the later bold '**Testing**' section", () => {
+  const result = isCompletedStage2AuditReport(ISSUE_480_COMMENT, {
+    mergeCommit: ISSUE_480_COMMIT,
+    requestedChecklist: ISSUE_480_CHECKLIST,
+  });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "NOT CLEAN");
+  assert.deepEqual(result.reasons, []);
+});
+
+// -- Stage 1 review findings on PR #485 (correcting issue #481): the "tests"/"testing" alias
+// introduced for #480 was giving section-label text too much semantic authority — a fenced
+// example of the label could mask real content, and any "Tests"/"Testing"-labelled section was
+// excluded solely on its label, even a genuine PASS/FAIL walk-through that merely used that word.
+
+test("countVerificationWalkthroughItems (Stage 1 finding 1 on PR #485): a standalone '**Testing**' label quoted inside a fenced example cannot mask a real numbered checklist that follows it", () => {
+  const body = [
+    "An example of the label shape referenced above:",
+    "```",
+    "**Testing**",
+    "```",
+    "",
+    "1. **PASS** — first item.",
+    "2. **PASS** — second item.",
+    "3. **PASS** — third item.",
+  ].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    3,
+    "the fenced '**Testing**' label must not open a section that then masks the real, unfenced numbered checklist for the rest of the document",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 2 on PR #485): a genuine numbered PASS/FAIL walk-through under a '### Testing' heading is still counted, not excluded merely for the label", () => {
+  const body = ["### Testing", "", "1. **PASS** — first item.", "2. **PASS** — second item.", "3. **PASS** — third item."].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    3,
+    "a '### Testing' heading over prose PASS/FAIL items (no command-log bullets) must not be treated as a literal command log",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 2 on PR #485): a genuine numbered PASS/FAIL walk-through under a standalone bold '**Tests**' label is still counted, not excluded merely for the label", () => {
+  const body = ["**Tests**", "", "1. **PASS** — first item.", "2. **PASS** — second item.", "3. **PASS** — third item."].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    3,
+    "a bold '**Tests**' label over prose PASS/FAIL items (no command-log bullets) must not be treated as a literal command log",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 2 on PR #485): the real #480 fixture's '**Testing**' section — genuine command-log bullets — is still excluded as a command log", () => {
+  assert.equal(
+    countVerificationWalkthroughItems(ISSUE_480_COMMENT),
+    8,
+    "the #480 fixture's '**Testing**' section bullets are all backtick-quoted commands and must remain excluded as a command log",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding 2 on PR #485): the established '### Checks' behavior is unchanged — still excluded on label alone with no content gate", () => {
+  const body = ["1. one", "2. two", "", "### Checks", "", "- ✅ `cmd a`", "- ✅ `cmd b`", "- ✅ `cmd c`"].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 2, "the 2-item numbered run must still win, not the 3-item '### Checks' section");
+});
+
+// -- Stage 2 audit finding on issue #488 (correcting PR #485): COMMAND_LOG_BULLET_CONTENT_PATTERN
+// was anchored only at the opening backtick, so a genuine marker-bullet checklist item that merely
+// *begins* with an inline-code span — "- ✅ `node --test` confirms the regression is fixed." — was
+// wrongly classified as command-log content and could mask a real "Tests"/"Testing" walk-through
+// out of the count. The audit's own probe placed three such prose items after an earlier two-item
+// run and got 2 instead of 3; these tests reproduce that shape under both the heading and bold-
+// label forms and confirm the fix counts the genuine later run.
+
+test("countVerificationWalkthroughItems (Stage 2 audit #488): a '### Testing' section of marker-bullet items that merely begin with inline code is not masked as a command log", () => {
+  const body = [
+    "- ✅ `cmd one` — first note.",
+    "- ✅ `cmd two` — second note.",
+    "",
+    "### Testing",
+    "",
+    "- ✅ `node --test` confirms the regression is fixed.",
+    "- ✅ `node tools/check-startup-budget.mjs` reports OK.",
+    "- ✅ `node tools/check-control-plane-paths.mjs` reports OK.",
+    "",
+    "Verdict: CLEAN",
+  ].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    3,
+    "the later 3-item '### Testing' run is genuine prose (trailing content follows each inline-code span) and must win over the earlier 2-item run, not be masked as a command log",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 2 audit #488): a bold '**Testing**' section of marker-bullet items that merely begin with inline code is not masked as a command log", () => {
+  const body = [
+    "1. **PASS** — setup.",
+    "2. **PASS** — teardown.",
+    "",
+    "**Testing**",
+    "",
+    "- ✅ `npm test` confirms all suites pass.",
+    "- ✅ `npm run lint` confirms no lint errors.",
+    "- ✅ `npm run build` confirms the build succeeds.",
+  ].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    3,
+    "the later 3-item '**Testing**' marker-bullet run is genuine prose and must win over the earlier 2-item numbered run, not be masked as a command log",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 2 audit #488): a genuine command-log bullet with trailing whitespace after the closing backtick is still recognized as command-log content", () => {
+  // Uses a content-gated "### Testing" label (not "### Checks", which is excluded on label alone
+  // regardless of content — Stage 1 review finding P2 on PR #489: the prior version of this test
+  // used "### Checks" and so never actually exercised COMMAND_LOG_BULLET_CONTENT_PATTERN at all).
+  const body = ["1. one", "2. two", "", "### Testing", "", "- ✅ `npm test`   ", "- ✅ `npm run lint`"].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    2,
+    "trailing whitespace after the closing backtick must not defeat command-log recognition — the bullet is still a bare command",
+  );
+});
+
+test("countVerificationWalkthroughItems (Stage 1 finding P1 on PR #489): a command-log bullet ending in ordinary punctuation with no em dash is still recognized as command-log content", () => {
+  const body = ["1. one", "2. two", "", "### Testing", "", "- ✅ `npm test`.", "- ✅ `npm run lint`."].join("\n");
+  assert.equal(
+    countVerificationWalkthroughItems(body),
+    2,
+    "a bare command followed only by terminal punctuation (no words) must still be recognized as command-log content, not promoted into a checklist candidate",
+  );
+});
+
 // -- Stage 1 review findings on this PR: masking a "### Checks" section must not itself turn an
 // unrelated earlier numbered *findings* list, or a nested subheading inside "### Checks", into
 // counted walk-through evidence.
@@ -1183,4 +1387,334 @@ test("isCompletedStage2AuditReport: issue #421's real response, given a delibera
   });
   assert.equal(result.complete, false, "an incorrect mergeCommit must never be forgiven merely because the response carries a genuine standalone verdict heading");
   assert.equal(result.verdict, null);
+});
+
+// -- extractResponseVerdict: the combined "Stage 2 Audit — <verdict>" heading must join the same
+// fence-aware, all-declaration collection the standalone heading already uses (Stage 2 audit #426,
+// correcting PR #424's own Stage 1 finding: this shape was left on a separate body-wide, non-fence-
+// aware, first-match-only scan). Regression matrix per audit #426 / issue #422 comment 5562041511. -
+
+test("extractResponseVerdict (audit #426, matrix item 1): a backtick-fenced '## Stage 2 Audit — CLEAN' example with no genuine declaration anywhere else extracts nothing", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. The parser must not read a fenced combined heading as a declaration, e.g.:",
+    "",
+    "```",
+    "## Stage 2 Audit — CLEAN",
+    "```",
+    "",
+    "No other verdict is stated in this body.",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), null);
+});
+
+test("extractResponseVerdict (audit #426, matrix item 2): the same fenced combined-heading example alongside a genuine non-fenced 'Verdict: NOT CLEAN' resolves to the genuine verdict, not the fenced example", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. The parser must not read a fenced combined heading as a declaration, e.g.:",
+    "",
+    "```",
+    "## Stage 2 Audit — CLEAN",
+    "```",
+    "",
+    "### Verdict",
+    "",
+    "NOT CLEAN",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("extractResponseVerdict (audit #426, matrix item 3): a tilde-fenced combined heading is excluded as evidence the same way a backtick-fenced one is", () => {
+  const body = ["~~~", "## Stage 2 Audit — NOT CLEAN", "~~~", "", "### Verdict", "", "CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), "CLEAN");
+});
+
+test("extractResponseVerdict (audit #426, matrix item 4): two genuine, non-fenced, conflicting combined headings fail closed to null rather than resolving to whichever appeared first", () => {
+  const body = ["## Stage 2 Audit — CLEAN", "", "Some intervening prose changed the outcome.", "", "## Stage 2 Audit — NOT CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), null);
+});
+
+test("extractResponseVerdict (audit #426, matrix item 5): repeated genuine combined headings that agree resolve to the agreed verdict", () => {
+  const body = ["## Stage 2 Audit — CLEAN", "", "Some prose repeats the verdict for emphasis.", "", "## Stage 2 Audit — CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), "CLEAN");
+});
+
+test("extractResponseVerdict (audit #426, matrix item 6): issue #421's accepted bare standalone '# CLEAN' fixture still resolves to CLEAN, unaffected by the combined-heading fix", () => {
+  assert.equal(extractResponseVerdict(ISSUE_421_COMMENT), "CLEAN");
+});
+
+test("extractResponseVerdict (audit #426): a fenced combined heading and a fenced standalone heading in the same body, with a genuine non-fenced label elsewhere, both stay excluded", () => {
+  const body = [
+    "```",
+    "## Stage 2 Audit — CLEAN",
+    "```",
+    "",
+    "~~~",
+    "# NOT CLEAN",
+    "~~~",
+    "",
+    "Verdict: NOT CLEAN",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("isCompletedStage2AuditReport (audit #426, matrix item 8): a completed-report evaluation fails closed to no verdict when the only apparent verdict is fenced combined-heading evidence", () => {
+  const body = validReport({
+    verdictLine: "",
+  }).replace(
+    "1. Confirmed the classifier rejects the exact #229 kickoff — CONFIRMED",
+    [
+      "1. Confirmed a fenced combined heading quoted as an example, e.g.:",
+      "",
+      "```",
+      "## Stage 2 Audit — CLEAN",
+      "```",
+      "",
+      "is not misread as this report's own verdict — CONFIRMED",
+    ].join("\n"),
+  );
+  const result = isCompletedStage2AuditReport(body, { mergeCommit: MERGE_COMMIT });
+  assert.equal(result.complete, false, "fenced combined-heading evidence with no genuine verdict declaration must never back a completed report");
+  assert.equal(result.verdict, null);
+  assert.ok(result.reasons.some((r) => r.includes("no explicit CLEAN/NOT CLEAN verdict")));
+});
+
+test("isCompletedStage2AuditReport (audit #426): a fenced combined-heading example never overrides the report's actual genuine NOT CLEAN verdict", () => {
+  const body = validReport({
+    verdictLine: "### Verdict\n\nNOT CLEAN",
+  }).replace(
+    "1. Confirmed the classifier rejects the exact #229 kickoff — CONFIRMED",
+    [
+      "1. Confirmed a fenced combined heading quoted as an example, e.g.:",
+      "",
+      "```",
+      "## Stage 2 Audit — CLEAN",
+      "```",
+      "",
+      "is not misread as this report's own verdict — CONFIRMED",
+    ].join("\n"),
+  );
+  const result = isCompletedStage2AuditReport(body, { mergeCommit: MERGE_COMMIT });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "NOT CLEAN", "a fenced combined-heading example in evidence must never override the report's real NOT CLEAN verdict");
+});
+
+// -- extractResponseVerdict / computeFencedCodeBlockMask: Stage 1 review findings on PR #429
+// (correcting audit #426's own P1). P1: a plain four-space/tab-indented example (no fence
+// delimiter at all) was misread as a genuine declaration because the per-line scan trims each
+// line before matching. P2: computeFencedCodeBlockMask toggled on any fence-looking line
+// regardless of character/length, so a response quoting Markdown fence syntax as an example (an
+// outer fence containing an inner, shorter-or-different-character fence-looking line) closed the
+// mask early and re-opened it at the real closing fence, leaving genuine content after it
+// incorrectly excluded. -
+
+test("extractResponseVerdict (PR #429 finding P1): a four-space-indented combined heading example, with no genuine declaration elsewhere, extracts nothing", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. A quoted example of the heading shape, indented as a plain code block:",
+    "",
+    "    ## Stage 2 Audit — CLEAN",
+    "",
+    "No other verdict is stated anywhere in this body.",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), null);
+});
+
+test("extractResponseVerdict (PR #429 finding P1): a tab-indented standalone heading example, with no genuine declaration elsewhere, extracts nothing", () => {
+  const body = ["Findings text.", "", "\t# CLEAN", "", "No other verdict is stated anywhere in this body."].join("\n");
+  assert.equal(extractResponseVerdict(body), null);
+});
+
+test("extractResponseVerdict (PR #429 finding P1): an indented combined-heading example alongside a genuine non-indented 'Verdict: NOT CLEAN' resolves to the genuine verdict", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. A quoted example, indented as a plain code block:",
+    "",
+    "    ## Stage 2 Audit — CLEAN",
+    "",
+    "### Verdict",
+    "",
+    "NOT CLEAN",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("extractResponseVerdict (PR #429 finding P2): a literal shorter fence-looking line quoted inside an outer longer fence does not prematurely close the mask, so a genuine unfenced declaration after the real closing fence is still recognized", () => {
+  const body = [
+    "### Findings",
+    "",
+    "1. Documenting fence syntax:",
+    "",
+    "````",
+    "Example of a closing fence:",
+    "```",
+    "````",
+    "",
+    "## Stage 2 Audit — CLEAN",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), "CLEAN");
+});
+
+test("extractResponseVerdict (PR #429 finding P2): a same-character but shorter fence-looking line inside an outer fence still masks a combined heading quoted inside it", () => {
+  const body = [
+    "````",
+    "Example of the heading shape:",
+    "```",
+    "## Stage 2 Audit — CLEAN",
+    "```",
+    "````",
+    "",
+    "Verdict: NOT CLEAN",
+  ].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+// Audit #430 finding (P2): the fixture below previously embedded "~~~" mid-line inside prose
+// ("Example of a tilde fence: ~~~"), which never matches FENCE_LINE_PATTERN's line-start anchor
+// (`^\s*(`{3,}|~{3,})`) in the first place — so it exercised nothing about the character/length
+// comparison the P2 fix actually added. Replaced with a standalone `~~~` delimiter line so the
+// fixture is a genuine fence-looking line of a different character than the outer opener, proving
+// it neither closes the outer fence nor lets the quoted heading between the two tilde lines leak
+// out as a genuine declaration.
+test("extractResponseVerdict (PR #429 finding P2): a standalone differently-charactered fence-looking line inside an outer fence does not close it, so a quoted heading between them stays excluded", () => {
+  const body = ["```", "~~~", "## Stage 2 Audit — CLEAN", "~~~", "```", "", "Verdict: NOT CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+// Audit #430 finding (P2): the prior suite covered a same-length closer and shorter same-character
+// closers, but never a *longer* same-character closer — the other half of the ">=" comparison in
+// computeFencedCodeBlockMask.
+test("extractResponseVerdict (PR #429 finding P2): a longer same-character closer validly closes the fence, so genuine content after it is visible", () => {
+  const body = ["```", "Example of the heading shape:", "## Stage 2 Audit — CLEAN", "````", "", "Verdict: NOT CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("extractResponseVerdict (PR #429): ordinary matched-length fences (the pre-existing common case) are unaffected by the character/length comparison", () => {
+  const body = ["```", "## Stage 2 Audit — CLEAN", "```", "", "Verdict: NOT CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), "NOT CLEAN");
+});
+
+test("extractResponseVerdict (PR #429): issue #421's accepted bare standalone '# CLEAN' fixture still resolves to CLEAN, unaffected by either fix", () => {
+  assert.equal(extractResponseVerdict(ISSUE_421_COMMENT), "CLEAN");
+});
+
+// -- Issue #427 / Stage 1 finding on PR #449: the literal canonical Stage 2 skeletons are
+// mechanically accepted as a completed report, both CLEAN and NOT CLEAN — the acceptance
+// criterion that the canonical producer format and the parser stay aligned. These fixtures are
+// NOT independent hand-typed copies of docs/stage2-audit-contract.md § 2: they are extracted
+// directly from that document's own fenced examples at test time and then have their literal
+// `<placeholder>` tokens filled in with concrete test values (see instantiateCanonicalSkeleton
+// below). If a future edit changes the documented skeleton's shape or placeholder tokens without
+// updating this extraction, the tokens are left unresolved (e.g. `<full-sha>` never becomes a
+// valid hex SHA) and these tests fail — producer/parser drift no longer stays green.
+// -----------------------------------------------------------------------------------------------
+
+const STAGE2_CONTRACT_DOC_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "docs", "stage2-audit-contract.md");
+// Normalize CRLF to LF at the point of read: an existing `core.autocrlf=true` clone can retain
+// CRLF working-tree bytes for this file even after `.gitattributes` (issue #470) declares
+// `eol=lf`, because Git only reapplies text attributes when a file is actually re-checked-out,
+// not merely because the policy changed underneath an unchanged blob. Without this, the
+// LF-anchored fence regex below fails to match on such a clone (0 fences found instead of 2),
+// collapsing this entire file's tests into a single module-load failure -- see
+// docs/eol-policy-proof-runs.md for the reproduction.
+const STAGE2_CONTRACT_DOC = readFileSync(STAGE2_CONTRACT_DOC_PATH, "utf8").replace(/\r\n/g, "\n");
+
+// Pulls the Nth (0-based) ```markdown fenced block out of docs/stage2-audit-contract.md § 2
+// ("## 2. Canonical response skeleton"): index 0 is the CLEAN skeleton, index 1 is NOT CLEAN.
+function extractCanonicalSkeletonFence(index) {
+  const sectionStart = STAGE2_CONTRACT_DOC.indexOf("## 2. Canonical response skeleton");
+  const sectionEnd = STAGE2_CONTRACT_DOC.indexOf("## 3. Canonical format vs. compatibility parsing");
+  assert.ok(sectionStart >= 0 && sectionEnd > sectionStart, "docs/stage2-audit-contract.md § 2 heading not found as expected — has the document been restructured?");
+  const section = STAGE2_CONTRACT_DOC.slice(sectionStart, sectionEnd);
+  const fences = [...section.matchAll(/```markdown\n([\s\S]*?)\n```/g)].map((m) => m[1]);
+  assert.equal(fences.length, 2, "expected exactly one CLEAN and one NOT CLEAN fenced skeleton under docs/stage2-audit-contract.md § 2");
+  return fences[index];
+}
+
+const CANONICAL_COMMIT = "b281dbd5e7590b8ac2992753cd875f5e6472d556";
+const CANONICAL_CHECKLIST = "1. First check.\n2. Second check.";
+
+// Fills in § 2's literal placeholder tokens with concrete test values. Every token here must
+// exist verbatim in the document's fenced skeletons; a token that no longer appears is caught by
+// the leftover-placeholder assertion below, not silently ignored.
+function instantiateCanonicalSkeleton(fence) {
+  const replacements = {
+    "<full-sha>": CANONICAL_COMMIT,
+    "<check 1 result>": "First check result.",
+    "<check 2 result>": "Second check result.",
+    "<root cause>": "Root cause",
+    "<exact evidence: file/line, command output, or quoted text>": "evidence (file.mjs:10, quoted text)",
+    "<what breaks>": "describes what breaks",
+    "<what to change>": "describes the fix",
+  };
+  let instantiated = fence;
+  for (const [token, value] of Object.entries(replacements)) instantiated = instantiated.split(token).join(value);
+  assert.ok(!/<[a-z][^>]*>/.test(instantiated), `docs/stage2-audit-contract.md § 2 skeleton has an unresolved placeholder token: ${instantiated.match(/<[a-z][^>]*>/)?.[0]}`);
+  return instantiated;
+}
+
+const CANONICAL_CLEAN_SKELETON = instantiateCanonicalSkeleton(extractCanonicalSkeletonFence(0));
+const CANONICAL_NOT_CLEAN_SKELETON = instantiateCanonicalSkeleton(extractCanonicalSkeletonFence(1));
+
+test("isCompletedStage2AuditReport: the literal canonical CLEAN skeleton (docs/stage2-audit-contract.md § 2) is accepted as a completed CLEAN report", () => {
+  const result = isCompletedStage2AuditReport(CANONICAL_CLEAN_SKELETON, {
+    mergeCommit: CANONICAL_COMMIT,
+    requestedChecklist: CANONICAL_CHECKLIST,
+  });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "CLEAN");
+  assert.deepEqual(result.reasons, []);
+});
+
+test("isCompletedStage2AuditReport: the literal canonical NOT CLEAN skeleton (docs/stage2-audit-contract.md § 2) is accepted as a completed NOT CLEAN report", () => {
+  const result = isCompletedStage2AuditReport(CANONICAL_NOT_CLEAN_SKELETON, {
+    mergeCommit: CANONICAL_COMMIT,
+    requestedChecklist: CANONICAL_CHECKLIST,
+  });
+  assert.equal(result.complete, true);
+  assert.equal(result.verdict, "NOT CLEAN");
+  assert.deepEqual(result.reasons, []);
+});
+
+test("isCompletedStage2AuditReport: the canonical skeleton against the wrong merge commit fails closed (wrong-target invalid-response example, § 6.3)", () => {
+  const wrongCommit = "1234567890abcdef1234567890abcdef12345678";
+  const result = isCompletedStage2AuditReport(CANONICAL_CLEAN_SKELETON, {
+    mergeCommit: wrongCommit,
+    requestedChecklist: CANONICAL_CHECKLIST,
+  });
+  assert.equal(result.complete, false);
+  assert.equal(result.verdict, null);
+});
+
+test("isCompletedStage2AuditReport: a findings-only response with no merge commit, checklist, or verdict fails closed (invalid-response example § 6.1)", () => {
+  const body = "There is a bug in foo.mjs that needs fixing.";
+  const result = isCompletedStage2AuditReport(body, { mergeCommit: CANONICAL_COMMIT, requestedChecklist: CANONICAL_CHECKLIST });
+  assert.equal(result.complete, false);
+  assert.equal(result.verdict, null);
+  assert.ok(result.reasons.length >= 2);
+});
+
+test("isCompletedStage2AuditReport: a bare 'CLEAN' with no commit restatement or verification content fails closed (invalid-response example § 6.2)", () => {
+  const result = isCompletedStage2AuditReport("CLEAN", { mergeCommit: CANONICAL_COMMIT, requestedChecklist: CANONICAL_CHECKLIST });
+  assert.equal(result.complete, false);
+  assert.equal(result.verdict, null);
+});
+
+test("isCompletedStage2AuditReport: the canonical skeleton truncated to one of two requested checklist items fails closed as incomplete (§ 4)", () => {
+  const truncated = CANONICAL_CLEAN_SKELETON.replace("2. PASS — Second check result.\n", "");
+  const result = isCompletedStage2AuditReport(truncated, {
+    mergeCommit: CANONICAL_COMMIT,
+    requestedChecklist: CANONICAL_CHECKLIST,
+  });
+  assert.equal(result.complete, false);
+  assert.ok(result.reasons.some((r) => r.includes("incomplete")));
+});
+
+test("extractResponseVerdict: two contradictory genuine verdict declarations in the same response fail closed to no verdict (invalid-response example § 6.4)", () => {
+  const body = ["CLEAN — looks fine.", "", "Verdict: NOT CLEAN"].join("\n");
+  assert.equal(extractResponseVerdict(body), null);
 });
