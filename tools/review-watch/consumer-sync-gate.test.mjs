@@ -17,6 +17,7 @@ import {
   isEligibleForRepair,
   findRepairableBareTrigger,
   isCleanStage1Response,
+  isCleanPassMatch,
   run,
 } from "./consumer-sync-gate.mjs";
 import { headMarker } from "./trigger.mjs";
@@ -520,6 +521,39 @@ test("isCleanStage1Response: false for a finding-bearing review (reproduces LDL 
         },
       ],
     }),
+    false,
+  );
+});
+
+test("isCleanStage1Response: false for a real finding hidden as an unlabeled trailing clause behind the clean-pass preamble (PR #673 Stage 1 review finding, Stage 2 audit #672 shape)", () => {
+  assert.equal(
+    isCleanStage1Response({
+      state: "RESPONSE_RECEIVED",
+      matches: [{ body_excerpt: "Codex Review: Didn't find any major issues. However, credentials are logged." }],
+    }),
+    false,
+  );
+});
+
+test("isCleanStage1Response: false when the only clean-pass-prefixed match hides a real finding, even alongside a separate genuine formal finding match (mixed-surface regression)", () => {
+  assert.equal(
+    isCleanStage1Response({
+      state: "RESPONSE_RECEIVED",
+      matches: [
+        { body_excerpt: "Codex Review: Didn't find any major issues. However, credentials are logged." },
+        {
+          body_excerpt:
+            "### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.",
+        },
+      ],
+    }),
+    false,
+  );
+});
+
+test("isCleanPassMatch: false for a real finding hidden as an unlabeled trailing clause behind the clean-pass preamble", () => {
+  assert.equal(
+    isCleanPassMatch({ body_excerpt: "Codex Review: Didn't find any major issues. However, credentials are logged." }),
     false,
   );
 });

@@ -123,6 +123,33 @@ test("checkCorrectionDelta: CORRECTION_SATISFIED — head matches, findings-bear
   });
 });
 
+test("checkCorrectionDelta: CORRECTION_SATISFIED — reviewed response's only finding is an unlabeled trailing clause behind the clean-pass preamble (PR #673 Stage 1 review finding, Stage 2 audit #672 shape)", async () => {
+  const hiddenFindingBody = "Codex Review: Didn't find any major issues. However, credentials are logged.";
+  const result = await checkCorrectionDelta(
+    { repo: "o/r", pr: 435, reviewedHead: REVIEWED, correctedHead: CORRECTED, gatedHead: CORRECTED },
+    {
+      stage1RunImpl: async () => findingsReceived({ matches: [{ body_excerpt: hiddenFindingBody }] }),
+      compareImpl: async () => ({ status: "ahead" }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "CORRECTION_SATISFIED");
+});
+
+test("checkCorrectionDelta: NOT_SATISFIED (findings-provenance) — a clean-pass preamble followed by a known-harmless trailing clause is still not findings-bearing, even though it opens with CLEAN_PREAMBLE_PATTERN", async () => {
+  const genuinelyCleanBody = "Codex Review: Didn't find any major issues. Nice work!";
+  const result = await checkCorrectionDelta(
+    { repo: "o/r", pr: 435, reviewedHead: REVIEWED, correctedHead: CORRECTED, gatedHead: CORRECTED },
+    {
+      stage1RunImpl: async () => findingsReceived({ matches: [{ body_excerpt: genuinelyCleanBody }] }),
+      compareImpl: throwingSpy("compareImpl"),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "NOT_SATISFIED");
+  assert.match(result.reason, /no findings-bearing/);
+});
+
 test("checkCorrectionDelta: CORRECTION_SATISFIED — gatedHead only needs to start with correctedHead (prefix match)", async () => {
   const shortCorrected = CORRECTED.slice(0, 10);
   const fullGated = CORRECTED;

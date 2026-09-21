@@ -68,15 +68,30 @@ import { stripLeadingMarkdownWrapper } from "./genuine-response.mjs";
 
 const CLEAN_REVIEW_PATTERN = /^Codex Review: Didn't find any major issues\./;
 
-// Codex's own severity-tag convention, observed live in its formal review comments and this
-// module's own fixtures ("P1: missing null check...", "P1 — Validate authority-envelope field
-// types...", the "![P1 Badge]" markdown badge on inline review comments) and now also as a
-// trailing clause appended after the fixed clean-pass preamble (PR #640 Stage 1 review finding
-// #2: "Codex Review: Didn't find any major issues. However, P1: credentials are logged." must
-// not be classified clean merely because CLEAN_REVIEW_PATTERN is a prefix match). Recognizing
-// this fixed severity-label convention is the same kind of narrow, structural check as the
-// rest of this module — never generic semantic parsing of what "sounds like" a finding.
-const SEVERITY_MARKER_PATTERN = /\bP[0-3]\b\s*[:—-]/;
+// Stage 2 audit #672 (P1): the fixed clean-pass preamble is a prefix match by design (genuine
+// clean-pass replies carry harmless trailing pleasantries, e.g. "Nice work!" — see this
+// module's own regression test), but checking only for an *absent* severity marker
+// (SEVERITY_MARKER_PATTERN, the prior approach) was the wrong test: a genuine trailing finding
+// that simply omits Codex's own "P0"–"P3" label — e.g. "Codex Review: Didn't find any major
+// issues. However, credentials are logged." — has no severity marker either, so it was
+// misclassified clean and could bypass FINDINGS_LACK_FORMAL_REVIEW entirely. The correct rule
+// is the inverse: only a small, explicit allowlist of harmless trailing clauses actually
+// observed from a genuine Codex clean-pass reply may follow the preamble; anything else — with
+// or without a severity marker — is treated as a potential real finding and fails closed as
+// findings-bearing. Same discipline as LEADING_SUMMARY_CLAUSE_PATTERN below: each entry here
+// must be a trailing clause actually observed live, not a guess at what a harmless one might
+// look like.
+//
+// PR #673 Stage 1 review finding (P2): "Nice work!" was the only allowlisted trailing clause,
+// but consumer-sync-gate.mjs's own CLEAN_REVIEW_PATTERN documents this preamble's second
+// sentence as varying, and consumer-sync-gate.test.mjs's own long-standing fixture (line ~506)
+// already treats "Codex Review: Didn't find any major issues. Can't wait for the next one!" as
+// a genuine clean response. Without also allowlisting it here, this module's own fail-closed
+// default reported that same genuine clean-pass reply as findings-bearing
+// (FINDINGS_LACK_FORMAL_REVIEW), blocking the plain issue-comments-only surface
+// consumer-sync-gate.mjs's whole automated flow depends on before its own downstream clean
+// check ever ran — the two independent classifiers must keep the same known-clean-suffix set.
+const CLEAN_PREAMBLE_TRAILING_PATTERN = /^(?:\s*(?:nice work|can't wait for the next one)[!.]?)?\s*$/i;
 
 const FORMAL_REVIEW_ENDPOINTS = new Set(["pull-comments", "pull-reviews"]);
 
@@ -136,12 +151,14 @@ const LOOKS_GOOD_PATTERN = /^looks\s+good(?:\s+to\s+me)?[.!]?\s*$/i;
 // closes (PR #640 Stage 1 review finding #4).
 export function isCleanReviewResponse(bodyExcerpt) {
   const stripped = stripTrailingMarkdownWrapper(stripLeadingMarkdownWrapper(bodyExcerpt ?? "").trim()).trim();
-  if (CLEAN_REVIEW_PATTERN.test(stripped)) {
-    // PR #640 Stage 1 review finding #2: the fixed clean-pass preamble is a prefix match by
-    // design (genuine clean-pass replies carry harmless trailing pleasantries, e.g. "Nice
-    // work!" — see this module's own regression test), but a genuine trailing finding must
-    // still be rejected rather than hidden behind that same prefix.
-    return !SEVERITY_MARKER_PATTERN.test(stripped);
+  const cleanPreambleMatch = CLEAN_REVIEW_PATTERN.exec(stripped);
+  if (cleanPreambleMatch) {
+    // PR #640 Stage 1 review finding #2 / Stage 2 audit #672 (P1): the fixed clean-pass
+    // preamble is a prefix match by design, but a genuine trailing finding — labeled with a
+    // severity marker or not — must still be rejected rather than hidden behind that same
+    // prefix. Only the narrow CLEAN_PREAMBLE_TRAILING_PATTERN allowlist may follow it.
+    const trailing = stripped.slice(cleanPreambleMatch[0].length);
+    return CLEAN_PREAMBLE_TRAILING_PATTERN.test(trailing);
   }
   const isKnownCleanShape = (text) =>
     NO_ISSUES_PATTERN.test(text) || LGTM_PATTERN.test(text) || LOOKS_GOOD_PATTERN.test(text);

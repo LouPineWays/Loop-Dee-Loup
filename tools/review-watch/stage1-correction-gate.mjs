@@ -59,6 +59,7 @@
 
 import { execFileSync } from "node:child_process";
 import { run as stage1Run } from "./stage1-gate.mjs";
+import { isFindingsBearingResponse } from "./stage1-findings.mjs";
 import { stage1DispositionMatchesHead } from "../orchestration/next-review-transition-gate.mjs";
 
 // Matches the disposition shape from this module's own header comment. Case-insensitive on
@@ -117,6 +118,29 @@ export function looksLikeCorrectionSatisfiedDisposition(raw) {
 const FINDINGS_PREAMBLE_PATTERN =
   /^### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request\./;
 
+// PR #673 Stage 1 review finding (P1): a genuine finding can also hide as an unlabeled
+// trailing clause behind Codex's *other* fixed preamble — the clean-pass one, "Codex Review:
+// Didn't find any major issues." (Stage 2 audit #672; stage1-findings.mjs's own
+// isCleanReviewResponse/isFindingsBearingResponse now recognize that shape via its narrow
+// CLEAN_PREAMBLE_TRAILING_PATTERN allowlist). Before this, a reviewed head whose only genuine
+// finding used that shape could never satisfy check 2 below: FINDINGS_PREAMBLE_PATTERN alone
+// only recognizes the formal "### 💡" heading, so `hasFindingsStage1Response` reported
+// NOT_SATISFIED and permanently stranded the corrected PR (only one Stage 1 round is
+// permitted, so there is no way to draw a second, differently-shaped review). This local copy
+// of the clean-pass preamble (same independent-copy convention as FINDINGS_PREAMBLE_PATTERN
+// above) narrowly gates when the shared classifier (`isFindingsBearingResponse`, imported from
+// the same `tools/review-watch` directory) is consulted: only for a body that itself opens
+// with the clean-pass preamble. This is deliberately narrower than calling
+// `isFindingsBearingResponse` on every match unconditionally would be — that function's own
+// fail-closed default treats *any* unrecognized reply shape as findings-bearing (the correct
+// direction for stage1-gate.mjs's own FINDINGS_LACK_FORMAL_REVIEW check, which exists to
+// refuse merge on ambiguous evidence), but this check runs in the opposite role: it is
+// *affirmative* proof a real correction was warranted, so an ambiguous reply that matches
+// neither known preamble (e.g. this module's own "No issues found. Looks good." test fixture)
+// must keep resolving to "no proof of a finding" here, not be swept into "proof of a finding"
+// merely because the shared classifier doesn't recognize it as clean either.
+const CLEAN_PREAMBLE_PATTERN = /^Codex Review: Didn't find any major issues\./;
+
 // Pure. Both known fixed Stage 1 preambles are anchored with `^`; PR #435's own live
 // regression showed a genuine review can open with an insignificant leading newline before
 // the heading, which an unforgiving anchor then fails to match. Trimming only insignificant
@@ -129,8 +153,10 @@ function stripOuterWhitespace(text) {
 
 // Pure. `stage1` is stage1-gate.mjs's own result. True only when at least one *head-bound*
 // genuine match (stage1.matches — provably tied to the exact reviewedHead being checked,
-// per stage1-gate.mjs's own matchBelongsToHead) opens with the known findings-bearing
-// preamble. Stage 1 review finding on this PR: `stage1.unboundGenuineMatches` are, by
+// per stage1-gate.mjs's own matchBelongsToHead) opens with the known formal findings-bearing
+// preamble, or opens with the clean-pass preamble but the shared classifier finds a hidden
+// finding behind it (PR #673 Stage 1 review finding — see CLEAN_PREAMBLE_PATTERN's own comment
+// above). Stage 1 review finding on this PR: `stage1.unboundGenuineMatches` are, by
 // stage1-gate.mjs's own contract, responses that could NOT be attributed to the requested
 // head — on a PR with triggers for multiple heads, an unbound findings-bearing response
 // belonging to a *different* round must never be borrowed to prove that reviewedHead itself
@@ -140,7 +166,11 @@ function stripOuterWhitespace(text) {
 // ambiguity check — a different question: "should this gate merely pause and let a human
 // look," not "does this prove the named head was reviewed").
 function hasFindingsStage1Response(stage1) {
-  return (stage1.matches ?? []).some((m) => FINDINGS_PREAMBLE_PATTERN.test(stripOuterWhitespace(m.body_excerpt)));
+  return (stage1.matches ?? []).some((m) => {
+    const body = stripOuterWhitespace(m.body_excerpt);
+    if (FINDINGS_PREAMBLE_PATTERN.test(body)) return true;
+    return CLEAN_PREAMBLE_PATTERN.test(body) && isFindingsBearingResponse(body);
+  });
 }
 
 // Async. The default `compareImpl`: runs `gh api repos/<repo>/compare/<base>...<head>` and
