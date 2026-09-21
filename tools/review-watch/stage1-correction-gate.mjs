@@ -144,12 +144,22 @@ function hasFindingsStage1Response(stage1) {
 }
 
 // Async. The default `compareImpl`: runs `gh api repos/<repo>/compare/<base>...<head>` and
-// returns the parsed JSON as-is (`checkCorrectionDelta` reads only its `status` field).
-// GitHub's compare API: `ahead` = head contains base plus 1+ new commits, `identical` = no
-// new commits, `diverged`/`behind` = base is not an ancestor of head.
+// returns `{ status }` (`checkCorrectionDelta` reads only that field). GitHub's compare API:
+// `ahead` = head contains base plus 1+ new commits, `identical` = no new commits,
+// `diverged`/`behind` = base is not an ancestor of head.
+//
+// Issue #669 (found recovering #638/#639's PR #640 after a large merge-forward): a wide
+// reviewed-head-to-corrected-head span pulls in every commit `main` gained in between, not
+// just this correction's own diff, so the unfiltered compare response can run well past
+// `execFileSync`'s default 1 MB `maxBuffer` and throw `ENOBUFS` before `.status` is ever read
+// — a spurious operational error, not a real ancestry rejection. `--jq ".status"` has `gh`
+// print only the one field this function needs, mirroring `defaultResolveCommit`'s existing
+// `--jq ".sha"` narrowing below, so the returned payload stays tiny regardless of diff size.
 export function defaultCompare({ repo, base, head }) {
-  const raw = execFileSync("gh", ["api", `repos/${repo}/compare/${base}...${head}`], { encoding: "utf8" });
-  return JSON.parse(raw);
+  const raw = execFileSync("gh", ["api", `repos/${repo}/compare/${base}...${head}`, "--jq", ".status"], {
+    encoding: "utf8",
+  });
+  return { status: raw.trim() };
 }
 
 // Async. The default `resolveCommitImpl`: resolves any hex prefix (7-40 chars) to the full
