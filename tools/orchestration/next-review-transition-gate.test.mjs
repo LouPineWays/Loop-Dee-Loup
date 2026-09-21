@@ -113,6 +113,49 @@ test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED -> STAGE1_CORRE
   assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
 });
 
+test("resolvePreMergeVerdict: a formal review artifact with ordinary finding text (no fixed preamble) -> STAGE1_CORRECTION_REQUIRED (PR #640 Stage 1 review finding #1)", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("RESPONSE_RECEIVED", {
+      matches: [
+        {
+          body_excerpt: "P1: the classifier accepts arbitrary truthy values instead of validating field types.",
+          endpoint: "pull-reviews",
+        },
+      ],
+      unboundGenuineMatches: [],
+    }),
+    mergeReady: mergeReady("MERGE_READY"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+});
+
+test("resolvePreMergeVerdict: a formal review artifact whose body opens with the fixed clean-pass preamble but appends a real finding -> STAGE1_CORRECTION_REQUIRED, never merge-ready (PR #640 Stage 1 review finding #2's routing implication)", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("RESPONSE_RECEIVED", {
+      matches: [
+        {
+          body_excerpt: "Codex Review: Didn't find any major issues. However, P1: credentials are logged.",
+          endpoint: "pull-reviews",
+        },
+      ],
+      unboundGenuineMatches: [],
+    }),
+    mergeReady: mergeReady("MERGE_READY"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+});
+
+test("resolvePreMergeVerdict: an ambiguous ack/kickoff comment on a formal review endpoint still does not satisfy the old fixed-preamble check, but is now findings-bearing via the shared classifier -- fail-closed is the intended direction here, unlike a plain-endpoint ack", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("RESPONSE_RECEIVED", {
+      matches: [{ body_excerpt: "Starting review... I will report back with findings.", endpoint: "pull-reviews" }],
+      unboundGenuineMatches: [],
+    }),
+    mergeReady: mergeReady("MERGE_READY"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+});
+
 test("resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED + Stage 1 disposition satisfied at this head + MERGE_READY -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", () => {
   const v = resolvePreMergeVerdict({
     stage1: stage1("RESPONSE_RECEIVED", {

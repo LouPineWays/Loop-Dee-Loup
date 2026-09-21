@@ -54,6 +54,22 @@ test("isCleanReviewResponse: recognizes Codex's own fixed clean-pass preamble 'C
   assert.equal(isCleanReviewResponse("Codex Review: Didn't find any major issues. Nice work!"), true);
 });
 
+test("isCleanReviewResponse: rejects the fixed clean-pass preamble when a real finding trails it (PR #640 Stage 1 review finding #2)", () => {
+  const body = "Codex Review: Didn't find any major issues. However, P1: credentials are logged.";
+  assert.equal(isCleanReviewResponse(body), false);
+  assert.equal(isFindingsBearingResponse(body), true);
+});
+
+test("isCleanReviewResponse: recognizes 'Looks good, no issues found.' (documented clean-response contract, PR #640 Stage 1 review finding #3)", () => {
+  assert.equal(isCleanReviewResponse("Looks good, no issues found."), true);
+});
+
+test("isCleanReviewResponse: recognizes closing-emphasis-wrapped clean replies (PR #640 Stage 1 review finding #4)", () => {
+  assert.equal(isCleanReviewResponse("**LGTM**"), true);
+  assert.equal(isCleanReviewResponse("- **No issues found.**"), true);
+  assert.equal(isCleanReviewResponse("> _Looks good._"), true);
+});
+
 test("isCleanReviewResponse: recognizes a Markdown-heading-wrapped clean reply", () => {
   assert.equal(isCleanReviewResponse("### No issues found."), true);
 });

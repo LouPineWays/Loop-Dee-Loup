@@ -68,6 +68,16 @@ import { stripLeadingMarkdownWrapper } from "./genuine-response.mjs";
 
 const CLEAN_REVIEW_PATTERN = /^Codex Review: Didn't find any major issues\./;
 
+// Codex's own severity-tag convention, observed live in its formal review comments and this
+// module's own fixtures ("P1: missing null check...", "P1 — Validate authority-envelope field
+// types...", the "![P1 Badge]" markdown badge on inline review comments) and now also as a
+// trailing clause appended after the fixed clean-pass preamble (PR #640 Stage 1 review finding
+// #2: "Codex Review: Didn't find any major issues. However, P1: credentials are logged." must
+// not be classified clean merely because CLEAN_REVIEW_PATTERN is a prefix match). Recognizing
+// this fixed severity-label convention is the same kind of narrow, structural check as the
+// rest of this module — never generic semantic parsing of what "sounds like" a finding.
+const SEVERITY_MARKER_PATTERN = /\bP[0-3]\b\s*[:—-]/;
+
 const FORMAL_REVIEW_ENDPOINTS = new Set(["pull-comments", "pull-reviews"]);
 
 // Pure. Whether `endpointName` (poll.mjs's `endpointsFor` naming: "pull-comments",
@@ -77,17 +87,36 @@ export function isFormalReviewEndpoint(endpointName) {
   return FORMAL_REVIEW_ENDPOINTS.has(endpointName);
 }
 
+// Mirrors stripLeadingMarkdownWrapper's own opening-marker normalization but for a matching
+// *closing* wrapper this module's own end-anchored clean patterns need to see past —
+// genuine-response.mjs's own checks (isCodexCloudSetupPrompt, BLOCKED_STATUS_PATTERN, etc.) are
+// never end-anchored, so it has never needed this (PR #640 Stage 1 review finding #4: "**LGTM**",
+// "- **No issues found.**", and "> _Looks good._" all left a dangling closing */_ marker that
+// made every end-anchored clean pattern below fail, forcing an unrecoverable
+// FINDINGS_LACK_FORMAL_REVIEW founder interrupt on an actually clean reply).
+function stripTrailingMarkdownWrapper(text) {
+  let s = text ?? "";
+  let prev;
+  do {
+    prev = s;
+    s = s.replace(/\s+$/, "");
+    s = s.replace(/[*_]{1,3}$/, "");
+  } while (s !== prev);
+  return s;
+}
+
 // A leading summary clause some genuine Stage 1 clean replies open with before the actual
 // no-issues statement — matches this repo's own existing fixtures: "Reviewed. No issues
 // found.", "Reviewed after retry. No issues found.", "Reviewed head B. No issues found.",
-// and the consumer-sync-gate.test.mjs YouTubery #98 regression fixture "Looks correct, no
-// issues found." Stripped, if present, before the no-issues check below so it can anchor to
+// the consumer-sync-gate.test.mjs YouTubery #98 regression fixture "Looks correct, no issues
+// found.", and (PR #640 Stage 1 review finding #3) the documented "Looks good, no issues
+// found." shape. Stripped, if present, before the no-issues check below so it can anchor to
 // what's left rather than requiring the no-issues phrase to be the very first word of the
 // message. Deliberately a small, explicit allowlist of known lead-in verbs — not a generic
 // bounded-clause stripper — consistent with this module's own Non-goals (no arbitrary
 // Markdown/prose parsing): each addition here must be a lead-in actually observed from a
 // genuine clean reply, not a guess at what one might look like.
-const LEADING_SUMMARY_CLAUSE_PATTERN = /^(?:reviewed|looks?\s+correct)\b[^.!?,]*[.!,]?\s*/i;
+const LEADING_SUMMARY_CLAUSE_PATTERN = /^(?:reviewed|looks?\s+correct|looks?\s+good)\b[^.!?,]*[.!,]?\s*/i;
 
 // The response, once any leading summary clause above is stripped, states nothing but a
 // short, explicit "no issues" declaration and nothing else — matched to the *end* of the
@@ -101,17 +130,29 @@ const LOOKS_GOOD_PATTERN = /^looks\s+good(?:\s+to\s+me)?[.!]?\s*$/i;
 
 // Pure. Whether `bodyExcerpt` (poll.mjs's truncated `body_excerpt`, or a full body) reports
 // no actionable findings ("clean"), using the same leading-Markdown-wrapper-stripping
-// discipline as genuine-response.mjs's own isGenuineResponse so a heading/list/blockquote/
-// emphasis-wrapped clean reply is still recognized.
+// discipline as genuine-response.mjs's own isGenuineResponse — plus this module's own
+// symmetric trailing-wrapper strip (stripTrailingMarkdownWrapper) — so a heading/list/
+// blockquote/emphasis-wrapped clean reply is still recognized even when the emphasis marker
+// closes (PR #640 Stage 1 review finding #4).
 export function isCleanReviewResponse(bodyExcerpt) {
-  const stripped = stripLeadingMarkdownWrapper(bodyExcerpt ?? "").trim();
-  if (CLEAN_REVIEW_PATTERN.test(stripped)) return true;
+  const stripped = stripTrailingMarkdownWrapper(stripLeadingMarkdownWrapper(bodyExcerpt ?? "").trim()).trim();
+  if (CLEAN_REVIEW_PATTERN.test(stripped)) {
+    // PR #640 Stage 1 review finding #2: the fixed clean-pass preamble is a prefix match by
+    // design (genuine clean-pass replies carry harmless trailing pleasantries, e.g. "Nice
+    // work!" — see this module's own regression test), but a genuine trailing finding must
+    // still be rejected rather than hidden behind that same prefix.
+    return !SEVERITY_MARKER_PATTERN.test(stripped);
+  }
+  const isKnownCleanShape = (text) =>
+    NO_ISSUES_PATTERN.test(text) || LGTM_PATTERN.test(text) || LOOKS_GOOD_PATTERN.test(text);
+  if (isKnownCleanShape(stripped)) return true;
+  // Only fall back to the summary-clause-stripped form when the unstripped text itself isn't
+  // already a recognized clean shape — this is what keeps "Looks good to me." (no lead-in
+  // clause needs stripping) and "Looks good, no issues found." (the lead-in clause must be
+  // stripped before the trailing no-issues phrase can be recognized) both working without one
+  // clobbering the other.
   const afterSummaryClause = stripped.replace(LEADING_SUMMARY_CLAUSE_PATTERN, "").trim();
-  return (
-    NO_ISSUES_PATTERN.test(afterSummaryClause) ||
-    LGTM_PATTERN.test(afterSummaryClause) ||
-    LOOKS_GOOD_PATTERN.test(afterSummaryClause)
-  );
+  return isKnownCleanShape(afterSummaryClause);
 }
 
 // Pure. The inverse of isCleanReviewResponse: whether a genuine matched response should be
