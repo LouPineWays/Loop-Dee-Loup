@@ -59,9 +59,11 @@
 //                                `classify-primary-path-lock.mjs`'s module comment for the same
 //                                constraint).
 //   CREATED_WORKTREE_AT_HEAD -- no existing worktree carries the target branch anywhere, so
-//                                `run` fetched the branch and created one distinct new worktree
-//                                on a real local branch at the exact target commit (`git
-//                                worktree add -B <branch> <path> <sha>`, upstream set to
+//                                `run` fetched the branch, atomically established a real local
+//                                branch at the exact target commit via a `git update-ref`
+//                                compare-and-swap (Stage 1 review finding on PR #696, Finding P1
+//                                -- never the resetting `worktree add -B`), and attached a new
+//                                worktree to it with plain `worktree add` (upstream set to
 //                                `origin/<branch>`) -- never detached (Stage 1 review finding on
 //                                PR #694: a detached checkout has no ordinary `git push`
 //                                destination for the correction worker's later push) -- under
@@ -87,10 +89,26 @@
 //   AMBIGUOUS                -- more than one live worktree carries the target branch.
 //                                Ordering/recency never resolves this; fails closed (#692
 //                                required check 6's ambiguity half).
-//   NO_SAFE_BINDING          -- a required git/gh operation itself failed (fetch, worktree
-//                                add) even though classification reached a nominally safe
-//                                path. Distinct from OPERATIONAL_ERROR: classification
+//   NO_SAFE_BINDING          -- either the invoking checkout or the one other worktree carrying
+//                                the target branch IS the primary checkout, which is never
+//                                repurposed for correction work (#692 requirement 5); or a
+//                                required git/gh operation itself failed (fetch, worktree add)
+//                                even though classification reached a nominally safe path. The
+//                                latter case is distinct from OPERATIONAL_ERROR: classification
 //                                succeeded, only the mutation it authorized did not.
+//   EXISTING_BRANCH_UNSAFE   -- `NEEDS_NEW_WORKTREE` resolved, but either (a) a local branch by
+//                                the target name already exists (unattached to any worktree) and
+//                                its tip is not the target commit and not safely contained in it
+//                                (Stage 2 audit finding on #695, Finding 1: the original `git
+//                                worktree add -B <branch> ...` unconditionally reset an existing
+//                                branch ref, which would silently discard any unpushed commits on
+//                                that branch -- `run` verifies containment via `merge-base
+//                                --is-ancestor` before ever writing the ref), or (b) that same
+//                                branch ref changed concurrently between this preflight's
+//                                observation and its atomic `update-ref` compare-and-swap (Stage 1
+//                                review finding on PR #696, Finding P1) -- the CAS itself failed,
+//                                so nothing was mutated. Either way this fails closed here instead
+//                                of resetting or overwriting the ref.
 //   OPERATIONAL_ERROR        -- `--pr` missing/invalid, `gh pr view` failed or did not resolve
 //                                a head, or the invoking checkout's own git state could not be
 //                                read. Not a judgment about the PR or checkout content.
@@ -118,6 +136,7 @@
 import { execFileSync } from "node:child_process";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 import { parseWorktreeListPorcelain } from "./worktree-preflight.mjs";
+import { normalizePathForComparison } from "./classify-primary-path-lock.mjs";
 
 function isPositiveInteger(value) {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
@@ -125,6 +144,18 @@ function isPositiveInteger(value) {
 
 function reasonOf(err) {
   return String(err?.stderr || err?.message || err).trim();
+}
+
+// Stage 1 review finding on PR #696 (this preflight's own Stage 2 correction): comparing
+// `path === primaryPath` as raw strings lets the same primary checkout evade the "never
+// repurpose the primary checkout" guard on Windows through case/separator variation alone
+// (`C:/Loop-Dee-Loup` vs `c:\loop-dee-loup`). Reuse `classify-primary-path-lock.mjs`'s own
+// host-aware `normalizePathForComparison` rather than re-deriving path-identity semantics here.
+// Two unrelated paths that both fail to normalize (empty/non-string) are never considered equal.
+function isSamePath(a, b) {
+  const na = normalizePathForComparison(a);
+  const nb = normalizePathForComparison(b);
+  return na !== null && nb !== null && na === nb;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -145,6 +176,21 @@ export function classifyCheckoutBinding({ targetHead, currentCheckout, liveWorkt
   }
 
   if (currentCheckout.branch === targetHead.branch && currentCheckout.sha === targetHead.sha) {
+    // Stage 2 audit finding on #695 (issue #695 Finding 2): matching branch+commit alone was
+    // being treated as sufficient for ALREADY_AT_HEAD before this ever compared the invoking
+    // checkout's own path against `primaryPath` -- the primary-path rejection below only ever
+    // fired for the separate "one other worktree carries the branch" case, so a primary
+    // checkout that happened to already sit on the PR branch/commit slipped past the "primary
+    // checkout is never repurposed for correction work" invariant entirely (#692 requirement
+    // 5). Reject it here, before considering cleanliness, exactly like the equivalent check in
+    // the worktree-match branch below.
+    if (isSamePath(currentCheckout.path, primaryPath)) {
+      return {
+        verdict: "NO_SAFE_BINDING",
+        reason: "the invoking checkout is the primary checkout, which is never repurposed for correction work",
+        path: currentCheckout.path,
+      };
+    }
     // Stage 1 review finding on PR #694: matching branch+commit alone is not proof this is safe
     // to correct in place -- pre-existing local modifications on this exact checkout would be
     // silently swept into the correction commit as this is the worker's first source-work gate.
@@ -176,7 +222,7 @@ export function classifyCheckoutBinding({ targetHead, currentCheckout, liveWorkt
 
   if (matches.length === 1) {
     const [w] = matches;
-    if (w.path === primaryPath) {
+    if (isSamePath(w.path, primaryPath)) {
       // The primary checkout is never repurposed as a correction target, even when it
       // happens to already carry the target branch by some out-of-band action -- #692
       // requirement 5. Fail closed rather than silently authorizing continued work there.
@@ -262,23 +308,73 @@ export function defaultGitImpl() {
         return { ok: false, reason: reasonOf(err) };
       }
     },
-    // Checked out on a real local branch -- created/reset (`-B`) at the exact target commit this
-    // preflight verified, never merely origin/<branch>'s current tip -- with its upstream set to
-    // origin/<branch>, rather than a detached HEAD. Stage 1 review finding on PR #694: a detached
-    // checkout has no ordinary `git push` destination, so the correction worker's later "push it"
-    // step would need to guess an explicit `HEAD:<branch>` refspec the dispatch contract never
-    // specifies; an ordinary `git push` now works unmodified. Safe by construction: this is only
-    // ever called from the `NEEDS_NEW_WORKTREE` path, reached only when no worktree anywhere --
-    // including the current checkout, which `git worktree list` always includes -- already
-    // carries this branch, so `-B` can never collide with an existing checkout of the same
-    // branch (#692 requirement 7).
-    addBranchWorktree(primaryCwd, path, branch, sha) {
+    // Stage 1 review finding on PR #696 (this preflight's own Stage 2 correction, Finding P1):
+    // a separate read-then-ancestry-check followed by a later, unconditional `-B` reset left a
+    // TOCTOU window -- a concurrent process could move the shared local branch ref after the
+    // safety check but before this write, and `-B` would still silently reset (and discard)
+    // whatever the ref pointed to by then. Establishing the branch's target commit is now a
+    // single atomic `git update-ref` compare-and-swap: it succeeds only if the ref still holds
+    // exactly the value this preflight observed and validated as safe (`expectedOldSha`, or the
+    // all-zero SHA when no ref existed at observation time), and fails -- with no mutation at
+    // all -- if anything moved it in between. Only after that CAS succeeds does this attach a
+    // worktree to the now-known-correct branch with plain `worktree add` (never `-b`/`-B`),
+    // which cannot itself reset or discard anything. Upstream is set to origin/<branch> rather
+    // than leaving a detached HEAD -- Stage 1 review finding on PR #694: a detached checkout has
+    // no ordinary `git push` destination, so the correction worker's later "push it" step would
+    // need to guess an explicit `HEAD:<branch>` refspec the dispatch contract never specifies.
+    // Safe by construction: this is only ever called from the `NEEDS_NEW_WORKTREE` path, reached
+    // only when no worktree anywhere -- including the current checkout, which `git worktree
+    // list` always includes -- already carries this branch, so attaching a worktree to it here
+    // can never collide with an existing checkout of the same branch (#692 requirement 7).
+    establishBranchAtSha(cwd, branch, sha, expectedOldSha) {
+      const zeroSha = "0".repeat(40);
       try {
-        runGit(["worktree", "add", "-B", branch, path, sha], { cwd: primaryCwd });
+        // A zero old-value is git's own idiom for "this ref must not already exist" -- exactly
+        // what `expectedOldSha === null` (no local branch observed) means here.
+        runGit(["update-ref", `refs/heads/${branch}`, sha, expectedOldSha ?? zeroSha], { cwd });
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, reason: reasonOf(err) };
+      }
+    },
+    addExistingBranchWorktree(primaryCwd, path, branch) {
+      try {
+        runGit(["worktree", "add", path, branch], { cwd: primaryCwd });
         runGit(["branch", `--set-upstream-to=origin/${branch}`, branch], { cwd: path });
         return { ok: true };
       } catch (err) {
         return { ok: false, reason: reasonOf(err) };
+      }
+    },
+    // Stage 2 audit finding on #695 (Finding 1): the original `addBranchWorktree` used `-B`,
+    // which resets an existing branch ref rather than refusing to touch it. This resolves
+    // whether a local branch by this name already exists at all, independent of whether any
+    // worktree currently checks it out -- `null` means no such ref exists (the ordinary, safe
+    // case). Stage 1 review finding on PR #696 (Finding P2): `git rev-parse --verify --quiet`
+    // exits 1 with no output for a genuinely absent ref, but any other failure (a corrupt
+    // repository, an unreadable object database, etc.) must not collapse into that same "absent"
+    // signal -- doing so would authorize the resetting branch-creation path on unproven ground.
+    // Only the specific documented "absent ref" exit is treated as absence; every other failure
+    // is rethrown so the caller fails closed instead of silently proceeding.
+    localBranchTip(cwd, branch) {
+      try {
+        return runGit(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd });
+      } catch (err) {
+        if (err && err.status === 1) return null;
+        throw err;
+      }
+    },
+    // True only when `ancestorSha` is reachable from `descendantSha` -- i.e. moving the branch
+    // ref from `ancestorSha` to `descendantSha` cannot discard any commit, because everything at
+    // `ancestorSha` is already contained in `descendantSha`'s history. Any non-zero exit
+    // (not-an-ancestor, diverged history, or an unresolvable object) fails closed to `false`,
+    // matching this module's other unknown-evidence-never-authorizes convention.
+    isAncestor(cwd, ancestorSha, descendantSha) {
+      try {
+        execFileSync("git", ["merge-base", "--is-ancestor", ancestorSha, descendantSha], { cwd });
+        return true;
+      } catch {
+        return false;
       }
     },
   };
@@ -385,7 +481,49 @@ export async function run(
       if (!fetchResult.ok) {
         return { exitCode: 2, verdict: "NO_SAFE_BINDING", reason: `fetch failed: ${fetchResult.reason}` };
       }
-      const addResult = git.addBranchWorktree(primaryPath, path, targetHead.branch, targetHead.sha);
+      // Stage 2 audit finding on #695 (Finding 1): no worktree anywhere checks out this branch
+      // (that is what got us into NEEDS_NEW_WORKTREE), but a local branch ref by this name can
+      // still exist unattached to any worktree -- the original `-B` reset would silently discard
+      // it. Only proceed when no such ref exists, it already IS the target commit, or its tip is
+      // safely contained in the target commit (no unique commits would be discarded).
+      //
+      // Stage 1 review finding on PR #696 (Finding P2): a failed lookup must never be read as
+      // "no such branch" -- `localBranchTip` now rethrows anything other than the specific
+      // documented "ref absent" exit, so that ambiguity fails closed here instead of silently
+      // authorizing the branch-creation path on unproven ground.
+      let existingTip;
+      try {
+        existingTip = git.localBranchTip(primaryPath, targetHead.branch);
+      } catch (err) {
+        return {
+          exitCode: 2,
+          verdict: "NO_SAFE_BINDING",
+          reason: `could not determine whether local branch "${targetHead.branch}" already exists: ${reasonOf(err)}`,
+        };
+      }
+      if (existingTip && existingTip !== targetHead.sha && !git.isAncestor(primaryPath, existingTip, targetHead.sha)) {
+        return {
+          exitCode: 2,
+          verdict: "EXISTING_BRANCH_UNSAFE",
+          branch: targetHead.branch,
+          reason: "a local branch with this name already exists and is not safely contained in the PR's current head; refusing to reset it",
+        };
+      }
+      // Stage 1 review finding on PR #696 (Finding P1): establish the branch's target commit via
+      // one atomic compare-and-swap against exactly the tip this preflight just validated as
+      // safe (or its absence). If any concurrent process moved the ref in between, the CAS
+      // itself fails and nothing is mutated -- this is what makes the safety check above
+      // atomic with the write, closing the prior read-then-reset TOCTOU window.
+      const casResult = git.establishBranchAtSha(primaryPath, targetHead.branch, targetHead.sha, existingTip);
+      if (!casResult.ok) {
+        return {
+          exitCode: 2,
+          verdict: "EXISTING_BRANCH_UNSAFE",
+          branch: targetHead.branch,
+          reason: `local branch "${targetHead.branch}" changed concurrently and was not safely established at the target commit: ${casResult.reason}`,
+        };
+      }
+      const addResult = git.addExistingBranchWorktree(primaryPath, path, targetHead.branch);
       if (!addResult.ok) {
         return { exitCode: 2, verdict: "NO_SAFE_BINDING", reason: `worktree creation failed: ${addResult.reason}` };
       }
