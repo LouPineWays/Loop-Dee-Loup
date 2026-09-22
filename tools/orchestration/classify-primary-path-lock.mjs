@@ -39,23 +39,33 @@
 // `path` is `null` (or the field omitted) when the caller could not determine it -- an unknown
 // path NEVER matches the primary path, so an unidentifiable session is never treated as a
 // candidate to archive, matching this repository's existing fail-closed-on-unknown-evidence
-// convention (`worktree-preflight.mjs`'s own `isDurablyObsolete`). `pinned`/`remoteControlActive`/
-// `archived` default to `false` when omitted.
+// convention (`worktree-preflight.mjs`'s own `isDurablyObsolete`). `archived` defaults to `false`
+// when omitted. `pinned`/`remoteControlActive` do NOT default to `false` when omitted: archival
+// eligibility requires each to be explicitly and positively known to be `false`. An omitted,
+// `null`, or otherwise non-boolean value is unknown protection state, not "unprotected" --
+// unknown evidence must never authorize a destructive/releasing action (Stage 1 review on PR
+// #690: the prior omitted-defaults-to-false contract let incomplete evidence produce
+// ARCHIVE_CANDIDATE).
 //
 // Verdicts:
 //
 //   ARCHIVE_CANDIDATE  -- exactly one non-archived session reports a path exactly equal to
-//                         --primary-path, and it is neither pinned nor remote-control-active.
-//                         Safe to call `archive_session` against. This is not the *only* safety
-//                         check: `archive_session` itself additionally and independently refuses
-//                         a session that is still mid-turn or has live background work ("A
-//                         session that is still working ... is not archived and the call says
-//                         so"), so this classification composes with, rather than replaces, that
-//                         built-in liveness guard.
-//   PROTECTED_OWNER    -- a matching session exists but is pinned or remote-control-active.
-//                         Never archive it regardless of how "stale" it otherwise looks -- a
-//                         remote-control-active session in particular may be a founder actively
-//                         driving it through a phone/claude.ai bridge right now.
+//                         --primary-path under this path's own comparison semantics (see
+//                         `normalizePathForComparison` below), and that session's `pinned` and
+//                         `remoteControlActive` fields are BOTH explicitly `false` -- not merely
+//                         omitted or falsy. Safe to call `archive_session` against. This is not
+//                         the *only* safety check: `archive_session` itself additionally and
+//                         independently refuses a session that is still mid-turn or has live
+//                         background work ("A session that is still working ... is not archived
+//                         and the call says so"), so this classification composes with, rather
+//                         than replaces, that built-in liveness guard.
+//   PROTECTED_OWNER    -- a matching session exists but is pinned or remote-control-active, OR
+//                         either field's protection state is not explicitly known (omitted,
+//                         `null`, or any non-boolean value). Never archive it regardless of how
+//                         "stale" it otherwise looks -- a remote-control-active session in
+//                         particular may be a founder actively driving it through a
+//                         phone/claude.ai bridge right now, and unknown protection state is
+//                         indistinguishable from that case until proven otherwise.
 //   AMBIGUOUS          -- more than one non-archived session reports the primary path. Ordering
 //                         or recency alone never resolves this; it fails closed to no action,
 //                         matching this repository's existing ambiguous-state convention (never
@@ -70,19 +80,34 @@
 //                         never a destructive guess against an unidentified owner.
 //   OPERATIONAL_ERROR  -- `primaryPath` was missing/empty. Not a judgment about session state.
 //
-// Path comparison normalizes backslash/forward-slash separators, case, and a trailing separator
-// (Windows paths are case-insensitive, and this repository's own tooling and checkouts run on
-// both POSIX and Windows hosts), so cosmetically different but identical paths still match.
+// Path comparison is host-semantics-aware, not a blanket normalization: a path is treated as
+// Windows-style -- separators unified (backslash/forward-slash both mean "separator"), case
+// folded, and a trailing separator dropped, because Windows paths are genuinely case-insensitive
+// -- only when it actually looks like a Windows path (a drive letter like `C:\` or `C:/`, or a
+// UNC `\\host\share` prefix). Any other path is treated as POSIX: case is significant, and a
+// literal backslash is a normal filename character, never a separator, so it is left untouched
+// rather than folded into `/`. Stage 1 review on PR #690: the prior blanket
+// lowercase-and-replace-backslash normalization could collapse two distinct, case-sensitive
+// POSIX paths into one apparent owner (or treat a POSIX path's literal backslash as if it were a
+// path separator), which is unsafe when the verdict feeds an archival decision. Only a trailing
+// `/` is trimmed unconditionally -- a trailing separator is redundant on both path styles, and
+// POSIX paths never use trailing backslash as a separator, so nothing POSIX-meaningful is
+// altered by that trim.
 //
 // Tests: node --test tools/orchestration/classify-primary-path-lock.test.mjs
 
 import { readFileSync } from "node:fs";
 
+const WINDOWS_STYLE_PATH = /^(?:[a-zA-Z]:[\\/]|\\\\)/;
+
 // Pure. Returns a normalized comparison key for a filesystem path, or null for anything that is
 // not a non-empty string (an unknown/undeterminable path must never coerce into a false match).
 export function normalizePathForComparison(p) {
   if (typeof p !== "string" || p.length === 0) return null;
-  let s = p.replace(/\\/g, "/").toLowerCase();
+  let s = p;
+  if (WINDOWS_STYLE_PATH.test(s)) {
+    s = s.replace(/\\/g, "/").toLowerCase();
+  }
   if (s.length > 1 && s.endsWith("/")) s = s.slice(0, -1);
   return s;
 }
@@ -110,7 +135,13 @@ export function classifyPrimaryPathLock({ primaryPath, sessions }) {
   }
 
   const [only] = candidates;
-  if (only.pinned || only.remoteControlActive) {
+  // Archival eligibility requires both protection fields to be POSITIVELY known to be false.
+  // `=== false` (rather than a falsy check) is deliberate: omitted, null, or any other
+  // non-boolean value is unknown protection state, and unknown evidence must fail closed to
+  // PROTECTED_OWNER rather than being treated as "unprotected" (Stage 1 review on PR #690).
+  const pinnedProvenSafe = only.pinned === false;
+  const remoteControlProvenSafe = only.remoteControlActive === false;
+  if (!pinnedProvenSafe || !remoteControlProvenSafe) {
     return { verdict: "PROTECTED_OWNER", sessionId: only.sessionId };
   }
 

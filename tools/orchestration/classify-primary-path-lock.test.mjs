@@ -10,10 +10,15 @@ import { normalizePathForComparison, classifyPrimaryPathLock, runCli } from "./c
 // normalizePathForComparison
 // -------------------------------------------------------------------------------------------
 
-test("normalizePathForComparison unifies separators, case, and trailing slash", () => {
+test("normalizePathForComparison unifies separators, case, and trailing slash for Windows-style paths", () => {
   assert.equal(normalizePathForComparison("C:\\Loop-Dee-Loup"), "c:/loop-dee-loup");
   assert.equal(normalizePathForComparison("C:/Loop-Dee-Loup/"), "c:/loop-dee-loup");
   assert.equal(normalizePathForComparison("c:\\loop-dee-loup\\"), "c:/loop-dee-loup");
+});
+
+test("normalizePathForComparison unifies UNC-style paths the same way", () => {
+  assert.equal(normalizePathForComparison("\\\\host\\Share\\Loop-Dee-Loup"), "//host/share/loop-dee-loup");
+  assert.equal(normalizePathForComparison("\\\\HOST\\share\\Loop-Dee-Loup\\"), "//host/share/loop-dee-loup");
 });
 
 test("normalizePathForComparison returns null for non-string/empty input", () => {
@@ -23,21 +28,71 @@ test("normalizePathForComparison returns null for non-string/empty input", () =>
   assert.equal(normalizePathForComparison(42), null);
 });
 
+// Stage 1 review on PR #690: a blanket lowercase-and-replace-backslash normalization is only
+// correct for genuinely Windows-style paths. A POSIX path must stay case-sensitive, and a literal
+// backslash in a POSIX filename must never be folded into a path separator.
+
+test("normalizePathForComparison keeps POSIX paths differing only by case distinct", () => {
+  const lower = normalizePathForComparison("/home/user/project");
+  const upper = normalizePathForComparison("/home/user/Project");
+  assert.equal(lower, "/home/user/project");
+  assert.equal(upper, "/home/user/Project");
+  assert.notEqual(lower, upper);
+});
+
+test("normalizePathForComparison never conflates a POSIX literal backslash with a '/' separator", () => {
+  const withLiteralBackslash = normalizePathForComparison("/home/user\\name/project");
+  const withSlashSeparator = normalizePathForComparison("/home/user/name/project");
+  assert.equal(withLiteralBackslash, "/home/user\\name/project");
+  assert.notEqual(withLiteralBackslash, withSlashSeparator);
+});
+
+test("normalizePathForComparison still trims a trailing '/' on a POSIX path without touching case", () => {
+  assert.equal(normalizePathForComparison("/home/user/Project/"), "/home/user/Project");
+});
+
 // -------------------------------------------------------------------------------------------
 // classifyPrimaryPathLock
 // -------------------------------------------------------------------------------------------
 
 const PRIMARY = "C:\\Loop-Dee-Loup";
 
-test("ARCHIVE_CANDIDATE: exactly one matching, non-pinned, non-remote-control session", () => {
+test("ARCHIVE_CANDIDATE: exactly one matching session with both protection fields explicitly proven false", () => {
   const result = classifyPrimaryPathLock({
     primaryPath: PRIMARY,
     sessions: [
       { sessionId: "s-other", path: "C:\\Loop-Dee-Loup\\.claude\\worktrees\\agent-1" },
-      { sessionId: "s-1", path: "c:/loop-dee-loup/" },
+      { sessionId: "s-1", path: "c:/loop-dee-loup/", pinned: false, remoteControlActive: false },
     ],
   });
   assert.deepEqual(result, { verdict: "ARCHIVE_CANDIDATE", sessionId: "s-1" });
+});
+
+// Stage 1 review on PR #690: omitted/unknown pinned or remoteControlActive must fail closed to
+// PROTECTED_OWNER, not default to "unprotected".
+
+test("PROTECTED_OWNER: matching session has both protection fields omitted (unknown)", () => {
+  const result = classifyPrimaryPathLock({
+    primaryPath: PRIMARY,
+    sessions: [{ sessionId: "s-1", path: PRIMARY }],
+  });
+  assert.deepEqual(result, { verdict: "PROTECTED_OWNER", sessionId: "s-1" });
+});
+
+test("PROTECTED_OWNER: matching session has pinned explicitly false but remoteControlActive omitted", () => {
+  const result = classifyPrimaryPathLock({
+    primaryPath: PRIMARY,
+    sessions: [{ sessionId: "s-1", path: PRIMARY, pinned: false }],
+  });
+  assert.deepEqual(result, { verdict: "PROTECTED_OWNER", sessionId: "s-1" });
+});
+
+test("PROTECTED_OWNER: matching session has remoteControlActive explicitly false but pinned is null", () => {
+  const result = classifyPrimaryPathLock({
+    primaryPath: PRIMARY,
+    sessions: [{ sessionId: "s-1", path: PRIMARY, pinned: null, remoteControlActive: false }],
+  });
+  assert.deepEqual(result, { verdict: "PROTECTED_OWNER", sessionId: "s-1" });
 });
 
 test("PROTECTED_OWNER: matching session is pinned", () => {
@@ -102,7 +157,7 @@ test("an archived duplicate does not turn an otherwise-single match into AMBIGUO
     primaryPath: PRIMARY,
     sessions: [
       { sessionId: "s-archived", path: PRIMARY, archived: true },
-      { sessionId: "s-live", path: PRIMARY },
+      { sessionId: "s-live", path: PRIMARY, pinned: false, remoteControlActive: false },
     ],
   });
   assert.deepEqual(result, { verdict: "ARCHIVE_CANDIDATE", sessionId: "s-live" });
@@ -141,7 +196,11 @@ test("runCli: reads a real sessions-json file and returns the classified verdict
   const dir = mkdtempSync(join(tmpdir(), "classify-primary-path-lock-"));
   try {
     const file = join(dir, "sessions.json");
-    writeFileSync(file, JSON.stringify([{ sessionId: "s-1", path: PRIMARY }]), "utf8");
+    writeFileSync(
+      file,
+      JSON.stringify([{ sessionId: "s-1", path: PRIMARY, pinned: false, remoteControlActive: false }]),
+      "utf8",
+    );
     const outcome = runCli({ argv: ["--primary-path", PRIMARY, "--sessions-json", file] });
     assert.equal(outcome.exitCode, 0);
     assert.deepEqual(outcome.result, { verdict: "ARCHIVE_CANDIDATE", sessionId: "s-1" });
