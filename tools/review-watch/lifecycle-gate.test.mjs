@@ -2440,10 +2440,13 @@ test("checkCloseAudit: CLOSE_READY (dry-run) / CLOSED (real run) — backed CLEA
     return { body: closeAuditBody({ workIssue: "#151", verdict: "CLEAN" }), state: "OPEN", createdAt: "2026-09-05T00:00:00Z" };
   };
   const ghApiImpl = withCompletedAuditReport();
+  // The shared-Work-issue predecessor sweep (issue #689) also lists candidates once this audit's
+  // own evidence backs CLEAN; an empty list keeps this test scoped to its own stated shape.
+  const ghIssueListImpl = async () => [];
 
   const dryRunResult = await checkCloseAudit(
     { repo: "owner/repo", "audit-issue": 160, "dry-run": "true" },
-    { ghIssueViewImpl, ghApiImpl },
+    { ghIssueViewImpl, ghApiImpl, ghIssueListImpl },
   );
   assert.equal(dryRunResult.exitCode, 0);
   assert.equal(dryRunResult.state, "CLOSE_READY");
@@ -2456,6 +2459,7 @@ test("checkCloseAudit: CLOSE_READY (dry-run) / CLOSED (real run) — backed CLEA
     {
       ghIssueViewImpl,
       ghApiImpl,
+      ghIssueListImpl,
       ghCloseImpl: async (a) => closeCalls.push(a),
       ghCommentImpl: async (a) => commentCalls.push(a),
     },
@@ -2477,17 +2481,18 @@ test("checkCloseAudit: CLOSE_READY (dry-run) / CLOSED (real run) — backed CLEA
     createdAt: "2026-09-05T00:00:00Z",
   });
   const ghApiImpl = withCompletedAuditReport();
+  const ghIssueListImpl = async () => [];
 
   const dryRunResult = await checkCloseAudit(
     { repo: "owner/repo", "audit-issue": 161, "dry-run": "true" },
-    { ghIssueViewImpl, ghApiImpl },
+    { ghIssueViewImpl, ghApiImpl, ghIssueListImpl },
   );
   assert.equal(dryRunResult.state, "CLOSE_READY");
 
   const closeCalls = [];
   const realResult = await checkCloseAudit(
     { repo: "owner/repo", "audit-issue": 161 },
-    { ghIssueViewImpl, ghApiImpl, ghCloseImpl: async (a) => closeCalls.push(a), ghCommentImpl: async () => {} },
+    { ghIssueViewImpl, ghApiImpl, ghIssueListImpl, ghCloseImpl: async (a) => closeCalls.push(a), ghCommentImpl: async () => {} },
   );
   assert.equal(realResult.state, "CLOSED");
   assert.equal(closeCalls.length, 1, "closes identically regardless of the (unfetched) work issue's presumed open/closed state");
@@ -2642,17 +2647,25 @@ test("checkCloseAudit: ALREADY_TERMINAL — a safe no-op on an already-closed au
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "ALREADY_TERMINAL");
   assert.equal(result.auditIssue, 160);
-  assert.equal(apiCalls, 0, "no evidence evaluation is needed for an already-terminal audit");
-  assert.equal(listCalls, 0, "no supersession search is needed for an already-terminal audit");
+  assert.equal(apiCalls, 0, "no evidence (re-)evaluation is needed for an already-terminal audit");
+  // Issue #689 (the #686/#688 recurrence): the ALREADY_TERMINAL rerun path now also sweeps for
+  // shared-Work-issue predecessors, not only the corrects-chain walk, so a predecessor missed by
+  // one strategy can still be reconciled by rerunning close-audit against the already-closed
+  // successor. That sweep costs exactly one candidate listing per call — never a second one, and
+  // never an evidence re-evaluation (apiCalls stays 0 above).
+  assert.equal(listCalls, 1, "the shared-Work-issue predecessor sweep lists candidates exactly once");
   assert.equal(closeCalls, 0, "must never attempt to close an already-closed issue");
   assert.equal(commentCalls, 0, "must never post a duplicate explanatory comment");
 });
 
 test("checkCloseAudit: ALREADY_TERMINAL is reported identically with --dry-run true (no mutation impls are even reachable)", async () => {
   const ghIssueViewImpl = async () => ({ body: closeAuditBody({ verdict: "CLEAN" }), state: "CLOSED", createdAt: "2026-09-05T09:00:00Z" });
+  // The shared-Work-issue predecessor sweep still lists candidates under --dry-run (only
+  // mutation is skipped), so a stub is required here even though close/comment are never reached.
+  const ghIssueListImpl = async () => [];
   const result = await checkCloseAudit(
     { repo: "owner/repo", "audit-issue": 160, "dry-run": "true" },
-    { ghIssueViewImpl },
+    { ghIssueViewImpl, ghIssueListImpl },
   );
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "ALREADY_TERMINAL");
@@ -2879,6 +2892,10 @@ test("checkCloseAudit: closing the terminal CLEAN audit cascades to retire the f
   };
   const ghIssueViewImpl = async ({ number }) => chain[number];
   const ghApiImpl = ghApiForThreads({ 702: completedAuditThread({ verdict: "CLEAN" }) });
+  // #700 and #702 also share a Work issue (#497); an empty candidate list isolates this test to
+  // the corrects-chain cascade it names (the shared-Work-issue sweep, issue #689, is covered by
+  // its own dedicated tests below).
+  const ghIssueListImpl = async () => [];
 
   const closeCalls = [];
   const commentCalls = [];
@@ -2887,6 +2904,7 @@ test("checkCloseAudit: closing the terminal CLEAN audit cascades to retire the f
     {
       ghIssueViewImpl,
       ghApiImpl,
+      ghIssueListImpl,
       ghCloseImpl: async (a) => closeCalls.push(a),
       ghCommentImpl: async (a) => commentCalls.push(a),
     },
@@ -2976,6 +2994,9 @@ test("checkCloseAudit: the predecessor cascade fails closed on a contradictory m
   };
   const ghIssueViewImpl = async ({ number }) => chain[number];
   const ghApiImpl = ghApiForThreads({ 742: completedAuditThread({ verdict: "CLEAN" }) });
+  // No other issue shares #742's Work issue (#497) in this fixture, so the shared-Work-issue
+  // sweep added by issue #689 finds nothing here; this test isolates the corrects-chain walk.
+  const ghIssueListImpl = async () => [];
 
   const closeCalls = [];
   const commentCalls = [];
@@ -2984,6 +3005,7 @@ test("checkCloseAudit: the predecessor cascade fails closed on a contradictory m
     {
       ghIssueViewImpl,
       ghApiImpl,
+      ghIssueListImpl,
       ghCloseImpl: async (a) => closeCalls.push(a),
       ghCommentImpl: async (a) => commentCalls.push(a),
     },
@@ -3052,6 +3074,9 @@ test("checkCloseAudit: the predecessor cascade fails closed on a correctsAuditRe
   };
   const ghIssueViewImpl = async ({ number }) => chain[number];
   const ghApiImpl = ghApiForThreads({ 742: completedAuditThread({ verdict: "CLEAN" }) });
+  // No other issue shares #742's Work issue (#497) in this fixture, so the shared-Work-issue
+  // sweep added by issue #689 finds nothing here; this test isolates the corrects-chain walk.
+  const ghIssueListImpl = async () => [];
 
   const closeCalls = [];
   const commentCalls = [];
@@ -3060,6 +3085,7 @@ test("checkCloseAudit: the predecessor cascade fails closed on a correctsAuditRe
     {
       ghIssueViewImpl,
       ghApiImpl,
+      ghIssueListImpl,
       ghCloseImpl: async (a) => closeCalls.push(a),
       ghCommentImpl: async (a) => commentCalls.push(a),
     },
@@ -3084,6 +3110,11 @@ test("checkCloseAudit: a transient predecessor-close failure is retried and comp
   };
   const ghIssueViewImpl = async ({ number }) => chain[number];
   const ghApiImpl = ghApiForThreads({ 702: completedAuditThread({ verdict: "CLEAN" }) });
+  // #700 and #702 happen to share a Work issue (#497) in this fixture, which would otherwise let
+  // the shared-Work-issue sweep (issue #689) retire #700 independently of the #701 corrects-chain
+  // failure below. An empty candidate list isolates this test to exactly what it names: linear
+  // corrects-chain failure-and-retry behavior.
+  const ghIssueListImpl = async () => [];
 
   // First run: closing #702 succeeds and cascades into #701, but the close of #701 itself fails
   // transiently. The cascade stops there (never reaching #700), and #702 is left closed.
@@ -3094,6 +3125,7 @@ test("checkCloseAudit: a transient predecessor-close failure is retried and comp
     {
       ghIssueViewImpl,
       ghApiImpl,
+      ghIssueListImpl,
       ghCloseImpl: async (a) => {
         firstCloseCalls.push(a.auditIssue);
         if (a.auditIssue === 701 && failNextClose) throw new Error("transient gh failure");
@@ -3120,6 +3152,7 @@ test("checkCloseAudit: a transient predecessor-close failure is retried and comp
     {
       ghIssueViewImpl,
       ghApiImpl,
+      ghIssueListImpl,
       ghCloseImpl: async (a) => {
         secondCloseCalls.push(a.auditIssue);
         chain[a.auditIssue].state = "CLOSED";
@@ -3169,6 +3202,9 @@ test("checkCloseAudit: the cascaded predecessor close comment attributes the cor
   };
   const ghIssueViewImpl = async ({ number }) => chain[number];
   const ghApiImpl = ghApiForThreads({ 702: completedAuditThread({ verdict: "CLEAN" }) });
+  // #700 and #702 share a Work issue (#497); an empty candidate list keeps this test scoped to
+  // the corrects-chain attribution it names, independent of the shared-Work-issue sweep (#689).
+  const ghIssueListImpl = async () => [];
 
   const commentCalls = [];
   await checkCloseAudit(
@@ -3176,6 +3212,7 @@ test("checkCloseAudit: the cascaded predecessor close comment attributes the cor
     {
       ghIssueViewImpl,
       ghApiImpl,
+      ghIssueListImpl,
       ghCloseImpl: async () => {},
       ghCommentImpl: async (a) => commentCalls.push(a),
     },
@@ -3185,6 +3222,226 @@ test("checkCloseAudit: the cascaded predecessor close comment attributes the cor
   assert.match(commentOn701.body, /#702's own "Stage 1 inline review disposition" field records/, "#701's comment must attribute the pointer to #702's own field, not #701's own");
   assert.doesNotMatch(commentOn701.body, /this audit issue's own "Stage 1 inline review disposition" field records that it is corrected/);
   assert.match(commentOn700.body, /#701's own "Stage 1 inline review disposition" field records/, "#700's comment must attribute the pointer to #701's own field, not #700's own");
+});
+
+// -- checkCloseAudit: shared-Work-issue backward predecessor retirement (issue #689, the live
+// #686/#688 recurrence) -----------------------------------------------------------------------
+//
+// #688's own "Stage 1 inline review disposition" field was supposed to name #686 as the
+// predecessor it corrects, but the controlling session that authored it placed that recurring
+// sentence in the audit-control-issue template's "Audit scope" field instead -- the one field
+// parseCorrectsAuditRef deliberately never reads (it is scoped only to "Stage 1 inline review
+// disposition", the one field the controller composes before ever triggering Codex). Closing
+// #688 therefore found no predecessor via the corrects-chain walk at all, even though #686 and
+// #688 both name the same Work issue (#668) and #688 is independently proven CLEAN -- exactly
+// the shape retireSharedWorkIssuePredecessors now also checks, mirroring backward the same
+// shared-Work-issue strategy checkCloseAudit's forward search (case b, above) already trusts.
+
+function misplacedCorrectsAuditFixture({ workIssue, commit = MERGE_COMMIT, verdict, createdAt, misplacedCorrects = null }) {
+  const scope =
+    misplacedCorrects !== null
+      ? `Complete diff review. This is itself a correction responding to a prior Stage 2 NOT CLEAN ` +
+        `verdict on audit issue #${misplacedCorrects} (named here, in Audit scope, not in Stage 1 ` +
+        `inline review disposition -- the live #686/#688 authoring defect).`
+      : "Complete diff review.";
+  return {
+    body:
+      `### Work issue\n\n${workIssue}\n\n### Exact merge commit\n\n${commit}\n\n` +
+      `### Stage 1 inline review disposition\n\nStage 1 inline review at frozen head \`${MERGE_COMMIT}\` found no issues.\n\n` +
+      `### Audit scope\n\n${scope}\n\n` +
+      `### Verification checklist\n\n1. Confirm A.\n\n### Verdict\n\n${verdict}\n`,
+    state: "OPEN",
+    createdAt,
+  };
+}
+
+test("checkCloseAudit: closing the terminal CLEAN audit retires a same-Work-issue predecessor via the shared-Work-issue sweep when the corrects-chain phrase is misplaced (the live #686/#688 recurrence)", async () => {
+  const chain = {
+    686: misplacedCorrectsAuditFixture({ workIssue: "#668", verdict: "NOT CLEAN", createdAt: "2026-09-21T21:50:33Z" }),
+    688: misplacedCorrectsAuditFixture({ workIssue: "#668", verdict: "CLEAN", createdAt: "2026-09-21T23:16:16Z", misplacedCorrects: 686 }),
+  };
+  // Confirm the fixture genuinely reproduces the authoring defect: the corrects-chain parser,
+  // scoped only to "Stage 1 inline review disposition," must not find the misplaced sentence.
+  assert.equal(parseCorrectsAuditRef(chain[688].body), null, "the misplaced sentence must be invisible to the corrects-chain parser");
+
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+  const ghApiImpl = ghApiForThreads({ 688: completedAuditThread({ verdict: "CLEAN" }) });
+
+  const closeCalls = [];
+  const commentCalls = [];
+  const result = await checkCloseAudit(
+    { repo: "LouPineWays/Loop-Dee-Loup", "audit-issue": 688 },
+    {
+      ghIssueViewImpl,
+      ghIssueListImpl,
+      ghApiImpl,
+      ghCloseImpl: async (a) => closeCalls.push(a),
+      ghCommentImpl: async (a) => commentCalls.push(a),
+    },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "CLOSED", "#688's own verdict is backed CLEAN regardless of the predecessor cascade");
+  assert.equal(result.retiredPredecessors.length, 1, "the shared-Work-issue sweep must retire #686 even though the corrects-chain walk found nothing");
+  assert.equal(result.retiredPredecessors[0].auditIssue, 686);
+  assert.equal(result.retiredPredecessors[0].supersededBy, 688);
+  assert.deepEqual(closeCalls.map((c) => c.auditIssue), [688, 686]);
+  const commentOn686 = commentCalls.find((c) => c.auditIssue === 686);
+  assert.ok(commentOn686, "#686 must receive its own explanatory close comment");
+  assert.match(commentOn686.body, /#688/, "the comment must name #688 as the audit that supersedes it");
+  assert.match(commentOn686.body, /same work issue/);
+});
+
+test("checkCloseAudit: a predecessor found by both the corrects-chain walk and the shared-Work-issue sweep is retired exactly once (no double-close, no double-comment)", async () => {
+  const chain = {
+    686: chainFixtureWithCorrects({ workIssue: "#668", verdict: "NOT CLEAN", createdAt: "2026-09-21T21:50:33Z" }),
+    688: chainFixtureWithCorrects({ workIssue: "#668", verdict: "CLEAN", createdAt: "2026-09-21T23:16:16Z", corrects: 686 }),
+  };
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+  const ghApiImpl = ghApiForThreads({ 688: completedAuditThread({ verdict: "CLEAN" }) });
+
+  const closeCalls = [];
+  const commentCalls = [];
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 688 },
+    {
+      ghIssueViewImpl,
+      ghIssueListImpl,
+      ghApiImpl,
+      ghCloseImpl: async (a) => closeCalls.push(a),
+      ghCommentImpl: async (a) => commentCalls.push(a),
+    },
+  );
+
+  assert.equal(result.retiredPredecessors.length, 1, "#686 is found by both strategies but retired only once");
+  assert.equal(result.retiredPredecessors[0].auditIssue, 686);
+  assert.deepEqual(closeCalls.map((c) => c.auditIssue), [688, 686], "must never close #686 twice");
+  assert.equal(commentCalls.filter((c) => c.auditIssue === 686).length, 1, "must never post a duplicate comment on #686");
+});
+
+test("checkCloseAudit: the shared-Work-issue sweep leaves a genuinely unrelated or later-created predecessor untouched (negative controls)", async () => {
+  const chain = {
+    // Different Work issue and no corrects pointer -- must never be retired.
+    900: chainFixtureWithCorrects({ workIssue: "#111", verdict: "NOT CLEAN", createdAt: "2026-09-21T20:00:00Z" }),
+    // Same Work issue as #902, but created AFTER it -- createdAt ordering must still govern the
+    // shared-Work-issue sweep exactly as it already governs the existing forward search.
+    901: chainFixtureWithCorrects({ workIssue: "#668", verdict: "NOT CLEAN", createdAt: "2026-09-22T00:00:00Z" }),
+    902: chainFixtureWithCorrects({ workIssue: "#668", verdict: "CLEAN", createdAt: "2026-09-21T23:16:16Z" }),
+  };
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+  const ghApiImpl = ghApiForThreads({ 902: completedAuditThread({ verdict: "CLEAN" }) });
+
+  const closeCalls = [];
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 902 },
+    { ghIssueViewImpl, ghIssueListImpl, ghApiImpl, ghCloseImpl: async (a) => closeCalls.push(a), ghCommentImpl: async () => {} },
+  );
+
+  assert.equal(result.state, "CLOSED");
+  assert.equal(result.retiredPredecessors.length, 0, "an unrelated Work issue and a later-created same-Work-issue audit must both stay untouched");
+  assert.deepEqual(closeCalls.map((c) => c.auditIssue), [902], "#900 and #901 must never be closed");
+});
+
+test("checkCloseAudit: the shared-Work-issue sweep fails closed on a same-Work-issue candidate with no canonical audit shape", async () => {
+  const chain = {
+    686: {
+      body:
+        "### Work issue\n\n#668\n\nJust an ordinary issue that happens to declare the same Work " +
+        "issue field text, with no merge commit or disposition fields.",
+      state: "OPEN",
+      createdAt: "2026-09-21T21:50:33Z",
+    },
+    688: chainFixtureWithCorrects({ workIssue: "#668", verdict: "CLEAN", createdAt: "2026-09-21T23:16:16Z" }),
+  };
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+  const ghApiImpl = ghApiForThreads({ 688: completedAuditThread({ verdict: "CLEAN" }) });
+
+  const closeCalls = [];
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 688 },
+    { ghIssueViewImpl, ghIssueListImpl, ghApiImpl, ghCloseImpl: async (a) => closeCalls.push(a), ghCommentImpl: async () => {} },
+  );
+
+  assert.equal(result.retiredPredecessors.length, 0, "a same-Work-issue candidate without the canonical audit shape must never be closed");
+  assert.equal(result.predecessorChainNotes.length, 1);
+  assert.equal(result.predecessorChainNotes[0].auditIssue, 686);
+  assert.match(result.predecessorChainNotes[0].reason, /canonical Stage 2 audit-control-issue shape/);
+  assert.deepEqual(closeCalls.map((c) => c.auditIssue), [688]);
+});
+
+test("checkCloseAudit: rerunning close-audit against an already-closed successor retroactively retires a predecessor the shared-Work-issue sweep missed before, then is a harmless no-op on a further rerun", async () => {
+  const chain = {
+    686: chainFixtureWithCorrects({ workIssue: "#668", verdict: "NOT CLEAN", createdAt: "2026-09-21T21:50:33Z" }),
+    688: chainFixtureWithCorrects({ workIssue: "#668", verdict: "CLEAN", createdAt: "2026-09-21T23:16:16Z" }),
+  };
+  chain[688].state = "CLOSED"; // #688 is already closed -- the ALREADY_TERMINAL branch, matching the live rerun shape.
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+
+  const closeCalls = [];
+  const commentCalls = [];
+  const firstResult = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 688 },
+    {
+      ghIssueViewImpl,
+      ghIssueListImpl,
+      ghCloseImpl: async (a) => {
+        closeCalls.push(a);
+        chain[a.auditIssue].state = "CLOSED";
+      },
+      ghCommentImpl: async (a) => commentCalls.push(a),
+    },
+  );
+  assert.equal(firstResult.state, "ALREADY_TERMINAL");
+  assert.equal(firstResult.retiredPredecessors.length, 1);
+  assert.equal(firstResult.retiredPredecessors[0].auditIssue, 686);
+  assert.equal(chain[686].state, "CLOSED", "the shared-Work-issue sweep must actually close #686 on this rerun");
+
+  const secondResult = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 688 },
+    {
+      ghIssueViewImpl,
+      ghIssueListImpl,
+      ghCloseImpl: async (a) => closeCalls.push(a),
+      ghCommentImpl: async (a) => commentCalls.push(a),
+    },
+  );
+  assert.equal(secondResult.state, "ALREADY_TERMINAL");
+  assert.equal(secondResult.retiredPredecessors.length, 0, "#686 is already closed; the sweep must not re-close or re-comment on it");
+  assert.equal(closeCalls.length, 1, "only the first run's single close of #686");
+  assert.equal(commentCalls.length, 1, "only the first run's single comment on #686");
+});
+
+test("checkCloseAudit: a gh issue list failure in the shared-Work-issue sweep degrades to a skip note, never blocking the terminal audit's own close or the corrects-chain cascade", async () => {
+  const chain = {
+    700: chainFixtureWithCorrects({ workIssue: "none", verdict: "NOT CLEAN", createdAt: "2026-09-05T10:00:00Z" }),
+    702: chainFixtureWithCorrects({ workIssue: "#497", verdict: "CLEAN", createdAt: "2026-09-05T11:00:00Z", corrects: 700 }),
+  };
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => {
+    throw new Error("search API rate-limited");
+  };
+  const ghApiImpl = ghApiForThreads({ 702: completedAuditThread({ verdict: "CLEAN" }) });
+
+  const closeCalls = [];
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 702 },
+    { ghIssueViewImpl, ghIssueListImpl, ghApiImpl, ghCloseImpl: async (a) => closeCalls.push(a), ghCommentImpl: async () => {} },
+  );
+
+  assert.equal(result.exitCode, 0, "a listing failure in the supplementary sweep must never fail the whole command");
+  assert.equal(result.state, "CLOSED");
+  assert.equal(result.retiredPredecessors.length, 1, "the corrects-chain cascade (#700) is unaffected by the sweep's listing failure");
+  assert.equal(result.retiredPredecessors[0].auditIssue, 700);
+  assert.ok(
+    result.predecessorChainNotes.some((n) => /gh issue list failed/.test(n.reason)),
+    "the listing failure itself must be recorded, not silently swallowed",
+  );
+  assert.deepEqual(closeCalls.map((c) => c.auditIssue), [702, 700]);
 });
 
 // -- normalizeSearchIssuesPage (Stage 1 review finding on PR #435: real pagination for

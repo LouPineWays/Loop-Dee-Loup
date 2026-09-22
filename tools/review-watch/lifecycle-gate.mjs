@@ -1892,6 +1892,170 @@ async function retirePredecessorChain(
   return { retired, skipped };
 }
 
+// Pure orchestration except for the injected `ghCloseImpl`/`ghCommentImpl` mutation. Finds every
+// OPEN, canonical-shaped audit issue that (a) is not the current (successor) audit itself, (b)
+// was created strictly before it, (c) names the exact same Work issue field, and (d) has not
+// already been retired by a different strategy (`excludeNumbers`) — and retires each one
+// independently, citing the current audit's own already-established closing evidence.
+//
+// This mirrors, in the backward direction, the exact shared-Work-issue forward-search strategy
+// `checkCloseAudit` case (b) below already trusts as independently valid and has tested
+// extensively (e.g. the #396->#406 five-issue chain) — but that forward search only ever runs
+// when an operator invokes `close-audit` directly against the *predecessor's own* issue number.
+// Issue #689, the #686/#688 recurrence: the real, deterministic flow this repository actually
+// runs (`next-review-transition-gate.mjs`'s `STAGE2_CLOSE_READY` `nextCommand`) invokes
+// `close-audit` against the *successor* (the audit that just went CLEAN), relying entirely on
+// `retirePredecessorChain`'s corrects-chain walk to cascade backward. #688's own "Stage 1 inline
+// review disposition" field named #686 in the wrong template section (under "Audit scope"
+// instead), so `parseCorrectsAuditRef` found no predecessor at all — even though #686 and #688
+// both name the same Work issue (#668) and #688 is independently proven CLEAN. The corrects-chain
+// strategy failing (an authoring defect that can recur) silently skipped the independently valid
+// shared-Work-issue strategy, because the backward cascade never tried it. This function is that
+// missing route, applied automatically whenever the successor closes, not only on a manual
+// per-predecessor invocation.
+//
+// Unlike the corrects-chain walk (a strict linear predecessor pointer, where one broken/malformed
+// link must stop the whole walk to avoid guessing past it), this is a flat, independent sweep
+// over every candidate sharing the Work issue: one malformed or already-closed candidate never
+// blocks evaluation of the others, since there is no chain ordering to preserve here.
+async function retireSharedWorkIssuePredecessors(
+  repo,
+  { number: currentNumber, createdAt: currentCreatedAt },
+  workIssueRef,
+  candidates,
+  reportEvidence,
+  { ghCloseImpl, ghCommentImpl, dryRun = false },
+  excludeNumbers = new Set(),
+) {
+  const retired = [];
+  const skipped = [];
+  const currentCreatedMs = new Date(currentCreatedAt ?? 0).getTime();
+
+  const sorted = [...(candidates ?? [])].sort(
+    (a, b) => new Date(a.createdAt ?? 0).getTime() - new Date(b.createdAt ?? 0).getTime(),
+  );
+
+  for (const candidate of sorted) {
+    const candidateNumber = Number(candidate.number);
+    if (candidateNumber === currentNumber) continue;
+    if (excludeNumbers.has(candidateNumber)) continue;
+    if (candidate.state === "CLOSED") continue;
+
+    const candidateCreatedMs = new Date(candidate.createdAt ?? 0).getTime();
+    if (!(candidateCreatedMs < currentCreatedMs)) continue;
+
+    const candidateWorkIssueRef = parseWorkIssueRef(candidate.body ?? "");
+    if (candidateWorkIssueRef !== workIssueRef) continue;
+
+    if (!hasCanonicalAuditShape(candidate.body ?? "")) {
+      skipped.push({
+        auditIssue: candidateNumber,
+        reason:
+          `#${candidateNumber} names the same Work issue but does not have the canonical Stage 2 ` +
+          `audit-control-issue shape (missing Exact merge commit / Work issue / Stage 1 inline ` +
+          `review disposition fields); fails closed rather than closing a possibly-unrelated issue`,
+      });
+      continue;
+    }
+
+    if (dryRun) {
+      retired.push({ auditIssue: candidateNumber, supersededBy: currentNumber, dryRun: true });
+      continue;
+    }
+
+    try {
+      await ghCloseImpl({ repo, auditIssue: candidateNumber });
+    } catch (err) {
+      skipped.push({ auditIssue: candidateNumber, reason: `gh issue close failed: ${err.message}` });
+      continue;
+    }
+    let commentPosted = true;
+    let commentError = null;
+    try {
+      await ghCommentImpl({
+        repo,
+        auditIssue: candidateNumber,
+        body: supersededCloseComment({ repo, supersededBy: currentNumber, reportEvidence }),
+      });
+    } catch (err) {
+      commentPosted = false;
+      commentError = err.message;
+    }
+    retired.push({
+      auditIssue: candidateNumber,
+      supersededBy: currentNumber,
+      commentPosted,
+      ...(commentError ? { commentError } : {}),
+    });
+  }
+
+  return { retired, skipped };
+}
+
+// Combines both independent backward-retirement strategies into the one cascade every
+// `checkCloseAudit` close path below invokes: the linear corrects-chain walk
+// (`retirePredecessorChain`) and the flat shared-Work-issue sweep
+// (`retireSharedWorkIssuePredecessors`) above. Per issue #689's acceptance criteria, neither
+// strategy silently skips the other — a predecessor already retired by one is excluded from the
+// other so it is never double-closed or double-commented, and a listing failure in the
+// supplementary Work-issue sweep degrades to "no additional candidates found" (recorded as a
+// `skipped` note) rather than undoing or blocking the close this cascade follows.
+async function retireSupersededPredecessors(
+  repo,
+  { number: currentNumber, body: currentBody, createdAt: currentCreatedAt },
+  reportEvidence,
+  { ghIssueViewImpl, ghIssueListImpl, ghCloseImpl, ghCommentImpl, dryRun = false },
+) {
+  const chainCascade = await retirePredecessorChain(
+    repo,
+    { number: currentNumber, body: currentBody, createdAt: currentCreatedAt },
+    { ghIssueViewImpl, ghCloseImpl, ghCommentImpl, dryRun },
+  );
+
+  const excludeNumbers = new Set([
+    ...chainCascade.retired.map((entry) => entry.auditIssue),
+    ...chainCascade.skipped.map((entry) => entry.auditIssue),
+  ]);
+
+  const workIssueRef = parseWorkIssueRef(currentBody ?? "");
+  let workIssueCascade = { retired: [], skipped: [] };
+  if (workIssueRef !== null && workIssueRef !== "none") {
+    let candidates = [];
+    let listError = null;
+    try {
+      candidates = await ghIssueListImpl({ repo });
+    } catch (err) {
+      listError = err;
+    }
+    if (listError) {
+      workIssueCascade = {
+        retired: [],
+        skipped: [
+          {
+            auditIssue: null,
+            reason: `gh issue list failed while searching for shared-Work-issue predecessors: ${listError.message}`,
+          },
+        ],
+      };
+    } else {
+      workIssueCascade = await retireSharedWorkIssuePredecessors(
+        repo,
+        { number: currentNumber, createdAt: currentCreatedAt },
+        workIssueRef,
+        candidates,
+        reportEvidence,
+        { ghCloseImpl, ghCommentImpl, dryRun },
+        excludeNumbers,
+      );
+    }
+  }
+
+  return {
+    retired: [...chainCascade.retired, ...workIssueCascade.retired],
+    skipped: [...chainCascade.skipped, ...workIssueCascade.skipped],
+  };
+}
+
 // `ghCloseImpl` and `ghCommentImpl` are injected so tests can drive this without touching the
 // real network or `gh` CLI, and are kept as two independently-failing steps — close first, then
 // comment — mirroring recoverPrematureClosure's own precedent above, but in the opposite order:
@@ -2050,17 +2214,21 @@ export async function checkCloseAudit(
   // An already-closed audit issue is already terminal for *its own* evidence, so there is no
   // evidence to (re-)compute and this issue itself is never re-closed or re-commented-on. Checked
   // before any evidence evaluation for that reason. But the predecessor cascade below is still
-  // attempted here (idempotently — retirePredecessorChain never re-closes or re-comments on an
-  // already-closed predecessor, and does nothing at all when this issue's own body names no
-  // predecessor): Stage 1 review finding on this PR (P2) — without this, a predecessor whose close
-  // attempt failed transiently on a prior run would remain open permanently, since a retry
-  // against this same terminal audit used to exit immediately as ALREADY_TERMINAL with no way to
-  // ever revisit that predecessor again.
+  // attempted here (idempotently — retireSupersededPredecessors never re-closes or re-comments on
+  // an already-closed predecessor, and does nothing at all when neither strategy finds one):
+  // Stage 1 review finding on this PR (P2) — without this, a predecessor whose close attempt
+  // failed transiently on a prior run would remain open permanently, since a retry against this
+  // same terminal audit used to exit immediately as ALREADY_TERMINAL with no way to ever revisit
+  // that predecessor again. Issue #689 (the #686/#688 recurrence): this rerun path is also how a
+  // predecessor missed by a since-fixed corrects-chain authoring defect gets reconciled — the
+  // shared-Work-issue strategy inside retireSupersededPredecessors runs here too, using only this
+  // audit's own already-fetched body (no evidence re-evaluation, matching the comment above).
   if (auditData.state === "CLOSED") {
-    const cascade = await retirePredecessorChain(
+    const cascade = await retireSupersededPredecessors(
       repo,
       { number: auditIssueNumber, body: auditData.body, createdAt: auditData.createdAt },
-      { ghIssueViewImpl, ghCloseImpl, ghCommentImpl, dryRun },
+      null,
+      { ghIssueViewImpl, ghIssueListImpl, ghCloseImpl, ghCommentImpl, dryRun },
     );
     return {
       exitCode: 0,
@@ -2079,14 +2247,22 @@ export async function checkCloseAudit(
   }
 
   // (a) This audit's own verdict is backed CLEAN — close regardless of the gated work issue's
-  // state (the #380/#384 fix). No supersession search is needed or performed. Once closing, also
-  // cascade backward through this audit's own correction-chain provenance (issue #513
-  // requirement 7) so a terminal CLEAN close alone retires every provably superseded predecessor,
-  // with no separate operator invocation needed against each predecessor's own issue number.
+  // state (the #380/#384 fix). No supersession search is needed to decide *this* audit's own
+  // close. Once closing, also cascade backward through both independent predecessor-discovery
+  // strategies (issue #513 requirement 7, generalized by issue #689 to include the
+  // shared-Work-issue signal alongside explicit correction-chain provenance) so a terminal CLEAN
+  // close alone retires every provably superseded predecessor, with no separate operator
+  // invocation needed against each predecessor's own issue number.
   if (own.backedClean) {
     const startAudit = { number: auditIssueNumber, body: auditData.body, createdAt: auditData.createdAt };
     if (dryRun) {
-      const cascade = await retirePredecessorChain(repo, startAudit, { ghIssueViewImpl, ghCloseImpl, ghCommentImpl, dryRun: true });
+      const cascade = await retireSupersededPredecessors(repo, startAudit, own.reportEvidence, {
+        ghIssueViewImpl,
+        ghIssueListImpl,
+        ghCloseImpl,
+        ghCommentImpl,
+        dryRun: true,
+      });
       return {
         exitCode: 0,
         state: "CLOSE_READY",
@@ -2102,7 +2278,13 @@ export async function checkCloseAudit(
       { ghCloseImpl, ghCommentImpl },
     );
     if (closeResult.exitCode !== 0) return closeResult;
-    const cascade = await retirePredecessorChain(repo, startAudit, { ghIssueViewImpl, ghCloseImpl, ghCommentImpl, dryRun: false });
+    const cascade = await retireSupersededPredecessors(repo, startAudit, own.reportEvidence, {
+      ghIssueViewImpl,
+      ghIssueListImpl,
+      ghCloseImpl,
+      ghCommentImpl,
+      dryRun: false,
+    });
     return { ...closeResult, retiredPredecessors: cascade.retired, predecessorChainNotes: cascade.skipped };
   }
 
@@ -2194,7 +2376,13 @@ export async function checkCloseAudit(
         : supersededCloseComment({ repo, supersededBy: supersededBy.number, reportEvidence: supersededBy.reportEvidence });
 
     if (dryRun) {
-      const cascade = await retirePredecessorChain(repo, startAudit, { ghIssueViewImpl, ghCloseImpl, ghCommentImpl, dryRun: true });
+      const cascade = await retireSupersededPredecessors(repo, startAudit, supersededBy.reportEvidence, {
+        ghIssueViewImpl,
+        ghIssueListImpl,
+        ghCloseImpl,
+        ghCommentImpl,
+        dryRun: true,
+      });
       return {
         exitCode: 0,
         state: "SUPERSEDED_CLOSE_READY",
@@ -2211,7 +2399,13 @@ export async function checkCloseAudit(
       { ghCloseImpl, ghCommentImpl },
     );
     if (closeResult.exitCode !== 0) return closeResult;
-    const cascade = await retirePredecessorChain(repo, startAudit, { ghIssueViewImpl, ghCloseImpl, ghCommentImpl, dryRun: false });
+    const cascade = await retireSupersededPredecessors(repo, startAudit, supersededBy.reportEvidence, {
+      ghIssueViewImpl,
+      ghIssueListImpl,
+      ghCloseImpl,
+      ghCommentImpl,
+      dryRun: false,
+    });
     return { ...closeResult, retiredPredecessors: cascade.retired, predecessorChainNotes: cascade.skipped };
   }
 
