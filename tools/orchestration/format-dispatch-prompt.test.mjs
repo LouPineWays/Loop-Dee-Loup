@@ -320,8 +320,19 @@ test("formatStage1CorrectionWorkerDispatchPrompt omits the Controlling Issue lin
   assert.match(prompt, /#570/);
 });
 
-test("formatStage1CorrectionWorkerDispatchPrompt stays well under the reference-only threshold", () => {
+// Issue #692: this template grew a mandatory `pr-head-checkout-preflight.mjs` clause (a fixed,
+// compact instruction naming the script and its own CHECKOUT_BINDING_UNVERIFIED failure
+// reference -- no PR/finding content restated). The CLI's own `assertReferenceOnly` enforces
+// the actual 700-char reference-only threshold at dispatch time (main()'s call site below), so
+// this unit test asserts the same bound directly against the formatter rather than a looser
+// one that would let a regression here only surface later, through the CLI.
+test("formatStage1CorrectionWorkerDispatchPrompt stays under the 700-char reference-only threshold", () => {
   const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569 });
+  assert.ok(prompt.length < 700, `expected < 700 chars, got ${prompt.length}`);
+});
+
+test('formatStage1CorrectionWorkerDispatchPrompt with correctionReason "closing-reference" stays under the 700-char reference-only threshold', () => {
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, correctionReason: "closing-reference" });
   assert.ok(prompt.length < 700, `expected < 700 chars, got ${prompt.length}`);
 });
 
@@ -351,6 +362,38 @@ test("formatStage1CorrectionWorkerDispatchPrompt points the worker at finalize-c
   const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569 });
   assert.match(prompt, /tools\/orchestration\/finalize-correction-breakpoint\.mjs/);
   assert.match(prompt, /CORRECTION_BREAKPOINT_UNVERIFIED/);
+});
+
+// Issue #692 (control #691): closes the live PR #690 / execution #685 / control #442
+// reproduction, where a correction worker recovered the PR's head metadata but never verified
+// its own checkout represented it, then failed reading a PR-only source file from `main`. The
+// default/"findings" reason always performs source work, so it mandates this preflight (plus
+// EnterWorktree) before any GitHub read or source work, and names its fail-closed reference.
+test("formatStage1CorrectionWorkerDispatchPrompt mandates the pr-head-checkout-preflight.mjs binding check (and EnterWorktree) before any other step, for the default/findings correction reason", () => {
+  for (const correctionReason of [undefined, "findings"]) {
+    const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, correctionReason });
+    assert.match(prompt, /pr-head-checkout-preflight\.mjs --pr 569/);
+    assert.match(prompt, /EnterWorktree/);
+    assert.match(prompt, /CHECKOUT_BINDING_UNVERIFIED 569/);
+    // The preflight clause must precede the Stage 1 review read, matching #692's own
+    // "before any source read or mutation" requirement.
+    assert.ok(prompt.indexOf("pr-head-checkout-preflight.mjs") < prompt.indexOf("Stage 1 review"));
+  }
+});
+
+// Stage 1 review finding on PR #694: a closing-reference repair is normally metadata-only (the
+// PR body or GitHub Development-sidebar link) and needs no local checkout at all -- mandating
+// the binding preflight unconditionally turned every dirty/occupied/unavailable local candidate
+// into an unrelated blocker for a repair that never touches source. It must still name the
+// preflight + EnterWorktree + CHECKOUT_BINDING_UNVERIFIED for the case it DOES need a
+// source/commit change, but only conditionally, and does not need to precede the Stage 1 review
+// read the way the findings reason's unconditional mandate does.
+test("formatStage1CorrectionWorkerDispatchPrompt applies the checkout binding conditionally, not unconditionally-first, for correctionReason \"closing-reference\"", () => {
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, correctionReason: "closing-reference" });
+  assert.match(prompt, /metadata-only needs no checkout/);
+  assert.match(prompt, /pr-head-checkout-preflight\.mjs --pr 569/);
+  assert.match(prompt, /EnterWorktree/);
+  assert.match(prompt, /CHECKOUT_BINDING_UNVERIFIED 569/);
 });
 
 test('formatStage1CorrectionWorkerDispatchPrompt with correctionReason "findings" (explicit) renders the same mandatory-finalizer template as the default', () => {
