@@ -299,7 +299,38 @@ export function formatIntegrationWorkerDispatchPrompt({ controlIssue, executionI
 // ordinary repair-and-stop instruction and explicitly tells it not to manufacture a
 // correction-satisfied disposition. Defaults to "findings" when absent (every pre-#613 caller,
 // including this file's own explicit-fields CLI mode, already assumed the findings-bearing shape).
-export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null, issue, pr, correctionReason }) {
+//
+// Issue #703 (control #691, the `work on #514` / execution #689 / PR #700 recurrence): the
+// findings template below previously told the *spawned* worker to run the preflight and then
+// `EnterWorktree` the returned path. Repository selection succeeded, but the spawned worker could
+// not rebind itself afterwards (agent-tool isolation had already pinned it to another sandbox;
+// a retry without isolation still hit the spawned-subagent `EnterWorktree` restriction), which
+// forced a parent-session correction fallback. The execution surface is now settled BEFORE
+// spawn: the controller pipes the gate verdict through `pr-head-checkout-preflight.mjs
+// --reserve-from-gate`, which reserves one exact PR-head checkout and adds `checkoutBinding`
+// ({ path, token, ... }) to the verdict. The findings template requires that binding (fails
+// closed without it -- no worker is ever spawned onto an unsettled surface) and tells the worker
+// only to *verify* it from the reserved path; no post-spawn workspace transition is required.
+const BINDING_TOKEN_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+
+function assertCheckoutBinding(checkoutBinding) {
+  if (
+    !checkoutBinding ||
+    typeof checkoutBinding.path !== "string" ||
+    !checkoutBinding.path ||
+    /[\r\n]/.test(checkoutBinding.path) ||
+    checkoutBinding.path.length > 200 ||
+    typeof checkoutBinding.token !== "string" ||
+    !BINDING_TOKEN_PATTERN.test(checkoutBinding.token)
+  ) {
+    throw new Error(
+      "formatStage1CorrectionWorkerDispatchPrompt requires a pre-spawn checkoutBinding { path, token } for a findings correction -- " +
+        "pipe the gate verdict through pr-head-checkout-preflight.mjs --reserve-from-gate first",
+    );
+  }
+}
+
+export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null, issue, pr, correctionReason, checkoutBinding = null }) {
   if (!isPositiveInteger(pr)) {
     throw new Error("formatStage1CorrectionWorkerDispatchPrompt requires pr to be a positive integer");
   }
@@ -340,9 +371,9 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
   // live-owned by another session, this repository's own one-session-per-exact-path invariant,
   // `docs/operating-model.md` § Concurrent subagent directory isolation -- is the same
   // fail-closed `CHECKOUT_BINDING_UNVERIFIED` outcome, never a path to work around.
-  const checkoutPreflightClause =
-    `Run node tools/orchestration/pr-head-checkout-preflight.mjs --pr ${pr}; on success EnterWorktree a ` +
-    `differing path. Either failing is CHECKOUT_BINDING_UNVERIFIED ${pr} -- stop first.\n\n`;
+  //
+  // Issue #703: superseded by the pre-spawn binding described above `assertCheckoutBinding` --
+  // the worker now verifies an already-reserved checkout instead of rebinding itself.
   if (reason === "closing-reference") {
     // Stage 1 review finding on PR #694: a closing-reference repair is normally a remote
     // metadata-only edit (the PR body or GitHub Development-sidebar link) needing no local
@@ -354,20 +385,23 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
       `Stage 1 correction worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
       `Read PR #${pr}'s Stage 1 review${executionReadClause} from GitHub for the closing-reference finding ` +
       `and authority (not restated). Closing-reference-only (no findings): metadata-only needs no checkout; ` +
-      `a source/commit change first needs pr-head-checkout-preflight.mjs --pr ${pr} + EnterWorktree, else ` +
-      `CHECKOUT_BINDING_UNVERIFIED ${pr}. Fix per docs/bounded-review-cycle.md, push it, and stop. Do not ` +
-      `run finalize-correction-breakpoint.mjs or record a correction-satisfied disposition. Do not ` +
-      `re-trigger review, merge, or begin Stage 2 here.`
+      `a source/commit change first needs pr-head-checkout-preflight.mjs --reserve --pr ${pr}, then ` +
+      `--verify-binding from its path, else CHECKOUT_BINDING_UNVERIFIED ${pr}. Fix per ` +
+      `docs/bounded-review-cycle.md, push it, and stop. Do not run finalize-correction-breakpoint.mjs or ` +
+      `record a correction-satisfied disposition. Do not re-trigger review, merge, or begin Stage 2 here.`
     );
   }
+  assertCheckoutBinding(checkoutBinding);
+  const { path, token } = checkoutBinding;
   return (
     `Stage 1 correction worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
-    checkoutPreflightClause +
-    `Read PR #${pr}'s Stage 1 review${executionReadClause} from GitHub for the findings and correction ` +
-    `authority (not restated here). Apply one consolidated correction per docs/bounded-review-cycle.md, push ` +
-    `it, then run tools/orchestration/finalize-correction-breakpoint.mjs before reporting; on ` +
-    `CORRECTION_BREAKPOINT_UNVERIFIED report that reference, not success. Then stop: no re-review, merge, or ` +
-    `Stage 2 here.`
+    `Pre-bound checkout: ${path}. From it, first run node tools/orchestration/pr-head-checkout-preflight.mjs ` +
+    `--verify-binding ${token} --pr ${pr} (nonzero: CHECKOUT_BINDING_UNVERIFIED ${pr}, stop); work only ` +
+    `there, push via its pushRefspec.\n\n` +
+    `Read PR #${pr}'s Stage 1 review${executionReadClause} for findings (not restated). Apply one ` +
+    `consolidated correction per docs/bounded-review-cycle.md, push, run ` +
+    `tools/orchestration/finalize-correction-breakpoint.mjs (on CORRECTION_BREAKPOINT_UNVERIFIED report ` +
+    `that, not success), then --release-binding ${token}. No re-review, merge, or Stage 2.`
   );
 }
 
@@ -490,7 +524,7 @@ const TEMPLATES_BY_STATE = {
   },
   STAGE1_CORRECTION_REQUIRED: {
     formatter: formatStage1CorrectionWorkerDispatchPrompt,
-    fields: ["controlIssue", "issue", "pr", "correctionReason"],
+    fields: ["controlIssue", "issue", "pr", "correctionReason", "checkoutBinding"],
   },
   STAGE2_CORRECTION_REQUIRED: { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
 };
@@ -515,7 +549,7 @@ const FORMATTERS_BY_KIND = {
   },
   "stage1-correction": {
     formatter: formatStage1CorrectionWorkerDispatchPrompt,
-    fields: ["controlIssue", "issue", "pr", "correctionReason"],
+    fields: ["controlIssue", "issue", "pr", "correctionReason", "checkoutBinding"],
   },
   "stage2-correction": { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
 };
@@ -545,6 +579,15 @@ const CLI_FLAG_BY_FIELD = {
 // `executionIssue`/`pr`/`auditIssue` have no such sentinel — a real GitHub reference or absent —
 // so they keep the plain Number coercion.
 function readField(field, source, { isCli }) {
+  // Issue #703: piped mode reads the `checkoutBinding` object `pr-head-checkout-preflight.mjs
+  // --reserve-from-gate` added to the verdict; explicit-fields mode rebuilds it from
+  // --binding-path/--binding-token (both or neither).
+  if (field === "checkoutBinding") {
+    if (!isCli) return source.checkoutBinding ?? null;
+    const path = source["binding-path"];
+    const token = source["binding-token"];
+    return path != null || token != null ? { path: path ?? null, token: token ?? null } : null;
+  }
   if (field === "issue") {
     const raw = isCli ? source[CLI_FLAG_BY_FIELD[field]] : source[field];
     if (raw == null) return null;
@@ -620,9 +663,14 @@ function main() {
     fields = Object.fromEntries(entry.fields.map((f) => [f, readField(f, parsed, { isCli: false })]));
   }
 
+  // Issue #703: a pre-bound checkout path is machine-generated data, not restated prose, and its
+  // length depends on where the repository is cloned -- it is excluded from the reference-only
+  // budget (it is itself capped at 200 chars by the formatter), so the fixed template text stays
+  // held to the same 700-char threshold as every other template.
+  const bindingAllowance = typeof fields?.checkoutBinding?.path === "string" ? fields.checkoutBinding.path.length : 0;
   let prompt;
   try {
-    prompt = assertReferenceOnly(formatter(fields));
+    prompt = assertReferenceOnly(formatter(fields), REFERENCE_ONLY_THRESHOLD_CHARS + bindingAllowance);
   } catch (err) {
     process.stderr.write(`format-dispatch-prompt.mjs: ${err.message}\n`);
     process.exit(1);

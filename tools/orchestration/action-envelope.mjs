@@ -186,7 +186,16 @@ const ENVELOPES = {
     mode: ENVELOPE_MODES.BOUNDED,
     authorizedActions: ["merge-pr", "create-stage2-audit-issue", "write-control-snapshot", "post-stage2-reviewer-trigger"],
   },
-  STAGE1_CORRECTION_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-correction-worker"] },
+  // Issue #703: a findings-bearing Stage 1 correction settles the worker's exact PR-head checkout
+  // BEFORE spawn (`pr-head-checkout-preflight.mjs --reserve-from-gate`, the pipeline stage between
+  // this gate and `format-dispatch-prompt.mjs`), so `reserve-correction-checkout` is authorized
+  // strictly before `dispatch-correction-worker`. This row is the findings (default) shape;
+  // `getActionEnvelope` narrows it for `correctionReason: "closing-reference"`, whose reservation
+  // stage is a pass-through (a metadata-only repair needs no checkout).
+  STAGE1_CORRECTION_REQUIRED: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"],
+  },
   STAGE2_CORRECTION_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-correction-worker"] },
   // This table row is the superset (real gated work issue exists, plus a real thin control
   // Issue to terminalize) shape, kept here only as the documentation default for this state.
@@ -304,6 +313,11 @@ export function getActionEnvelope(state, context = {}) {
 
   if (state === "BLOCKED" && context.blockerReconciliationEligible === true) {
     return { mode: ENVELOPE_MODES.CHAIN, authorizedActions: ["run-reconcile-control-blocker"] };
+  }
+
+  // Issue #703: only a findings-bearing correction (the default) reserves a checkout pre-spawn.
+  if (state === "STAGE1_CORRECTION_REQUIRED" && context.correctionReason === "closing-reference") {
+    return { mode: entry.mode, authorizedActions: ["dispatch-correction-worker"] };
   }
 
   if (state === "STAGE2_CLOSE_READY") {

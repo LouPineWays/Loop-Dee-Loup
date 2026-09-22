@@ -27,6 +27,16 @@ test("verify-action-envelope: a normal compliant invocation exits 0", () => {
   assert.equal(parsed.status, "compliant");
 });
 
+// Issue #703: STAGE1_CORRECTION_REQUIRED's envelope depends on the verdict's correctionReason.
+test("verify-action-envelope: --correction-reason narrows STAGE1_CORRECTION_REQUIRED exactly as the verdict field does", () => {
+  assert.equal(run(["--state", "STAGE1_CORRECTION_REQUIRED", "--actions", "reserve-correction-checkout,dispatch-correction-worker"]).exitCode, 0);
+  assert.equal(run(["--state", "STAGE1_CORRECTION_REQUIRED", "--actions", "dispatch-correction-worker"]).exitCode, 5);
+  assert.equal(
+    run(["--state", "STAGE1_CORRECTION_REQUIRED", "--correction-reason", "closing-reference", "--actions", "dispatch-correction-worker"]).exitCode,
+    0,
+  );
+});
+
 test("verify-action-envelope: a normal violation invocation exits 5", () => {
   const result = run(["--state", "READY_TO_DISPATCH", "--actions", "dispatch-execution-worker,wait-for-completion"]);
   assert.equal(result.exitCode, 5);
