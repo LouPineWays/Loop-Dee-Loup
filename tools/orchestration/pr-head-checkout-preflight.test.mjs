@@ -20,15 +20,40 @@ test("classifyCheckoutBinding: OPERATIONAL_ERROR when the target head cannot be 
   assert.equal(result.verdict, "OPERATIONAL_ERROR");
 });
 
-test("classifyCheckoutBinding: ALREADY_AT_HEAD when the invoking checkout already matches branch and commit", () => {
+test("classifyCheckoutBinding: ALREADY_AT_HEAD when the invoking checkout already matches branch, commit, and is proven clean", () => {
   const path = `${PRIMARY}/.claude/worktrees/agent-1`;
   const result = classifyCheckoutBinding({
     targetHead: TARGET_HEAD,
-    currentCheckout: { path, branch: TARGET_HEAD.branch, sha: TARGET_HEAD.sha },
+    currentCheckout: { path, branch: TARGET_HEAD.branch, sha: TARGET_HEAD.sha, dirty: false },
     liveWorktrees: [{ path, headCommit: TARGET_HEAD.sha, branch: TARGET_HEAD.branch, locked: false, dirty: false }],
     primaryPath: PRIMARY,
   });
   assert.deepEqual(result, { verdict: "ALREADY_AT_HEAD", path });
+});
+
+test("classifyCheckoutBinding: DIRTY_CANDIDATE when the invoking checkout matches branch/commit but has local modifications (never ALREADY_AT_HEAD)", () => {
+  const path = `${PRIMARY}/.claude/worktrees/agent-1b`;
+  const result = classifyCheckoutBinding({
+    targetHead: TARGET_HEAD,
+    currentCheckout: { path, branch: TARGET_HEAD.branch, sha: TARGET_HEAD.sha, dirty: true },
+    liveWorktrees: [{ path, headCommit: TARGET_HEAD.sha, branch: TARGET_HEAD.branch, locked: false, dirty: true }],
+    primaryPath: PRIMARY,
+  });
+  assert.equal(result.verdict, "DIRTY_CANDIDATE");
+  assert.equal(result.path, path);
+  assert.match(result.reason, /local modifications/);
+});
+
+test("classifyCheckoutBinding: DIRTY_CANDIDATE when the invoking checkout's own cleanliness is unknown (fails closed)", () => {
+  const path = `${PRIMARY}/.claude/worktrees/agent-1c`;
+  const result = classifyCheckoutBinding({
+    targetHead: TARGET_HEAD,
+    currentCheckout: { path, branch: TARGET_HEAD.branch, sha: TARGET_HEAD.sha, dirty: null },
+    liveWorktrees: [{ path, headCommit: TARGET_HEAD.sha, branch: TARGET_HEAD.branch, locked: false, dirty: null }],
+    primaryPath: PRIMARY,
+  });
+  assert.equal(result.verdict, "DIRTY_CANDIDATE");
+  assert.match(result.reason, /could not be determined/);
 });
 
 // Live #690 reproduction shape: session sits on `main` in the primary checkout; no worktree
@@ -160,7 +185,7 @@ function gitStub(overrides = {}) {
     isDirty: () => false,
     fetchBranch: () => ({ ok: true }),
     ffOnlyMergeToBranch: () => ({ ok: true }),
-    addDetachedWorktree: () => ({ ok: true }),
+    addBranchWorktree: () => ({ ok: true }),
     ...overrides,
   };
 }
@@ -185,8 +210,9 @@ test("run: OPERATIONAL_ERROR (exit 1) when gh pr view fails", async () => {
   assert.equal(result.verdict, "OPERATIONAL_ERROR");
 });
 
-test("run: #690 reproduction -- primary checkout on main, no matching worktree -- creates a detached worktree at the exact head and exits 0", async () => {
+test("run: #690 reproduction -- primary checkout on main, no matching worktree -- creates a branch worktree at the exact head and exits 0", async () => {
   let addedPath = null;
+  let addedBranch = null;
   let addedSha = null;
   let fetchedFrom = null;
   const result = await run(
@@ -198,8 +224,9 @@ test("run: #690 reproduction -- primary checkout on main, no matching worktree -
           fetchedFrom = cwd;
           return { ok: true };
         },
-        addDetachedWorktree: (primaryCwd, path, sha) => {
+        addBranchWorktree: (primaryCwd, path, branch, sha) => {
           addedPath = path;
+          addedBranch = branch;
           addedSha = sha;
           return { ok: true };
         },
@@ -208,9 +235,35 @@ test("run: #690 reproduction -- primary checkout on main, no matching worktree -
   );
   assert.equal(result.exitCode, 0);
   assert.equal(result.verdict, "CREATED_WORKTREE_AT_HEAD");
+  assert.equal(addedBranch, TARGET_HEAD.branch);
   assert.equal(addedSha, TARGET_HEAD.sha);
   assert.equal(addedPath, result.path);
   assert.equal(fetchedFrom, PRIMARY);
+});
+
+test("run: created worktree is checked out on a real branch (never detached) so an ordinary git push can reach the PR", async () => {
+  let worktreeAddArgs = null;
+  let branchUpstreamArgs = null;
+  const result = await run(
+    { repo: "o/r", pr: 690 },
+    {
+      ghPrViewImpl: async () => ({ headRefName: TARGET_HEAD.branch, headRefOid: TARGET_HEAD.sha }),
+      git: gitStub({
+        addBranchWorktree: (primaryCwd, path, branch, sha) => {
+          // Mirrors defaultGitImpl's real addBranchWorktree: `worktree add -B <branch> <path>
+          // <sha>` then `branch --set-upstream-to=origin/<branch>` -- captured here only to
+          // assert the CALL SHAPE `run()` requests, not to re-implement git plumbing.
+          worktreeAddArgs = { primaryCwd, path, branch, sha };
+          branchUpstreamArgs = { branch, upstream: `origin/${branch}` };
+          return { ok: true };
+        },
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(worktreeAddArgs.branch, TARGET_HEAD.branch);
+  assert.equal(worktreeAddArgs.sha, TARGET_HEAD.sha);
+  assert.equal(branchUpstreamArgs.upstream, `origin/${TARGET_HEAD.branch}`);
 });
 
 test("run: already-correct head is a no-op that reports ALREADY_AT_HEAD (exit 0)", async () => {
@@ -377,7 +430,7 @@ test("run: no safe local binding -- worktree creation itself fails -- reports NO
     {
       ghPrViewImpl: async () => ({ headRefName: TARGET_HEAD.branch, headRefOid: TARGET_HEAD.sha }),
       git: gitStub({
-        addDetachedWorktree: () => ({ ok: false, reason: "fatal: could not create work tree dir" }),
+        addBranchWorktree: () => ({ ok: false, reason: "fatal: could not create work tree dir" }),
       }),
     },
   );

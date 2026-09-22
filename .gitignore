@@ -5,3 +5,11 @@
 # Per-session action-envelope stop markers (tools/orchestration/action-envelope-hook.mjs,
 # issue #641) are transient live-session state, never durable repository state.
 .claude/action-envelope-state/
+
+# Dispatch/Agent-tool worktree checkouts and any worktrees pr-head-checkout-preflight.mjs
+# (issue #692) creates under the primary checkout's own .claude/worktrees/ root are disposable,
+# per-session working copies -- never durable repository content. Excluding them keeps the
+# primary checkout's own index clean (Stage 1 review finding on PR #694: without this, a routine
+# `git add .` in the primary checkout could stage a generated worktree as an embedded-repository
+# gitlink).
+.claude/worktrees/

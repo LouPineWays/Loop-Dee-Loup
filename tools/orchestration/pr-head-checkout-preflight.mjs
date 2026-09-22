@@ -30,28 +30,58 @@
 // wrapper that additionally performs the one safe mutation each success verdict requires):
 //
 //   ALREADY_AT_HEAD          -- the invoking checkout's own branch and commit already match
-//                                the PR's current head exactly. No worktree churn (#692
-//                                requirement 3); proceed in place.
+//                                the PR's current head exactly, AND is proven clean (Stage 1
+//                                review finding on PR #694: matching branch/commit alone never
+//                                proved this checkout had no pre-existing local modifications
+//                                that correction work would silently sweep into its commit). No
+//                                worktree churn (#692 requirement 3); proceed in place.
 //   REUSABLE_WORKTREE_AT_HEAD -- exactly one OTHER live worktree already carries the target
 //                                branch at the target commit, is not locked, and is proven
 //                                clean. Safe to continue there; the caller (a live session)
-//                                switches into it with `EnterWorktree({ path })`.
+//                                MUST switch into it with `EnterWorktree({ path })` before any
+//                                source read (#692 requirement 3's "actually selected/entered"
+//                                half; `format-dispatch-prompt.mjs`'s Stage 1 correction
+//                                template mandates this). This is also the authoritative
+//                                session-vacancy proof, not merely a formality: git's own
+//                                `locked` worktree metadata is administrative-lock state, not an
+//                                exclusive claim on the path, so a clean worktree still actively
+//                                owned by another live session would pass every check above --
+//                                Stage 1 review finding on PR #694. `EnterWorktree` enforces this
+//                                repository's own one-session-per-exact-path invariant
+//                                (`docs/operating-model.md` § Concurrent subagent directory
+//                                isolation) and fails deterministically if another live session
+//                                already holds the path; that failure IS the fail-closed signal,
+//                                reported the same as any other `CHECKOUT_BINDING_UNVERIFIED`
+//                                outcome, never worked around. This reuses existing session/path-
+//                                ownership machinery rather than this script re-implementing a
+//                                parallel occupancy model it cannot itself observe (a plain
+//                                script has no access to live session state -- see
+//                                `classify-primary-path-lock.mjs`'s module comment for the same
+//                                constraint).
 //   CREATED_WORKTREE_AT_HEAD -- no existing worktree carries the target branch anywhere, so
-//                                `run` fetched the branch and created one distinct new
-//                                worktree, detached at the exact target commit (`git worktree
-//                                add --detach <path> <sha>`), under the primary checkout's own
-//                                `.claude/worktrees/` root. The primary checkout itself is
-//                                never the target path and is never checked out onto the
-//                                correction branch (#692 requirement 5).
+//                                `run` fetched the branch and created one distinct new worktree
+//                                on a real local branch at the exact target commit (`git
+//                                worktree add -B <branch> <path> <sha>`, upstream set to
+//                                `origin/<branch>`) -- never detached (Stage 1 review finding on
+//                                PR #694: a detached checkout has no ordinary `git push`
+//                                destination for the correction worker's later push) -- under
+//                                the primary checkout's own `.claude/worktrees/` root (excluded
+//                                from the primary checkout's own index by `.gitignore`, PR #694).
+//                                The primary checkout itself is never the target path and is
+//                                never checked out onto the correction branch (#692 requirement
+//                                5). The caller MUST `EnterWorktree({ path })` before any source
+//                                read, same as `REUSABLE_WORKTREE_AT_HEAD` above.
 //   STALE_HEAD_MISMATCH      -- exactly one other worktree carries the target branch, is
 //                                clean and unlocked, but at an older commit; `run` attempted a
 //                                safe `fetch` + `merge --ff-only` reconciliation and it did not
 //                                converge on the target commit (a non-fast-forward divergence,
 //                                or the fetch/merge itself failed). Fails closed before source
 //                                work (#692 required check 3).
-//   DIRTY_CANDIDATE          -- the one worktree carrying the target branch has unsafe local
-//                                changes, or its clean/dirty state could not be determined at
-//                                all. Never repurposed (#692 required check 5).
+//   DIRTY_CANDIDATE          -- the sole candidate checkout for source work -- either the
+//                                invoking checkout itself (already at the target branch/commit)
+//                                or the one other worktree carrying the target branch -- has
+//                                unsafe local changes, or its clean/dirty state could not be
+//                                determined at all. Never repurposed (#692 required check 5).
 //   BRANCH_OWNED_ELSEWHERE_LOCKED -- the one worktree carrying the target branch is locked.
 //                                Never repurposed.
 //   AMBIGUOUS                -- more than one live worktree carries the target branch.
@@ -115,6 +145,21 @@ export function classifyCheckoutBinding({ targetHead, currentCheckout, liveWorkt
   }
 
   if (currentCheckout.branch === targetHead.branch && currentCheckout.sha === targetHead.sha) {
+    // Stage 1 review finding on PR #694: matching branch+commit alone is not proof this is safe
+    // to correct in place -- pre-existing local modifications on this exact checkout would be
+    // silently swept into the correction commit as this is the worker's first source-work gate.
+    // Unknown cleanliness (`dirty` not positively `false`) fails closed exactly like every other
+    // unknown-evidence check in this module.
+    if (currentCheckout.dirty !== false) {
+      return {
+        verdict: "DIRTY_CANDIDATE",
+        path: currentCheckout.path,
+        reason:
+          currentCheckout.dirty === true
+            ? "current checkout contains local modifications"
+            : "current checkout cleanliness could not be determined",
+      };
+    }
     return { verdict: "ALREADY_AT_HEAD", path: currentCheckout.path };
   }
 
@@ -217,12 +262,20 @@ export function defaultGitImpl() {
         return { ok: false, reason: reasonOf(err) };
       }
     },
-    // Detached at the exact target commit -- never a branch checkout -- so this can never
-    // collide with an existing local branch of the same name, and the resulting worktree's
-    // identity is pinned to the commit this preflight actually verified (#692 requirement 7).
-    addDetachedWorktree(primaryCwd, path, sha) {
+    // Checked out on a real local branch -- created/reset (`-B`) at the exact target commit this
+    // preflight verified, never merely origin/<branch>'s current tip -- with its upstream set to
+    // origin/<branch>, rather than a detached HEAD. Stage 1 review finding on PR #694: a detached
+    // checkout has no ordinary `git push` destination, so the correction worker's later "push it"
+    // step would need to guess an explicit `HEAD:<branch>` refspec the dispatch contract never
+    // specifies; an ordinary `git push` now works unmodified. Safe by construction: this is only
+    // ever called from the `NEEDS_NEW_WORKTREE` path, reached only when no worktree anywhere --
+    // including the current checkout, which `git worktree list` always includes -- already
+    // carries this branch, so `-B` can never collide with an existing checkout of the same
+    // branch (#692 requirement 7).
+    addBranchWorktree(primaryCwd, path, branch, sha) {
       try {
-        runGit(["worktree", "add", "--detach", path, sha], { cwd: primaryCwd });
+        runGit(["worktree", "add", "-B", branch, path, sha], { cwd: primaryCwd });
+        runGit(["branch", `--set-upstream-to=origin/${branch}`, branch], { cwd: path });
         return { ok: true };
       } catch (err) {
         return { ok: false, reason: reasonOf(err) };
@@ -280,6 +333,12 @@ export async function run(
     };
     rawWorktrees = parseWorktreeListPorcelain(git.worktreeListPorcelain(cwd));
     primaryPath = rawWorktrees[0]?.path ?? currentCheckout.path;
+    // Only resolved for a genuine branch+commit match against the target head -- the same
+    // "never run git status against every candidate" discipline the worktree-match branch below
+    // already follows; an unrelated current checkout never needs its dirty state at all.
+    if (currentCheckout.branch === targetHead.branch && currentCheckout.sha === targetHead.sha) {
+      currentCheckout.dirty = git.isDirty(currentCheckout.path);
+    }
   } catch (err) {
     return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: `could not read current checkout/worktree state: ${reasonOf(err)}` };
   }
@@ -326,7 +385,7 @@ export async function run(
       if (!fetchResult.ok) {
         return { exitCode: 2, verdict: "NO_SAFE_BINDING", reason: `fetch failed: ${fetchResult.reason}` };
       }
-      const addResult = git.addDetachedWorktree(primaryPath, path, targetHead.sha);
+      const addResult = git.addBranchWorktree(primaryPath, path, targetHead.branch, targetHead.sha);
       if (!addResult.ok) {
         return { exitCode: 2, verdict: "NO_SAFE_BINDING", reason: `worktree creation failed: ${addResult.reason}` };
       }

@@ -331,6 +331,11 @@ test("formatStage1CorrectionWorkerDispatchPrompt stays under the 700-char refere
   assert.ok(prompt.length < 700, `expected < 700 chars, got ${prompt.length}`);
 });
 
+test('formatStage1CorrectionWorkerDispatchPrompt with correctionReason "closing-reference" stays under the 700-char reference-only threshold', () => {
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, correctionReason: "closing-reference" });
+  assert.ok(prompt.length < 700, `expected < 700 chars, got ${prompt.length}`);
+});
+
 // Reference-only negative control: the whole point of this template is that a correction
 // worker recovers findings from the PR/Issue directly rather than the controller restating
 // them here. Assert no finding-shaped prose ever appears.
@@ -361,18 +366,34 @@ test("formatStage1CorrectionWorkerDispatchPrompt points the worker at finalize-c
 
 // Issue #692 (control #691): closes the live PR #690 / execution #685 / control #442
 // reproduction, where a correction worker recovered the PR's head metadata but never verified
-// its own checkout represented it, then failed reading a PR-only source file from `main`. Both
-// correctionReason branches perform source work, so both must run this preflight first, before
-// any GitHub read or source work, and name its fail-closed reference.
-test("formatStage1CorrectionWorkerDispatchPrompt mandates the pr-head-checkout-preflight.mjs binding check before any other step, for both correction reasons", () => {
-  for (const correctionReason of [undefined, "findings", "closing-reference"]) {
+// its own checkout represented it, then failed reading a PR-only source file from `main`. The
+// default/"findings" reason always performs source work, so it mandates this preflight (plus
+// EnterWorktree) before any GitHub read or source work, and names its fail-closed reference.
+test("formatStage1CorrectionWorkerDispatchPrompt mandates the pr-head-checkout-preflight.mjs binding check (and EnterWorktree) before any other step, for the default/findings correction reason", () => {
+  for (const correctionReason of [undefined, "findings"]) {
     const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, correctionReason });
-    assert.match(prompt, /First run node tools\/orchestration\/pr-head-checkout-preflight\.mjs --pr 569/);
+    assert.match(prompt, /pr-head-checkout-preflight\.mjs --pr 569/);
+    assert.match(prompt, /EnterWorktree/);
     assert.match(prompt, /CHECKOUT_BINDING_UNVERIFIED 569/);
     // The preflight clause must precede the Stage 1 review read, matching #692's own
     // "before any source read or mutation" requirement.
     assert.ok(prompt.indexOf("pr-head-checkout-preflight.mjs") < prompt.indexOf("Stage 1 review"));
   }
+});
+
+// Stage 1 review finding on PR #694: a closing-reference repair is normally metadata-only (the
+// PR body or GitHub Development-sidebar link) and needs no local checkout at all -- mandating
+// the binding preflight unconditionally turned every dirty/occupied/unavailable local candidate
+// into an unrelated blocker for a repair that never touches source. It must still name the
+// preflight + EnterWorktree + CHECKOUT_BINDING_UNVERIFIED for the case it DOES need a
+// source/commit change, but only conditionally, and does not need to precede the Stage 1 review
+// read the way the findings reason's unconditional mandate does.
+test("formatStage1CorrectionWorkerDispatchPrompt applies the checkout binding conditionally, not unconditionally-first, for correctionReason \"closing-reference\"", () => {
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, correctionReason: "closing-reference" });
+  assert.match(prompt, /metadata-only needs no checkout/);
+  assert.match(prompt, /pr-head-checkout-preflight\.mjs --pr 569/);
+  assert.match(prompt, /EnterWorktree/);
+  assert.match(prompt, /CHECKOUT_BINDING_UNVERIFIED 569/);
 });
 
 test('formatStage1CorrectionWorkerDispatchPrompt with correctionReason "findings" (explicit) renders the same mandatory-finalizer template as the default', () => {
