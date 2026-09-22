@@ -320,25 +320,41 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
   }
   const executionLine = hasExecutionIssue ? ` Execution Issue: #${issue}.` : "";
   const controlLine = controlIssue != null ? ` Controlling Issue: #${controlIssue}.` : "";
-  const executionReadClause = hasExecutionIssue ? ` and Execution Issue #${issue}` : "";
+  const executionReadClause = hasExecutionIssue ? ` / Execution Issue #${issue}` : "";
+  // Issue #692 (control #691), closing the live PR #690 / execution #685 / control #442
+  // reproduction: a correction worker recovered this exact PR's head metadata but never
+  // verified its own checkout represented that head, then failed reading a PR-only source
+  // file from an unrelated `main` checkout. This mandatory first step -- before any GitHub
+  // read or source work below -- binds the checkout deterministically via
+  // `pr-head-checkout-preflight.mjs` rather than assuming the dispatched session's own
+  // working directory already is the PR head; that script's own header names the exact
+  // recovery step (reuse/create a worktree via `EnterWorktree`, or fail closed) for each of
+  // its verdicts, so it is deliberately not restated here -- this file's 700-char
+  // reference-only threshold (`assertReferenceOnly` below) leaves no room to. A non-zero exit
+  // is a fail-closed checkout/head-binding failure, never a downstream "file does not exist"
+  // symptom to work around.
+  const checkoutPreflightClause =
+    `First run node tools/orchestration/pr-head-checkout-preflight.mjs --pr ${pr}; a non-zero exit is ` +
+    `CHECKOUT_BINDING_UNVERIFIED ${pr} -- stop before any source work.\n\n`;
   if (reason === "closing-reference") {
     return (
       `Stage 1 correction worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
-      `Read PR #${pr}'s current Stage 1 review${executionReadClause} directly from GitHub to recover the ` +
-      `closing-reference finding and correction authority — it was not restated here on purpose. This is a ` +
-      `closing-reference-only repair (no findings): fix it per docs/bounded-review-cycle.md, push it, and ` +
-      `stop. Do not run finalize-correction-breakpoint.mjs or record a correction-satisfied disposition. Do ` +
-      `not re-trigger review, merge, or begin Stage 2 in this context.`
+      checkoutPreflightClause +
+      `Read PR #${pr}'s Stage 1 review${executionReadClause} from GitHub for the closing-reference ` +
+      `finding and correction authority (not restated here). This is a closing-reference-only repair (no ` +
+      `findings): fix per docs/bounded-review-cycle.md, push it, and stop. Do not run ` +
+      `finalize-correction-breakpoint.mjs or record a correction-satisfied disposition. Do not re-trigger ` +
+      `review, merge, or begin Stage 2 here.`
     );
   }
   return (
     `Stage 1 correction worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
-    `Read PR #${pr}'s current Stage 1 review${executionReadClause} directly from GitHub to recover the ` +
-    `findings and correction authority — they were not restated here on purpose. Verify and apply one ` +
-    `consolidated correction per docs/bounded-review-cycle.md, push it. Then run ` +
-    `tools/orchestration/finalize-correction-breakpoint.mjs before reporting; on ` +
-    `CORRECTION_BREAKPOINT_UNVERIFIED report that reference, never ordinary success. Then stop: do not ` +
-    `re-trigger review, merge, or begin Stage 2 in this context.`
+    checkoutPreflightClause +
+    `Read PR #${pr}'s Stage 1 review${executionReadClause} from GitHub for the findings and correction ` +
+    `authority (not restated here). Apply one consolidated correction per docs/bounded-review-cycle.md, push ` +
+    `it, then run tools/orchestration/finalize-correction-breakpoint.mjs before reporting; on ` +
+    `CORRECTION_BREAKPOINT_UNVERIFIED report that reference, not success. Then stop: no re-review, merge, or ` +
+    `Stage 2 here.`
   );
 }
 
