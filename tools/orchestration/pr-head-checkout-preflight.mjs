@@ -87,10 +87,21 @@
 //   AMBIGUOUS                -- more than one live worktree carries the target branch.
 //                                Ordering/recency never resolves this; fails closed (#692
 //                                required check 6's ambiguity half).
-//   NO_SAFE_BINDING          -- a required git/gh operation itself failed (fetch, worktree
-//                                add) even though classification reached a nominally safe
-//                                path. Distinct from OPERATIONAL_ERROR: classification
+//   NO_SAFE_BINDING          -- either the invoking checkout or the one other worktree carrying
+//                                the target branch IS the primary checkout, which is never
+//                                repurposed for correction work (#692 requirement 5); or a
+//                                required git/gh operation itself failed (fetch, worktree add)
+//                                even though classification reached a nominally safe path. The
+//                                latter case is distinct from OPERATIONAL_ERROR: classification
 //                                succeeded, only the mutation it authorized did not.
+//   EXISTING_BRANCH_UNSAFE   -- `NEEDS_NEW_WORKTREE` resolved, but a local branch by the target
+//                                name already exists (unattached to any worktree) and its tip is
+//                                not the target commit and not safely contained in it (Stage 2
+//                                audit finding on #695, Finding 1: `git worktree add -B <branch>
+//                                ...` unconditionally resets an existing branch ref, which would
+//                                silently discard any unpushed commits on that branch). `run`
+//                                verifies containment via `merge-base --is-ancestor` before ever
+//                                using `-B`, and fails closed here instead of resetting the ref.
 //   OPERATIONAL_ERROR        -- `--pr` missing/invalid, `gh pr view` failed or did not resolve
 //                                a head, or the invoking checkout's own git state could not be
 //                                read. Not a judgment about the PR or checkout content.
@@ -145,6 +156,21 @@ export function classifyCheckoutBinding({ targetHead, currentCheckout, liveWorkt
   }
 
   if (currentCheckout.branch === targetHead.branch && currentCheckout.sha === targetHead.sha) {
+    // Stage 2 audit finding on #695 (issue #695 Finding 2): matching branch+commit alone was
+    // being treated as sufficient for ALREADY_AT_HEAD before this ever compared the invoking
+    // checkout's own path against `primaryPath` -- the primary-path rejection below only ever
+    // fired for the separate "one other worktree carries the branch" case, so a primary
+    // checkout that happened to already sit on the PR branch/commit slipped past the "primary
+    // checkout is never repurposed for correction work" invariant entirely (#692 requirement
+    // 5). Reject it here, before considering cleanliness, exactly like the equivalent check in
+    // the worktree-match branch below.
+    if (currentCheckout.path === primaryPath) {
+      return {
+        verdict: "NO_SAFE_BINDING",
+        reason: "the invoking checkout is the primary checkout, which is never repurposed for correction work",
+        path: currentCheckout.path,
+      };
+    }
     // Stage 1 review finding on PR #694: matching branch+commit alone is not proof this is safe
     // to correct in place -- pre-existing local modifications on this exact checkout would be
     // silently swept into the correction commit as this is the worker's first source-work gate.
@@ -281,6 +307,31 @@ export function defaultGitImpl() {
         return { ok: false, reason: reasonOf(err) };
       }
     },
+    // Stage 2 audit finding on #695 (Finding 1): `addBranchWorktree` above uses `-B`, which
+    // resets an existing branch ref rather than refusing to touch it. This resolves whether a
+    // local branch by this name already exists at all, independent of whether any worktree
+    // currently checks it out -- `null` means no such ref exists (the ordinary, safe case).
+    localBranchTip(cwd, branch) {
+      try {
+        return runGit(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd });
+      } catch {
+        return null;
+      }
+    },
+    // True only when `ancestorSha` is reachable from `descendantSha` -- i.e. resetting the
+    // branch ref from `ancestorSha` to `descendantSha` via `-B` cannot discard any commit,
+    // because everything at `ancestorSha` is already contained in `descendantSha`'s history.
+    // Any non-zero exit (not-an-ancestor, diverged history, or an unresolvable object) fails
+    // closed to `false`, matching this module's other unknown-evidence-never-authorizes
+    // convention.
+    isAncestor(cwd, ancestorSha, descendantSha) {
+      try {
+        execFileSync("git", ["merge-base", "--is-ancestor", ancestorSha, descendantSha], { cwd });
+        return true;
+      } catch {
+        return false;
+      }
+    },
   };
 }
 
@@ -384,6 +435,20 @@ export async function run(
       const fetchResult = git.fetchBranch(primaryPath, targetHead.branch);
       if (!fetchResult.ok) {
         return { exitCode: 2, verdict: "NO_SAFE_BINDING", reason: `fetch failed: ${fetchResult.reason}` };
+      }
+      // Stage 2 audit finding on #695 (Finding 1): no worktree anywhere checks out this branch
+      // (that is what got us into NEEDS_NEW_WORKTREE), but a local branch ref by this name can
+      // still exist unattached to any worktree -- `addBranchWorktree`'s `-B` would silently
+      // reset it. Only proceed when no such ref exists, it already IS the target commit, or its
+      // tip is safely contained in the target commit (no unique commits would be discarded).
+      const existingTip = git.localBranchTip(primaryPath, targetHead.branch);
+      if (existingTip && existingTip !== targetHead.sha && !git.isAncestor(primaryPath, existingTip, targetHead.sha)) {
+        return {
+          exitCode: 2,
+          verdict: "EXISTING_BRANCH_UNSAFE",
+          branch: targetHead.branch,
+          reason: "a local branch with this name already exists and is not safely contained in the PR's current head; refusing to reset it",
+        };
       }
       const addResult = git.addBranchWorktree(primaryPath, path, targetHead.branch, targetHead.sha);
       if (!addResult.ok) {

@@ -163,6 +163,34 @@ test("classifyCheckoutBinding: NO_SAFE_BINDING when the target branch is already
   assert.equal(result.verdict, "NO_SAFE_BINDING");
 });
 
+// Stage 2 audit finding on #695, Finding 2: a clean primary checkout already sitting on the
+// exact target branch/commit was reaching ALREADY_AT_HEAD before the primary-path guard (above)
+// was ever evaluated for this shape -- the guard only fired in the separate "one other worktree
+// carries the branch" branch. This is the regression the audit required.
+test("classifyCheckoutBinding: NO_SAFE_BINDING when the invoking checkout IS the primary checkout and already matches the target branch/commit (never ALREADY_AT_HEAD)", () => {
+  const result = classifyCheckoutBinding({
+    targetHead: TARGET_HEAD,
+    currentCheckout: { path: PRIMARY, branch: TARGET_HEAD.branch, sha: TARGET_HEAD.sha, dirty: false },
+    liveWorktrees: [{ path: PRIMARY, headCommit: TARGET_HEAD.sha, branch: TARGET_HEAD.branch, locked: false, dirty: false }],
+    primaryPath: PRIMARY,
+  });
+  assert.equal(result.verdict, "NO_SAFE_BINDING");
+  assert.equal(result.path, PRIMARY);
+});
+
+// Same shape, but the primary checkout is additionally dirty -- the primary-path rejection must
+// still take priority over (and be reached before) the dirty check, not merely happen to agree
+// with it.
+test("classifyCheckoutBinding: NO_SAFE_BINDING when the invoking checkout IS the primary checkout, matches the target branch/commit, and is dirty", () => {
+  const result = classifyCheckoutBinding({
+    targetHead: TARGET_HEAD,
+    currentCheckout: { path: PRIMARY, branch: TARGET_HEAD.branch, sha: TARGET_HEAD.sha, dirty: true },
+    liveWorktrees: [{ path: PRIMARY, headCommit: TARGET_HEAD.sha, branch: TARGET_HEAD.branch, locked: false, dirty: true }],
+    primaryPath: PRIMARY,
+  });
+  assert.equal(result.verdict, "NO_SAFE_BINDING");
+});
+
 // -------------------------------------------------------------------------------------------
 // defaultNewWorktreePath
 // -------------------------------------------------------------------------------------------
@@ -186,6 +214,8 @@ function gitStub(overrides = {}) {
     fetchBranch: () => ({ ok: true }),
     ffOnlyMergeToBranch: () => ({ ok: true }),
     addBranchWorktree: () => ({ ok: true }),
+    localBranchTip: () => null,
+    isAncestor: () => true,
     ...overrides,
   };
 }
@@ -267,6 +297,39 @@ test("run: created worktree is checked out on a real branch (never detached) so 
 });
 
 test("run: already-correct head is a no-op that reports ALREADY_AT_HEAD (exit 0)", async () => {
+  // The invoking checkout is a non-primary worktree already at the target branch/commit -- the
+  // primary checkout itself (a separate `main` entry below) is untouched. See the dedicated
+  // NO_SAFE_BINDING test below for the case where the invoking checkout IS the primary.
+  const agentPath = `${PRIMARY}/.claude/worktrees/agent-current`;
+  const result = await run(
+    { repo: "o/r", pr: 690 },
+    {
+      ghPrViewImpl: async () => ({ headRefName: TARGET_HEAD.branch, headRefOid: TARGET_HEAD.sha }),
+      git: gitStub({
+        toplevel: () => agentPath,
+        currentBranch: () => TARGET_HEAD.branch,
+        currentCommit: () => TARGET_HEAD.sha,
+        worktreeListPorcelain: () =>
+          [
+            `worktree ${PRIMARY}`,
+            "HEAD aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "branch refs/heads/main",
+            "",
+            `worktree ${agentPath}`,
+            `HEAD ${TARGET_HEAD.sha}`,
+            `branch refs/heads/${TARGET_HEAD.branch}`,
+          ].join("\n"),
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.verdict, "ALREADY_AT_HEAD");
+  assert.equal(result.path, agentPath);
+});
+
+// Stage 2 audit finding on #695, Finding 2, exercised through the `run()` CLI wrapper (the
+// `classifyCheckoutBinding` unit tests above cover the same fix at the pure-decision level).
+test("run: a clean primary checkout already at the target branch/commit is rejected with NO_SAFE_BINDING, never ALREADY_AT_HEAD (exit 2)", async () => {
   const result = await run(
     { repo: "o/r", pr: 690 },
     {
@@ -278,8 +341,9 @@ test("run: already-correct head is a no-op that reports ALREADY_AT_HEAD (exit 0)
       }),
     },
   );
-  assert.equal(result.exitCode, 0);
-  assert.equal(result.verdict, "ALREADY_AT_HEAD");
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.verdict, "NO_SAFE_BINDING");
+  assert.equal(result.path, PRIMARY);
 });
 
 test("run: reuses an existing clean worktree already at the target head (exit 0, no worktree creation)", async () => {
@@ -422,6 +486,100 @@ test("run: branch-owned-elsewhere (locked) fails closed (exit 2) rather than rep
   );
   assert.equal(result.exitCode, 2);
   assert.equal(result.verdict, "BRANCH_OWNED_ELSEWHERE_LOCKED");
+});
+
+// Stage 2 audit finding on #695, Finding 1: `git worktree add -B <branch> ...` resets an
+// existing local branch ref rather than refusing to touch it. These three tests cover the
+// safe-proceed, safe-reset, and fail-closed shapes of the new pre-check.
+
+test("run: NEEDS_NEW_WORKTREE proceeds normally when no local branch by that name exists", async () => {
+  let addBranchWorktreeCalled = false;
+  const result = await run(
+    { repo: "o/r", pr: 690 },
+    {
+      ghPrViewImpl: async () => ({ headRefName: TARGET_HEAD.branch, headRefOid: TARGET_HEAD.sha }),
+      git: gitStub({
+        localBranchTip: () => null,
+        addBranchWorktree: () => {
+          addBranchWorktreeCalled = true;
+          return { ok: true };
+        },
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.verdict, "CREATED_WORKTREE_AT_HEAD");
+  assert.equal(addBranchWorktreeCalled, true);
+});
+
+test("run: NEEDS_NEW_WORKTREE proceeds when an existing local branch's tip is safely contained in the target head (no unpushed commits would be lost)", async () => {
+  let isAncestorArgs = null;
+  let addBranchWorktreeCalled = false;
+  const result = await run(
+    { repo: "o/r", pr: 690 },
+    {
+      ghPrViewImpl: async () => ({ headRefName: TARGET_HEAD.branch, headRefOid: TARGET_HEAD.sha }),
+      git: gitStub({
+        localBranchTip: () => "olderoldolderoldolderoldolderoldolderold",
+        isAncestor: (cwd, ancestorSha, descendantSha) => {
+          isAncestorArgs = { cwd, ancestorSha, descendantSha };
+          return true;
+        },
+        addBranchWorktree: () => {
+          addBranchWorktreeCalled = true;
+          return { ok: true };
+        },
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.verdict, "CREATED_WORKTREE_AT_HEAD");
+  assert.equal(addBranchWorktreeCalled, true);
+  assert.equal(isAncestorArgs.ancestorSha, "olderoldolderoldolderoldolderoldolderold");
+  assert.equal(isAncestorArgs.descendantSha, TARGET_HEAD.sha);
+  assert.equal(isAncestorArgs.cwd, PRIMARY);
+});
+
+test("run: NEEDS_NEW_WORKTREE fails closed to EXISTING_BRANCH_UNSAFE (exit 2) rather than resetting a diverged local branch with unpushed commits, and never calls addBranchWorktree", async () => {
+  let addBranchWorktreeCalled = false;
+  const result = await run(
+    { repo: "o/r", pr: 690 },
+    {
+      ghPrViewImpl: async () => ({ headRefName: TARGET_HEAD.branch, headRefOid: TARGET_HEAD.sha }),
+      git: gitStub({
+        localBranchTip: () => "unpushedunpushedunpushedunpushedunpushed",
+        isAncestor: () => false,
+        addBranchWorktree: () => {
+          addBranchWorktreeCalled = true;
+          return { ok: true };
+        },
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.verdict, "EXISTING_BRANCH_UNSAFE");
+  assert.equal(result.branch, TARGET_HEAD.branch);
+  assert.equal(addBranchWorktreeCalled, false);
+});
+
+test("run: NEEDS_NEW_WORKTREE proceeds without an ancestor check when the existing local branch's tip already equals the target sha", async () => {
+  let isAncestorCalled = false;
+  const result = await run(
+    { repo: "o/r", pr: 690 },
+    {
+      ghPrViewImpl: async () => ({ headRefName: TARGET_HEAD.branch, headRefOid: TARGET_HEAD.sha }),
+      git: gitStub({
+        localBranchTip: () => TARGET_HEAD.sha,
+        isAncestor: () => {
+          isAncestorCalled = true;
+          return false;
+        },
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.verdict, "CREATED_WORKTREE_AT_HEAD");
+  assert.equal(isAncestorCalled, false);
 });
 
 test("run: no safe local binding -- worktree creation itself fails -- reports NO_SAFE_BINDING (exit 2), never a downstream missing-file error", async () => {
