@@ -16,6 +16,16 @@ import {
   assertReferenceOnly,
 } from "./format-dispatch-prompt.mjs";
 
+// Issue #703: the pre-spawn checkout binding `pr-head-checkout-preflight.mjs --reserve-from-gate`
+// adds to a findings-bearing STAGE1_CORRECTION_REQUIRED verdict. `scriptPath` (Stage 1 finding P1
+// on PR #710) is the controller's own absolute path to that script, distinct from `path` (the
+// reserved checkout the worker corrects inside).
+const BINDING = {
+  path: "C:/Loop-Dee-Loup/.claude/worktrees/pr-569-bind-1a2b3c4d",
+  token: "1a2b3c4d",
+  scriptPath: "C:/Loop-Dee-Loup/tools/orchestration/pr-head-checkout-preflight.mjs",
+};
+
 test("formatDispatchPrompt includes the exact control Issue, execution Issue, and route", () => {
   const prompt = formatDispatchPrompt({ controlIssue: 322, executionIssue: 321, route: "implementation worker" });
   assert.match(prompt, /#321/);
@@ -306,7 +316,7 @@ test("formatIntegrationWorkerDispatchPrompt throws for missing/invalid required 
 // but piping the verdict into this formatter exited 2 ("not a supported dispatch state").
 
 test("formatStage1CorrectionWorkerDispatchPrompt includes the exact PR, execution Issue, and controlling Issue references", () => {
-  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569 });
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, checkoutBinding: BINDING });
   assert.match(prompt, /^Stage 1 correction worker dispatch\./);
   assert.match(prompt, /#569/);
   assert.match(prompt, /#570/);
@@ -314,7 +324,7 @@ test("formatStage1CorrectionWorkerDispatchPrompt includes the exact PR, executio
 });
 
 test("formatStage1CorrectionWorkerDispatchPrompt omits the Controlling Issue line when controlIssue is absent (direct-reference mode)", () => {
-  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ issue: 570, pr: 569 });
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ issue: 570, pr: 569, checkoutBinding: BINDING });
   assert.ok(!prompt.includes("Controlling Issue"));
   assert.match(prompt, /#569/);
   assert.match(prompt, /#570/);
@@ -326,9 +336,13 @@ test("formatStage1CorrectionWorkerDispatchPrompt omits the Controlling Issue lin
 // the actual 700-char reference-only threshold at dispatch time (main()'s call site below), so
 // this unit test asserts the same bound directly against the formatter rather than a looser
 // one that would let a regression here only surface later, through the CLI.
-test("formatStage1CorrectionWorkerDispatchPrompt stays under the 700-char reference-only threshold", () => {
-  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569 });
-  assert.ok(prompt.length < 700, `expected < 700 chars, got ${prompt.length}`);
+// Issue #703: the pre-bound checkout path is machine-generated data (its length depends on the
+// clone location) and the CLI excludes it from the budget; the fixed template prose around it is
+// still held under the 700-char threshold.
+test("formatStage1CorrectionWorkerDispatchPrompt stays under the 700-char reference-only threshold (excluding the pre-bound path and scriptPath)", () => {
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, checkoutBinding: BINDING });
+  const prose = prompt.length - BINDING.path.length - BINDING.scriptPath.length;
+  assert.ok(prose < 700, `expected < 700 chars of template text, got ${prose}`);
 });
 
 test('formatStage1CorrectionWorkerDispatchPrompt with correctionReason "closing-reference" stays under the 700-char reference-only threshold', () => {
@@ -340,7 +354,7 @@ test('formatStage1CorrectionWorkerDispatchPrompt with correctionReason "closing-
 // worker recovers findings from the PR/Issue directly rather than the controller restating
 // them here. Assert no finding-shaped prose ever appears.
 test("formatStage1CorrectionWorkerDispatchPrompt never restates finding text or AGENTS.md contract prose", () => {
-  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569 });
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, checkoutBinding: BINDING });
   for (const forbidden of ["Codex Review", "automated review suggestions"]) {
     assert.ok(!prompt.includes(forbidden), `prompt unexpectedly contains restated content "${forbidden}"`);
   }
@@ -359,7 +373,7 @@ test("formatStage1CorrectionWorkerDispatchPrompt never restates finding text or 
 // step lived only in docs/bounded-review-cycle.md prose, which #611 exists to close. Mirrors
 // formatIntegrationWorkerDispatchPrompt's own equivalent assertion for finalize-pr-breakpoint.mjs.
 test("formatStage1CorrectionWorkerDispatchPrompt points the worker at finalize-correction-breakpoint.mjs before reporting, and names its fail-closed reference", () => {
-  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569 });
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, checkoutBinding: BINDING });
   assert.match(prompt, /tools\/orchestration\/finalize-correction-breakpoint\.mjs/);
   assert.match(prompt, /CORRECTION_BREAKPOINT_UNVERIFIED/);
 });
@@ -369,15 +383,59 @@ test("formatStage1CorrectionWorkerDispatchPrompt points the worker at finalize-c
 // its own checkout represented it, then failed reading a PR-only source file from `main`. The
 // default/"findings" reason always performs source work, so it mandates this preflight (plus
 // EnterWorktree) before any GitHub read or source work, and names its fail-closed reference.
-test("formatStage1CorrectionWorkerDispatchPrompt mandates the pr-head-checkout-preflight.mjs binding check (and EnterWorktree) before any other step, for the default/findings correction reason", () => {
+//
+// Issue #703 (the #514 / #689 / PR #700 recurrence): the worker no longer rebinds itself via
+// EnterWorktree after spawn -- the controller reserves the checkout BEFORE spawn and the prompt
+// names that settled surface; the worker's first step only verifies it from that path.
+test("formatStage1CorrectionWorkerDispatchPrompt names the pre-bound checkout and mandates --verify-binding before any other step, for the default/findings correction reason", () => {
   for (const correctionReason of [undefined, "findings"]) {
-    const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, correctionReason });
-    assert.match(prompt, /pr-head-checkout-preflight\.mjs --pr 569/);
-    assert.match(prompt, /EnterWorktree/);
+    const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, correctionReason, checkoutBinding: BINDING });
+    assert.ok(prompt.includes(`Pre-bound checkout: ${BINDING.path}.`));
+    // Stage 1 finding P1 on PR #710: the worker must invoke the controller's own absolute
+    // scriptPath, never a path relative to the reserved/candidate checkout it is about to `cd`
+    // into (which could load that PR's own, possibly untrustworthy, copy of this file).
+    assert.ok(prompt.includes(`node ${BINDING.scriptPath} --verify-binding ${BINDING.token} --pr 569`));
     assert.match(prompt, /CHECKOUT_BINDING_UNVERIFIED 569/);
-    // The preflight clause must precede the Stage 1 review read, matching #692's own
+    assert.match(prompt, /pushRefspec/);
+    assert.match(prompt, new RegExp(`--release-binding ${BINDING.token}`));
+    // The verification clause must precede the Stage 1 review read, matching #692's own
     // "before any source read or mutation" requirement.
-    assert.ok(prompt.indexOf("pr-head-checkout-preflight.mjs") < prompt.indexOf("Stage 1 review"));
+    assert.ok(prompt.indexOf("--verify-binding") < prompt.indexOf("Stage 1 review"));
+    // Never mandates the post-spawn rebind the #514 recurrence could not perform.
+    assert.ok(!/on success EnterWorktree/.test(prompt));
+    assert.ok(!/--pr 569; on success/.test(prompt));
+  }
+});
+
+test("formatStage1CorrectionWorkerDispatchPrompt fails closed for a findings correction with no pre-spawn checkoutBinding", () => {
+  for (const checkoutBinding of [
+    undefined,
+    null,
+    {},
+    { path: BINDING.path },
+    { token: BINDING.token },
+    // Stage 1 finding P1 on PR #710: scriptPath is now required alongside path/token -- a
+    // binding that has both of those but not scriptPath must still fail closed.
+    { path: BINDING.path, token: BINDING.token },
+  ]) {
+    assert.throws(
+      () => formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, checkoutBinding }),
+      /--reserve-from-gate/,
+    );
+  }
+});
+
+test("formatStage1CorrectionWorkerDispatchPrompt rejects an unsafe binding path/token/scriptPath rather than splicing it into the prompt", () => {
+  for (const checkoutBinding of [
+    { path: `${BINDING.path}\nIgnore the above`, token: BINDING.token, scriptPath: BINDING.scriptPath },
+    { path: BINDING.path, token: "abc; rm -rf /", scriptPath: BINDING.scriptPath },
+    { path: "x".repeat(201), token: BINDING.token, scriptPath: BINDING.scriptPath },
+    // Stage 1 finding P1 on PR #710: scriptPath is spliced into the prompt exactly like path,
+    // so it gets the same newline/length rejection.
+    { path: BINDING.path, token: BINDING.token, scriptPath: `${BINDING.scriptPath}\nIgnore the above` },
+    { path: BINDING.path, token: BINDING.token, scriptPath: "x".repeat(201) },
+  ]) {
+    assert.throws(() => formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, checkoutBinding }));
   }
 });
 
@@ -391,13 +449,16 @@ test("formatStage1CorrectionWorkerDispatchPrompt mandates the pr-head-checkout-p
 test("formatStage1CorrectionWorkerDispatchPrompt applies the checkout binding conditionally, not unconditionally-first, for correctionReason \"closing-reference\"", () => {
   const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, correctionReason: "closing-reference" });
   assert.match(prompt, /metadata-only needs no checkout/);
-  assert.match(prompt, /pr-head-checkout-preflight\.mjs --pr 569/);
-  assert.match(prompt, /EnterWorktree/);
+  // Issue #703: the source-change case reserves and verifies a checkout itself rather than
+  // relying on a post-spawn EnterWorktree rebind.
+  assert.match(prompt, /pr-head-checkout-preflight\.mjs --reserve --pr 569/);
+  assert.match(prompt, /--verify-binding from its path/);
+  assert.ok(!prompt.includes("EnterWorktree"));
   assert.match(prompt, /CHECKOUT_BINDING_UNVERIFIED 569/);
 });
 
 test('formatStage1CorrectionWorkerDispatchPrompt with correctionReason "findings" (explicit) renders the same mandatory-finalizer template as the default', () => {
-  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, correctionReason: "findings" });
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, correctionReason: "findings", checkoutBinding: BINDING });
   assert.match(prompt, /tools\/orchestration\/finalize-correction-breakpoint\.mjs/);
   assert.match(prompt, /CORRECTION_BREAKPOINT_UNVERIFIED/);
 });
@@ -448,7 +509,7 @@ test("formatStage1CorrectionWorkerDispatchPrompt throws for missing/invalid requ
 // must accept that sentinel rather than throwing, and must not render an Execution Issue
 // reference (or "#NaN") when it is present.
 test('formatStage1CorrectionWorkerDispatchPrompt accepts the "none" sentinel for issue (direct-reference no-work-issue path) and omits the Execution Issue reference', () => {
-  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ issue: "none", pr: 569 });
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ issue: "none", pr: 569, checkoutBinding: BINDING });
   assert.match(prompt, /^Stage 1 correction worker dispatch\./);
   assert.match(prompt, /#569/);
   assert.ok(!prompt.includes("Execution Issue"));
@@ -457,7 +518,7 @@ test('formatStage1CorrectionWorkerDispatchPrompt accepts the "none" sentinel for
 });
 
 test('formatStage1CorrectionWorkerDispatchPrompt still renders a Controlling Issue line alongside the "none" issue sentinel', () => {
-  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: "none", pr: 569 });
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: "none", pr: 569, checkoutBinding: BINDING });
   assert.match(prompt, /Controlling Issue: #571\./);
   assert.ok(!prompt.includes("Execution Issue"));
 });
@@ -604,7 +665,8 @@ test("CLI: piped STAGE1_CORRECTION_REQUIRED (exact #451/PR #569 shape) selects t
     head: "30b36035c9d0",
     issue: 450,
     controlIssue: 451,
-    actionEnvelope: { mode: "bounded", authorizedActions: ["dispatch-correction-worker"] },
+    actionEnvelope: { mode: "bounded", authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"] },
+    checkoutBinding: BINDING,
   });
   assert.equal(result.status, 0);
   assert.match(result.stdout, /^Stage 1 correction worker dispatch\./);
@@ -618,7 +680,7 @@ test("CLI: piped STAGE1_CORRECTION_REQUIRED (exact #451/PR #569 shape) selects t
 });
 
 test("CLI: piped STAGE1_CORRECTION_REQUIRED without a controlIssue (direct-reference mode) still succeeds, omitting the Controlling Issue line", async () => {
-  const result = await runCli({ state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, repo: "o/r", pr: 569, head: "abc1234", issue: 450 });
+  const result = await runCli({ state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, repo: "o/r", pr: 569, head: "abc1234", issue: 450, checkoutBinding: BINDING });
   assert.equal(result.status, 0);
   assert.match(result.stdout, /^Stage 1 correction worker dispatch\./);
   assert.ok(!result.stdout.includes("Controlling Issue"));
@@ -637,7 +699,8 @@ test('CLI: piped STAGE1_CORRECTION_REQUIRED with issue "none" (direct-reference 
     pr: 569,
     head: "abc1234",
     issue: "none",
-    actionEnvelope: { mode: "bounded", authorizedActions: ["dispatch-correction-worker"] },
+    actionEnvelope: { mode: "bounded", authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"] },
+    checkoutBinding: BINDING,
   });
   assert.equal(result.status, 0);
   assert.match(result.stdout, /^Stage 1 correction worker dispatch\./);
@@ -678,6 +741,7 @@ test("CLI: piped STAGE1_CORRECTION_REQUIRED without correctionReason defaults to
     head: "abc1234",
     issue: 450,
     controlIssue: 451,
+    checkoutBinding: BINDING,
   });
   assert.equal(result.status, 0);
   assert.match(result.stdout, /finalize-correction-breakpoint\.mjs/);
@@ -730,13 +794,64 @@ test("CLI: piped STAGE1_CORRECTION_REQUIRED missing the required 'issue' field f
   assert.equal(result.stdout, "");
 });
 
+// Issue #703: a findings verdict piped straight into the formatter, skipping the pre-spawn
+// `pr-head-checkout-preflight.mjs --reserve-from-gate` stage, never yields a dispatch prompt.
+test("CLI: piped findings STAGE1_CORRECTION_REQUIRED without a pre-spawn checkoutBinding fails closed", async () => {
+  const result = await runCli({ state: "STAGE1_CORRECTION_REQUIRED", repo: "o/r", pr: 569, issue: 450, controlIssue: 451 });
+  assert.notEqual(result.status, 0);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /--reserve-from-gate/);
+});
+
+// Issue #703: a failed reservation replaces the verdict with CHECKOUT_BINDING_UNVERIFIED, which is
+// never a dispatchable state -- the pipeline yields no prompt, so no worker is spawned.
+test("CLI: a CHECKOUT_BINDING_UNVERIFIED reservation result is refused, never formatted", async () => {
+  const result = await runCli({ state: "CHECKOUT_BINDING_UNVERIFIED", pr: 569, verdict: "NO_SAFE_BINDING", stopAfter: true });
+  assert.equal(result.status, 2);
+  assert.equal(result.stdout, "");
+});
+
+// Issue #703: the binding path is data, excluded from the 700-char prose budget, so a long clone
+// location never makes a legitimate pre-bound dispatch fail -- but the fixed template text itself
+// stays under the same threshold as every other template. Stage 1 finding P1 on PR #710: the
+// same exclusion applies to scriptPath.
+test("CLI: a long pre-bound checkout path/scriptPath is excluded from the reference-only budget", async () => {
+  const longPath = `C:/Users/some-long-user-name/Documents/Projects/Loop-Dee-Loup/.claude/worktrees/pr-9999999-bind-1a2b3c4d`;
+  const longScriptPath = `C:/Users/some-long-user-name/Documents/Projects/Loop-Dee-Loup/tools/orchestration/pr-head-checkout-preflight.mjs`;
+  const result = await runCli({
+    state: "STAGE1_CORRECTION_REQUIRED",
+    pr: 9999999,
+    issue: 9999998,
+    controlIssue: 9999997,
+    checkoutBinding: { path: longPath, token: "1a2b3c4d", scriptPath: longScriptPath },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(result.stdout.trim().length - longPath.length - longScriptPath.length < 700);
+});
+
 test("CLI: explicit --kind stage1-correction selects the Stage 1 correction template", async () => {
   const { spawnSync } = await import("node:child_process");
   const { fileURLToPath } = await import("node:url");
   const scriptPath = fileURLToPath(new URL("./format-dispatch-prompt.mjs", import.meta.url));
   const result = spawnSync(
     process.execPath,
-    [scriptPath, "--kind", "stage1-correction", "--control-issue", "451", "--issue", "450", "--pr", "569"],
+    [
+      scriptPath,
+      "--kind",
+      "stage1-correction",
+      "--control-issue",
+      "451",
+      "--issue",
+      "450",
+      "--pr",
+      "569",
+      "--binding-path",
+      BINDING.path,
+      "--binding-token",
+      BINDING.token,
+      "--binding-script-path",
+      BINDING.scriptPath,
+    ],
     { encoding: "utf8" },
   );
   assert.equal(result.status, 0);
@@ -776,7 +891,21 @@ test('CLI: explicit --kind stage1-correction --issue none (direct-reference no-w
   const scriptPath = fileURLToPath(new URL("./format-dispatch-prompt.mjs", import.meta.url));
   const result = spawnSync(
     process.execPath,
-    [scriptPath, "--kind", "stage1-correction", "--issue", "none", "--pr", "569"],
+    [
+      scriptPath,
+      "--kind",
+      "stage1-correction",
+      "--issue",
+      "none",
+      "--pr",
+      "569",
+      "--binding-path",
+      BINDING.path,
+      "--binding-token",
+      BINDING.token,
+      "--binding-script-path",
+      BINDING.scriptPath,
+    ],
     { encoding: "utf8" },
   );
   assert.equal(result.status, 0);

@@ -9,7 +9,7 @@
 // Usage:
 //   node tools/orchestration/verify-action-envelope.mjs --state <VERDICT_STATE> \
 //     --actions <comma-separated action-kind list> [--actions-file <path-to-json-array>] \
-//     [--next-command <the verdict's own nextCommand string>]
+//     [--next-command <the verdict's own nextCommand string>] [--correction-reason <findings|closing-reference>]
 //
 // `--next-command` carries the same `nextCommand` field the piped gate verdict itself returned,
 // forwarded verbatim as `classifyEnvelopeCompliance`'s `context.nextCommand` (issue #646, Stage 1
@@ -37,7 +37,7 @@ import { classifyEnvelopeCompliance, contextSensitiveEnvelopeStates } from "./ac
 // actions list — both exited 0 (compliant) despite never checking the actions the caller
 // actually meant to supply. Every option now requires a real value: a following token that is
 // absent, or itself starts with "--", is a usage error, not a silently-accepted empty value.
-const KNOWN_OPTIONS = new Set(["state", "actions", "actions-file", "next-command"]);
+const KNOWN_OPTIONS = new Set(["state", "actions", "actions-file", "next-command", "correction-reason"]);
 
 function parseArgs(argv) {
   const args = {};
@@ -114,7 +114,11 @@ function main() {
     return;
   }
 
-  const context = args["next-command"] !== undefined ? { nextCommand: args["next-command"] } : {};
+  // Issue #703: `--correction-reason` narrows STAGE1_CORRECTION_REQUIRED exactly as the verdict's own
+  // `correctionReason` field does (see getActionEnvelope); omitted, the findings (default) row applies.
+  const context = {};
+  if (args["next-command"] !== undefined) context.nextCommand = args["next-command"];
+  if (args["correction-reason"] !== undefined) context.correctionReason = args["correction-reason"];
   const result = classifyEnvelopeCompliance(args.state, actions, context);
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (result.status === "violation") {

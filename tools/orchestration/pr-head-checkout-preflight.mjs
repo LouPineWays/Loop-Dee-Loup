@@ -126,17 +126,42 @@
 // around; 1 for a missing/invalid argument or an operational failure unrelated to the PR/
 // checkout's own content.
 //
+// Issue #703: the verdicts above are the legacy *in-worker* binding mode, which relies on the
+// spawned worker rebinding itself afterwards via `EnterWorktree`. That post-spawn rebind is not
+// available on every agent substrate (the #514 / #689 / PR #700 recurrence), so the Stage 1
+// correction dispatch path no longer uses it: see the "Pre-spawn binding" section below
+// (`--reserve-from-gate` / `--reserve` / `--verify-binding` / `--release-binding`). The legacy
+// mode is kept unchanged for its #692 regression coverage and any caller whose substrate can
+// rebind.
+//
 // Usage:
 //   node tools/orchestration/pr-head-checkout-preflight.mjs --pr <N> [--repo <owner/repo>]
+//     (legacy in-worker mode)
+//   <gate JSON> | node tools/orchestration/pr-head-checkout-preflight.mjs --reserve-from-gate
+//     (controller, before spawn; pipe the output into format-dispatch-prompt.mjs)
+//   node tools/orchestration/pr-head-checkout-preflight.mjs --reserve --pr <N>
+//   node tools/orchestration/pr-head-checkout-preflight.mjs --verify-binding <token> --pr <N>
+//     (worker's first action, run from the reserved path)
+//   node tools/orchestration/pr-head-checkout-preflight.mjs --release-binding <token>
 //     `--repo` defaults to the invoking checkout's own configured `origin` remote via
 //     `ready-dispatch-gate.mjs`'s `resolveRepoIdentity` -- never a hand-typed slug.
 //
 // Tests: node --test tools/orchestration/pr-head-checkout-preflight.test.mjs
 
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 import { parseWorktreeListPorcelain } from "./worktree-preflight.mjs";
 import { normalizePathForComparison } from "./classify-primary-path-lock.mjs";
+import { getActionEnvelope } from "./action-envelope.mjs";
+
+// Issue #703 Stage 1 correction (P1 finding on PR #710): this process's own absolute path to
+// itself -- the controller's authoritative copy of this script, loaded from wherever the
+// controller's own checkout lives, never a path relative to any candidate/reserved checkout
+// (see the "Pre-spawn binding" section below and `reserve`'s `scriptPath` field for why).
+export const SELF_SCRIPT_PATH = fileURLToPath(import.meta.url);
 
 function isPositiveInteger(value) {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
@@ -377,6 +402,61 @@ export function defaultGitImpl() {
         return false;
       }
     },
+    // -- Issue #703 pre-spawn binding plumbing (see the "Pre-spawn binding" section below) ----
+    // `null` when the remote-tracking ref cannot be resolved -- never guessed.
+    remoteBranchSha(cwd, branch) {
+      try {
+        return runGit(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`], { cwd });
+      } catch {
+        return null;
+      }
+    },
+    // One git operation creates the worktree AND places the exclusive reservation lock, so no
+    // window exists in which the new path is present but unreserved. `git worktree add` itself
+    // refuses an already-existing non-empty path and `-b` refuses an already-existing branch name,
+    // so a fresh, token-unique path/branch can never be one another live session already holds.
+    addLockedBindingWorktree(primaryCwd, path, localBranch, sha, lockReason) {
+      try {
+        runGit(["worktree", "add", "--lock", "--reason", lockReason, "-b", localBranch, path, sha], { cwd: primaryCwd });
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, reason: reasonOf(err) };
+      }
+    },
+    // `git worktree lock` fails if the worktree is already locked -- an atomic exclusive claim.
+    lockWorktree(cwd, path, lockReason) {
+      try {
+        runGit(["worktree", "lock", "--reason", lockReason, path], { cwd });
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, reason: reasonOf(err) };
+      }
+    },
+    unlockWorktree(cwd, path) {
+      try {
+        runGit(["worktree", "unlock", path], { cwd });
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, reason: reasonOf(err) };
+      }
+    },
+    // Never `--force`: git itself refuses to remove a worktree with local modifications.
+    removeWorktree(cwd, path) {
+      try {
+        runGit(["worktree", "remove", path], { cwd });
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, reason: reasonOf(err) };
+      }
+    },
+    deleteLocalBranch(cwd, branch) {
+      try {
+        runGit(["branch", "-D", branch], { cwd });
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, reason: reasonOf(err) };
+      }
+    },
   };
 }
 
@@ -393,6 +473,394 @@ function sanitizeForPath(value) {
 
 export function defaultNewWorktreePath(primaryPath, pr, branch) {
   return `${primaryPath}/.claude/worktrees/pr-${pr}-${sanitizeForPath(branch)}`;
+}
+
+// =============================================================================================
+// Pre-spawn binding (issue #703, control #691)
+// =============================================================================================
+//
+// Demonstrated failure this closes (the `work on #514` / execution #689 / PR #700 recurrence):
+// the dispatch template above made the *spawned* correction worker responsible for moving
+// itself onto the PR-head checkout after it started (`EnterWorktree({ path })`). Repository
+// selection/creation succeeded every time; the step that dead-ended was the runtime rebind. A
+// worker spawned with agent-tool worktree isolation was already pinned to a different sandbox
+// worktree, and a retry without explicit isolation still hit the spawned-subagent `EnterWorktree`
+// restriction, so the only way forward was the parent session doing the correction itself.
+//
+// Provider-independent invariant (docs/operating-model.md § PR-head checkout preflight for
+// Stage 1 correction): a correction worker's execution surface -- one exact PR-head checkout,
+// exclusively reserved for that one worker -- is settled deterministically BEFORE the worker is
+// spawned, and the worker's first action only *verifies* that surface; it never has to perform
+// a post-spawn workspace transition its agent substrate may not allow. How the worker then
+// operates from the reserved path (absolute paths, a per-command `cd`, a spawn-time working
+// directory, or an entry operation where the substrate genuinely supports one) is a runtime
+// adapter detail, not the invariant.
+//
+// Three operations, all keyed by an opaque per-reservation token:
+//
+//   reserve        -- run by the controller before spawn. Always creates one fresh worktree at a
+//                     token-unique path on a token-unique local branch at the exact current head
+//                     commit, created and locked by one `git worktree add --lock`
+//                     (RESERVED_CREATED). The primary checkout is never eligible, and is simply
+//                     bypassed rather than dead-ending the way the legacy `run()` path's
+//                     NO_SAFE_BINDING did. The reservation is a `git worktree lock` whose reason
+//                     records pr/sha/branch/mode/token. Occupancy is proven by construction: a
+//                     fresh path did not exist before `worktree add` created it (git refuses an
+//                     existing path), and the lock atomically fails if anyone else already holds
+//                     it. Locked worktrees are also never retired by worktree-preflight.mjs.
+//
+//                     Stage 1 finding P1 on PR #710: an earlier revision also let the invoking
+//                     checkout be reserved "in place" (no worktree churn) whenever it already
+//                     happened to sit at the exact target head, proven exclusive only by `git
+//                     worktree lock` -- an administrative/pruning-exclusion primitive, not proof
+//                     no other live process or session is using the path. This script has no
+//                     access to live session state to prove otherwise, so that path is removed:
+//                     `reserve` always creates a fresh, construction-proven-exclusive worktree.
+//   verify-binding -- the worker's mandatory first action, run from the reserved path, using the
+//                     CONTROLLER's own absolute copy of this script (`reserve`'s `scriptPath`
+//                     field, threaded through `checkoutBinding` -- see `reserveFromGate` and
+//                     Stage 1 finding P1 on PR #710 below). Proves that the command actually
+//                     executed inside the reserved checkout (not the worker's spawn-time sandbox
+//                     -- WRONG_CHECKOUT), that the reservation is this token's and this PR's,
+//                     that the checkout is not the primary, is clean, and that its commit still
+//                     equals the PR's *current* head re-read from GitHub at verification time (a
+//                     head that advanced after reservation fails closed as STALE_HEAD_MISMATCH --
+//                     a reservation never authorizes a stale commit). The output's `pushRefspec`
+//                     (`HEAD:<pr-branch>`) is a plain, non-forced push, so a head that advances
+//                     after verification is still refused by git itself.
+//
+//                     Stage 1 finding P1 on PR #710: `format-dispatch-prompt.mjs`'s generated
+//                     prompt runs this step with the worker's cwd set to the reserved/candidate
+//                     checkout -- exactly the untrusted PR content this reservation exists to
+//                     evaluate. A relative `tools/orchestration/pr-head-checkout-preflight.mjs`
+//                     invoked from there would load THAT checkout's own (possibly outdated or
+//                     PR-modified) copy of this file rather than the controller's, letting the
+//                     candidate being corrected certify its own binding contract. The dispatch
+//                     prompt now names `scriptPath` -- the controller's own absolute path to this
+//                     module, captured at `reserve` time before the worker even exists -- so
+//                     verification code is always controller-authoritative even while it
+//                     evaluates the reserved checkout's own live state as its cwd.
+//   release-binding -- unlocks the reservation; the created worktree is also removed (never
+//                     forced) once it is clean and its commit is proven contained in the PR branch
+//                     on origin, so no unpushed work can be discarded.
+//
+//                     Stage 1 finding P2 on PR #710: the generated dispatch prompt runs this step
+//                     from inside the reserved checkout itself (there is no other checkout for
+//                     the worker to run it from), which used to unconditionally keep (never
+//                     remove) the worktree -- deleting a directory that is a running process's
+//                     own OS-level working directory fails on this repository's Windows hosts, so
+//                     every ordinary successful correction leaked its generated worktree/branch.
+//                     `release-binding` now moves this process's own working directory out of the
+//                     reserved path first when invoked from inside it, then evaluates
+//                     clean/pushed/removal exactly as it would from anywhere else.
+//
+// Verdicts: RESERVED_CREATED / BINDING_VERIFIED / RELEASED (exit 0); OCCUPIED_CANDIDATE /
+// DIRTY_CANDIDATE / STALE_HEAD_MISMATCH / NO_SAFE_BINDING / WRONG_CHECKOUT / BINDING_NOT_FOUND /
+// BINDING_MISMATCH / AMBIGUOUS (exit 2, fail closed); OPERATIONAL_ERROR (1). A failed `reserve`
+// (piped through `reserveFromGate`) surfaces as its own terminal `CHECKOUT_BINDING_UNVERIFIED`
+// verdict state -- see `reserveFromGate`'s own comment and Stage 1 finding P2 on PR #710 below
+// for why that is a distinct recognized action-envelope state, not a violation of
+// STAGE1_CORRECTION_REQUIRED's own bounded envelope.
+
+export const BINDING_LOCK_PREFIX = "ldl-pr-head-binding";
+
+export function formatBindingLockReason({ pr, sha, branch, mode, token }) {
+  return `${BINDING_LOCK_PREFIX} pr=${pr} sha=${sha} branch=${branch} mode=${mode} token=${token}`;
+}
+
+// Pure. `null` for anything that is not exactly this module's own reservation shape -- a lock
+// placed by anyone/anything else is never read as one of ours.
+//
+// `mode: "in-place"` is legacy-only (Stage 1 finding P1 on PR #710 removed the code path that
+// creates it -- see `reserve`'s own comment) but is still parsed here, and `releaseBinding` still
+// refuses to remove a binding in that mode, purely as a fail-closed guard against a lock reason
+// a pre-#710 controller may have already written before this fix deployed.
+export function parseBindingLockReason(reason) {
+  if (typeof reason !== "string") return null;
+  const tokens = reason.trim().split(/\s+/);
+  if (tokens[0] !== BINDING_LOCK_PREFIX) return null;
+  const fields = {};
+  for (const t of tokens.slice(1)) {
+    const eq = t.indexOf("=");
+    if (eq <= 0) return null;
+    fields[t.slice(0, eq)] = t.slice(eq + 1);
+  }
+  const pr = Number(fields.pr);
+  if (!isPositiveInteger(pr) || !fields.sha || !fields.branch || !fields.token) return null;
+  if (fields.mode !== "created" && fields.mode !== "in-place") return null;
+  return { pr, sha: fields.sha, branch: fields.branch, mode: fields.mode, token: fields.token };
+}
+
+export function defaultBindingWorktreePath(primaryPath, pr, token) {
+  return `${primaryPath}/.claude/worktrees/pr-${pr}-bind-${sanitizeForPath(token)}`;
+}
+
+export function bindingLocalBranch(pr, token) {
+  return `ldl-bind/pr-${pr}-${sanitizeForPath(token)}`;
+}
+
+function defaultTokenImpl() {
+  return randomBytes(4).toString("hex");
+}
+
+async function resolveTargetHead(ghPrViewImpl, repo, pr) {
+  let prView;
+  try {
+    prView = await ghPrViewImpl({ repo, pr });
+  } catch (err) {
+    return { error: { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: `gh pr view failed for PR #${pr}: ${reasonOf(err)}` } };
+  }
+  const head = { branch: prView?.headRefName ?? null, sha: prView?.headRefOid ?? null };
+  if (!head.branch || !head.sha) {
+    return { error: { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: `PR #${pr} did not resolve a headRefName/headRefOid` } };
+  }
+  return { head };
+}
+
+function readCheckoutState(git, cwd) {
+  const path = git.toplevel(cwd);
+  const worktrees = parseWorktreeListPorcelain(git.worktreeListPorcelain(cwd));
+  return {
+    path,
+    branch: git.currentBranch(cwd),
+    sha: git.currentCommit(cwd),
+    worktrees,
+    primaryPath: worktrees[0]?.path ?? path,
+  };
+}
+
+function pushRefspecFor(branch) {
+  return `HEAD:${branch}`;
+}
+
+export async function reserve(
+  { repo, pr, cwd = process.cwd() },
+  { ghPrViewImpl = defaultGhPrView, git = defaultGitImpl(), tokenImpl = defaultTokenImpl, bindingPathImpl = defaultBindingWorktreePath } = {},
+) {
+  if (!isPositiveInteger(pr)) {
+    return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: "--pr is required and must be a positive integer" };
+  }
+  const { head, error } = await resolveTargetHead(ghPrViewImpl, repo, pr);
+  if (error) return error;
+
+  let state;
+  try {
+    state = readCheckoutState(git, cwd);
+  } catch (err) {
+    return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: `could not read current checkout/worktree state: ${reasonOf(err)}` };
+  }
+  const token = tokenImpl();
+  const base = { pr, sha: head.sha, branch: head.branch, token, pushRefspec: pushRefspecFor(head.branch) };
+
+  // Issue #703 Stage 1 correction (P1 finding on PR #710): the invoking checkout already being
+  // at the exact target head was previously trusted as an "in place, no churn" reservation,
+  // proven exclusive only by `git worktree lock` -- an administrative/pruning-exclusion
+  // primitive, not evidence that no other live process or session is using the path (this
+  // script has no access to live session state -- see `classify-primary-path-lock.mjs`'s own
+  // module comment for the same constraint). Trusting it could hand a writer into a checkout
+  // another live session genuinely still owns, contradicting the exact-path single-session
+  // exclusivity this reservation exists to guarantee. No genuine occupancy primitive is
+  // available here, so this always creates one fresh, token-unique worktree instead -- its
+  // occupancy is then proven by construction (a path that did not exist before `git worktree
+  // add --lock` created it, and a lock that atomically fails if anything else already holds it),
+  // never inferred from "clean and already at head". `state.path`/`state.worktrees` above are
+  // still read for their `primaryPath` derivation (and to fail closed if the checkout's own git
+  // state cannot be read at all); the invoking checkout itself is otherwise never inspected.
+  const fetchResult = git.fetchBranch(state.primaryPath, head.branch);
+  if (!fetchResult.ok) {
+    return { exitCode: 2, verdict: "NO_SAFE_BINDING", reason: `fetch failed: ${fetchResult.reason}` };
+  }
+  const remoteSha = git.remoteBranchSha(state.primaryPath, head.branch);
+  if (remoteSha !== head.sha) {
+    return {
+      exitCode: 2,
+      verdict: "STALE_HEAD_MISMATCH",
+      reason: `origin/${head.branch} resolved to ${remoteSha ?? "(unresolvable)"}, not the PR's current head ${head.sha}`,
+    };
+  }
+  const path = bindingPathImpl(state.primaryPath, pr, token);
+  const localBranch = bindingLocalBranch(pr, token);
+  const added = git.addLockedBindingWorktree(state.primaryPath, path, localBranch, head.sha, formatBindingLockReason({ ...base, mode: "created" }));
+  if (!added.ok) {
+    return { exitCode: 2, verdict: "NO_SAFE_BINDING", path, reason: `reserved worktree creation failed: ${added.reason}` };
+  }
+  // `scriptPath` is THIS process's own absolute path -- the controller's authoritative copy,
+  // never the reserved checkout's own (possibly PR-modified or out-of-date) copy. Threaded
+  // through `reserveFromGate` into `checkoutBinding` so `format-dispatch-prompt.mjs` can tell
+  // the worker to invoke verification by this absolute path (Stage 1 finding P1 on PR #710:
+  // a relative `tools/orchestration/pr-head-checkout-preflight.mjs`, run with the worker's cwd
+  // inside the reserved/candidate checkout, would load THAT PR's own copy of this file instead).
+  return { exitCode: 0, verdict: "RESERVED_CREATED", path, mode: "created", localBranch, scriptPath: SELF_SCRIPT_PATH, ...base };
+}
+
+function findBinding(worktrees, token) {
+  return worktrees
+    .map((w) => ({ worktree: w, binding: w.locked ? parseBindingLockReason(w.lockedReason) : null }))
+    .filter((m) => m.binding && m.binding.token === token);
+}
+
+export async function verifyBinding(
+  { repo, pr, token, cwd = process.cwd() },
+  { ghPrViewImpl = defaultGhPrView, git = defaultGitImpl() } = {},
+) {
+  if (!isPositiveInteger(pr) || typeof token !== "string" || !token) {
+    return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: "--verify-binding <token> and --pr <N> are both required" };
+  }
+  let state;
+  try {
+    state = readCheckoutState(git, cwd);
+  } catch (err) {
+    return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: `could not read current checkout/worktree state: ${reasonOf(err)}` };
+  }
+  const matches = findBinding(state.worktrees, token);
+  if (matches.length === 0) {
+    return { exitCode: 2, verdict: "BINDING_NOT_FOUND", reason: `no worktree holds reservation ${token}` };
+  }
+  if (matches.length > 1) {
+    return { exitCode: 2, verdict: "AMBIGUOUS", reason: `more than one worktree claims reservation ${token}`, paths: matches.map((m) => m.worktree.path) };
+  }
+  const [{ worktree, binding }] = matches;
+  if (binding.pr !== pr) {
+    return { exitCode: 2, verdict: "BINDING_MISMATCH", path: worktree.path, reason: `reservation ${token} is for PR #${binding.pr}, not PR #${pr}` };
+  }
+  if (isSamePath(worktree.path, state.primaryPath)) {
+    return { exitCode: 2, verdict: "NO_SAFE_BINDING", path: worktree.path, reason: "the reserved checkout is the primary checkout" };
+  }
+  if (!isSamePath(state.path, worktree.path)) {
+    return {
+      exitCode: 2,
+      verdict: "WRONG_CHECKOUT",
+      path: worktree.path,
+      reason: `verification ran in ${state.path}, not the reserved checkout ${worktree.path}`,
+    };
+  }
+  const { head, error } = await resolveTargetHead(ghPrViewImpl, repo, pr);
+  if (error) return error;
+  if (head.sha !== binding.sha || head.branch !== binding.branch || state.sha !== head.sha) {
+    return {
+      exitCode: 2,
+      verdict: "STALE_HEAD_MISMATCH",
+      path: worktree.path,
+      reason: `PR head is ${head.branch}@${head.sha}; reservation recorded ${binding.branch}@${binding.sha}; checkout is at ${state.sha}`,
+    };
+  }
+  const dirty = git.isDirty(worktree.path);
+  if (dirty !== false) {
+    return {
+      exitCode: 2,
+      verdict: "DIRTY_CANDIDATE",
+      path: worktree.path,
+      reason: dirty === true ? "reserved checkout contains local modifications" : "reserved checkout cleanliness could not be determined",
+    };
+  }
+  return {
+    exitCode: 0,
+    verdict: "BINDING_VERIFIED",
+    path: worktree.path,
+    pr,
+    sha: head.sha,
+    branch: head.branch,
+    token,
+    pushRefspec: pushRefspecFor(head.branch),
+  };
+}
+
+export async function releaseBinding(
+  { token, cwd = process.cwd() },
+  { git = defaultGitImpl(), chdir = process.chdir.bind(process) } = {},
+) {
+  if (typeof token !== "string" || !token) {
+    return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: "--release-binding <token> is required" };
+  }
+  let state;
+  try {
+    state = readCheckoutState(git, cwd);
+  } catch (err) {
+    return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: `could not read current checkout/worktree state: ${reasonOf(err)}` };
+  }
+  const matches = findBinding(state.worktrees, token);
+  if (matches.length !== 1) {
+    return { exitCode: 2, verdict: matches.length === 0 ? "BINDING_NOT_FOUND" : "AMBIGUOUS", reason: `reservation ${token} matched ${matches.length} worktrees` };
+  }
+  const [{ worktree, binding }] = matches;
+  const unlocked = git.unlockWorktree(state.primaryPath, worktree.path);
+  if (!unlocked.ok) {
+    return { exitCode: 2, verdict: "OCCUPIED_CANDIDATE", path: worktree.path, reason: `unlock failed: ${unlocked.reason}` };
+  }
+  const kept = (why) => ({ exitCode: 0, verdict: "RELEASED", path: worktree.path, removed: false, keptReason: why });
+  // Defense in depth only: `reserve` above never produces a "in-place" mode binding any more
+  // (the P1 fix above), so this branch is unreachable from that path today. It stays as a
+  // fail-closed guard against a legacy lock reason written by pre-#710 code, whose worktree this
+  // function never created and must never remove.
+  if (binding.mode !== "created") return kept("only a created reservation's worktree is ever removed");
+  // Issue #703 Stage 1 correction (P2 finding on PR #710): the generated dispatch prompt has the
+  // worker run --release-binding from inside the reserved checkout itself -- there is no other
+  // checkout for it to run this from. A directory that is a running process's own OS-level
+  // current working directory cannot be removed on this repository's Windows hosts, even by a
+  // different subprocess targeting it by path, so the prior unconditional early return here
+  // (kept, never removed) meant every normal successful correction left its generated worktree
+  // and local binding branch behind. Move this process's own working directory out of the
+  // reserved path first -- to the primary checkout, which every git mutation below already uses
+  // as its own cwd -- then evaluate clean/pushed/removal exactly as when release runs from
+  // elsewhere. `chdir` is injectable so a caller that cannot tolerate a global cwd change can
+  // supply its own relocation.
+  if (isSamePath(state.path, worktree.path)) {
+    try {
+      chdir(state.primaryPath);
+    } catch (err) {
+      return kept(`could not leave the reserved checkout before evaluating removal: ${reasonOf(err)}`);
+    }
+  }
+  if (git.isDirty(worktree.path) !== false) return kept("reserved checkout is not proven clean");
+  const fetched = git.fetchBranch(state.primaryPath, binding.branch);
+  const remoteSha = fetched.ok ? git.remoteBranchSha(state.primaryPath, binding.branch) : null;
+  const tip = worktree.headCommit;
+  if (!remoteSha || !tip || !(tip === remoteSha || git.isAncestor(state.primaryPath, tip, remoteSha))) {
+    return kept(`reserved commit is not proven contained in origin/${binding.branch}`);
+  }
+  const removed = git.removeWorktree(state.primaryPath, worktree.path);
+  if (!removed.ok) return kept(`worktree removal failed: ${removed.reason}`);
+  if (worktree.branch && worktree.branch === bindingLocalBranch(binding.pr, binding.token)) {
+    git.deleteLocalBranch(state.primaryPath, worktree.branch);
+  }
+  return { exitCode: 0, verdict: "RELEASED", path: worktree.path, removed: true };
+}
+
+// Pipeline stage between `next-review-transition-gate.mjs` and `format-dispatch-prompt.mjs`:
+// a findings-bearing STAGE1_CORRECTION_REQUIRED verdict gains `checkoutBinding` (the settled
+// surface the formatter requires); every other verdict passes through unchanged. A failed
+// reservation replaces the verdict with CHECKOUT_BINDING_UNVERIFIED, which the formatter refuses
+// to render, so no worker is ever spawned without a settled surface.
+export async function reserveFromGate(gate, { repo, cwd } = {}, deps = {}) {
+  if (!gate || gate.state !== "STAGE1_CORRECTION_REQUIRED" || gate.correctionReason === "closing-reference") {
+    return { exitCode: 0, output: gate };
+  }
+  const result = await reserve({ repo, pr: gate.pr, cwd }, deps);
+  if (result.exitCode !== 0) {
+    // Issue #703 Stage 1 correction (P2 finding on PR #710): a failed reservation must reach a
+    // terminal, no-dispatch outcome that is itself representable as compliant -- the original
+    // STAGE1_CORRECTION_REQUIRED envelope authorizes exactly `["reserve-correction-checkout",
+    // "dispatch-correction-worker"]` in order, so a controller that correctly stops here (never
+    // dispatching) would otherwise always be reported as missing the required dispatch action.
+    // CHECKOUT_BINDING_UNVERIFIED is its own recognized verdict state in action-envelope.mjs
+    // (mode "none", zero further authorized actions) precisely so compliance is checked against
+    // THIS terminal verdict for whatever the controller does after receiving it, not against the
+    // original bounded envelope the failed reservation never got to satisfy.
+    const state = "CHECKOUT_BINDING_UNVERIFIED";
+    return {
+      exitCode: result.exitCode,
+      output: {
+        state,
+        pr: gate.pr,
+        verdict: result.verdict,
+        reason: result.reason ?? result.message ?? null,
+        stopAfter: true,
+        actionEnvelope: getActionEnvelope(state),
+      },
+    };
+  }
+  const { path, token, sha, branch, mode, verdict, scriptPath } = result;
+  return { exitCode: 0, output: { ...gate, checkoutBinding: { path, token, sha, branch, mode, verdict, scriptPath } } };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -549,14 +1017,27 @@ export async function run(
 // CLI
 // ---------------------------------------------------------------------------------------------
 
+// Value-less flags (`--reserve`, `--reserve-from-gate`) never consume the following token.
+const BOOLEAN_FLAGS = new Set(["reserve", "reserve-from-gate"]);
+
 function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith("--")) continue;
-    args[a.slice(2)] = argv[++i];
+    const name = a.slice(2);
+    if (BOOLEAN_FLAGS.has(name)) args[name] = true;
+    else args[name] = argv[++i];
   }
   return args;
+}
+
+function readStdin() {
+  try {
+    return readFileSync(0, "utf8").trim();
+  } catch {
+    return "";
+  }
 }
 
 function toIntOrNull(v) {
@@ -567,6 +1048,15 @@ function toIntOrNull(v) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+
+  // release-binding needs no GitHub identity at all.
+  if (args["release-binding"] !== undefined) {
+    const result = await releaseBinding({ token: args["release-binding"] });
+    if (result.message) console.error(result.message);
+    console.log(JSON.stringify(result));
+    process.exit(result.exitCode);
+    return;
+  }
 
   let resolvedRepo = args.repo;
   if (!resolvedRepo) {
@@ -579,8 +1069,26 @@ async function main() {
     resolvedRepo = identity.repo;
   }
 
+  if (args["reserve-from-gate"]) {
+    let gate;
+    try {
+      gate = JSON.parse(readStdin());
+    } catch (err) {
+      console.error(`pr-head-checkout-preflight.mjs: could not parse gate JSON on stdin: ${err.message}`);
+      process.exit(1);
+      return;
+    }
+    const { exitCode, output } = await reserveFromGate(gate, { repo: resolvedRepo });
+    console.log(JSON.stringify(output));
+    process.exit(exitCode);
+    return;
+  }
+
   const pr = toIntOrNull(args.pr);
-  const result = await run({ repo: resolvedRepo, pr });
+  let result;
+  if (args.reserve) result = await reserve({ repo: resolvedRepo, pr });
+  else if (args["verify-binding"] !== undefined) result = await verifyBinding({ repo: resolvedRepo, pr, token: args["verify-binding"] });
+  else result = await run({ repo: resolvedRepo, pr });
   if (result.message) {
     if (result.exitCode === 0) console.log(result.message);
     else console.error(result.message);

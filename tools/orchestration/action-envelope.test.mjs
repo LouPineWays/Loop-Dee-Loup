@@ -28,6 +28,7 @@ test("getActionEnvelope: every ready-dispatch-gate.mjs and next-review-transitio
     "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
     "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
     "STAGE1_CORRECTION_REQUIRED",
+    "CHECKOUT_BINDING_UNVERIFIED",
     "STAGE2_CORRECTION_REQUIRED",
     "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
     "STAGE2_CLOSE_READY",
@@ -323,10 +324,38 @@ test("STAGE2_CORRECTION_REQUIRED: one bounded correction dispatch, no extra audi
   assert.equal(result.reasons.length, 2);
 });
 
-test("STAGE1_CORRECTION_REQUIRED: same bounded single-dispatch envelope", () => {
+// Issue #703: a findings-bearing Stage 1 correction reserves its PR-head checkout before spawn
+// (`pr-head-checkout-preflight.mjs --reserve-from-gate`), strictly before the dispatch itself.
+test("STAGE1_CORRECTION_REQUIRED (findings): reserve the correction checkout, then dispatch -- in that order", () => {
   assert.equal(
-    classifyEnvelopeCompliance("STAGE1_CORRECTION_REQUIRED", ["dispatch-correction-worker"]).status,
+    classifyEnvelopeCompliance("STAGE1_CORRECTION_REQUIRED", ["reserve-correction-checkout", "dispatch-correction-worker"]).status,
     "compliant",
+  );
+  assert.equal(
+    classifyEnvelopeCompliance("STAGE1_CORRECTION_REQUIRED", ["reserve-correction-checkout", "dispatch-correction-worker"], {
+      correctionReason: "findings",
+    }).status,
+    "compliant",
+  );
+});
+
+test("STAGE1_CORRECTION_REQUIRED (findings): dispatching without the pre-spawn reservation is a violation", () => {
+  const result = classifyEnvelopeCompliance("STAGE1_CORRECTION_REQUIRED", ["dispatch-correction-worker"]);
+  assert.equal(result.status, "violation");
+  assert.ok(result.reasons.some((r) => r.includes("reserve-correction-checkout") && r.includes("not observed")));
+});
+
+test("STAGE1_CORRECTION_REQUIRED (findings): reserving after dispatching is out of order", () => {
+  const result = classifyEnvelopeCompliance("STAGE1_CORRECTION_REQUIRED", ["dispatch-correction-worker", "reserve-correction-checkout"]);
+  assert.equal(result.status, "violation");
+});
+
+test("STAGE1_CORRECTION_REQUIRED (closing-reference): single-dispatch envelope, no reservation authorized", () => {
+  const context = { correctionReason: "closing-reference" };
+  assert.equal(classifyEnvelopeCompliance("STAGE1_CORRECTION_REQUIRED", ["dispatch-correction-worker"], context).status, "compliant");
+  assert.equal(
+    classifyEnvelopeCompliance("STAGE1_CORRECTION_REQUIRED", ["reserve-correction-checkout", "dispatch-correction-worker"], context).status,
+    "violation",
   );
 });
 
@@ -341,6 +370,7 @@ test("STAGE1_CORRECTION_REQUIRED: same bounded single-dispatch envelope", () => 
 // `restart-control-kickoff`/`rerun-gate` are additionally unconditionally deny-listed.
 test("STAGE1_CORRECTION_REQUIRED: #587/PR #590 shape — dispatch the correction worker, then restart the control Issue's own kickoff and re-run lifecycle logic in the same context, is a violation", () => {
   const result = classifyEnvelopeCompliance("STAGE1_CORRECTION_REQUIRED", [
+    "reserve-correction-checkout",
     "dispatch-correction-worker",
     "restart-control-kickoff",
     "rerun-gate",
@@ -348,11 +378,37 @@ test("STAGE1_CORRECTION_REQUIRED: #587/PR #590 shape — dispatch the correction
   assert.equal(result.status, "violation");
   // restart-control-kickoff and rerun-gate are each unconditionally deny-listed (never
   // authorized by any verdict envelope, regardless of mode) = 2 reasons.
-  // dispatch-correction-worker is the verdict's one authorized action and is attempted exactly
-  // once, in order, so it contributes no reason of its own.
+  // reserve-correction-checkout and dispatch-correction-worker are the verdict's authorized
+  // actions (issue #703), each attempted exactly once, in order, so they contribute no reason.
   assert.equal(result.reasons.length, 2);
   assert.ok(result.reasons.some((r) => r.includes("restart-control-kickoff") && r.includes("never authorized")));
   assert.ok(result.reasons.some((r) => r.includes("rerun-gate") && r.includes("never authorized")));
+});
+
+// Stage 1 finding P2 on PR #710 (issue #703's own correction): a reservation failure replaces
+// the verdict with its own terminal CHECKOUT_BINDING_UNVERIFIED state (`pr-head-checkout-
+// preflight.mjs`'s `reserveFromGate`) rather than staying under STAGE1_CORRECTION_REQUIRED's own
+// bounded envelope, precisely so the controller's correct "stop, never dispatch" response is
+// compliant against the state actually in force, not a false "missing dispatch-correction-worker"
+// violation against the original one.
+test("CHECKOUT_BINDING_UNVERIFIED: zero further actions after a failed reservation is compliant", () => {
+  assert.equal(classifyEnvelopeCompliance("CHECKOUT_BINDING_UNVERIFIED", []).status, "compliant");
+});
+
+test("CHECKOUT_BINDING_UNVERIFIED: dispatching a correction worker anyway is a violation", () => {
+  const result = classifyEnvelopeCompliance("CHECKOUT_BINDING_UNVERIFIED", ["dispatch-correction-worker"]);
+  assert.equal(result.status, "violation");
+  assert.ok(result.reasons.some((r) => r.includes("dispatch-correction-worker") && r.includes("zero further operational actions")));
+});
+
+// The general "missing required action" protection must stay intact for the ORIGINAL
+// STAGE1_CORRECTION_REQUIRED envelope: a reservation that was never attempted at all (as opposed
+// to attempted-and-failed, which produces the distinct CHECKOUT_BINDING_UNVERIFIED state checked
+// above) is still exactly the existing violation shape.
+test("STAGE1_CORRECTION_REQUIRED still reports a genuinely omitted reservation as a violation (CHECKOUT_BINDING_UNVERIFIED is additive, not a relaxation)", () => {
+  const result = classifyEnvelopeCompliance("STAGE1_CORRECTION_REQUIRED", ["dispatch-correction-worker"]);
+  assert.equal(result.status, "violation");
+  assert.ok(result.reasons.some((r) => r.includes("reserve-correction-checkout") && r.includes("not observed")));
 });
 
 // -- classifyEnvelopeCompliance: #514 pre-PR planning/routing/dispatch breakpoints --------

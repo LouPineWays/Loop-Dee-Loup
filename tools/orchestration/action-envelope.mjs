@@ -186,7 +186,30 @@ const ENVELOPES = {
     mode: ENVELOPE_MODES.BOUNDED,
     authorizedActions: ["merge-pr", "create-stage2-audit-issue", "write-control-snapshot", "post-stage2-reviewer-trigger"],
   },
-  STAGE1_CORRECTION_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-correction-worker"] },
+  // Issue #703: a findings-bearing Stage 1 correction settles the worker's exact PR-head checkout
+  // BEFORE spawn (`pr-head-checkout-preflight.mjs --reserve-from-gate`, the pipeline stage between
+  // this gate and `format-dispatch-prompt.mjs`), so `reserve-correction-checkout` is authorized
+  // strictly before `dispatch-correction-worker`. This row is the findings (default) shape;
+  // `getActionEnvelope` narrows it for `correctionReason: "closing-reference"`, whose reservation
+  // stage is a pass-through (a metadata-only repair needs no checkout).
+  STAGE1_CORRECTION_REQUIRED: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"],
+  },
+  // Stage 1 finding P2 on PR #710 (issue #703's own correction): a failed `reserve-correction-
+  // checkout` must stop the controller without ever dispatching, but STAGE1_CORRECTION_REQUIRED's
+  // own bounded envelope above authorizes exactly `["reserve-correction-checkout",
+  // "dispatch-correction-worker"]` in order -- checking a reservation-failure action list against
+  // THAT envelope always reports the (correctly never-attempted) dispatch as a missing required
+  // action, making the safe path indistinguishable from a violation. `pr-head-checkout-
+  // preflight.mjs`'s `reserveFromGate` already replaces the verdict's own `state` with
+  // `CHECKOUT_BINDING_UNVERIFIED` on a failed reservation (and stamps this exact envelope onto
+  // it) -- so a reservation failure is a genuinely different, terminal verdict state, not the
+  // original bounded one still in force. This is a `NONE` row (zero further authorized actions)
+  // because the reservation attempt itself is what produced this state; nothing may follow it,
+  // and the general "missing required action" protection above is deliberately left unchanged --
+  // this adds a distinct, correctly-modeled terminal state instead of relaxing that check.
+  CHECKOUT_BINDING_UNVERIFIED: { mode: ENVELOPE_MODES.NONE, authorizedActions: [] },
   STAGE2_CORRECTION_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-correction-worker"] },
   // This table row is the superset (real gated work issue exists, plus a real thin control
   // Issue to terminalize) shape, kept here only as the documentation default for this state.
@@ -304,6 +327,11 @@ export function getActionEnvelope(state, context = {}) {
 
   if (state === "BLOCKED" && context.blockerReconciliationEligible === true) {
     return { mode: ENVELOPE_MODES.CHAIN, authorizedActions: ["run-reconcile-control-blocker"] };
+  }
+
+  // Issue #703: only a findings-bearing correction (the default) reserves a checkout pre-spawn.
+  if (state === "STAGE1_CORRECTION_REQUIRED" && context.correctionReason === "closing-reference") {
+    return { mode: entry.mode, authorizedActions: ["dispatch-correction-worker"] };
   }
 
   if (state === "STAGE2_CLOSE_READY") {
