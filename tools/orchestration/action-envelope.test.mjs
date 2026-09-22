@@ -28,6 +28,7 @@ test("getActionEnvelope: every ready-dispatch-gate.mjs and next-review-transitio
     "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
     "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
     "STAGE1_CORRECTION_REQUIRED",
+    "CHECKOUT_BINDING_UNVERIFIED",
     "STAGE2_CORRECTION_REQUIRED",
     "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
     "STAGE2_CLOSE_READY",
@@ -382,6 +383,32 @@ test("STAGE1_CORRECTION_REQUIRED: #587/PR #590 shape — dispatch the correction
   assert.equal(result.reasons.length, 2);
   assert.ok(result.reasons.some((r) => r.includes("restart-control-kickoff") && r.includes("never authorized")));
   assert.ok(result.reasons.some((r) => r.includes("rerun-gate") && r.includes("never authorized")));
+});
+
+// Stage 1 finding P2 on PR #710 (issue #703's own correction): a reservation failure replaces
+// the verdict with its own terminal CHECKOUT_BINDING_UNVERIFIED state (`pr-head-checkout-
+// preflight.mjs`'s `reserveFromGate`) rather than staying under STAGE1_CORRECTION_REQUIRED's own
+// bounded envelope, precisely so the controller's correct "stop, never dispatch" response is
+// compliant against the state actually in force, not a false "missing dispatch-correction-worker"
+// violation against the original one.
+test("CHECKOUT_BINDING_UNVERIFIED: zero further actions after a failed reservation is compliant", () => {
+  assert.equal(classifyEnvelopeCompliance("CHECKOUT_BINDING_UNVERIFIED", []).status, "compliant");
+});
+
+test("CHECKOUT_BINDING_UNVERIFIED: dispatching a correction worker anyway is a violation", () => {
+  const result = classifyEnvelopeCompliance("CHECKOUT_BINDING_UNVERIFIED", ["dispatch-correction-worker"]);
+  assert.equal(result.status, "violation");
+  assert.ok(result.reasons.some((r) => r.includes("dispatch-correction-worker") && r.includes("zero further operational actions")));
+});
+
+// The general "missing required action" protection must stay intact for the ORIGINAL
+// STAGE1_CORRECTION_REQUIRED envelope: a reservation that was never attempted at all (as opposed
+// to attempted-and-failed, which produces the distinct CHECKOUT_BINDING_UNVERIFIED state checked
+// above) is still exactly the existing violation shape.
+test("STAGE1_CORRECTION_REQUIRED still reports a genuinely omitted reservation as a violation (CHECKOUT_BINDING_UNVERIFIED is additive, not a relaxation)", () => {
+  const result = classifyEnvelopeCompliance("STAGE1_CORRECTION_REQUIRED", ["dispatch-correction-worker"]);
+  assert.equal(result.status, "violation");
+  assert.ok(result.reasons.some((r) => r.includes("reserve-correction-checkout") && r.includes("not observed")));
 });
 
 // -- classifyEnvelopeCompliance: #514 pre-PR planning/routing/dispatch breakpoints --------

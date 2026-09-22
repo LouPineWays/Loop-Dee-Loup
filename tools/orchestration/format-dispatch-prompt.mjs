@@ -313,6 +313,16 @@ export function formatIntegrationWorkerDispatchPrompt({ controlIssue, executionI
 // only to *verify* it from the reserved path; no post-spawn workspace transition is required.
 const BINDING_TOKEN_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 
+// Stage 1 finding P1 on PR #710: the findings template below used to tell the worker to invoke
+// `pr-head-checkout-preflight.mjs` by a path relative to the reserved/candidate checkout it had
+// just been told to `cd` into -- exactly the untrusted PR content this reservation exists to
+// evaluate. A PR that predates `--verify-binding` support, or one that edits this tool itself,
+// would then supply the verifier, letting the candidate being corrected certify its own binding
+// contract. `checkoutBinding.scriptPath` (added by `pr-head-checkout-preflight.mjs`'s `reserve`,
+// the controller's own absolute path to itself, captured before the worker even exists) is now
+// required alongside `path`/`token` and is what the template actually invokes, so verification
+// code always comes from the controller's authoritative checkout while still evaluating the
+// reserved checkout's own live state as its cwd. Same validation/length budget as `path` above.
 function assertCheckoutBinding(checkoutBinding) {
   if (
     !checkoutBinding ||
@@ -321,10 +331,14 @@ function assertCheckoutBinding(checkoutBinding) {
     /[\r\n]/.test(checkoutBinding.path) ||
     checkoutBinding.path.length > 200 ||
     typeof checkoutBinding.token !== "string" ||
-    !BINDING_TOKEN_PATTERN.test(checkoutBinding.token)
+    !BINDING_TOKEN_PATTERN.test(checkoutBinding.token) ||
+    typeof checkoutBinding.scriptPath !== "string" ||
+    !checkoutBinding.scriptPath ||
+    /[\r\n]/.test(checkoutBinding.scriptPath) ||
+    checkoutBinding.scriptPath.length > 200
   ) {
     throw new Error(
-      "formatStage1CorrectionWorkerDispatchPrompt requires a pre-spawn checkoutBinding { path, token } for a findings correction -- " +
+      "formatStage1CorrectionWorkerDispatchPrompt requires a pre-spawn checkoutBinding { path, token, scriptPath } for a findings correction -- " +
         "pipe the gate verdict through pr-head-checkout-preflight.mjs --reserve-from-gate first",
     );
   }
@@ -392,10 +406,10 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
     );
   }
   assertCheckoutBinding(checkoutBinding);
-  const { path, token } = checkoutBinding;
+  const { path, token, scriptPath } = checkoutBinding;
   return (
     `Stage 1 correction worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
-    `Pre-bound checkout: ${path}. From it, first run node tools/orchestration/pr-head-checkout-preflight.mjs ` +
+    `Pre-bound checkout: ${path}. From it, first run node ${scriptPath} ` +
     `--verify-binding ${token} --pr ${pr} (nonzero: CHECKOUT_BINDING_UNVERIFIED ${pr}, stop); work only ` +
     `there, push via its pushRefspec.\n\n` +
     `Read PR #${pr}'s Stage 1 review${executionReadClause} for findings (not restated). Apply one ` +
@@ -581,12 +595,16 @@ const CLI_FLAG_BY_FIELD = {
 function readField(field, source, { isCli }) {
   // Issue #703: piped mode reads the `checkoutBinding` object `pr-head-checkout-preflight.mjs
   // --reserve-from-gate` added to the verdict; explicit-fields mode rebuilds it from
-  // --binding-path/--binding-token (both or neither).
+  // --binding-path/--binding-token/--binding-script-path (the Stage 1 finding P1 addition on PR
+  // #710 -- any present or none).
   if (field === "checkoutBinding") {
     if (!isCli) return source.checkoutBinding ?? null;
     const path = source["binding-path"];
     const token = source["binding-token"];
-    return path != null || token != null ? { path: path ?? null, token: token ?? null } : null;
+    const scriptPath = source["binding-script-path"];
+    return path != null || token != null || scriptPath != null
+      ? { path: path ?? null, token: token ?? null, scriptPath: scriptPath ?? null }
+      : null;
   }
   if (field === "issue") {
     const raw = isCli ? source[CLI_FLAG_BY_FIELD[field]] : source[field];
@@ -666,8 +684,13 @@ function main() {
   // Issue #703: a pre-bound checkout path is machine-generated data, not restated prose, and its
   // length depends on where the repository is cloned -- it is excluded from the reference-only
   // budget (it is itself capped at 200 chars by the formatter), so the fixed template text stays
-  // held to the same 700-char threshold as every other template.
-  const bindingAllowance = typeof fields?.checkoutBinding?.path === "string" ? fields.checkoutBinding.path.length : 0;
+  // held to the same 700-char threshold as every other template. Stage 1 finding P1 on PR #710
+  // adds `scriptPath` (the controller's own absolute path to pr-head-checkout-preflight.mjs) to
+  // the template, machine-generated the same way and capped the same way, so it gets the same
+  // budget exclusion.
+  const bindingAllowance =
+    (typeof fields?.checkoutBinding?.path === "string" ? fields.checkoutBinding.path.length : 0) +
+    (typeof fields?.checkoutBinding?.scriptPath === "string" ? fields.checkoutBinding.scriptPath.length : 0);
   let prompt;
   try {
     prompt = assertReferenceOnly(formatter(fields), REFERENCE_ONLY_THRESHOLD_CHARS + bindingAllowance);

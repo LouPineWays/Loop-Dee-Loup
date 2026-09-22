@@ -151,9 +151,17 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 import { parseWorktreeListPorcelain } from "./worktree-preflight.mjs";
 import { normalizePathForComparison } from "./classify-primary-path-lock.mjs";
+import { getActionEnvelope } from "./action-envelope.mjs";
+
+// Issue #703 Stage 1 correction (P1 finding on PR #710): this process's own absolute path to
+// itself -- the controller's authoritative copy of this script, loaded from wherever the
+// controller's own checkout lives, never a path relative to any candidate/reserved checkout
+// (see the "Pre-spawn binding" section below and `reserve`'s `scriptPath` field for why).
+export const SELF_SCRIPT_PATH = fileURLToPath(import.meta.url);
 
 function isPositiveInteger(value) {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
@@ -490,37 +498,69 @@ export function defaultNewWorktreePath(primaryPath, pr, branch) {
 //
 // Three operations, all keyed by an opaque per-reservation token:
 //
-//   reserve        -- run by the controller before spawn. Either reserves the invoking checkout
-//                     in place (RESERVED_IN_PLACE: a non-primary, clean, unlocked worktree already
-//                     at the exact current PR head -- the spawned worker inherits it, so there is
-//                     no worktree churn), or creates one fresh worktree at a token-unique path on a
-//                     token-unique local branch at the exact current head commit, created and
-//                     locked by one `git worktree add --lock` (RESERVED_CREATED). The primary
-//                     checkout is never eligible, and is simply bypassed rather than dead-ending
-//                     the way the legacy `run()` path's NO_SAFE_BINDING did. The reservation is a
-//                     `git worktree lock` whose reason records pr/sha/branch/mode/token.
-//                     Occupancy is proven by construction, never inferred from "clean/unlocked":
-//                     a fresh path did not exist before `worktree add` created it (git refuses an
-//                     existing path), and an in-place/existing path is only ever reserved through
-//                     `git worktree lock`, which atomically fails if anyone else already holds it.
-//                     Locked worktrees are also never retired by worktree-preflight.mjs.
-//   verify-binding -- the worker's mandatory first action, run from the reserved path. Proves
-//                     that the command actually executed inside the reserved checkout (not the
-//                     worker's spawn-time sandbox -- WRONG_CHECKOUT), that the reservation is this
-//                     token's and this PR's, that the checkout is not the primary, is clean, and
-//                     that its commit still equals the PR's *current* head re-read from GitHub at
-//                     verification time (a head that advanced after reservation fails closed as
-//                     STALE_HEAD_MISMATCH -- a reservation never authorizes a stale commit). The
-//                     output's `pushRefspec` (`HEAD:<pr-branch>`) is a plain, non-forced push, so a
-//                     head that advances after verification is still refused by git itself.
-//   release-binding -- unlocks the reservation; a RESERVED_CREATED worktree is also removed (never
-//                     forced) once it is clean and its commit is proven contained in the PR branch
-//                     on origin, so no unpushed work can be discarded. An in-place reservation is
-//                     only ever unlocked, never removed.
+//   reserve        -- run by the controller before spawn. Always creates one fresh worktree at a
+//                     token-unique path on a token-unique local branch at the exact current head
+//                     commit, created and locked by one `git worktree add --lock`
+//                     (RESERVED_CREATED). The primary checkout is never eligible, and is simply
+//                     bypassed rather than dead-ending the way the legacy `run()` path's
+//                     NO_SAFE_BINDING did. The reservation is a `git worktree lock` whose reason
+//                     records pr/sha/branch/mode/token. Occupancy is proven by construction: a
+//                     fresh path did not exist before `worktree add` created it (git refuses an
+//                     existing path), and the lock atomically fails if anyone else already holds
+//                     it. Locked worktrees are also never retired by worktree-preflight.mjs.
 //
-// Verdicts: RESERVED_IN_PLACE / RESERVED_CREATED / BINDING_VERIFIED / RELEASED (exit 0);
-// OCCUPIED_CANDIDATE / DIRTY_CANDIDATE / STALE_HEAD_MISMATCH / NO_SAFE_BINDING / WRONG_CHECKOUT /
-// BINDING_NOT_FOUND / BINDING_MISMATCH / AMBIGUOUS (exit 2, fail closed); OPERATIONAL_ERROR (1).
+//                     Stage 1 finding P1 on PR #710: an earlier revision also let the invoking
+//                     checkout be reserved "in place" (no worktree churn) whenever it already
+//                     happened to sit at the exact target head, proven exclusive only by `git
+//                     worktree lock` -- an administrative/pruning-exclusion primitive, not proof
+//                     no other live process or session is using the path. This script has no
+//                     access to live session state to prove otherwise, so that path is removed:
+//                     `reserve` always creates a fresh, construction-proven-exclusive worktree.
+//   verify-binding -- the worker's mandatory first action, run from the reserved path, using the
+//                     CONTROLLER's own absolute copy of this script (`reserve`'s `scriptPath`
+//                     field, threaded through `checkoutBinding` -- see `reserveFromGate` and
+//                     Stage 1 finding P1 on PR #710 below). Proves that the command actually
+//                     executed inside the reserved checkout (not the worker's spawn-time sandbox
+//                     -- WRONG_CHECKOUT), that the reservation is this token's and this PR's,
+//                     that the checkout is not the primary, is clean, and that its commit still
+//                     equals the PR's *current* head re-read from GitHub at verification time (a
+//                     head that advanced after reservation fails closed as STALE_HEAD_MISMATCH --
+//                     a reservation never authorizes a stale commit). The output's `pushRefspec`
+//                     (`HEAD:<pr-branch>`) is a plain, non-forced push, so a head that advances
+//                     after verification is still refused by git itself.
+//
+//                     Stage 1 finding P1 on PR #710: `format-dispatch-prompt.mjs`'s generated
+//                     prompt runs this step with the worker's cwd set to the reserved/candidate
+//                     checkout -- exactly the untrusted PR content this reservation exists to
+//                     evaluate. A relative `tools/orchestration/pr-head-checkout-preflight.mjs`
+//                     invoked from there would load THAT checkout's own (possibly outdated or
+//                     PR-modified) copy of this file rather than the controller's, letting the
+//                     candidate being corrected certify its own binding contract. The dispatch
+//                     prompt now names `scriptPath` -- the controller's own absolute path to this
+//                     module, captured at `reserve` time before the worker even exists -- so
+//                     verification code is always controller-authoritative even while it
+//                     evaluates the reserved checkout's own live state as its cwd.
+//   release-binding -- unlocks the reservation; the created worktree is also removed (never
+//                     forced) once it is clean and its commit is proven contained in the PR branch
+//                     on origin, so no unpushed work can be discarded.
+//
+//                     Stage 1 finding P2 on PR #710: the generated dispatch prompt runs this step
+//                     from inside the reserved checkout itself (there is no other checkout for
+//                     the worker to run it from), which used to unconditionally keep (never
+//                     remove) the worktree -- deleting a directory that is a running process's
+//                     own OS-level working directory fails on this repository's Windows hosts, so
+//                     every ordinary successful correction leaked its generated worktree/branch.
+//                     `release-binding` now moves this process's own working directory out of the
+//                     reserved path first when invoked from inside it, then evaluates
+//                     clean/pushed/removal exactly as it would from anywhere else.
+//
+// Verdicts: RESERVED_CREATED / BINDING_VERIFIED / RELEASED (exit 0); OCCUPIED_CANDIDATE /
+// DIRTY_CANDIDATE / STALE_HEAD_MISMATCH / NO_SAFE_BINDING / WRONG_CHECKOUT / BINDING_NOT_FOUND /
+// BINDING_MISMATCH / AMBIGUOUS (exit 2, fail closed); OPERATIONAL_ERROR (1). A failed `reserve`
+// (piped through `reserveFromGate`) surfaces as its own terminal `CHECKOUT_BINDING_UNVERIFIED`
+// verdict state -- see `reserveFromGate`'s own comment and Stage 1 finding P2 on PR #710 below
+// for why that is a distinct recognized action-envelope state, not a violation of
+// STAGE1_CORRECTION_REQUIRED's own bounded envelope.
 
 export const BINDING_LOCK_PREFIX = "ldl-pr-head-binding";
 
@@ -530,6 +570,11 @@ export function formatBindingLockReason({ pr, sha, branch, mode, token }) {
 
 // Pure. `null` for anything that is not exactly this module's own reservation shape -- a lock
 // placed by anyone/anything else is never read as one of ours.
+//
+// `mode: "in-place"` is legacy-only (Stage 1 finding P1 on PR #710 removed the code path that
+// creates it -- see `reserve`'s own comment) but is still parsed here, and `releaseBinding` still
+// refuses to remove a binding in that mode, purely as a fail-closed guard against a lock reason
+// a pre-#710 controller may have already written before this fix deployed.
 export function parseBindingLockReason(reason) {
   if (typeof reason !== "string") return null;
   const tokens = reason.trim().split(/\s+/);
@@ -607,35 +652,20 @@ export async function reserve(
   const token = tokenImpl();
   const base = { pr, sha: head.sha, branch: head.branch, token, pushRefspec: pushRefspecFor(head.branch) };
 
-  // Already-correct binding: the spawned worker inherits the invoking checkout, which is already
-  // the exact current head -- reserve it in place, no churn. The primary checkout is never
-  // eligible and falls through to a fresh reservation instead of failing.
-  if (state.sha === head.sha && !isSamePath(state.path, state.primaryPath)) {
-    const entry = state.worktrees.find((w) => isSamePath(w.path, state.path));
-    if (!entry || entry.locked) {
-      return {
-        exitCode: 2,
-        verdict: "OCCUPIED_CANDIDATE",
-        path: state.path,
-        reason: entry ? `invoking checkout is already locked: ${entry.lockedReason ?? "(no reason)"}` : "invoking checkout is not a registered worktree",
-      };
-    }
-    const dirty = git.isDirty(state.path);
-    if (dirty !== false) {
-      return {
-        exitCode: 2,
-        verdict: "DIRTY_CANDIDATE",
-        path: state.path,
-        reason: dirty === true ? "invoking checkout contains local modifications" : "invoking checkout cleanliness could not be determined",
-      };
-    }
-    const lock = git.lockWorktree(state.path, state.path, formatBindingLockReason({ ...base, mode: "in-place" }));
-    if (!lock.ok) {
-      return { exitCode: 2, verdict: "OCCUPIED_CANDIDATE", path: state.path, reason: `could not reserve the invoking checkout: ${lock.reason}` };
-    }
-    return { exitCode: 0, verdict: "RESERVED_IN_PLACE", path: state.path, mode: "in-place", ...base };
-  }
-
+  // Issue #703 Stage 1 correction (P1 finding on PR #710): the invoking checkout already being
+  // at the exact target head was previously trusted as an "in place, no churn" reservation,
+  // proven exclusive only by `git worktree lock` -- an administrative/pruning-exclusion
+  // primitive, not evidence that no other live process or session is using the path (this
+  // script has no access to live session state -- see `classify-primary-path-lock.mjs`'s own
+  // module comment for the same constraint). Trusting it could hand a writer into a checkout
+  // another live session genuinely still owns, contradicting the exact-path single-session
+  // exclusivity this reservation exists to guarantee. No genuine occupancy primitive is
+  // available here, so this always creates one fresh, token-unique worktree instead -- its
+  // occupancy is then proven by construction (a path that did not exist before `git worktree
+  // add --lock` created it, and a lock that atomically fails if anything else already holds it),
+  // never inferred from "clean and already at head". `state.path`/`state.worktrees` above are
+  // still read for their `primaryPath` derivation (and to fail closed if the checkout's own git
+  // state cannot be read at all); the invoking checkout itself is otherwise never inspected.
   const fetchResult = git.fetchBranch(state.primaryPath, head.branch);
   if (!fetchResult.ok) {
     return { exitCode: 2, verdict: "NO_SAFE_BINDING", reason: `fetch failed: ${fetchResult.reason}` };
@@ -654,7 +684,13 @@ export async function reserve(
   if (!added.ok) {
     return { exitCode: 2, verdict: "NO_SAFE_BINDING", path, reason: `reserved worktree creation failed: ${added.reason}` };
   }
-  return { exitCode: 0, verdict: "RESERVED_CREATED", path, mode: "created", localBranch, ...base };
+  // `scriptPath` is THIS process's own absolute path -- the controller's authoritative copy,
+  // never the reserved checkout's own (possibly PR-modified or out-of-date) copy. Threaded
+  // through `reserveFromGate` into `checkoutBinding` so `format-dispatch-prompt.mjs` can tell
+  // the worker to invoke verification by this absolute path (Stage 1 finding P1 on PR #710:
+  // a relative `tools/orchestration/pr-head-checkout-preflight.mjs`, run with the worker's cwd
+  // inside the reserved/candidate checkout, would load THAT PR's own copy of this file instead).
+  return { exitCode: 0, verdict: "RESERVED_CREATED", path, mode: "created", localBranch, scriptPath: SELF_SCRIPT_PATH, ...base };
 }
 
 function findBinding(worktrees, token) {
@@ -729,7 +765,10 @@ export async function verifyBinding(
   };
 }
 
-export async function releaseBinding({ token, cwd = process.cwd() }, { git = defaultGitImpl() } = {}) {
+export async function releaseBinding(
+  { token, cwd = process.cwd() },
+  { git = defaultGitImpl(), chdir = process.chdir.bind(process) } = {},
+) {
   if (typeof token !== "string" || !token) {
     return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: "--release-binding <token> is required" };
   }
@@ -749,8 +788,29 @@ export async function releaseBinding({ token, cwd = process.cwd() }, { git = def
     return { exitCode: 2, verdict: "OCCUPIED_CANDIDATE", path: worktree.path, reason: `unlock failed: ${unlocked.reason}` };
   }
   const kept = (why) => ({ exitCode: 0, verdict: "RELEASED", path: worktree.path, removed: false, keptReason: why });
-  if (binding.mode !== "created") return kept("in-place reservations are only ever unlocked");
-  if (isSamePath(state.path, worktree.path)) return kept("release ran from inside the reserved checkout");
+  // Defense in depth only: `reserve` above never produces a "in-place" mode binding any more
+  // (the P1 fix above), so this branch is unreachable from that path today. It stays as a
+  // fail-closed guard against a legacy lock reason written by pre-#710 code, whose worktree this
+  // function never created and must never remove.
+  if (binding.mode !== "created") return kept("only a created reservation's worktree is ever removed");
+  // Issue #703 Stage 1 correction (P2 finding on PR #710): the generated dispatch prompt has the
+  // worker run --release-binding from inside the reserved checkout itself -- there is no other
+  // checkout for it to run this from. A directory that is a running process's own OS-level
+  // current working directory cannot be removed on this repository's Windows hosts, even by a
+  // different subprocess targeting it by path, so the prior unconditional early return here
+  // (kept, never removed) meant every normal successful correction left its generated worktree
+  // and local binding branch behind. Move this process's own working directory out of the
+  // reserved path first -- to the primary checkout, which every git mutation below already uses
+  // as its own cwd -- then evaluate clean/pushed/removal exactly as when release runs from
+  // elsewhere. `chdir` is injectable so a caller that cannot tolerate a global cwd change can
+  // supply its own relocation.
+  if (isSamePath(state.path, worktree.path)) {
+    try {
+      chdir(state.primaryPath);
+    } catch (err) {
+      return kept(`could not leave the reserved checkout before evaluating removal: ${reasonOf(err)}`);
+    }
+  }
   if (git.isDirty(worktree.path) !== false) return kept("reserved checkout is not proven clean");
   const fetched = git.fetchBranch(state.primaryPath, binding.branch);
   const remoteSha = fetched.ok ? git.remoteBranchSha(state.primaryPath, binding.branch) : null;
@@ -777,13 +837,30 @@ export async function reserveFromGate(gate, { repo, cwd } = {}, deps = {}) {
   }
   const result = await reserve({ repo, pr: gate.pr, cwd }, deps);
   if (result.exitCode !== 0) {
+    // Issue #703 Stage 1 correction (P2 finding on PR #710): a failed reservation must reach a
+    // terminal, no-dispatch outcome that is itself representable as compliant -- the original
+    // STAGE1_CORRECTION_REQUIRED envelope authorizes exactly `["reserve-correction-checkout",
+    // "dispatch-correction-worker"]` in order, so a controller that correctly stops here (never
+    // dispatching) would otherwise always be reported as missing the required dispatch action.
+    // CHECKOUT_BINDING_UNVERIFIED is its own recognized verdict state in action-envelope.mjs
+    // (mode "none", zero further authorized actions) precisely so compliance is checked against
+    // THIS terminal verdict for whatever the controller does after receiving it, not against the
+    // original bounded envelope the failed reservation never got to satisfy.
+    const state = "CHECKOUT_BINDING_UNVERIFIED";
     return {
       exitCode: result.exitCode,
-      output: { state: "CHECKOUT_BINDING_UNVERIFIED", pr: gate.pr, verdict: result.verdict, reason: result.reason ?? result.message ?? null, stopAfter: true },
+      output: {
+        state,
+        pr: gate.pr,
+        verdict: result.verdict,
+        reason: result.reason ?? result.message ?? null,
+        stopAfter: true,
+        actionEnvelope: getActionEnvelope(state),
+      },
     };
   }
-  const { path, token, sha, branch, mode, verdict } = result;
-  return { exitCode: 0, output: { ...gate, checkoutBinding: { path, token, sha, branch, mode, verdict } } };
+  const { path, token, sha, branch, mode, verdict, scriptPath } = result;
+  return { exitCode: 0, output: { ...gate, checkoutBinding: { path, token, sha, branch, mode, verdict, scriptPath } } };
 }
 
 // ---------------------------------------------------------------------------------------------
