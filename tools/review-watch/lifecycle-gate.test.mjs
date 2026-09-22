@@ -2647,25 +2647,29 @@ test("checkCloseAudit: ALREADY_TERMINAL — a safe no-op on an already-closed au
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "ALREADY_TERMINAL");
   assert.equal(result.auditIssue, 160);
-  assert.equal(apiCalls, 0, "no evidence (re-)evaluation is needed for an already-terminal audit");
-  // Issue #689 (the #686/#688 recurrence): the ALREADY_TERMINAL rerun path now also sweeps for
-  // shared-Work-issue predecessors, not only the corrects-chain walk, so a predecessor missed by
-  // one strategy can still be reconciled by rerunning close-audit against the already-closed
-  // successor. That sweep costs exactly one candidate listing per call — never a second one, and
-  // never an evidence re-evaluation (apiCalls stays 0 above).
-  assert.equal(listCalls, 1, "the shared-Work-issue predecessor sweep lists candidates exactly once");
+  // Stage 1 review finding on PR #700 (P1): bare CLOSED state is no longer trusted on its own —
+  // this rerun revalidates the closed audit's own evidence exactly once before deciding whether
+  // the broad shared-Work-issue sweep is authorized at all.
+  assert.equal(apiCalls, 1, "the closed audit's own evidence is revalidated exactly once before any sweep is authorized");
+  // This fixture's ghApiImpl returns no comments, so revalidation finds no backed-CLEAN evidence
+  // (own or a successor's) — the shared-Work-issue sweep is therefore never authorized, and the
+  // rerun falls back to the narrower corrects-chain walk alone, which needs no candidate listing.
+  assert.equal(listCalls, 1, "revalidation's own work-issue-match search lists candidates exactly once");
   assert.equal(closeCalls, 0, "must never attempt to close an already-closed issue");
   assert.equal(commentCalls, 0, "must never post a duplicate explanatory comment");
 });
 
 test("checkCloseAudit: ALREADY_TERMINAL is reported identically with --dry-run true (no mutation impls are even reachable)", async () => {
   const ghIssueViewImpl = async () => ({ body: closeAuditBody({ verdict: "CLEAN" }), state: "CLOSED", createdAt: "2026-09-05T09:00:00Z" });
-  // The shared-Work-issue predecessor sweep still lists candidates under --dry-run (only
+  // Stage 1 review finding on PR #700 (P1): the rerun now revalidates the closed audit's own
+  // evidence before authorizing any sweep, even under --dry-run, so a ghApiImpl stub is required.
+  const ghApiImpl = withKickoffOnly();
+  // The revalidation's own work-issue-match search still lists candidates under --dry-run (only
   // mutation is skipped), so a stub is required here even though close/comment are never reached.
   const ghIssueListImpl = async () => [];
   const result = await checkCloseAudit(
     { repo: "owner/repo", "audit-issue": 160, "dry-run": "true" },
-    { ghIssueViewImpl, ghIssueListImpl },
+    { ghIssueViewImpl, ghApiImpl, ghIssueListImpl },
   );
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "ALREADY_TERMINAL");
@@ -3044,6 +3048,9 @@ test("checkCloseAudit: rerunning close-audit after a successful cascade retireme
           apiCalls++;
           return [];
         },
+        // Stage 1 review finding on PR #700 (P1): the rerun now revalidates via a work-issue-match
+        // search before falling back to the corrects-chain walk, so a stub is required here too.
+        ghIssueListImpl: async () => [],
         ghCloseImpl: async () => {
           closeCalls++;
         },
@@ -3053,7 +3060,11 @@ test("checkCloseAudit: rerunning close-audit after a successful cascade retireme
       },
     );
     assert.equal(result.state, "ALREADY_TERMINAL", `#${auditIssue} must report ALREADY_TERMINAL on rerun`);
-    assert.equal(apiCalls, 0);
+    // Revalidation calls ghApiImpl to re-check this audit's own evidence only when its own
+    // recorded verdict is CLEAN (#702) -- a NOT CLEAN verdict (#700, #701) never reaches
+    // findStage2ReportEvidence at all, matching evaluateAuditCloseReadiness's own short-circuit.
+    const expectedApiCalls = chain[auditIssue].body.includes("### Verdict\n\nCLEAN") ? 1 : 0;
+    assert.equal(apiCalls, expectedApiCalls, `#${auditIssue} revalidates its own evidence via ghApiImpl only when its own recorded verdict is CLEAN`);
     assert.equal(closeCalls, 0, `must never re-attempt closing #${auditIssue}`);
     assert.equal(commentCalls, 0, `must never post a duplicate comment for #${auditIssue}`);
   }
@@ -3381,6 +3392,10 @@ test("checkCloseAudit: rerunning close-audit against an already-closed successor
   chain[688].state = "CLOSED"; // #688 is already closed -- the ALREADY_TERMINAL branch, matching the live rerun shape.
   const ghIssueViewImpl = async ({ number }) => chain[number];
   const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+  // Stage 1 review finding on PR #700 (P1): the rerun now revalidates #688's own evidence before
+  // authorizing the sweep -- #688 really is independently proven CLEAN (the exact #686/#688
+  // scenario this whole cascade exists for), so this fixture must actually back that claim.
+  const ghApiImpl = ghApiForThreads({ 688: completedAuditThread({ verdict: "CLEAN" }) });
 
   const closeCalls = [];
   const commentCalls = [];
@@ -3389,6 +3404,7 @@ test("checkCloseAudit: rerunning close-audit against an already-closed successor
     {
       ghIssueViewImpl,
       ghIssueListImpl,
+      ghApiImpl,
       ghCloseImpl: async (a) => {
         closeCalls.push(a);
         chain[a.auditIssue].state = "CLOSED";
@@ -3406,6 +3422,7 @@ test("checkCloseAudit: rerunning close-audit against an already-closed successor
     {
       ghIssueViewImpl,
       ghIssueListImpl,
+      ghApiImpl,
       ghCloseImpl: async (a) => closeCalls.push(a),
       ghCommentImpl: async (a) => commentCalls.push(a),
     },
@@ -3442,6 +3459,75 @@ test("checkCloseAudit: a gh issue list failure in the shared-Work-issue sweep de
     "the listing failure itself must be recorded, not silently swallowed",
   );
   assert.deepEqual(closeCalls.map((c) => c.auditIssue), [702, 700]);
+});
+
+// -- Stage 1 review findings on PR #700 (shared-Work-issue sweep authority hardening) ------
+
+// P1: a closed audit issue's bare CLOSED state must never be trusted as authority for the broad
+// shared-Work-issue sweep on its own -- this fixture simulates an audit closed manually or as an
+// abandoned/duplicate issue, whose own verdict never actually resolved to backed CLEAN (own or a
+// successor's). A rerun against it must leave an unrelated open predecessor sharing its Work issue
+// field untouched, never closing it with a comment that falsely claims completed evidence.
+test("checkCloseAudit: the ALREADY_TERMINAL rerun never authorizes the shared-Work-issue sweep on an unverified closed audit (Stage 1 review finding P1)", async () => {
+  const chain = {
+    // #800 was closed without ever being backed CLEAN itself (verdict PENDING, no comment
+    // evidence) -- e.g. closed manually as a duplicate/abandoned issue, not by this tooling.
+    800: chainFixtureWithCorrects({ workIssue: "#900", verdict: "PENDING", createdAt: "2026-09-22T12:00:00Z" }),
+    // #801 shares the same Work issue and predates #800, but is a completely independent, still-
+    // legitimately-open audit -- it must never be swept merely because #800 is closed.
+    801: chainFixtureWithCorrects({ workIssue: "#900", verdict: "PENDING", createdAt: "2026-09-22T10:00:00Z" }),
+  };
+  chain[800].state = "CLOSED";
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+  const ghApiImpl = async () => []; // no comment evidence anywhere -- nothing is genuinely backed CLEAN.
+
+  const closeCalls = [];
+  const commentCalls = [];
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 800 },
+    { ghIssueViewImpl, ghIssueListImpl, ghApiImpl, ghCloseImpl: async (a) => closeCalls.push(a), ghCommentImpl: async (a) => commentCalls.push(a) },
+  );
+
+  assert.equal(result.state, "ALREADY_TERMINAL");
+  assert.equal(result.retiredPredecessors.length, 0, "#801 must never be swept on the strength of #800's unverified CLOSED state alone");
+  assert.equal(closeCalls.length, 0, "#801 must never be closed");
+  assert.equal(commentCalls.length, 0, "no false supersession comment must ever be posted");
+});
+
+// P2: even when the sweep IS genuinely authorized (a real backed-CLEAN successor), a predecessor
+// it finds may itself already be independently backed CLEAN -- e.g. its own close step was
+// interrupted after a completed CLEAN report landed. Closing it with the standard superseded-
+// wording comment ("this audit issue's own verdict is not backed CLEAN") would durably misstate
+// its own history; it must be closed citing its own evidence instead.
+test("checkCloseAudit: the shared-Work-issue sweep cites a candidate's own CLEAN evidence, never a false 'not backed CLEAN' claim (Stage 1 review finding P2)", async () => {
+  const chain = {
+    // #901 is an independently backed-CLEAN predecessor that never got closed (its own close step
+    // was interrupted) -- it shares #902's Work issue and predates it.
+    901: chainFixtureWithCorrects({ workIssue: "#950", verdict: "CLEAN", createdAt: "2026-09-22T10:00:00Z" }),
+    902: chainFixtureWithCorrects({ workIssue: "#950", verdict: "CLEAN", createdAt: "2026-09-22T12:00:00Z" }),
+  };
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+  const ghApiImpl = ghApiForThreads({
+    901: completedAuditThread({ verdict: "CLEAN" }),
+    902: completedAuditThread({ verdict: "CLEAN" }),
+  });
+
+  const closeCalls = [];
+  const commentCalls = [];
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 902 },
+    { ghIssueViewImpl, ghIssueListImpl, ghApiImpl, ghCloseImpl: async (a) => closeCalls.push(a), ghCommentImpl: async (a) => commentCalls.push(a) },
+  );
+
+  assert.equal(result.state, "CLOSED");
+  assert.equal(result.retiredPredecessors.length, 1);
+  assert.equal(result.retiredPredecessors[0].auditIssue, 901);
+  assert.deepEqual(closeCalls.map((c) => c.auditIssue), [902, 901]);
+  const predecessorComment = commentCalls.find((c) => c.auditIssue === 901);
+  assert.match(predecessorComment.body, /this audit issue's own recorded verdict is backed CLEAN/, "#901's own CLEAN evidence must be cited");
+  assert.doesNotMatch(predecessorComment.body, /not backed/, "must never falsely claim #901's own verdict is not backed CLEAN");
 });
 
 // -- normalizeSearchIssuesPage (Stage 1 review finding on PR #435: real pagination for

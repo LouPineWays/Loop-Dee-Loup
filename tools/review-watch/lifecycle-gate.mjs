@@ -1924,7 +1924,7 @@ async function retireSharedWorkIssuePredecessors(
   workIssueRef,
   candidates,
   reportEvidence,
-  { ghCloseImpl, ghCommentImpl, dryRun = false },
+  { ghCloseImpl, ghCommentImpl, ghApiImpl, bot, dryRun = false },
   excludeNumbers = new Set(),
 ) {
   const retired = [];
@@ -1963,6 +1963,24 @@ async function retireSharedWorkIssuePredecessors(
       continue;
     }
 
+    // Stage 1 review finding on PR #700 (P2): never assume this candidate's own verdict is "not
+    // backed CLEAN" merely because it predates the current audit and shares its Work issue --
+    // an earlier audit whose close step was interrupted after an independently valid completed
+    // CLEAN report would otherwise be closed with a comment that falsely attributes its
+    // terminalization to #currentNumber alone. Revalidate its own evidence first; a failure
+    // evaluating this one candidate is recorded as a skip and never blocks the rest of the sweep,
+    // matching every other per-candidate fail-closed check in this loop.
+    let candidateOwn;
+    try {
+      candidateOwn = await evaluateAuditCloseReadiness(repo, candidateNumber, candidate.body ?? "", { ghApiImpl, bot });
+    } catch (err) {
+      skipped.push({
+        auditIssue: candidateNumber,
+        reason: `gh api call failed while evaluating candidate's own evidence: ${err.message}`,
+      });
+      continue;
+    }
+
     try {
       await ghCloseImpl({ repo, auditIssue: candidateNumber });
     } catch (err) {
@@ -1971,11 +1989,14 @@ async function retireSharedWorkIssuePredecessors(
     }
     let commentPosted = true;
     let commentError = null;
+    const closeCommentBody = candidateOwn.backedClean
+      ? ownCleanCloseComment({ repo, auditIssue: candidateNumber, reportEvidence: candidateOwn.reportEvidence })
+      : supersededCloseComment({ repo, supersededBy: currentNumber, reportEvidence });
     try {
       await ghCommentImpl({
         repo,
         auditIssue: candidateNumber,
-        body: supersededCloseComment({ repo, supersededBy: currentNumber, reportEvidence }),
+        body: closeCommentBody,
       });
     } catch (err) {
       commentPosted = false;
@@ -2004,7 +2025,7 @@ async function retireSupersededPredecessors(
   repo,
   { number: currentNumber, body: currentBody, createdAt: currentCreatedAt },
   reportEvidence,
-  { ghIssueViewImpl, ghIssueListImpl, ghCloseImpl, ghCommentImpl, dryRun = false },
+  { ghIssueViewImpl, ghIssueListImpl, ghCloseImpl, ghCommentImpl, ghApiImpl, bot, dryRun = false },
 ) {
   const chainCascade = await retirePredecessorChain(
     repo,
@@ -2044,7 +2065,7 @@ async function retireSupersededPredecessors(
         workIssueRef,
         candidates,
         reportEvidence,
-        { ghCloseImpl, ghCommentImpl, dryRun },
+        { ghCloseImpl, ghCommentImpl, ghApiImpl, bot, dryRun },
         excludeNumbers,
       );
     }
@@ -2177,6 +2198,59 @@ export async function checkCloseWorkIssue(
   };
 }
 
+// Pure orchestration (throws only if `ghApiImpl`/`ghIssueListImpl` throws, same convention as
+// evaluateAuditCloseReadiness). Revalidates whether `auditIssueNumber` genuinely has authority to
+// close, using the exact same two-part test `checkCloseAudit`'s own fresh-run cases (a)/(b) use to
+// decide *its own* close: either its recorded verdict is independently backed CLEAN, or a distinct,
+// later-created successor audit issue resolves to backed-CLEAN via the shared-Work-issue or
+// corrects-chain strategy. Stage 1 review finding on PR #700 (P1): `checkCloseAudit`'s
+// ALREADY_TERMINAL rerun path used to treat bare `state === "CLOSED"` alone as sufficient authority
+// to run the broad shared-Work-issue predecessor sweep — but an audit closed manually, as an
+// abandoned/duplicate issue, or for any other reason that never actually resolved to backed-CLEAN
+// (its own or a successor's) is not genuine supersession provenance, and a rerun against it could
+// close every earlier open audit sharing its Work issue field while posting comments that falsely
+// claim completed Stage 2 evidence. This is the revalidation that rerun path now performs before
+// trusting that broad sweep at all.
+async function determineAuditClosingAuthority(repo, { number: auditIssueNumber, body, createdAt }, { ghApiImpl, ghIssueListImpl, bot }) {
+  const own = await evaluateAuditCloseReadiness(repo, auditIssueNumber, body ?? "", { ghApiImpl, bot });
+  if (own.backedClean) {
+    return { authorized: true, reportEvidence: own.reportEvidence };
+  }
+
+  const workIssueRef = parseWorkIssueRef(body ?? "");
+  if (workIssueRef === null) {
+    return { authorized: false, reportEvidence: null };
+  }
+
+  const candidates = await ghIssueListImpl({ repo });
+  const auditCreatedMs = new Date(createdAt ?? 0).getTime();
+  const sortedCandidates = [...candidates].sort(
+    (a, b) => new Date(a.createdAt ?? 0).getTime() - new Date(b.createdAt ?? 0).getTime(),
+  );
+
+  if (workIssueRef !== "none") {
+    for (const candidate of sortedCandidates) {
+      if (Number(candidate.number) === auditIssueNumber) continue;
+      const candidateCreatedMs = new Date(candidate.createdAt ?? 0).getTime();
+      if (!(candidateCreatedMs > auditCreatedMs)) continue;
+      if (parseWorkIssueRef(candidate.body ?? "") !== workIssueRef) continue;
+
+      const candidateOwn = await evaluateAuditCloseReadiness(repo, Number(candidate.number), candidate.body ?? "", { ghApiImpl, bot });
+      if (candidateOwn.backedClean) {
+        return { authorized: true, reportEvidence: candidateOwn.reportEvidence };
+      }
+    }
+  }
+
+  const candidatesByNumber = new Map(sortedCandidates.map((candidate) => [Number(candidate.number), candidate]));
+  const chainResult = await findCorrectionChainSuccessor(repo, auditIssueNumber, auditCreatedMs, candidatesByNumber, new Set(), { ghApiImpl, bot });
+  if (chainResult) {
+    return { authorized: true, reportEvidence: chainResult.reportEvidence };
+  }
+
+  return { authorized: false, reportEvidence: null };
+}
+
 // Deterministic, idempotent audit-issue terminalization predicate and close-out command (issue
 // #407) — see this file's module comment for the full state vocabulary and rationale.
 // `ghIssueViewImpl`, `ghApiImpl`, `ghIssueListImpl`, `ghCloseImpl`, and `ghCommentImpl` are all
@@ -2214,22 +2288,46 @@ export async function checkCloseAudit(
   // An already-closed audit issue is already terminal for *its own* evidence, so there is no
   // evidence to (re-)compute and this issue itself is never re-closed or re-commented-on. Checked
   // before any evidence evaluation for that reason. But the predecessor cascade below is still
-  // attempted here (idempotently — retireSupersededPredecessors never re-closes or re-comments on
-  // an already-closed predecessor, and does nothing at all when neither strategy finds one):
-  // Stage 1 review finding on this PR (P2) — without this, a predecessor whose close attempt
-  // failed transiently on a prior run would remain open permanently, since a retry against this
-  // same terminal audit used to exit immediately as ALREADY_TERMINAL with no way to ever revisit
-  // that predecessor again. Issue #689 (the #686/#688 recurrence): this rerun path is also how a
-  // predecessor missed by a since-fixed corrects-chain authoring defect gets reconciled — the
-  // shared-Work-issue strategy inside retireSupersededPredecessors runs here too, using only this
-  // audit's own already-fetched body (no evidence re-evaluation, matching the comment above).
+  // attempted here (idempotently — retireSupersededPredecessors/retirePredecessorChain never
+  // re-close or re-comment on an already-closed predecessor, and do nothing at all when no
+  // strategy finds one): Stage 1 review finding on this PR (P2, prior round) — without this, a
+  // predecessor whose close attempt failed transiently on a prior run would remain open
+  // permanently, since a retry against this same terminal audit used to exit immediately as
+  // ALREADY_TERMINAL with no way to ever revisit that predecessor again. Issue #689 (the
+  // #686/#688 recurrence): this rerun path is also how a predecessor missed by a since-fixed
+  // corrects-chain authoring defect gets reconciled — the shared-Work-issue strategy runs here too.
+  //
+  // Stage 1 review finding on this PR (P1): bare `state === "CLOSED"` alone is never authority for
+  // the broad shared-Work-issue sweep — an audit closed manually, as an abandoned/duplicate issue,
+  // or for any reason that never actually resolved to backed-CLEAN (its own or a successor's) is
+  // not genuine supersession provenance, and running that sweep on its strength could close every
+  // earlier open audit sharing its Work issue field while falsely claiming completed evidence.
+  // Revalidate via `determineAuditClosingAuthority` first; only an authorized result runs the full
+  // cascade (with its own genuine reportEvidence, replacing the previously-hardcoded `null`).
+  // Otherwise, fall back to the narrower corrects-chain walk alone — the original, pre-#689
+  // behavior, which requires its own explicit chain-provenance pointer rather than merely a shared
+  // Work issue field.
   if (auditData.state === "CLOSED") {
-    const cascade = await retireSupersededPredecessors(
-      repo,
-      { number: auditIssueNumber, body: auditData.body, createdAt: auditData.createdAt },
-      null,
-      { ghIssueViewImpl, ghIssueListImpl, ghCloseImpl, ghCommentImpl, dryRun },
-    );
+    const startAudit = { number: auditIssueNumber, body: auditData.body, createdAt: auditData.createdAt };
+    let authority;
+    try {
+      authority = await determineAuditClosingAuthority(repo, startAudit, { ghApiImpl, ghIssueListImpl, bot });
+    } catch (err) {
+      return { exitCode: 1, message: `gh api call failed while revalidating closed audit issue ${repo}#${auditIssue}: ${err.message}` };
+    }
+
+    const cascade = authority.authorized
+      ? await retireSupersededPredecessors(repo, startAudit, authority.reportEvidence, {
+          ghIssueViewImpl,
+          ghIssueListImpl,
+          ghCloseImpl,
+          ghCommentImpl,
+          ghApiImpl,
+          bot,
+          dryRun,
+        })
+      : await retirePredecessorChain(repo, startAudit, { ghIssueViewImpl, ghCloseImpl, ghCommentImpl, dryRun });
+
     return {
       exitCode: 0,
       state: "ALREADY_TERMINAL",
@@ -2261,6 +2359,8 @@ export async function checkCloseAudit(
         ghIssueListImpl,
         ghCloseImpl,
         ghCommentImpl,
+        ghApiImpl,
+        bot,
         dryRun: true,
       });
       return {
@@ -2283,6 +2383,8 @@ export async function checkCloseAudit(
       ghIssueListImpl,
       ghCloseImpl,
       ghCommentImpl,
+      ghApiImpl,
+      bot,
       dryRun: false,
     });
     return { ...closeResult, retiredPredecessors: cascade.retired, predecessorChainNotes: cascade.skipped };
@@ -2381,6 +2483,8 @@ export async function checkCloseAudit(
         ghIssueListImpl,
         ghCloseImpl,
         ghCommentImpl,
+        ghApiImpl,
+        bot,
         dryRun: true,
       });
       return {
@@ -2404,6 +2508,8 @@ export async function checkCloseAudit(
       ghIssueListImpl,
       ghCloseImpl,
       ghCommentImpl,
+      ghApiImpl,
+      bot,
       dryRun: false,
     });
     return { ...closeResult, retiredPredecessors: cascade.retired, predecessorChainNotes: cascade.skipped };
