@@ -64,6 +64,19 @@
 // router's own recognized-shape list must never silently fall behind action-envelope.mjs's
 // table without being noticed.
 //
+// Operational-failure/domain-verdict boundary through blocker reconciliation (Stage 1 finding on
+// PR #716): `reconcile-control-blocker.mjs` documents exactly four non-`UNBLOCKED` states as
+// established terminal domain outcomes — `INCOMPLETE_PREREQUISITE`, `AMBIGUOUS_BLOCKER`,
+// `ALREADY_UNBLOCKED`, `ALREADY_TERMINAL` (AGENTS.md's own BLOCKED paragraph: "any other result
+// ... stops with this same concise chat contract, unchanged"). Its `REJECTED` / exit-2 state is
+// not one of those — it means the canonical proposed control snapshot failed
+// `write-control-snapshot.mjs`'s own validation, i.e. the child invocation itself failed, not
+// that a domain outcome was reached. Only the four documented states may be normalized to a
+// successful terminal `BLOCKED` session-entry verdict; `REJECTED` (or any other state this
+// router's own recognized list has not been taught) must propagate as an operational failure —
+// `ok: false` — preserving the reconciliation's own error detail so the rejected write remains
+// diagnosable. Avoid a broad "anything other than UNBLOCKED is terminal BLOCKED" rule.
+//
 // Tests: node --test tools/orchestration/session-entry-gate.test.mjs
 
 import { checkReadyDispatch, resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
@@ -77,6 +90,18 @@ import { clearLastGateVerdict, persistLastGateVerdict } from "./action-envelope-
 // never be able to spin forever.
 const MAX_CHAIN_HOPS = 6;
 
+// The complete set of `reconcile-control-blocker.mjs` non-`UNBLOCKED` states that AGENTS.md's own
+// BLOCKED paragraph documents as established terminal domain outcomes (see the module comment's
+// "Operational-failure/domain-verdict boundary" section). `REJECTED` and any state outside this
+// set are child-invocation failures, not domain outcomes, and must fail closed as operational
+// errors rather than being folded into a generic "anything but UNBLOCKED is terminal" rule.
+const TERMINAL_RECONCILIATION_STATES = new Set([
+  "INCOMPLETE_PREREQUISITE",
+  "AMBIGUOUS_BLOCKER",
+  "ALREADY_UNBLOCKED",
+  "ALREADY_TERMINAL",
+]);
+
 function provenanceEntry(gate, verdict) {
   return {
     gate,
@@ -86,8 +111,8 @@ function provenanceEntry(gate, verdict) {
   };
 }
 
-function operationalError(message, provenance) {
-  return { ok: false, exitCode: 1, message, provenance };
+function operationalError(message, provenance, extra = {}) {
+  return { ok: false, exitCode: 1, message, provenance, ...extra };
 }
 
 // The deterministic router itself. `repo`/`controlIssue` mirror the two leaf gates' own call
@@ -201,6 +226,20 @@ export async function runSessionEntryGate(
       });
       if (typeof reconciled?.state !== "string") {
         return operationalError(reconciled?.message ?? "reconcile-control-blocker.mjs produced no verdict.", provenance);
+      }
+      if (reconciled.state !== "UNBLOCKED" && !TERMINAL_RECONCILIATION_STATES.has(reconciled.state)) {
+        // Not one of the four documented terminal domain outcomes -- e.g. `REJECTED` (exit 2):
+        // the canonical proposed control snapshot failed validation and nothing was written. That
+        // is a failed child invocation, not an established domain result, so it must not be
+        // normalized into a successful terminal BLOCKED session-entry verdict. Preserve the
+        // reconciliation's own error detail (`errors`/`message`) so the rejected write stays
+        // diagnosable.
+        return operationalError(
+          reconciled.message ??
+            `reconcile-control-blocker.mjs returned unexpected state "${reconciled.state}" (not UNBLOCKED or a documented terminal outcome).`,
+          provenance,
+          { reconciliation: reconciled },
+        );
       }
       if (reconciled.state !== "UNBLOCKED") {
         // The one reconciliation attempt AGENTS.md's own BLOCKED paragraph authorizes has now

@@ -212,6 +212,57 @@ for (const nonUnblockedState of ["INCOMPLETE_PREREQUISITE", "AMBIGUOUS_BLOCKER",
   });
 }
 
+// -- BLOCKED reconciliation: REJECTED is an operational failure, not a terminal domain outcome --
+
+test("BLOCKED + blockerReconciliationEligible -> REJECTED fails operationally (ok:false), never a successful terminal BLOCKED verdict", async () => {
+  // Stage 1 review finding on PR #716: `reconcile-control-blocker.mjs`'s `REJECTED` / exit-2
+  // state means the composed proposed control snapshot failed write-control-snapshot.mjs's own
+  // validation -- a failed child invocation, not one of the four documented terminal domain
+  // outcomes (INCOMPLETE_PREREQUISITE, AMBIGUOUS_BLOCKER, ALREADY_UNBLOCKED, ALREADY_TERMINAL).
+  // It must propagate as an operational failure, preserving enough detail to diagnose the
+  // rejected write, rather than being folded into "anything but UNBLOCKED is terminal BLOCKED".
+  const blockedVerdict = {
+    exitCode: 4,
+    state: "BLOCKED",
+    controlIssue: 301,
+    repo: REPO,
+    reasons: ["Blocker: #299"],
+    blockerReconciliationEligible: true,
+    actionEnvelope: getActionEnvelope("BLOCKED", { blockerReconciliationEligible: true }),
+  };
+  const rejectedResult = {
+    exitCode: 2,
+    state: "REJECTED",
+    controlIssue: 301,
+    errors: ["Lifecycle field is ambiguous."],
+    message: "reconcile-control-blocker.mjs: proposed control snapshot failed validation.",
+  };
+
+  let readyCallCount = 0;
+  const result = await runSessionEntryGate(
+    { repo: REPO, controlIssue: 301 },
+    {
+      checkReadyDispatchImpl: async () => {
+        readyCallCount += 1;
+        return blockedVerdict;
+      },
+      runNextReviewTransitionGateImpl: async () => {
+        throw new Error("must not be called for this shape");
+      },
+      checkReconcileControlBlockerImpl: async () => rejectedResult,
+      resolveRepoIdentityImpl: stubResolveRepoIdentity,
+    },
+  );
+
+  assert.equal(readyCallCount, 1, "must never re-invoke ready-dispatch-gate after a REJECTED reconciliation result");
+  assert.equal(result.ok, false, "REJECTED must fail operationally, not be normalized into a successful domain verdict");
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /failed validation/);
+  assert.equal(result.reconciliation.state, "REJECTED");
+  assert.equal(result.provenance.at(-1).gate, "reconcile-control-blocker");
+  assert.equal(result.provenance.at(-1).state, "REJECTED");
+});
+
 // -- Negative control: ordinary ("fallthrough") NOT_READY never chains ----------------------
 
 test("ordinary NOT_READY (no postPrLifecycle, mode fallthrough) never invokes a chained gate", async () => {
