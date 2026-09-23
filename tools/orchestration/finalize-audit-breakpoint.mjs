@@ -54,17 +54,25 @@
 // either way, since it only ever re-derives evidence from the live Audit Issue/PR, never from
 // who or what created them).
 //
-// Usage:
+// Usage (split thin/thick control-Issue flow):
 //   node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue 445 \
 //     --execution-issue 440 --pr 558 --audit-issue 559
 //   node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue 445 \
 //     --execution-issue none --pr 558 --audit-issue 559
 //
-// Exit codes: 0 (FINALIZED), 1 (operational error — missing/invalid args, unresolved
-// repository identity, or an underlying `gh` read that itself failed), 2
-// (AUDIT_BREAKPOINT_UNVERIFIED — a fail-closed refusal; the durable control Issue body is
-// never mutated on this path since `write-control-snapshot.mjs` is only ever reached after
-// every prior check has already passed).
+// Usage (direct-reference flow, no thin control Issue -- Stage 1 correction on PR #721):
+// omitting --control-issue selects `runDirectReferenceVerification` instead of `run` above --
+// the same PR-merged/Audit-Issue-matches evidence, minus every control-body check and the
+// write-control-snapshot.mjs projection, since there is no control Issue to project onto:
+//   node tools/orchestration/finalize-audit-breakpoint.mjs \
+//     --execution-issue 440 --pr 558 --audit-issue 559
+//
+// Exit codes: 0 (FINALIZED for the control-Issue flow, AUDIT_VERIFIED for the direct-reference
+// flow), 1 (operational error — missing/invalid args, unresolved repository identity, or an
+// underlying `gh` read that itself failed), 2 (AUDIT_BREAKPOINT_UNVERIFIED — a fail-closed
+// refusal; the durable control Issue body is never mutated on this path since
+// `write-control-snapshot.mjs` is only ever reached after every prior check has already
+// passed, and the direct-reference flow never calls it at all).
 //
 // Tests: node --test tools/orchestration/finalize-audit-breakpoint.test.mjs
 
@@ -431,6 +439,75 @@ export async function run(
   };
 }
 
+// Stage 1 correction on PR #721 (Codex P1 finding, "Keep direct-reference audits off the
+// control finalizer"): a direct-reference AUDIT_READY result (no thin/thick control Issue at
+// all -- next-review-transition-gate.mjs's own `--pr`/`--head`/`--issue` mode) has nothing for
+// `run()` above to project a control snapshot onto, and `run()` hard-requires a positive
+// `--control-issue`. This is the "mechanically verified continuation that does not invoke a
+// control-only finalizer" docs/bounded-review-cycle.md's "Stage 2 preparation worker" section
+// requires for that flow instead: it independently re-derives that the PR actually merged and
+// that the Audit Issue's own "Exact merge commit"/"Work issue" fields genuinely correspond to
+// it -- reusing the exact same `verifyPrMerged`/`verifyAuditIssueMatches` checks `run()` performs
+// above, never a second competing parse -- but it never touches `write-control-snapshot.mjs`,
+// since there is no control Issue to project a breakpoint onto. Only once this reports
+// `AUDIT_VERIFIED` is the reviewer trigger (Stage 2 step 4) authorized for a direct-reference
+// flow (`tools/orchestration/action-envelope.mjs`'s `verify-direct-reference-audit` action).
+export async function runDirectReferenceVerification(
+  { repo, executionIssue, pr, auditIssue },
+  { ghPrViewImpl = defaultGhPrView, ghAuditIssueViewImpl = defaultGhAuditIssueView } = {},
+) {
+  if (!isPositiveInteger(pr) || !isPositiveInteger(auditIssue)) {
+    return {
+      exitCode: 1,
+      message: "Missing/invalid required args: --pr and --audit-issue must both be positive integers.",
+    };
+  }
+  if (!isValidExecutionIssueArg(executionIssue)) {
+    return {
+      exitCode: 1,
+      message: 'Missing/invalid required arg: --execution-issue must be a positive integer, or the literal "none".',
+    };
+  }
+
+  let prView;
+  try {
+    prView = await ghPrViewImpl({ repo, pr });
+  } catch (err) {
+    return unverified({ controlIssue: null, executionIssue, pr, auditIssue, reason: `gh pr view failed for PR #${pr}: ${err.message}` });
+  }
+  const mergedCheck = verifyPrMerged(prView);
+  if (!mergedCheck.ok) {
+    return unverified({ controlIssue: null, executionIssue, pr, auditIssue, reason: mergedCheck.reason });
+  }
+
+  let auditView;
+  try {
+    auditView = await ghAuditIssueViewImpl({ repo, auditIssue });
+  } catch (err) {
+    return unverified({
+      controlIssue: null,
+      executionIssue,
+      pr,
+      auditIssue,
+      reason: `gh issue view failed for Audit Issue #${auditIssue}: ${err.message}`,
+    });
+  }
+  const auditMatchCheck = verifyAuditIssueMatches(auditView, { mergeCommitOid: mergedCheck.mergeCommitOid, executionIssue });
+  if (!auditMatchCheck.ok) {
+    return unverified({ controlIssue: null, executionIssue, pr, auditIssue, reason: auditMatchCheck.reason });
+  }
+
+  return {
+    exitCode: 0,
+    state: "AUDIT_VERIFIED",
+    controlIssue: null,
+    executionIssue,
+    pr,
+    auditIssue,
+    message: `AUDIT_VERIFIED ${pr} ${auditIssue}`,
+  };
+}
+
 function defaultGhIssueView({ repo, controlIssue }) {
   const args = ["issue", "view", String(controlIssue), "--json", "body"];
   if (repo) args.push("--repo", repo);
@@ -482,7 +559,14 @@ async function main() {
   const rawExecutionIssue = args["execution-issue"];
   const executionIssue = rawExecutionIssue === "none" ? "none" : rawExecutionIssue != null ? Number(rawExecutionIssue) : null;
 
-  const result = await run({ repo: resolvedRepo, controlIssue, executionIssue, pr, auditIssue });
+  // Stage 1 correction on PR #721: omitting --control-issue selects the direct-reference
+  // verification continuation (runDirectReferenceVerification) instead of the split thin/thick
+  // control-Issue finalizer (run) -- there is no control Issue to project a breakpoint onto in
+  // that mode.
+  const result =
+    controlIssue !== null
+      ? await run({ repo: resolvedRepo, controlIssue, executionIssue, pr, auditIssue })
+      : await runDirectReferenceVerification({ repo: resolvedRepo, executionIssue, pr, auditIssue });
 
   if (result.exitCode === 1) {
     console.error(result.message);

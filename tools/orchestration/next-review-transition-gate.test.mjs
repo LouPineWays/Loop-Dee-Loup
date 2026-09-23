@@ -1428,12 +1428,16 @@ test("runNextReviewTransitionGate: control-Issue mode honors an explicit --head,
 // has no notion of "already merged" and would re-authorize a second merge-pr action); it must
 // resume forward by dispatching the Stage 2 preparation worker again.
 
-test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 reference that is already MERGED resolves to STAGE2_PREPARATION_REQUIRED, never re-running stage1-gate/mergeReady", async () => {
+test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 reference that is already MERGED, and whose control Issue already carries a settled Stage 1 disposition, resolves to STAGE2_PREPARATION_REQUIRED, never re-running stage1-gate/mergeReady", async () => {
+  // Stage 1 correction on PR #721: CONTROL_BODY_PRE_MERGE_SATISFIED carries a canonical
+  // "satisfied at <sha>" Stage 1 disposition -- the case this resume path may safely proceed
+  // from. CONTROL_BODY_PRE_MERGE (the stranded "requested" shape) is covered by the distinct
+  // STAGE2_PREPARATION_BLOCKED_ON_STAGE1 test below.
   let prStateReadFor = null;
   const result = await runNextReviewTransitionGate(
     { repo: "o/r", controlIssue: "322" },
     {
-      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE, state: "OPEN" }),
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_SATISFIED, state: "OPEN" }),
       ghPrStateImpl: async ({ number }) => {
         prStateReadFor = number;
         return { headRefOid: "mergedhead", state: "MERGED" };
@@ -1457,6 +1461,40 @@ test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 referenc
   assert.deepEqual(result.actionEnvelope, {
     mode: "bounded",
     authorizedActions: ["dispatch-stage2-preparation-worker"],
+  });
+});
+
+// Stage 1 correction on PR #721 (Codex P1 finding): a merged PR whose control Issue never
+// durably settled a Stage 1 disposition (the stranded "requested" shape, or none at all) must
+// not bypass Stage 1 authority merely because it merged.
+test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 reference that is already MERGED, but whose control Issue's Stage 1 disposition is still the stranded 'requested' shape, fails closed to STAGE2_PREPARATION_BLOCKED_ON_STAGE1 and names the recovery command, never resuming Stage 2 preparation", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      stage1RunImpl: async () => {
+        throw new Error("should never be called -- Stage 1 is unverified, not a re-run case");
+      },
+      checkMergeReadyImpl: async () => {
+        throw new Error("should never be called -- Stage 1 is unverified, not a re-run case");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE2_PREPARATION_BLOCKED_ON_STAGE1");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.controlIssue, 322);
+  assert.equal(result.pr, 376);
+  assert.equal(result.issue, 375);
+  assert.match(result.reason, /not a canonical satisfied\/exempt or correction-satisfied disposition/);
+  assert.match(
+    result.nextCommand,
+    /finalize-stage1-satisfied-breakpoint\.mjs --control-issue 322 --execution-issue 375 --pr 376 --recover true/,
+  );
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["run-finalize-stage1-satisfied-recover"],
   });
 });
 

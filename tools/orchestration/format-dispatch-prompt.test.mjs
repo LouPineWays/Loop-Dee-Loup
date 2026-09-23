@@ -648,16 +648,58 @@ test("formatStage2PreparationWorkerDispatchPrompt includes the exact PR, Executi
   assert.match(prompt, /#322/);
 });
 
-test("formatStage2PreparationWorkerDispatchPrompt omits the Execution Issue line for the 'none' sentinel and the Controlling Issue line when absent (direct-reference no-work-issue mode)", () => {
+test("formatStage2PreparationWorkerDispatchPrompt renders an explicit 'Execution Issue: none.' declaration for the 'none' sentinel (never omits it) and omits the Controlling Issue line when absent (direct-reference no-work-issue mode)", () => {
+  // Stage 1 correction on PR #721 (Codex P1 finding): omitting the Execution Issue line
+  // entirely for "none" is indistinguishable from missing context to a worker with no control
+  // Issue to read it from -- it must be rendered explicitly instead.
   const prompt = formatStage2PreparationWorkerDispatchPrompt({ issue: "none", pr: 376 });
-  assert.ok(!prompt.includes("Execution Issue"));
+  assert.match(prompt, /Execution Issue: none\./);
   assert.ok(!prompt.includes("Controlling Issue"));
   assert.match(prompt, /#376/);
 });
 
-test("formatStage2PreparationWorkerDispatchPrompt stays under the 700-char reference-only threshold at the worst-case 4-digit issue numbers", () => {
-  const prompt = formatStage2PreparationWorkerDispatchPrompt({ controlIssue: 9999, issue: 9999, pr: 9999 });
+test("formatStage2PreparationWorkerDispatchPrompt stays under the 700-char reference-only threshold at the worst-case 4-digit issue numbers and a full-length head", () => {
+  const prompt = formatStage2PreparationWorkerDispatchPrompt({
+    controlIssue: 9999,
+    issue: 9999,
+    pr: 9999,
+    head: "abcdef1234567890abcdef1234567890abcdef12",
+  });
   assert.ok(prompt.length <= 700, `expected <= 700 chars, got ${prompt.length}`);
+});
+
+test("formatStage2PreparationWorkerDispatchPrompt stays under the 700-char reference-only threshold at the worst-case direct-reference shape (no controlIssue, full-length head, 'none' issue)", () => {
+  const prompt = formatStage2PreparationWorkerDispatchPrompt({
+    issue: "none",
+    pr: 9999,
+    head: "abcdef1234567890abcdef1234567890abcdef12",
+  });
+  assert.ok(prompt.length <= 700, `expected <= 700 chars, got ${prompt.length}`);
+});
+
+// Stage 1 correction on PR #721 (Codex P2 finding): stage2-control-plane-ci-head.mjs requires a
+// control Issue and has nothing to resolve from in direct-reference mode -- the gate's own
+// already-computed pre-merge head must be forwarded to the worker instead of discarded.
+test("formatStage2PreparationWorkerDispatchPrompt forwards the gated head for direct-reference dispatch (no controlIssue) instead of requiring the control-Issue-only CI-head script", () => {
+  const withHead = formatStage2PreparationWorkerDispatchPrompt({ issue: 375, pr: 376, head: "abc1234" });
+  assert.ok(!withHead.includes("stage2-control-plane-ci-head.mjs"));
+  assert.match(withHead, /abc1234/);
+
+  const withoutHead = formatStage2PreparationWorkerDispatchPrompt({ issue: 375, pr: 376 });
+  assert.ok(!withoutHead.includes("stage2-control-plane-ci-head.mjs"));
+  assert.match(withoutHead, /direct inspection/);
+});
+
+test("formatStage2PreparationWorkerDispatchPrompt uses the control-Issue-scoped CI-head script when controlIssue is present, ignoring any head", () => {
+  const prompt = formatStage2PreparationWorkerDispatchPrompt({ controlIssue: 322, issue: 375, pr: 376, head: "abc1234" });
+  assert.match(prompt, /stage2-control-plane-ci-head\.mjs --control-issue 322/);
+});
+
+// Stage 1 correction on PR #721 (Codex P2 finding): an interrupted-after-audit-create resume
+// must not blindly mandate creating a second canonical Audit Issue for the same PR/merge commit.
+test("formatStage2PreparationWorkerDispatchPrompt instructs the worker to reconcile against an existing matching Audit Issue before creating a new one", () => {
+  const prompt = formatStage2PreparationWorkerDispatchPrompt({ controlIssue: 322, issue: 375, pr: 376 });
+  assert.match(prompt, /Reuse a matching open Audit Issue if one exists/);
 });
 
 test("formatStage2PreparationWorkerDispatchPrompt never restates diff/finding content or AGENTS.md contract prose", () => {

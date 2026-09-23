@@ -126,15 +126,26 @@ verdicts, once `finalize-stage1-satisfied` and `merge-pr` have already run per
 by reference (control Issue, execution Issue, merged PR — never the diff, findings, or
 requirements restated), the same reference-only dispatch discipline `AGENTS.md` § Subagent
 dispatch and `docs/operating-model.md` § Two-plane Issue dispatch already require for every other
-bounded worker in this repository.
+bounded worker in this repository. The explicit no-work-issue sentinel (`issue: "none"`) is
+rendered as an explicit "Execution Issue: none." declaration, never omitted — a worker with no
+Controlling Issue to read that state from cannot otherwise distinguish "no work issue" from
+missing context (Stage 1 correction on PR #721, Codex P1 finding).
 
 The dispatched worker:
 
 1. reads the merged PR, its diff, the execution Issue's acceptance authority, and the Stage 1
    review/disposition directly from GitHub — none of it restated in the dispatch prompt;
 2. establishes the exact merge commit per Stage 2 step 1 below, and, for a control-plane PR,
-   resolves the correct pre-merge CI head via `tools/review-watch/stage2-control-plane-ci-head.mjs`;
-3. creates the canonical Stage 2 Audit Issue per Stage 2 step 2 below, deriving a change-specific
+   resolves the correct pre-merge CI head via `tools/review-watch/stage2-control-plane-ci-head.mjs`
+   in a split thin/thick control-Issue flow — or, for a direct-reference dispatch with no
+   Controlling Issue, from the pre-merge `head` the dispatch prompt itself carries (Stage 1
+   correction on PR #721, Codex P2 finding: that script requires a control Issue and has nothing
+   to resolve from without one, so the already-gated head is forwarded instead of discarded);
+3. reconciles against an already-existing matching Audit Issue for this PR/merge commit before
+   creating a new one (Stage 1 correction on PR #721, Codex P2 finding: an interruption after a
+   prior worker already created the canonical Audit Issue, but before the controller's own
+   finalize/trigger follow-up ran, must not produce a second one for the same merge), then
+   creates the canonical Stage 2 Audit Issue per Stage 2 step 2 below, deriving a change-specific
    verification checklist from the actual diff and acceptance criteria — never generic prose;
 4. verifies the created issue by direct read (Stage 2 step 3 below);
 5. does not trigger `@codex review`, does not write to any control Issue, and does not perform
@@ -145,22 +156,46 @@ The dispatched worker:
    `AUDIT_PREPARATION_FAILED <reason>` if it could not persist a valid Audit Issue — never a
    narrative dump of its reasoning for the controller to reinterpret.
 
-Only once the worker reports `AUDIT_READY #<n>` does the controller resume: run
-`tools/orchestration/finalize-audit-breakpoint.mjs` (Stage 2 step 3's ordering invariant,
-unchanged by this section) to project and verify the thin control's AUDIT state, then post the
-independent reviewer trigger (Stage 2 step 4).
+Only once the worker reports `AUDIT_READY #<n>` does the controller resume, branching by flow
+shape (`tools/orchestration/action-envelope.mjs`'s `preparationResult`-derived envelope, Stage 1
+correction on PR #721, Codex P1/P7 findings): for a split thin/thick control-Issue flow, run
+`node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue <control> ...` (Stage 2
+step 3's ordering invariant, unchanged by this section) to project and verify the thin control's
+AUDIT state; for a direct-reference flow with no Controlling Issue, run the same script
+*without* `--control-issue` — `finalize-audit-breakpoint.mjs` hard-requires a positive
+`--control-issue` and cannot be pointed at a nonexistent control Issue, so omitting it selects
+`runDirectReferenceVerification` instead: the identical PR-merged/Audit-Issue-matches evidence,
+minus every control-body check and the `write-control-snapshot.mjs` projection, reporting
+`AUDIT_VERIFIED` rather than `FINALIZED`. Either way, only once that step reports success does
+the controller post the independent reviewer trigger (Stage 2 step 4) —
+`AUDIT_BREAKPOINT_UNVERIFIED` from either path means the trigger must not be posted.
 
-`AUDIT_PREPARATION_FAILED` (or the worker failing to report at all) is a safe, resumable state,
-never a reason to fall back to controller-side semantic reconstruction: the PR is already merged
-and that merge identity is already truthful and durable; no Stage 2 Audit Issue reference has
-been recorded; a fresh session resuming this control Issue re-runs
-`next-review-transition-gate.mjs`, which resolves this exact shape — a settled `PR` bullet whose
-live state is `MERGED` with no settled `Stage 2` bullet — to `STAGE2_PREPARATION_REQUIRED`
-(`tools/orchestration/action-envelope.mjs` authorizes exactly one more
-`dispatch-stage2-preparation-worker` action from it, never a second `merge-pr`), and dispatches a
-fresh preparation worker exactly as above, carrying the same `{ controlIssue, issue, pr }`
-reference triple. Re-running `stage1-gate`/`mergeReady` against an already-merged PR is not this
-recovery path — `next-review-transition-gate.mjs` never attempts it once state resolves `MERGED`.
+If the worker instead reports `AUDIT_PREPARATION_FAILED` (or fails to report at all), the
+controller's envelope authorizes only the dispatch itself — never `write-control-snapshot`/
+`verify-direct-reference-audit` or the reviewer trigger, since no valid Audit Issue number
+exists to finalize or trigger against. This is a safe, resumable state, never a reason to fall
+back to controller-side semantic reconstruction: the PR is already merged and that merge
+identity is already truthful and durable; no Stage 2 Audit Issue reference has been recorded; a
+fresh session resuming this control Issue re-runs `next-review-transition-gate.mjs`, which
+resolves this exact shape — a settled `PR` bullet whose live state is `MERGED` with no settled
+`Stage 2` bullet, and a control Issue's own `Stage 1` bullet already carrying a canonical
+satisfied/exempt or correction-satisfied disposition (see below) — to
+`STAGE2_PREPARATION_REQUIRED` (`tools/orchestration/action-envelope.mjs` authorizes exactly one
+more `dispatch-stage2-preparation-worker` action from it, never a second `merge-pr`), and
+dispatches a fresh preparation worker exactly as above, carrying the same
+`{ controlIssue, issue, pr }` reference triple. Re-running `stage1-gate`/`mergeReady` against an
+already-merged PR is not this recovery path — `next-review-transition-gate.mjs` never attempts it
+once state resolves `MERGED`.
+
+When that same merged-PR/no-settled-Stage-2 shape is found but the control Issue's own `Stage 1`
+bullet is *not* one of those two affirmative dispositions (Stage 1 correction on PR #721, Codex
+P1 finding, "Verify Stage 1 before resuming Stage 2"): a prematurely or manually merged PR must
+not resume Stage 2 preparation on unverified Stage 1 authority merely because it merged.
+`next-review-transition-gate.mjs` instead reports `STAGE2_PREPARATION_BLOCKED_ON_STAGE1`, naming
+the exact `node tools/orchestration/finalize-stage1-satisfied-breakpoint.mjs --recover true`
+recovery command as its `nextCommand` — the same documented recovery path Verdict handling's
+own admissible-prestate contract already governs. Run that command; a fresh gate invocation
+afterward resolves the now-settled disposition to `STAGE2_PREPARATION_REQUIRED` as above.
 
 ## Stage 2: one post-merge issue audit
 

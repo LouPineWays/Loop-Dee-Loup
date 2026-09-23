@@ -37,6 +37,58 @@ test("verify-action-envelope: --correction-reason narrows STAGE1_CORRECTION_REQU
   );
 });
 
+// Stage 1 correction on PR #721: STAGE2_PREPARATION_REQUIRED's envelope depends on the Stage 2
+// preparation worker's own reported outcome and whether a control Issue exists to finalize onto.
+test("verify-action-envelope: --preparation-result/--control-issue narrow STAGE2_PREPARATION_REQUIRED exactly as the worker's own reported outcome does", () => {
+  assert.equal(run(["--state", "STAGE2_PREPARATION_REQUIRED", "--actions", "dispatch-stage2-preparation-worker"]).exitCode, 0);
+  assert.equal(
+    run([
+      "--state",
+      "STAGE2_PREPARATION_REQUIRED",
+      "--preparation-result",
+      "AUDIT_READY",
+      "--control-issue",
+      "322",
+      "--actions",
+      "dispatch-stage2-preparation-worker,write-control-snapshot,post-stage2-reviewer-trigger",
+    ]).exitCode,
+    0,
+  );
+  assert.equal(
+    run([
+      "--state",
+      "STAGE2_PREPARATION_REQUIRED",
+      "--preparation-result",
+      "AUDIT_READY",
+      "--actions",
+      "dispatch-stage2-preparation-worker,verify-direct-reference-audit,post-stage2-reviewer-trigger",
+    ]).exitCode,
+    0,
+  );
+  assert.equal(
+    run([
+      "--state",
+      "STAGE2_PREPARATION_REQUIRED",
+      "--preparation-result",
+      "AUDIT_PREPARATION_FAILED",
+      "--actions",
+      "dispatch-stage2-preparation-worker",
+    ]).exitCode,
+    0,
+  );
+  assert.equal(
+    run([
+      "--state",
+      "STAGE2_PREPARATION_REQUIRED",
+      "--preparation-result",
+      "AUDIT_PREPARATION_FAILED",
+      "--actions",
+      "dispatch-stage2-preparation-worker,write-control-snapshot",
+    ]).exitCode,
+    5,
+  );
+});
+
 test("verify-action-envelope: a normal violation invocation exits 5", () => {
   const result = run(["--state", "READY_TO_DISPATCH", "--actions", "dispatch-execution-worker,wait-for-completion"]);
   assert.equal(result.exitCode, 5);

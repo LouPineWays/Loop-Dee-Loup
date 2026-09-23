@@ -517,15 +517,24 @@ export function formatStage2CorrectionWorkerDispatchPrompt({ controlIssue = null
 // reference). All three verdicts carry the identical `{ repo, pr, issue, controlIssue }` context
 // shape, so one formatter and one field set serves every one of them.
 //
-// Carries only the PR/Execution/Controlling Issue references — never the diff, findings, or
-// checklist content restated. The dispatched worker reads the merged PR, its diff, the execution
-// Issue's acceptance authority, and the Stage 1 disposition directly from GitHub, resolves the
-// exact merge commit itself (never trusting a pre-merge head passed through the dispatch), and
-// creates the canonical Stage 2 Audit Issue per docs/bounded-review-cycle.md Stage 2 steps 1-3.
-// It must not trigger `@codex review`, write to any control Issue, or perform the audit itself —
-// those remain the controller's own deterministic follow-up (finalize-audit-breakpoint.mjs, then
-// the reviewer trigger) and Stage 2's own fresh independent context, respectively.
-export function formatStage2PreparationWorkerDispatchPrompt({ controlIssue = null, issue, pr }) {
+// Carries only the PR/Execution/Controlling Issue references (plus, for a direct-reference
+// dispatch with no Controlling Issue, the already-gated pre-merge `head` — Stage 1 correction on
+// PR #721, Codex P2 finding: `stage2-control-plane-ci-head.mjs` requires a control Issue and has
+// nothing to resolve from in that mode, so the gate's own already-computed head must be forwarded
+// instead of discarded) — never the diff, findings, or checklist content restated. The dispatched
+// worker reads the merged PR, its diff, the execution Issue's acceptance authority, and the
+// Stage 1 disposition directly from GitHub, resolves the exact merge commit itself (never
+// trusting a pre-merge head passed through the dispatch for that purpose), and creates the
+// canonical Stage 2 Audit Issue per docs/bounded-review-cycle.md Stage 2 steps 1-3 — reconciling
+// against an already-existing matching one first (Codex P2 finding: an interruption after a
+// prior worker created the Audit Issue but before the controller's own finalize/trigger follow-up
+// ran must not produce a duplicate canonical Audit Issue for the same PR/merge commit). It must
+// not trigger `@codex review`, write to any control Issue, or perform the audit itself — those
+// remain the controller's own deterministic follow-up (finalize-audit-breakpoint.mjs for a split
+// thin/thick flow, or its direct-reference verification continuation when no control Issue
+// exists — docs/bounded-review-cycle.md's "Stage 2 preparation worker" section — then the
+// reviewer trigger) and Stage 2's own fresh independent context, respectively.
+export function formatStage2PreparationWorkerDispatchPrompt({ controlIssue = null, issue, pr, head = null }) {
   if (!isPositiveInteger(pr)) {
     throw new Error("formatStage2PreparationWorkerDispatchPrompt requires pr to be a positive integer");
   }
@@ -538,17 +547,29 @@ export function formatStage2PreparationWorkerDispatchPrompt({ controlIssue = nul
   if (controlIssue !== null && controlIssue !== undefined && !isPositiveInteger(controlIssue)) {
     throw new Error("formatStage2PreparationWorkerDispatchPrompt requires controlIssue to be a positive integer when present");
   }
-  const executionLine = hasExecutionIssue ? ` Execution Issue: #${issue}.` : "";
-  const controlLine = controlIssue != null ? ` Controlling Issue: #${controlIssue}.` : "";
+  if (head !== null && head !== undefined && (typeof head !== "string" || !head.trim())) {
+    throw new Error("formatStage2PreparationWorkerDispatchPrompt requires head to be a non-empty string when present");
+  }
+  const hasControlIssue = controlIssue != null;
+  // Codex P1 finding: omitting the Execution Issue line entirely for the explicit "none"
+  // sentinel is indistinguishable from missing context to a worker with no control Issue to
+  // read it from — render the declaration explicitly instead of by omission either way.
+  const executionLine = hasExecutionIssue ? ` Execution Issue: #${issue}.` : ` Execution Issue: none.`;
+  const controlLine = hasControlIssue ? ` Controlling Issue: #${controlIssue}.` : "";
   const executionReadClause = hasExecutionIssue ? ` and Execution Issue #${issue}` : "";
+  const ciHeadClause = hasControlIssue
+    ? `tools/review-watch/stage2-control-plane-ci-head.mjs --control-issue ${controlIssue}`
+    : head
+      ? `the gated head ${head} (no control Issue)`
+      : `direct inspection (no control Issue/head)`;
   return (
     `Stage 2 preparation worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
-    `Read PR #${pr}${executionReadClause} from GitHub for the diff, Stage 1 disposition, and ` +
-    `authority (not restated). Resolve the exact merge commit and, for a control-plane PR, the ` +
-    `CI head via tools/review-watch/stage2-control-plane-ci-head.mjs. Create the canonical Stage ` +
-    `2 Audit Issue per docs/bounded-review-cycle.md Stage 2 and docs/stage2-audit-contract.md. ` +
-    `Verify by direct read. Do not trigger @codex review, write to any control Issue, or audit ` +
-    `it yourself. Stop; report one line: "AUDIT_READY #<n>" or "AUDIT_PREPARATION_FAILED <reason>".`
+    `Read PR #${pr}${executionReadClause} from GitHub for diff, Stage 1 disposition, and ` +
+    `authority (not restated). Resolve the merge commit and control-plane CI head via ` +
+    `${ciHeadClause}. Reuse a matching open Audit Issue if one exists; else create one per ` +
+    `docs/bounded-review-cycle.md Stage 2 and docs/stage2-audit-contract.md. Verify by direct ` +
+    `read. Do not trigger @codex review, write to any control Issue, or audit it yourself. Stop; ` +
+    `report one line: "AUDIT_READY #<n>" or "AUDIT_PREPARATION_FAILED <reason>".`
   );
 }
 
@@ -614,14 +635,18 @@ const TEMPLATES_BY_STATE = {
   STAGE2_CORRECTION_REQUIRED: { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
   // Issue #718: all three verdicts share the identical { controlIssue, issue, pr } context shape
   // next-review-transition-gate.mjs already attaches — see formatStage2PreparationWorkerDispatchPrompt's
-  // own comment for why one formatter and field set covers every one of them.
+  // own comment for why one formatter and field set covers every one of them. The first two also
+  // carry `head` (Stage 1 correction on PR #721, Codex P2 finding): a direct-reference dispatch
+  // with no controlIssue forwards the already-gated pre-merge head instead of discarding it.
+  // STAGE2_PREPARATION_REQUIRED never needs it -- that resume verdict only ever arises in
+  // control-Issue mode (see next-review-transition-gate.mjs's own module comment).
   STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2: {
     formatter: formatStage2PreparationWorkerDispatchPrompt,
-    fields: ["controlIssue", "issue", "pr"],
+    fields: ["controlIssue", "issue", "pr", "head"],
   },
   STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2: {
     formatter: formatStage2PreparationWorkerDispatchPrompt,
-    fields: ["controlIssue", "issue", "pr"],
+    fields: ["controlIssue", "issue", "pr", "head"],
   },
   STAGE2_PREPARATION_REQUIRED: {
     formatter: formatStage2PreparationWorkerDispatchPrompt,
@@ -652,7 +677,10 @@ const FORMATTERS_BY_KIND = {
     fields: ["controlIssue", "issue", "pr", "correctionReason", "checkoutBinding"],
   },
   "stage2-correction": { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
-  "stage2-preparation": { formatter: formatStage2PreparationWorkerDispatchPrompt, fields: ["controlIssue", "issue", "pr"] },
+  "stage2-preparation": {
+    formatter: formatStage2PreparationWorkerDispatchPrompt,
+    fields: ["controlIssue", "issue", "pr", "head"],
+  },
 };
 
 const CLI_FLAG_BY_FIELD = {
@@ -665,6 +693,7 @@ const CLI_FLAG_BY_FIELD = {
   pr: "pr",
   auditIssue: "audit-issue",
   correctionReason: "correction-reason",
+  head: "head",
 };
 
 // Pure. Reads one field's value out of an explicit-fields `args` map or a piped gate-result
