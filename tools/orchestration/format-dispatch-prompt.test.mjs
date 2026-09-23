@@ -13,6 +13,7 @@ import {
   formatIntegrationWorkerDispatchPrompt,
   formatStage1CorrectionWorkerDispatchPrompt,
   formatStage2CorrectionWorkerDispatchPrompt,
+  formatStage2PreparationWorkerDispatchPrompt,
   formatConflictRecoveryWorkerDispatchPrompt,
   assertReferenceOnly,
 } from "./format-dispatch-prompt.mjs";
@@ -636,6 +637,128 @@ test("formatStage2CorrectionWorkerDispatchPrompt throws for missing/invalid requ
   assert.throws(() => formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: NaN }));
   assert.throws(() => formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: -1 }));
   assert.throws(() => formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 12.5, auditIssue: 559 }));
+});
+
+// -- issue #718: formatStage2PreparationWorkerDispatchPrompt --------------------------------
+
+test("formatStage2PreparationWorkerDispatchPrompt includes the exact PR, Execution Issue, and Controlling Issue references", () => {
+  const prompt = formatStage2PreparationWorkerDispatchPrompt({ controlIssue: 322, issue: 375, pr: 376 });
+  assert.match(prompt, /^Stage 2 preparation worker dispatch\./);
+  assert.match(prompt, /#376/);
+  assert.match(prompt, /#375/);
+  assert.match(prompt, /#322/);
+});
+
+test("formatStage2PreparationWorkerDispatchPrompt renders an explicit 'Execution Issue: none.' declaration for the 'none' sentinel (never omits it) and omits the Controlling Issue line when absent (direct-reference no-work-issue mode)", () => {
+  // Stage 1 correction on PR #721 (Codex P1 finding): omitting the Execution Issue line
+  // entirely for "none" is indistinguishable from missing context to a worker with no control
+  // Issue to read it from -- it must be rendered explicitly instead.
+  const prompt = formatStage2PreparationWorkerDispatchPrompt({ issue: "none", pr: 376 });
+  assert.match(prompt, /Execution Issue: none\./);
+  assert.ok(!prompt.includes("Controlling Issue"));
+  assert.match(prompt, /#376/);
+});
+
+test("formatStage2PreparationWorkerDispatchPrompt stays under the 700-char reference-only threshold at the worst-case 4-digit issue numbers and a full-length head", () => {
+  const prompt = formatStage2PreparationWorkerDispatchPrompt({
+    controlIssue: 9999,
+    issue: 9999,
+    pr: 9999,
+    head: "abcdef1234567890abcdef1234567890abcdef12",
+  });
+  assert.ok(prompt.length <= 700, `expected <= 700 chars, got ${prompt.length}`);
+});
+
+test("formatStage2PreparationWorkerDispatchPrompt stays under the 700-char reference-only threshold at the worst-case direct-reference shape (no controlIssue, full-length head, 'none' issue)", () => {
+  const prompt = formatStage2PreparationWorkerDispatchPrompt({
+    issue: "none",
+    pr: 9999,
+    head: "abcdef1234567890abcdef1234567890abcdef12",
+  });
+  assert.ok(prompt.length <= 700, `expected <= 700 chars, got ${prompt.length}`);
+});
+
+// Stage 1 correction on PR #721 (Codex P2 finding): stage2-control-plane-ci-head.mjs requires a
+// control Issue and has nothing to resolve from in direct-reference mode -- the gate's own
+// already-computed pre-merge head must be forwarded to the worker instead of discarded.
+test("formatStage2PreparationWorkerDispatchPrompt forwards the gated head for direct-reference dispatch (no controlIssue) instead of requiring the control-Issue-only CI-head script", () => {
+  const withHead = formatStage2PreparationWorkerDispatchPrompt({ issue: 375, pr: 376, head: "abc1234" });
+  assert.ok(!withHead.includes("stage2-control-plane-ci-head.mjs"));
+  assert.match(withHead, /abc1234/);
+
+  const withoutHead = formatStage2PreparationWorkerDispatchPrompt({ issue: 375, pr: 376 });
+  assert.ok(!withoutHead.includes("stage2-control-plane-ci-head.mjs"));
+  assert.match(withoutHead, /direct inspection/);
+});
+
+test("formatStage2PreparationWorkerDispatchPrompt uses the control-Issue-scoped CI-head script when controlIssue is present, ignoring any head", () => {
+  const prompt = formatStage2PreparationWorkerDispatchPrompt({ controlIssue: 322, issue: 375, pr: 376, head: "abc1234" });
+  assert.match(prompt, /stage2-control-plane-ci-head\.mjs --control-issue 322/);
+});
+
+// Stage 1 correction on PR #721 (Codex P2 finding): an interrupted-after-audit-create resume
+// must not blindly mandate creating a second canonical Audit Issue for the same PR/merge commit.
+test("formatStage2PreparationWorkerDispatchPrompt instructs the worker to reconcile against an existing matching Audit Issue before creating a new one", () => {
+  const prompt = formatStage2PreparationWorkerDispatchPrompt({ controlIssue: 322, issue: 375, pr: 376 });
+  assert.match(prompt, /Reuse a matching open Audit Issue if one exists/);
+});
+
+test("formatStage2PreparationWorkerDispatchPrompt never restates diff/finding content or AGENTS.md contract prose", () => {
+  const prompt = formatStage2PreparationWorkerDispatchPrompt({ controlIssue: 322, issue: 375, pr: 376 });
+  for (const forbidden of ["STATUS", "OUTCOME", "CHANGED", "DECISIONS", "NEW RISKS", "Founder interrupt conditions"]) {
+    assert.ok(!new RegExp(`\\b${forbidden}\\b`).test(prompt), `prompt unexpectedly contains restated field "${forbidden}"`);
+  }
+});
+
+test("formatStage2PreparationWorkerDispatchPrompt forbids triggering the reviewer, writing to the control Issue, or performing the audit itself, and mandates the compact AUDIT_READY/AUDIT_PREPARATION_FAILED return shape", () => {
+  const prompt = formatStage2PreparationWorkerDispatchPrompt({ controlIssue: 322, issue: 375, pr: 376 });
+  assert.match(prompt, /Do not trigger @codex review/);
+  assert.match(prompt, /write to any control Issue/);
+  assert.match(prompt, /audit it yourself/);
+  assert.match(prompt, /AUDIT_READY #<n>/);
+  assert.match(prompt, /AUDIT_PREPARATION_FAILED <reason>/);
+});
+
+test("formatStage2PreparationWorkerDispatchPrompt throws for missing/invalid required fields", () => {
+  assert.throws(() => formatStage2PreparationWorkerDispatchPrompt({ controlIssue: 322, issue: 375, pr: null }));
+  assert.throws(() => formatStage2PreparationWorkerDispatchPrompt({ controlIssue: 322, issue: 375, pr: -1 }));
+  assert.throws(() => formatStage2PreparationWorkerDispatchPrompt({ controlIssue: 322, issue: NaN, pr: 376 }));
+  assert.throws(() => formatStage2PreparationWorkerDispatchPrompt({ controlIssue: 12.5, issue: 375, pr: 376 }));
+});
+
+test("CLI: piped STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2 selects the Stage 2 preparation template", async () => {
+  const result = await runCli({ state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", controlIssue: 322, issue: 375, pr: 376 });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Stage 2 preparation worker dispatch\./);
+  assert.match(result.stdout, /#376/);
+});
+
+test("CLI: piped STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 selects the Stage 2 preparation template", async () => {
+  const result = await runCli({ state: "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2", controlIssue: 487, issue: 375, pr: 536 });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Stage 2 preparation worker dispatch\./);
+  assert.match(result.stdout, /#536/);
+});
+
+test("CLI: piped STAGE2_PREPARATION_REQUIRED selects the Stage 2 preparation template", async () => {
+  const result = await runCli({ state: "STAGE2_PREPARATION_REQUIRED", controlIssue: 322, issue: 375, pr: 376 });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Stage 2 preparation worker dispatch\./);
+  assert.match(result.stdout, /#376/);
+});
+
+test("CLI explicit --kind stage2-preparation renders the same template", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const scriptPath = fileURLToPath(new URL("./format-dispatch-prompt.mjs", import.meta.url));
+  const result = spawnSync(
+    process.execPath,
+    [scriptPath, "--kind", "stage2-preparation", "--control-issue", "322", "--issue", "375", "--pr", "376"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Stage 2 preparation worker dispatch\./);
+  assert.match(result.stdout, /#376/);
 });
 
 // -- formatConflictRecoveryWorkerDispatchPrompt (issue #665, live #639/#638/PR #640 -----------

@@ -125,10 +125,102 @@ A fresh `next-review-transition-gate.mjs` invocation afterward re-derives the no
 
 This recovery is scoped narrowly to the observed correction-satisfied path — it does not generalize to every Stage 1 disposition or every possible merge-conflict shape, and it introduces no automatic or routine second Stage 1 review trigger. The same #638/#640 execution packet and PR remain authoritative throughout; this is ordinary target-branch drift on a still-open, still-coherent packet, not a new outcome or a replacement lifecycle.
 
+## Stage 2 preparation worker
+
+Issue #718: the top-level controller must stay a compact lifecycle switchboard even at the
+merge → Stage 2 boundary. Deterministic control work (re-running the authoritative gate, merging
+an already-authorized PR, recording the exact merge identity, projecting compact control state,
+triggering the reviewer) stays inline — do not introduce a worker merely to wrap a gate, a merge
+command, or a trigger that is already mechanically decidable. But constructing a valid Stage 2
+Audit Issue is not mechanically decidable: it requires semantic inspection of the execution
+contract, the actual PR diff, implementation/source details, the Stage 1 findings/disposition,
+and change-specific verification coverage. That work belongs in one bounded worker, not the
+orchestrator.
+
+Once `tools/orchestration/next-review-transition-gate.mjs` returns
+`STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2`, `STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2`,
+or the resume verdict `STAGE2_PREPARATION_REQUIRED` (below) — and, for the two merge/trigger
+verdicts, once `finalize-stage1-satisfied` and `merge-pr` have already run per
+`tools/orchestration/action-envelope.mjs`'s authorized order — pipe that same verdict JSON into
+`node tools/orchestration/format-dispatch-prompt.mjs` and dispatch the Stage 2 preparation worker
+by reference (control Issue, execution Issue, merged PR — never the diff, findings, or
+requirements restated), the same reference-only dispatch discipline `AGENTS.md` § Subagent
+dispatch and `docs/operating-model.md` § Two-plane Issue dispatch already require for every other
+bounded worker in this repository. The explicit no-work-issue sentinel (`issue: "none"`) is
+rendered as an explicit "Execution Issue: none." declaration, never omitted — a worker with no
+Controlling Issue to read that state from cannot otherwise distinguish "no work issue" from
+missing context (Stage 1 correction on PR #721, Codex P1 finding).
+
+The dispatched worker:
+
+1. reads the merged PR, its diff, the execution Issue's acceptance authority, and the Stage 1
+   review/disposition directly from GitHub — none of it restated in the dispatch prompt;
+2. establishes the exact merge commit per Stage 2 step 1 below, and, for a control-plane PR,
+   resolves the correct pre-merge CI head via `tools/review-watch/stage2-control-plane-ci-head.mjs`
+   in a split thin/thick control-Issue flow — or, for a direct-reference dispatch with no
+   Controlling Issue, from the pre-merge `head` the dispatch prompt itself carries (Stage 1
+   correction on PR #721, Codex P2 finding: that script requires a control Issue and has nothing
+   to resolve from without one, so the already-gated head is forwarded instead of discarded);
+3. reconciles against an already-existing matching Audit Issue for this PR/merge commit before
+   creating a new one (Stage 1 correction on PR #721, Codex P2 finding: an interruption after a
+   prior worker already created the canonical Audit Issue, but before the controller's own
+   finalize/trigger follow-up ran, must not produce a second one for the same merge), then
+   creates the canonical Stage 2 Audit Issue per Stage 2 step 2 below, deriving a change-specific
+   verification checklist from the actual diff and acceptance criteria — never generic prose;
+4. verifies the created issue by direct read (Stage 2 step 3 below);
+5. does not trigger `@codex review`, does not write to any control Issue, and does not perform
+   the audit itself — Stage 2 remains a fresh, independent context (Stage 2 step 2), and this
+   worker having just read the diff and Stage 1 disposition to prepare the checklist is exactly
+   why it cannot also be that independent auditor;
+6. stops and returns exactly one compact result: `AUDIT_READY #<n>` on success, or
+   `AUDIT_PREPARATION_FAILED <reason>` if it could not persist a valid Audit Issue — never a
+   narrative dump of its reasoning for the controller to reinterpret.
+
+Only once the worker reports `AUDIT_READY #<n>` does the controller resume, branching by flow
+shape (`tools/orchestration/action-envelope.mjs`'s `preparationResult`-derived envelope, Stage 1
+correction on PR #721, Codex P1/P7 findings): for a split thin/thick control-Issue flow, run
+`node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue <control> ...` (Stage 2
+step 3's ordering invariant, unchanged by this section) to project and verify the thin control's
+AUDIT state; for a direct-reference flow with no Controlling Issue, run the same script
+*without* `--control-issue` — `finalize-audit-breakpoint.mjs` hard-requires a positive
+`--control-issue` and cannot be pointed at a nonexistent control Issue, so omitting it selects
+`runDirectReferenceVerification` instead: the identical PR-merged/Audit-Issue-matches evidence,
+minus every control-body check and the `write-control-snapshot.mjs` projection, reporting
+`AUDIT_VERIFIED` rather than `FINALIZED`. Either way, only once that step reports success does
+the controller post the independent reviewer trigger (Stage 2 step 4) —
+`AUDIT_BREAKPOINT_UNVERIFIED` from either path means the trigger must not be posted.
+
+If the worker instead reports `AUDIT_PREPARATION_FAILED` (or fails to report at all), the
+controller's envelope authorizes only the dispatch itself — never `write-control-snapshot`/
+`verify-direct-reference-audit` or the reviewer trigger, since no valid Audit Issue number
+exists to finalize or trigger against. This is a safe, resumable state, never a reason to fall
+back to controller-side semantic reconstruction: the PR is already merged and that merge
+identity is already truthful and durable; no Stage 2 Audit Issue reference has been recorded; a
+fresh session resuming this control Issue re-runs `next-review-transition-gate.mjs`, which
+resolves this exact shape — a settled `PR` bullet whose live state is `MERGED` with no settled
+`Stage 2` bullet, and a control Issue's own `Stage 1` bullet already carrying a canonical
+satisfied/exempt or correction-satisfied disposition (see below) — to
+`STAGE2_PREPARATION_REQUIRED` (`tools/orchestration/action-envelope.mjs` authorizes exactly one
+more `dispatch-stage2-preparation-worker` action from it, never a second `merge-pr`), and
+dispatches a fresh preparation worker exactly as above, carrying the same
+`{ controlIssue, issue, pr }` reference triple. Re-running `stage1-gate`/`mergeReady` against an
+already-merged PR is not this recovery path — `next-review-transition-gate.mjs` never attempts it
+once state resolves `MERGED`.
+
+When that same merged-PR/no-settled-Stage-2 shape is found but the control Issue's own `Stage 1`
+bullet is *not* one of those two affirmative dispositions (Stage 1 correction on PR #721, Codex
+P1 finding, "Verify Stage 1 before resuming Stage 2"): a prematurely or manually merged PR must
+not resume Stage 2 preparation on unverified Stage 1 authority merely because it merged.
+`next-review-transition-gate.mjs` instead reports `STAGE2_PREPARATION_BLOCKED_ON_STAGE1`, naming
+the exact `node tools/orchestration/finalize-stage1-satisfied-breakpoint.mjs --recover true`
+recovery command as its `nextCommand` — the same documented recovery path Verdict handling's
+own admissible-prestate contract already governs. Run that command; a fresh gate invocation
+afterward resolves the now-settled disposition to `STAGE2_PREPARATION_REQUIRED` as above.
+
 ## Stage 2: one post-merge issue audit
 
 1. Record the exact merge commit on the target branch, not merely the PR head. Establish it from durable repository evidence — `gh pr view <pr> --repo <owner/repo> --json state,mergeCommit` reporting `state: "MERGED"` and its `mergeCommit.oid` — never from the PR head SHA, a founder's statement that they merged it, a locally inferred commit, or a merge attempt that was denied per Stage 1's environment-refused-merge case above. If `state` is not yet `MERGED`, no merge commit exists and Stage 2 must not start; that is the expected state during a Stage 1 environment-refused-merge handoff until the founder actually performs the merge.
-2. Start the audit from a fresh independent context. Open one control issue containing the complete read-only audit specification, using the `audit-control-issue` issue template, filling in its `Work issue` field with the implementation issue this audit gates and its verification-checklist field with a numbered, change-specific list of checks derived from the actual diff and acceptance criteria — not generic prose. Keep the checklist to the number of genuinely independent checks the diff actually needs, and group tightly related sub-checks (e.g. several failure-mode branches of the same function) under one numbered item rather than splitting them into many top-level items purely for enumeration's own sake: `tools/review-watch/stage2-report.mjs`'s completeness signal (issue #268 finding 2) deliberately compares the response's own walk-through *count* against this field's item count, with no semantic credit for prose elsewhere in the response that covers a topic without a matching numbered/marker line — a checklist sized well past what a reviewer can realistically enumerate one-for-one produces a mechanically-incomplete response even when the substance was genuinely covered (issue #335, audit #334's 11-item checklist against a substantively-complete 4-bullet response). The `Work issue` field is the sole structured source `tools/review-watch/lifecycle-gate.mjs`'s post-audit check reads to know which issue a CLEAN verdict here authorizes closing (issue #156) — never infer it from the merged PR's non-closing reference text instead. Never reuse an existing non-audit issue — the original feature or slice issue, a decision form, or any other control issue, closed or open — as the Stage 2 control boundary. A prior invocation on the wrong issue is not a completed audit; open the fresh `audit-control-issue` regardless. Type the literal word `none` into `Work issue` only when the merged PR genuinely has no gated implementation issue (issue #190 — e.g. LDL's own recurring consumer-sync PRs, reproduced on `LouPineWays/YouTubery#19`); `post-audit` reads that as the explicit no-work-issue state. The field stays required rather than being left optional/blank: an operator who simply forgot to fill in a real work issue would otherwise produce GitHub's own `_No response_` marker, rendering identically to a deliberate declaration and silently stripping that issue's premature-closure protection (Stage 1 review finding on PR #197). Do not type `none` merely to avoid finding the real work issue, and do not point it at an unrelated or historical issue (e.g. the sync mechanism's own setup issue) as a substitute — that risks `post-audit` reopening or premature-closure-flagging an issue this audit was never meant to gate. For a control-plane PR (per the Entry check's path list), the checklist must include an item confirming that every workflow whose `paths:` trigger should match the diff actually shows a completed run — not merely that the file contents are correct — checked via `gh api repos/<owner>/<repo>/actions/runs?head_sha=<sha>` against the exact pre-merge head Stage 1 authority actually authorized, never the merge commit recorded in step 1 above: every control-plane workflow in this repository triggers only on `pull_request`, so its Actions runs are keyed to a PR branch's head SHA, and the merge commit created on `main` is a distinct commit such a workflow never runs against, so querying `head_sha=<merge-commit>` would falsely fail even a control-plane PR whose CI ran and passed correctly (issue #98). This closes the gap found in issue #96: a workflow can be silently broken (e.g. a `paths:` glob that never matches) and a content-only audit will not detect it.
+2. Start the audit from a fresh independent context — the dispatched Stage 2 preparation worker above, never the top-level controller itself. Open one control issue containing the complete read-only audit specification, using the `audit-control-issue` issue template, filling in its `Work issue` field with the implementation issue this audit gates and its verification-checklist field with a numbered, change-specific list of checks derived from the actual diff and acceptance criteria — not generic prose. Keep the checklist to the number of genuinely independent checks the diff actually needs, and group tightly related sub-checks (e.g. several failure-mode branches of the same function) under one numbered item rather than splitting them into many top-level items purely for enumeration's own sake: `tools/review-watch/stage2-report.mjs`'s completeness signal (issue #268 finding 2) deliberately compares the response's own walk-through *count* against this field's item count, with no semantic credit for prose elsewhere in the response that covers a topic without a matching numbered/marker line — a checklist sized well past what a reviewer can realistically enumerate one-for-one produces a mechanically-incomplete response even when the substance was genuinely covered (issue #335, audit #334's 11-item checklist against a substantively-complete 4-bullet response). The `Work issue` field is the sole structured source `tools/review-watch/lifecycle-gate.mjs`'s post-audit check reads to know which issue a CLEAN verdict here authorizes closing (issue #156) — never infer it from the merged PR's non-closing reference text instead. Never reuse an existing non-audit issue — the original feature or slice issue, a decision form, or any other control issue, closed or open — as the Stage 2 control boundary. A prior invocation on the wrong issue is not a completed audit; open the fresh `audit-control-issue` regardless. Type the literal word `none` into `Work issue` only when the merged PR genuinely has no gated implementation issue (issue #190 — e.g. LDL's own recurring consumer-sync PRs, reproduced on `LouPineWays/YouTubery#19`); `post-audit` reads that as the explicit no-work-issue state. The field stays required rather than being left optional/blank: an operator who simply forgot to fill in a real work issue would otherwise produce GitHub's own `_No response_` marker, rendering identically to a deliberate declaration and silently stripping that issue's premature-closure protection (Stage 1 review finding on PR #197). Do not type `none` merely to avoid finding the real work issue, and do not point it at an unrelated or historical issue (e.g. the sync mechanism's own setup issue) as a substitute — that risks `post-audit` reopening or premature-closure-flagging an issue this audit was never meant to gate. For a control-plane PR (per the Entry check's path list), the checklist must include an item confirming that every workflow whose `paths:` trigger should match the diff actually shows a completed run — not merely that the file contents are correct — checked via `gh api repos/<owner>/<repo>/actions/runs?head_sha=<sha>` against the exact pre-merge head Stage 1 authority actually authorized, never the merge commit recorded in step 1 above: every control-plane workflow in this repository triggers only on `pull_request`, so its Actions runs are keyed to a PR branch's head SHA, and the merge commit created on `main` is a distinct commit such a workflow never runs against, so querying `head_sha=<merge-commit>` would falsely fail even a control-plane PR whose CI ran and passed correctly (issue #98). This closes the gap found in issue #96: a workflow can be silently broken (e.g. a `paths:` glob that never matches) and a content-only audit will not detect it.
 
    "The exact pre-merge head Stage 1 authority actually authorized" is not always the frozen reviewed head — audit #508 (control #499, PR #507) proved that the hard rule "always use the frozen reviewed head" is stale for a PR that reached merge authority via the Correction-satisfied disposition above: `05c70da1404ef89954c15be720222a81c01a230c` (the frozen head Codex actually reviewed) never ran CI at all, only the corrected head `18f960088bb41704f2f970c72089640dc0c63bb9` did (run `34456423959`), because `merge-ready-gate.mjs` granted merge authority at that corrected head without a second ordinary Stage 1 round. Resolve this deterministically rather than guessing or defaulting to the reviewed head: run `node tools/review-watch/stage2-control-plane-ci-head.mjs --control-issue <N>` against the control issue whose "Stage 1" bullet this audit traces back to. It parses that bullet's own disposition shape — an ordinary `satisfied at <sha>` / `exempt at <sha>` bullet resolves to that sha (the frozen reviewed head, unchanged behavior for the common case); a `correction-satisfied at <corrected-sha> (reviewed <reviewed-sha>)` bullet resolves to the corrected head, the exact head the correction-satisfied machinery verified and merge-ready-gate.mjs actually authorized — and fails closed (exit 2, never a guess) on a missing, malformed, or unrecognized bullet. Use its resolved `head` for `<sha>` in the checklist item text; never substitute the merge commit for it either way (issue #98).
 3. Verify the created issue body by direct read. It must survive transport intact and name the exact commit.

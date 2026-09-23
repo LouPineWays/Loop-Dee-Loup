@@ -9,7 +9,15 @@
 // Usage:
 //   node tools/orchestration/verify-action-envelope.mjs --state <VERDICT_STATE> \
 //     --actions <comma-separated action-kind list> [--actions-file <path-to-json-array>] \
-//     [--next-command <the verdict's own nextCommand string>] [--correction-reason <findings|closing-reference>]
+//     [--next-command <the verdict's own nextCommand string>] [--correction-reason <findings|closing-reference>] \
+//     [--preparation-result <AUDIT_READY|AUDIT_PREPARATION_FAILED>] [--control-issue <N>]
+//
+// `--preparation-result`/`--control-issue` (Stage 1 correction on PR #721) narrow
+// STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2, STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_
+// STAGE2, and STAGE2_PREPARATION_REQUIRED exactly as the dispatched Stage 2 preparation worker's
+// own reported outcome does (see getActionEnvelope) — mirrors `--correction-reason`'s existing
+// precedent for a controller-observed, not verdict-carried, context field. Omitted, each
+// verdict's plain static table row applies unchanged, matching every pre-existing invocation.
 //
 // `--next-command` carries the same `nextCommand` field the piped gate verdict itself returned,
 // forwarded verbatim as `classifyEnvelopeCompliance`'s `context.nextCommand` (issue #646, Stage 1
@@ -37,7 +45,15 @@ import { classifyEnvelopeCompliance, contextSensitiveEnvelopeStates } from "./ac
 // actions list — both exited 0 (compliant) despite never checking the actions the caller
 // actually meant to supply. Every option now requires a real value: a following token that is
 // absent, or itself starts with "--", is a usage error, not a silently-accepted empty value.
-const KNOWN_OPTIONS = new Set(["state", "actions", "actions-file", "next-command", "correction-reason"]);
+const KNOWN_OPTIONS = new Set([
+  "state",
+  "actions",
+  "actions-file",
+  "next-command",
+  "correction-reason",
+  "preparation-result",
+  "control-issue",
+]);
 
 function parseArgs(argv) {
   const args = {};
@@ -119,6 +135,10 @@ function main() {
   const context = {};
   if (args["next-command"] !== undefined) context.nextCommand = args["next-command"];
   if (args["correction-reason"] !== undefined) context.correctionReason = args["correction-reason"];
+  // Stage 1 correction on PR #721: same precedent, for the Stage 2 preparation worker's own
+  // reported outcome and the presence/absence of a control Issue to finalize onto.
+  if (args["preparation-result"] !== undefined) context.preparationResult = args["preparation-result"];
+  if (args["control-issue"] !== undefined) context.controlIssue = Number(args["control-issue"]);
   const result = classifyEnvelopeCompliance(args.state, actions, context);
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (result.status === "violation") {

@@ -150,9 +150,13 @@ const ENVELOPES = {
   // trigger race ahead of the durable AUDIT projection: PR #558 merged, Audit Issue #559 was
   // created and triggered, and Codex read control #445 while it still said `Lifecycle:
   // REVIEW`, returning BLOCKED. `trigger-stage2` is split into its own two ordered actions —
-  // `create-stage2-audit-issue` (open the fresh audit-control-issue and verify it by direct
-  // read, docs/bounded-review-cycle.md Stage 2 steps 2-3) and `post-stage2-reviewer-trigger`
-  // (post the `@codex review` trigger, step 4) — with `write-control-snapshot` (in practice,
+  // `dispatch-stage2-preparation-worker` (dispatch the bounded Stage 2 preparation worker,
+  // which reads the merged PR/diff/execution Issue/Stage 1 disposition directly and persists
+  // the canonical audit-control-issue itself, verified by direct read — docs/bounded-review-
+  // cycle.md Stage 2 steps 2-3; issue #718 moved this out of the orchestrator's own action list
+  // and into a dispatched worker's, renaming it from the prior `create-stage2-audit-issue`,
+  // which the orchestrator performed itself) and `post-stage2-reviewer-trigger` (post the
+  // `@codex review` trigger, step 4) — with `write-control-snapshot` (in practice,
   // `tools/orchestration/finalize-audit-breakpoint.mjs`'s compose-write-verify sequence)
   // required strictly between them. The reviewer trigger is authorized only after the control
   // snapshot durably records the AUDIT state and the exact Stage 2 reference, and that write
@@ -177,14 +181,34 @@ const ENVELOPES = {
     authorizedActions: [
       "finalize-stage1-satisfied",
       "merge-pr",
-      "create-stage2-audit-issue",
+      "dispatch-stage2-preparation-worker",
       "write-control-snapshot",
       "post-stage2-reviewer-trigger",
     ],
   },
   STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2: {
     mode: ENVELOPE_MODES.BOUNDED,
-    authorizedActions: ["merge-pr", "create-stage2-audit-issue", "write-control-snapshot", "post-stage2-reviewer-trigger"],
+    authorizedActions: [
+      "merge-pr",
+      "dispatch-stage2-preparation-worker",
+      "write-control-snapshot",
+      "post-stage2-reviewer-trigger",
+    ],
+  },
+  // Issue #718: the resumable post-merge/pre-preparation gap -- a prior controller already
+  // merged the PR (and possibly began Stage 2 preparation) but no settled Stage 2 reference was
+  // ever durably recorded. A fresh controller resuming this state (next-review-transition-
+  // gate.mjs's control-Issue-mode "PR" bullet settled, live PR state MERGED, no settled "Stage
+  // 2" bullet) authorizes exactly one more dispatch, never a second merge-pr.
+  STAGE2_PREPARATION_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-stage2-preparation-worker"] },
+  // Stage 1 correction on PR #721 (Codex P1 finding): a merged PR whose control Issue's Stage 1
+  // disposition was never durably settled -- named by next-review-transition-gate.mjs's own
+  // STAGE2_PREPARATION_BLOCKED_ON_STAGE1 verdict. Authorizes exactly the one recovery command
+  // that verdict's own `nextCommand` names (finalize-stage1-satisfied-breakpoint.mjs --recover
+  // true); a fresh gate invocation afterward resolves normally to STAGE2_PREPARATION_REQUIRED.
+  STAGE2_PREPARATION_BLOCKED_ON_STAGE1: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["run-finalize-stage1-satisfied-recover"],
   },
   // Issue #665 (live #639/#638/PR #640 reproduction): every documented merge prerequisite for a
   // correction-satisfied disposition passed, but GitHub's own live mergeable state reported a
@@ -351,6 +375,47 @@ export function getActionEnvelope(state, context = {}) {
   // Issue #703: only a findings-bearing correction (the default) reserves a checkout pre-spawn.
   if (state === "STAGE1_CORRECTION_REQUIRED" && context.correctionReason === "closing-reference") {
     return { mode: entry.mode, authorizedActions: ["dispatch-correction-worker"] };
+  }
+
+  // Stage 1 correction on PR #721 (Codex findings P1/P6): the three verdicts that dispatch
+  // dispatch-stage2-preparation-worker in the SAME bounded envelope
+  // (STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2, STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_
+  // STAGE2, and the resume verdict STAGE2_PREPARATION_REQUIRED) must not treat
+  // write-control-snapshot/post-stage2-reviewer-trigger as unconditionally required. The
+  // dispatched worker itself decides, returning a compact "AUDIT_READY #<n>" or
+  // "AUDIT_PREPARATION_FAILED <reason>" (format-dispatch-prompt.mjs's
+  // formatStage2PreparationWorkerDispatchPrompt). A failed preparation leaves no valid Audit
+  // Issue number to project or trigger against -- those two actions cannot safely run, and the
+  // dispatch-only sequence ending there is the correct, compliant stop (mirroring
+  // CHECKOUT_BINDING_UNVERIFIED's own "the attempt itself is what produced this state" reasoning
+  // above). A successful AUDIT_READY authorizes the follow-up: the control-write finalizer
+  // (write-control-snapshot, in practice finalize-audit-breakpoint.mjs) in thin/thick
+  // control-Issue mode, or a distinct verify-direct-reference-audit action (no control Issue to
+  // project onto -- docs/bounded-review-cycle.md's "Stage 2 preparation worker" section's
+  // direct-reference continuation, finalize-audit-breakpoint.mjs's own
+  // runDirectReferenceVerification) when none exists -- either way followed by
+  // post-stage2-reviewer-trigger. `context.preparationResult` is supplied by the caller (the
+  // controller's own compliance record of the worker's actual returned status), never guessed
+  // from `state` alone; its absence (or an unrecognized value) keeps each verdict's existing
+  // static table row unchanged, so every pre-existing caller/test that never supplies it is
+  // unaffected.
+  if (
+    (state === "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2" ||
+      state === "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2" ||
+      state === "STAGE2_PREPARATION_REQUIRED") &&
+    (context.preparationResult === "AUDIT_READY" || context.preparationResult === "AUDIT_PREPARATION_FAILED")
+  ) {
+    const base =
+      state === "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2"
+        ? ["finalize-stage1-satisfied", "merge-pr", "dispatch-stage2-preparation-worker"]
+        : state === "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2"
+          ? ["merge-pr", "dispatch-stage2-preparation-worker"]
+          : ["dispatch-stage2-preparation-worker"];
+    if (context.preparationResult === "AUDIT_PREPARATION_FAILED") {
+      return { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: base };
+    }
+    const finalizeAction = context.controlIssue != null ? "write-control-snapshot" : "verify-direct-reference-audit";
+    return { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: [...base, finalizeAction, "post-stage2-reviewer-trigger"] };
   }
 
   if (state === "STAGE2_CLOSE_READY") {

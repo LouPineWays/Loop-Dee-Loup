@@ -8,6 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   run,
+  runDirectReferenceVerification,
   verifyExecutionMatchesAudit,
   verifyControlPrMatches,
   verifyPrMerged,
@@ -456,6 +457,91 @@ test('run(): rejects an --execution-issue that is neither a positive integer nor
     { repo: "o/r", controlIssue: 445, executionIssue: "bogus", pr: 558, auditIssue: 559 },
     {
       ghIssueViewImpl: async () => {
+        throw new Error("must not be called");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 1);
+});
+
+// -- Stage 1 correction on PR #721 (Codex P1 finding, "Keep direct-reference audits off the
+// control finalizer"): runDirectReferenceVerification -- the mechanically verified continuation
+// for an AUDIT_READY result with no thin/thick control Issue to project a breakpoint onto.
+
+test("runDirectReferenceVerification(): the happy path -- merged PR, matching audit issue -> AUDIT_VERIFIED, never touching write-control-snapshot.mjs", async () => {
+  const result = await runDirectReferenceVerification(
+    { repo: "o/r", executionIssue: 440, pr: 558, auditIssue: 559 },
+    {
+      ghPrViewImpl: async ({ pr }) => {
+        assert.equal(pr, 558);
+        return MERGED_PR_VIEW;
+      },
+      ghAuditIssueViewImpl: async ({ auditIssue }) => {
+        assert.equal(auditIssue, 559);
+        return MATCHING_AUDIT_VIEW;
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "AUDIT_VERIFIED");
+  assert.equal(result.controlIssue, null);
+  assert.equal(result.message, "AUDIT_VERIFIED 558 559");
+});
+
+test('runDirectReferenceVerification(): the explicit no-work-issue sentinel ("none") is accepted and checked against the Audit Issue\'s own "Work issue" field', async () => {
+  const result = await runDirectReferenceVerification(
+    { repo: "o/r", executionIssue: "none", pr: 558, auditIssue: 559 },
+    {
+      ghPrViewImpl: async () => MERGED_PR_VIEW,
+      ghAuditIssueViewImpl: async () => ({
+        state: "OPEN",
+        body: ["### Work issue", "", "none", "", "### Exact merge commit", "", "`d34db33fd34db33fd34db33fd34db33fd34db33f`", ""].join(
+          "\n",
+        ),
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "AUDIT_VERIFIED");
+});
+
+test("runDirectReferenceVerification(): PR not yet merged -> AUDIT_BREAKPOINT_UNVERIFIED, never spending an Audit Issue read", async () => {
+  let auditReadAttempted = false;
+  const result = await runDirectReferenceVerification(
+    { repo: "o/r", executionIssue: 440, pr: 558, auditIssue: 559 },
+    {
+      ghPrViewImpl: async () => ({ state: "OPEN" }),
+      ghAuditIssueViewImpl: async () => {
+        auditReadAttempted = true;
+        return MATCHING_AUDIT_VIEW;
+      },
+    },
+  );
+  assert.equal(auditReadAttempted, false);
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "AUDIT_BREAKPOINT_UNVERIFIED");
+});
+
+test("runDirectReferenceVerification(): audit issue evidence mismatch (wrong merge commit) -> AUDIT_BREAKPOINT_UNVERIFIED", async () => {
+  const result = await runDirectReferenceVerification(
+    { repo: "o/r", executionIssue: 440, pr: 558, auditIssue: 559 },
+    {
+      ghPrViewImpl: async () => MERGED_PR_VIEW,
+      ghAuditIssueViewImpl: async () => ({
+        state: "OPEN",
+        body: ["### Work issue", "", "#440", "", "### Exact merge commit", "", "`notthesamecommit`", ""].join("\n"),
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "AUDIT_BREAKPOINT_UNVERIFIED");
+});
+
+test("runDirectReferenceVerification(): rejects missing/invalid required args without ever calling gh", async () => {
+  const result = await runDirectReferenceVerification(
+    { repo: "o/r", executionIssue: 440, pr: null, auditIssue: 559 },
+    {
+      ghPrViewImpl: async () => {
         throw new Error("must not be called");
       },
     },

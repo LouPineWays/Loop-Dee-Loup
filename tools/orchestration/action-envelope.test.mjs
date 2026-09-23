@@ -30,6 +30,8 @@ test("getActionEnvelope: every ready-dispatch-gate.mjs and next-review-transitio
     "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT",
     "STAGE1_CORRECTION_REQUIRED",
     "CHECKOUT_BINDING_UNVERIFIED",
+    "STAGE2_PREPARATION_REQUIRED",
+    "STAGE2_PREPARATION_BLOCKED_ON_STAGE1",
     "STAGE2_CORRECTION_REQUIRED",
     "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
     "STAGE2_CLOSE_READY",
@@ -97,10 +99,10 @@ test("duplicating an authorized action within one bounded transition is a violat
   assert.ok(result.reasons[0].includes("already performed once"));
 });
 
-test("performing an envelope's own authorized actions out of its declared order is a violation (write-control-snapshot, create-stage2-audit-issue, post-stage2-reviewer-trigger, merge-pr)", () => {
+test("performing an envelope's own authorized actions out of its declared order is a violation (write-control-snapshot, dispatch-stage2-preparation-worker, post-stage2-reviewer-trigger, merge-pr)", () => {
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
     "write-control-snapshot",
-    "create-stage2-audit-issue",
+    "dispatch-stage2-preparation-worker",
     "post-stage2-reviewer-trigger",
     "merge-pr",
   ]);
@@ -120,7 +122,7 @@ test("#559/#445/PR #558 shape: posting the Stage 2 reviewer trigger before the c
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
     "finalize-stage1-satisfied",
     "merge-pr",
-    "create-stage2-audit-issue",
+    "dispatch-stage2-preparation-worker",
     "post-stage2-reviewer-trigger",
     "write-control-snapshot",
   ]);
@@ -132,7 +134,7 @@ test("#559/#445/PR #558 shape: the corrected order (merge, create audit issue, p
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
     "finalize-stage1-satisfied",
     "merge-pr",
-    "create-stage2-audit-issue",
+    "dispatch-stage2-preparation-worker",
     "write-control-snapshot",
     "post-stage2-reviewer-trigger",
   ]);
@@ -145,7 +147,7 @@ test("#582/#583 shape: merging before the Stage 1 disposition is durably persist
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
     "merge-pr",
     "finalize-stage1-satisfied",
-    "create-stage2-audit-issue",
+    "dispatch-stage2-preparation-worker",
     "write-control-snapshot",
     "post-stage2-reviewer-trigger",
   ]);
@@ -156,7 +158,7 @@ test("#582/#583 shape: merging before the Stage 1 disposition is durably persist
 test("#582/#583 shape: omitting finalize-stage1-satisfied entirely is a violation even though every observed action is itself permitted and in order", () => {
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
     "merge-pr",
-    "create-stage2-audit-issue",
+    "dispatch-stage2-preparation-worker",
     "write-control-snapshot",
     "post-stage2-reviewer-trigger",
   ]);
@@ -281,7 +283,7 @@ test("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2: finalize-stage1-satisfied, merg
     classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
       "finalize-stage1-satisfied",
       "merge-pr",
-      "create-stage2-audit-issue",
+      "dispatch-stage2-preparation-worker",
       "write-control-snapshot",
       "post-stage2-reviewer-trigger",
     ]).status,
@@ -290,7 +292,7 @@ test("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2: finalize-stage1-satisfied, merg
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
     "finalize-stage1-satisfied",
     "merge-pr",
-    "create-stage2-audit-issue",
+    "dispatch-stage2-preparation-worker",
     "wait-for-completion",
   ]);
   assert.equal(result.status, "violation");
@@ -300,12 +302,159 @@ test("STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2: same bounded merge/c
   assert.equal(
     classifyEnvelopeCompliance("STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
       "merge-pr",
-      "create-stage2-audit-issue",
+      "dispatch-stage2-preparation-worker",
       "write-control-snapshot",
       "post-stage2-reviewer-trigger",
     ]).status,
     "compliant",
   );
+});
+
+// Issue #718 controller-context negative (Required check 2): the pre-#718 shape -- the
+// controller itself performing semantic Stage 2 audit-issue authoring, recorded here as the old
+// "create-stage2-audit-issue" action kind -- is no longer in either merge/trigger verdict's
+// authorized envelope at all. A controller that still performed it directly, instead of
+// dispatching the bounded preparation worker, is now a structural violation, not merely
+// discouraged by prose.
+test("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2: the pre-#718 controller-performed 'create-stage2-audit-issue' action is no longer authorized at all", () => {
+  const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
+    "finalize-stage1-satisfied",
+    "merge-pr",
+    "create-stage2-audit-issue",
+    "write-control-snapshot",
+    "post-stage2-reviewer-trigger",
+  ]);
+  assert.equal(result.status, "violation");
+  assert.ok(result.reasons.some((r) => r.includes("create-stage2-audit-issue") && r.includes("not in the authorized envelope")));
+  assert.ok(
+    result.reasons.some((r) => r.includes("dispatch-stage2-preparation-worker") && r.includes("required action")),
+    "the envelope must still require the bounded worker dispatch even though an unauthorized substitute was attempted",
+  );
+});
+
+// -- Issue #718: STAGE2_PREPARATION_REQUIRED -- the resumable post-merge/pre-preparation gap --
+
+test("STAGE2_PREPARATION_REQUIRED: one bounded dispatch is compliant; anything else (including a second merge-pr) is a violation", () => {
+  assert.equal(
+    classifyEnvelopeCompliance("STAGE2_PREPARATION_REQUIRED", ["dispatch-stage2-preparation-worker"]).status,
+    "compliant",
+  );
+  const result = classifyEnvelopeCompliance("STAGE2_PREPARATION_REQUIRED", [
+    "merge-pr",
+    "dispatch-stage2-preparation-worker",
+  ]);
+  assert.equal(result.status, "violation");
+  assert.equal(result.reasons.length, 1);
+  assert.ok(result.reasons[0].includes("merge-pr"));
+});
+
+// -- Stage 1 correction on PR #721: preparationResult-derived follow-up authorization --------
+// Codex findings P1 ("Authorize completion after resumed preparation") and P6 ("Model a failed
+// preparation as a terminal transition"), plus the guidance-comment regression list items 1-2.
+
+test("STAGE2_PREPARATION_REQUIRED with preparationResult AUDIT_READY (control-Issue mode): dispatch, write-control-snapshot, then trigger is compliant and advances exactly once", () => {
+  const context = { preparationResult: "AUDIT_READY", controlIssue: 322 };
+  assert.equal(
+    classifyEnvelopeCompliance(
+      "STAGE2_PREPARATION_REQUIRED",
+      ["dispatch-stage2-preparation-worker", "write-control-snapshot", "post-stage2-reviewer-trigger"],
+      context,
+    ).status,
+    "compliant",
+  );
+  // Stopping after dispatch alone (as if the resumed envelope were still the narrow default) is
+  // now a violation -- the required follow-up was never observed. This is the exact defect the
+  // Codex P1 finding reported: the pre-correction envelope permitted only the dispatch even
+  // though the worker cannot itself finalize/trigger.
+  const short = classifyEnvelopeCompliance("STAGE2_PREPARATION_REQUIRED", ["dispatch-stage2-preparation-worker"], context);
+  assert.equal(short.status, "violation");
+  assert.ok(short.reasons.some((r) => r.includes("write-control-snapshot")));
+  // A second dispatch (never re-dispatching the same worker twice under one resumed envelope) is
+  // still rejected.
+  const repeated = classifyEnvelopeCompliance(
+    "STAGE2_PREPARATION_REQUIRED",
+    [
+      "dispatch-stage2-preparation-worker",
+      "write-control-snapshot",
+      "post-stage2-reviewer-trigger",
+      "dispatch-stage2-preparation-worker",
+    ],
+    context,
+  );
+  assert.equal(repeated.status, "violation");
+});
+
+test("STAGE2_PREPARATION_REQUIRED with preparationResult AUDIT_PREPARATION_FAILED: stopping after the dispatch alone is compliant; attempting write-control-snapshot or the trigger afterward is a violation", () => {
+  const context = { preparationResult: "AUDIT_PREPARATION_FAILED", controlIssue: 322 };
+  assert.equal(
+    classifyEnvelopeCompliance("STAGE2_PREPARATION_REQUIRED", ["dispatch-stage2-preparation-worker"], context).status,
+    "compliant",
+  );
+  const overreach = classifyEnvelopeCompliance(
+    "STAGE2_PREPARATION_REQUIRED",
+    ["dispatch-stage2-preparation-worker", "write-control-snapshot"],
+    context,
+  );
+  assert.equal(overreach.status, "violation");
+  assert.ok(overreach.reasons.some((r) => r.includes("write-control-snapshot")));
+});
+
+test("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2 with preparationResult AUDIT_PREPARATION_FAILED: merge/dispatch stops cleanly, never reaching write-control-snapshot/trigger", () => {
+  const context = { preparationResult: "AUDIT_PREPARATION_FAILED", controlIssue: 322 };
+  assert.equal(
+    classifyEnvelopeCompliance(
+      "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
+      ["finalize-stage1-satisfied", "merge-pr", "dispatch-stage2-preparation-worker"],
+      context,
+    ).status,
+    "compliant",
+  );
+  const overreach = classifyEnvelopeCompliance(
+    "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
+    ["finalize-stage1-satisfied", "merge-pr", "dispatch-stage2-preparation-worker", "post-stage2-reviewer-trigger"],
+    context,
+  );
+  assert.equal(overreach.status, "violation");
+});
+
+test("STAGE2_PREPARATION_REQUIRED with preparationResult AUDIT_READY and no controlIssue (direct-reference mode): authorizes verify-direct-reference-audit, never write-control-snapshot (no control Issue exists to project onto)", () => {
+  const context = { preparationResult: "AUDIT_READY", controlIssue: null };
+  assert.equal(
+    classifyEnvelopeCompliance(
+      "STAGE2_PREPARATION_REQUIRED",
+      ["dispatch-stage2-preparation-worker", "verify-direct-reference-audit", "post-stage2-reviewer-trigger"],
+      context,
+    ).status,
+    "compliant",
+  );
+  const wrongFinalizer = classifyEnvelopeCompliance(
+    "STAGE2_PREPARATION_REQUIRED",
+    ["dispatch-stage2-preparation-worker", "write-control-snapshot", "post-stage2-reviewer-trigger"],
+    context,
+  );
+  assert.equal(wrongFinalizer.status, "violation");
+  assert.ok(wrongFinalizer.reasons.some((r) => r.includes("write-control-snapshot")));
+});
+
+test("STAGE2_PREPARATION_REQUIRED: omitting preparationResult from context keeps the original narrow dispatch-only envelope unchanged (backward compatible default)", () => {
+  assert.deepEqual(getActionEnvelope("STAGE2_PREPARATION_REQUIRED", { controlIssue: 322 }), {
+    mode: "bounded",
+    authorizedActions: ["dispatch-stage2-preparation-worker"],
+  });
+});
+
+// -- Stage 1 correction on PR #721: STAGE2_PREPARATION_BLOCKED_ON_STAGE1 --------------------
+// Codex P1 finding ("Verify Stage 1 before resuming Stage 2") -- the merged-PR resume path must
+// not bypass an unsettled Stage 1 disposition; next-review-transition-gate.mjs's own new verdict
+// authorizes exactly the one named recovery command.
+
+test("STAGE2_PREPARATION_BLOCKED_ON_STAGE1: exactly one recovery-script run is compliant; dispatching the Stage 2 preparation worker directly from this state is a violation", () => {
+  assert.equal(
+    classifyEnvelopeCompliance("STAGE2_PREPARATION_BLOCKED_ON_STAGE1", ["run-finalize-stage1-satisfied-recover"]).status,
+    "compliant",
+  );
+  const result = classifyEnvelopeCompliance("STAGE2_PREPARATION_BLOCKED_ON_STAGE1", ["dispatch-stage2-preparation-worker"]);
+  assert.equal(result.status, "violation");
 });
 
 // -- classifyEnvelopeCompliance: action-bearing correction --------------------------------

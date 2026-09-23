@@ -110,6 +110,27 @@
 //     - anything else (operational error from either check, or a combination this gate does
 //       not recognize)                                   -> AMBIGUOUS
 //
+//   Issue #718: control-Issue mode's "PR" bullet is settled but "Stage 2" is not (a genuinely
+//   pre-merge control Issue, or a resumed one whose prior Stage 2 preparation never durably
+//   recorded a Stage 2 reference), and no explicit --head override was supplied -- this gate
+//   now checks live PR state before treating it as an ordinary pre-merge transition:
+//     - PR state MERGED, and the control Issue's own "Stage 1" bullet already carries a
+//       canonical satisfied/exempt or correction-satisfied disposition (Stage 1 correction on
+//       PR #721, Codex P1 finding: a prematurely/manually merged PR whose Stage 1 disposition
+//       was never durably settled must not bypass that authority merely because it merged) ->
+//       STAGE2_PREPARATION_REQUIRED (a prior controller already merged and possibly began Stage
+//       2 preparation, e.g. via dispatch-stage2-preparation-worker, without it durably
+//       completing; re-running stage1-gate/mergeReady against an already-merged PR is not a
+//       safe resume path, so this authorizes exactly one more dispatch-stage2-preparation-worker
+//       action instead, carrying the same { repo, pr, issue, controlIssue } context shape
+//       STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2 carries, resolvable via the Execution bullet)
+//     - PR state MERGED, but the "Stage 1" bullet is not one of those two affirmative shapes ->
+//       STAGE2_PREPARATION_BLOCKED_ON_STAGE1, naming the exact
+//       finalize-stage1-satisfied-breakpoint.mjs --recover true recovery command as
+//       `nextCommand`; a fresh gate invocation after that recovery succeeds resolves normally to
+//       STAGE2_PREPARATION_REQUIRED above
+//     - anything else -> the ordinary pre-merge phase below, using that live head
+//
 //   Post-merge phase (a settled "Stage 2"/Audit reference):
 //     - lifecycle-gate post-audit READY_TO_CLOSE or ACCEPTED_NO_WORK_ISSUE -> STAGE2_CLOSE_READY
 //       (issue #407 unit 407-B: this verdict also carries `nextCommand`, the exact real
@@ -870,6 +891,10 @@ function exitCodeFor(state) {
     case "NO_ACTION_YET":
     case "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2":
     case "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2":
+    // Issue #718: names a required, non-blocking resume action (dispatch the Stage 2
+    // preparation worker) -- the same "authorizes proceeding" bucket as the two merge/trigger
+    // verdicts above, never an error or an outstanding correction.
+    case "STAGE2_PREPARATION_REQUIRED":
     case "STAGE2_CLOSE_READY":
     case "STAGE2_REPORT_READY_TO_RECORD":
       return 0;
@@ -880,6 +905,12 @@ function exitCodeFor(state) {
     // corrective action too (run the trigger/finalize nextCommand) -- same exit-code bucket as
     // its STAGE2_CORRECTION_REQUIRED sibling, never the "authorizes proceeding" bucket above.
     case "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION":
+    // Stage 1 correction on PR #721: names a concrete, non-blocking corrective action (run
+    // finalize-stage1-satisfied-breakpoint.mjs --recover true) required before Stage 2
+    // preparation may resume -- same bucket as its STAGE1_CORRECTION_REQUIRED sibling. Not
+    // reached via this switch today (the inline construction sets its own literal exitCode:3),
+    // kept here only for this function's own documented exhaustiveness.
+    case "STAGE2_PREPARATION_BLOCKED_ON_STAGE1":
       return 3;
     case "AMBIGUOUS":
     case "STAGE2_RESPONSE_UNUSABLE":
@@ -1379,8 +1410,102 @@ async function runNextReviewTransitionGateCore(
   }
 
   if (prRef.kind === "issue") {
+    // Issue #718: an explicit --head is a deliberate override (e.g. replaying a specific
+    // already-known state) and, exactly as before this fix, skips any live PR read entirely --
+    // it does not opt into the merged-PR resume detection below.
+    if (args.head) {
+      return resolvePreMergeFromControlBody(
+        { repo, body, prIssue: prRef.issue, controlIssueNumber, head: args.head, ghPrHeadImpl },
+        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
+      );
+    }
+    // No settled "Stage 2" reference exists here (the auditRef.kind === "issue" branch above
+    // already returned). Resolve the Execution reference first, before any live PR read --
+    // mirrors resolvePreMergeFromControlBody's own ordering rationale below (a malformed
+    // Execution reference must fail closed without ever spending a live PR read at all), and
+    // means this same resolved reference is available for both outcomes of the live-state check
+    // that follows.
+    const executionField = readExecutionBulletField(body);
+    const executionRef = executionField.conflict
+      ? { ok: false, reason: describeExecutionConflict(executionField) }
+      : parseExecutionPointer(executionField.value);
+    if (!executionRef.ok) {
+      return {
+        exitCode: 4,
+        state: "AMBIGUOUS",
+        stopAfter: true,
+        repo,
+        controlIssue: controlIssueNumber,
+        reason:
+          `Execution reference required to resolve the gated work issue for the pre-merge check is malformed: ` +
+          `${executionRef.reason}`,
+      };
+    }
+    // Before treating this as an ordinary pre-merge transition, resolve live PR state the same
+    // way the coexisting-PR-and-Stage-2 branch above already does (#537) -- a prior controller
+    // may have already merged this PR (and possibly begun Stage 2 preparation) without ever
+    // durably recording a settled "Stage 2" reference, e.g. because
+    // dispatch-stage2-preparation-worker failed or the session was interrupted before
+    // finalize-audit-breakpoint.mjs ran. Re-running stage1-gate/mergeReady against an
+    // already-merged PR is not a safe resume path -- mergeReady in particular has no notion of
+    // "already merged" and would happily re-authorize a second merge-pr action.
+    let prState;
+    try {
+      prState = await ghPrStateImpl({ repo, number: prRef.issue });
+    } catch (err) {
+      return { exitCode: 1, message: `gh pr view failed for ${repo}#${prRef.issue}: ${err.message}` };
+    }
+    if (prState.state === "MERGED") {
+      // Stage 1 correction on PR #721 (Codex P1 finding): a merged PR with no settled Stage 2
+      // pointer must not resume Stage 2 preparation merely because it is merged -- a
+      // prematurely or manually merged PR whose control state still carries an unsettled Stage
+      // 1 disposition (e.g. the stranded "requested" shape, or none at all) would otherwise
+      // bypass Stage 1 authority entirely. Require the control Issue's own "Stage 1" bullet to
+      // already carry one of the two affirmative shapes the pre-merge phase above authorizes
+      // merge from -- an ordinary "satisfied|exempt at <sha>" disposition, or a
+      // "correction-satisfied at <sha> (reviewed <sha>)" one -- before resuming. When neither is
+      // present, this is not a safe resume: stop at STAGE2_PREPARATION_BLOCKED_ON_STAGE1 and name
+      // the documented recovery command (finalize-stage1-satisfied-breakpoint.mjs --recover true)
+      // rather than silently authorizing Stage 2 preparation on unverified Stage 1 authority.
+      const stage1Bullet = parseControlBullet(body, "Stage 1");
+      const hasAffirmativeDisposition = parseAffirmativeStage1Disposition(stage1Bullet) !== null;
+      const hasCorrectionSatisfiedDisposition =
+        looksLikeCorrectionSatisfiedDisposition(stage1Bullet) && parseCorrectionSatisfiedDisposition(stage1Bullet) !== null;
+      if (!hasAffirmativeDisposition && !hasCorrectionSatisfiedDisposition) {
+        return {
+          exitCode: 3,
+          state: "STAGE2_PREPARATION_BLOCKED_ON_STAGE1",
+          stopAfter: true,
+          repo,
+          controlIssue: controlIssueNumber,
+          pr: prRef.issue,
+          issue: executionRef.issue,
+          reason:
+            `control Issue #${controlIssueNumber}'s "Stage 1" bullet (${JSON.stringify(stage1Bullet)}) is not a ` +
+            `canonical satisfied/exempt or correction-satisfied disposition, but PR #${prRef.issue} is already ` +
+            "MERGED -- Stage 2 preparation must not resume on unverified Stage 1 authority",
+          nextCommand:
+            `node tools/orchestration/finalize-stage1-satisfied-breakpoint.mjs --control-issue ${controlIssueNumber} ` +
+            `--execution-issue ${executionRef.issue} --pr ${prRef.issue} --recover true`,
+        };
+      }
+      // This verdict's own context shape (repo, pr, issue, controlIssue) matches
+      // STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2's exactly -- tools/orchestration/format-
+      // dispatch-prompt.mjs's stage2-preparation template can pipe either verdict's JSON through
+      // unchanged.
+      return {
+        exitCode: 0,
+        state: "STAGE2_PREPARATION_REQUIRED",
+        stopAfter: true,
+        repo,
+        controlIssue: controlIssueNumber,
+        pr: prRef.issue,
+        issue: executionRef.issue,
+      };
+    }
+    const head = prState.headRefOid;
     return resolvePreMergeFromControlBody(
-      { repo, body, prIssue: prRef.issue, controlIssueNumber, head: args.head, ghPrHeadImpl },
+      { repo, body, prIssue: prRef.issue, controlIssueNumber, head, ghPrHeadImpl },
       { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl },
     );
   }
