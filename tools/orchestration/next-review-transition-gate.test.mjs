@@ -422,6 +422,98 @@ test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + an operatio
   assert.notEqual(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
 });
 
+// -- resolvePreMergeVerdict: issue #665, mergeConflict (correction-satisfied merge-conflict
+// recovery -- the live #639/#638/PR #640 reproduction) ---------------------------------------
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + MERGE_READY + mergeConflict CONFLICTING -> STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT, never a merge attempt (exact #639/#640 reproduction shape)", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
+    mergeConflict: { exitCode: 0, mergeable: "CONFLICTING" },
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT");
+  assert.equal(v.stopAfter, true);
+  assert.equal(v.reviewedHead, "reviewed1234567");
+  assert.equal(v.correctedHead, "corrected1234567");
+  assert.notEqual(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + MERGE_READY + mergeConflict MERGEABLE -> STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 unchanged (non-conflicting correction-satisfied path is unaffected)", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
+    mergeConflict: { exitCode: 0, mergeable: "MERGEABLE" },
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + MERGE_READY + no mergeConflict supplied at all (null) -> STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2 unchanged (backward-compatible default when the caller never fetched it)", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + MERGE_READY + mergeConflict UNKNOWN -> NO_ACTION_YET (GitHub hasn't finished computing mergeability; never misdiagnosed as a conflict, never authorizes merge on unconfirmed evidence)", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
+    mergeConflict: { exitCode: 0, mergeable: "UNKNOWN" },
+  });
+  assert.equal(v.state, "NO_ACTION_YET");
+  assert.notEqual(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT");
+  assert.notEqual(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("resolvePreMergeVerdict: NOT_REQUESTED + CORRECTION_SATISFIED + MERGE_READY + an operational-error mergeConflict result falls closed to AMBIGUOUS, never a silent merge authorization", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED"),
+    mergeConflict: { exitCode: 1, message: "gh pr view failed" },
+  });
+  assert.equal(v.state, "AMBIGUOUS");
+  assert.match(v.reason, /mergeability check/);
+});
+
+test("resolvePreMergeVerdict: issue #665 recovery case -- a corrected head that is a strict, non-diverged descendant of the reviewed head (a real merge commit integrating target branch, never a rebase) with mergeConflict now MERGEABLE resumes the normal merge-and-trigger-Stage-2 transition once the recovery worker's finalize-correction-breakpoint.mjs re-establishes the disposition at the new head", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: correctionDelta("CORRECTION_SATISFIED", {
+      reviewedHead: "reviewed1234567",
+      correctedHead: "recoveredmergecommit1234567",
+    }),
+    mergeConflict: { exitCode: 0, mergeable: "MERGEABLE" },
+  });
+  assert.equal(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+  assert.equal(v.reviewedHead, "reviewed1234567");
+  assert.equal(v.correctedHead, "recoveredmergecommit1234567");
+});
+
+test("resolvePreMergeVerdict: issue #665 -- a recovery attempt that rebased/force-rewrote instead of merging still fails closed (checkCorrectionDelta's own ancestry check rejects a non-\"ahead\" compare status; never authorizes merge on a diverged head)", () => {
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("NOT_REQUESTED"),
+    mergeReady: mergeReady("MERGE_READY"),
+    correctionDelta: correctionDelta("NOT_SATISFIED", {
+      reason: 'compare(reviewed1234567...rebasedhead1234567) reported status "diverged", not "ahead"',
+    }),
+    // A rebase/force-push recovery would also still show CONFLICTING or MERGEABLE against the
+    // target branch depending on timing, but it never reaches this far: checkCorrectionDelta's
+    // own ancestry check (re-derived by resolvePreMerge before mergeConflict is ever fetched)
+    // already rejects it as NOT_SATISFIED.
+    mergeConflict: { exitCode: 0, mergeable: "MERGEABLE" },
+  });
+  assert.equal(v.state, "AMBIGUOUS");
+  assert.match(v.reason, /diverged/);
+  assert.notEqual(v.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
 test("resolvePreMergeVerdict: NOT_REQUESTED + NOT_SATISFIED -> AMBIGUOUS, carrying the underlying reason", () => {
   const v = resolvePreMergeVerdict({
     stage1: stage1("NOT_REQUESTED"),
@@ -799,6 +891,7 @@ test("runNextReviewTransitionGate: direct --pr/--head/--issue mode accepts --sta
         assert.equal(args.correctedHead, "0009c54b18");
         return { exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: "0009c54b18" };
       },
+      checkMergeConflictImpl: async () => ({ exitCode: 0, mergeable: "MERGEABLE" }),
     },
   );
   assert.equal(issueReadCalls, 0);
@@ -1185,6 +1278,7 @@ test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfie
         correctionDeltaCallArgs = args;
         return { exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: "0009c54b18" };
       },
+      checkMergeConflictImpl: async () => ({ exitCode: 0, mergeable: "MERGEABLE" }),
     },
   );
   assert.deepEqual(correctionDeltaCallArgs, {
@@ -1207,7 +1301,8 @@ test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfie
   });
 });
 
-test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfied disposition but BLOCKED_CLOSING_REFERENCE resolves to STAGE1_CORRECTION_REQUIRED", async () => {
+test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfied disposition but BLOCKED_CLOSING_REFERENCE resolves to STAGE1_CORRECTION_REQUIRED, and never spends a mergeability check at all (mergeReady's own leg is already blocked; nothing to gain from live mergeability evidence)", async () => {
+  let mergeConflictCalls = 0;
   const result = await runNextReviewTransitionGate(
     { repo: "o/r", controlIssue: "322" },
     {
@@ -1216,11 +1311,87 @@ test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfie
       stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
       checkMergeReadyImpl: async () => ({ exitCode: 2, state: "BLOCKED_CLOSING_REFERENCE" }),
       checkCorrectionDeltaImpl: async () => ({ exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: "0009c54b18" }),
+      checkMergeConflictImpl: async () => {
+        mergeConflictCalls++;
+        throw new Error("should never be called -- mergeReady's own leg is already blocked");
+      },
     },
   );
+  assert.equal(mergeConflictCalls, 0);
   assert.equal(result.exitCode, 3);
   assert.equal(result.state, "STAGE1_CORRECTION_REQUIRED");
   assert.equal(result.correctionReason, "closing-reference");
+});
+
+// -- runNextReviewTransitionGate: issue #665, the exact #639/#638/PR #640 reproduction --------
+
+test("runNextReviewTransitionGate: control-Issue mode, correction-satisfied + MERGE_READY, but the live PR's own mergeable state reports CONFLICTING -> STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT, authorizing exactly one bounded conflict-recovery dispatch and never a merge attempt (exact #639/#638/PR #640 reproduction)", async () => {
+  let mergeConflictCallArgs = null;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrHeadImpl: async () => "0009c54b18",
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => ({ exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: "0009c54b18" }),
+      checkMergeConflictImpl: async (args) => {
+        mergeConflictCallArgs = args;
+        return { exitCode: 0, mergeable: "CONFLICTING" };
+      },
+    },
+  );
+  assert.deepEqual(mergeConflictCallArgs, { repo: "o/r", number: 376 });
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.reviewedHead, "30b36035c9");
+  assert.equal(result.correctedHead, "0009c54b18");
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["reserve-correction-checkout", "dispatch-conflict-recovery-worker"],
+  });
+});
+
+test("runNextReviewTransitionGate: direct-reference mode reaches the identical STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT verdict for the same conflicting-mergeability evidence", async () => {
+  const result = await runNextReviewTransitionGate(
+    {
+      repo: "o/r",
+      pr: 640,
+      head: "0009c54b18",
+      issue: 638,
+      stage1Disposition: "correction-satisfied at 0009c54b18 (reviewed 30b36035c9)",
+    },
+    {
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => ({
+        exitCode: 0,
+        state: "CORRECTION_SATISFIED",
+        reviewedHead: "30b36035c9",
+        correctedHead: "0009c54b18",
+      }),
+      checkMergeConflictImpl: async () => ({ exitCode: 0, mergeable: "CONFLICTING" }),
+    },
+  );
+  assert.equal(result.state, "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT");
+});
+
+test("runNextReviewTransitionGate: an ordinary (non-correction) satisfied Stage 1 path never spends a mergeability check at all -- issue #665 scopes this narrowly to the correction-satisfied path only", async () => {
+  let mergeConflictCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", pr: 640, head: "0009c54b18", issue: 638 },
+    {
+      stage1RunImpl: async () => stage1("RESPONSE_RECEIVED"),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkMergeConflictImpl: async () => {
+        mergeConflictCalls++;
+        throw new Error("should never be called -- this is the ordinary satisfied path, not correction-satisfied");
+      },
+    },
+  );
+  assert.equal(mergeConflictCalls, 0);
+  assert.equal(result.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
 });
 
 test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfied disposition whose evidence does not check out (NOT_SATISFIED) resolves to AMBIGUOUS", async () => {
@@ -1343,6 +1514,7 @@ test("runNextReviewTransitionGate: exact #438/PR #610 regression, after finaliza
           correctedHead: ISSUE_611_CORRECTED_HEAD,
         };
       },
+      checkMergeConflictImpl: async () => ({ exitCode: 0, mergeable: "MERGEABLE" }),
     },
   );
   assert.deepEqual(correctionDeltaCallArgs, {
@@ -1615,6 +1787,7 @@ test("runNextReviewTransitionGate: issue #537 verification case 1 -- exact #487/
         assert.equal(args.pr, 536);
         return { exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: "0009c54b18" };
       },
+      checkMergeConflictImpl: async () => ({ exitCode: 0, mergeable: "MERGEABLE" }),
       checkPostAuditImpl: async () => {
         postAuditCalls++;
         throw new Error("should never be called -- the still-open PR #536 owns the transition, not stale Stage 2 #535");
@@ -1767,6 +1940,7 @@ test("runNextReviewTransitionGate: issue #537 verification case 8 -- direct-refe
         reviewedHead: "30b36035c9",
         correctedHead: "0009c54b18",
       }),
+      checkMergeConflictImpl: async () => ({ exitCode: 0, mergeable: "MERGEABLE" }),
     },
   );
   assert.equal(result.exitCode, 0);

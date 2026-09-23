@@ -634,7 +634,7 @@ function pushRefspecFor(branch) {
 }
 
 export async function reserve(
-  { repo, pr, cwd = process.cwd() },
+  { repo, pr, cwd = process.cwd(), expectedHead = null },
   { ghPrViewImpl = defaultGhPrView, git = defaultGitImpl(), tokenImpl = defaultTokenImpl, bindingPathImpl = defaultBindingWorktreePath } = {},
 ) {
   if (!isPositiveInteger(pr)) {
@@ -642,6 +642,23 @@ export async function reserve(
   }
   const { head, error } = await resolveTargetHead(ghPrViewImpl, repo, pr);
   if (error) return error;
+  // Stage 1 review finding on PR #719 (issue #665, P2 -- the TOCTOU gap): `expectedHead` pins
+  // a reservation to the exact head a caller has already authorized (e.g. the `correctedHead`
+  // `next-review-transition-gate.mjs`'s STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT verdict
+  // gated its conflict verdict against). Without this check, `reserve` would happily bind
+  // whatever the PR's live head happens to be at reservation time -- a commit that landed on
+  // the PR after the gate ran, and that never passed the transition authorizing recovery,
+  // could silently become the worker's starting point. Reusing STALE_HEAD_MISMATCH (rather than
+  // inventing a parallel verdict) keeps this the same fail-closed "a reservation never
+  // authorizes a stale/unexpected commit" meaning the verdict already carries elsewhere in this
+  // function.
+  if (expectedHead && head.sha !== expectedHead) {
+    return {
+      exitCode: 2,
+      verdict: "STALE_HEAD_MISMATCH",
+      reason: `PR #${pr}'s live head is ${head.sha}, not the gated corrected head ${expectedHead} -- the PR head advanced after the conflict verdict was produced`,
+    };
+  }
 
   let state;
   try {
@@ -827,15 +844,29 @@ export async function releaseBinding(
 }
 
 // Pipeline stage between `next-review-transition-gate.mjs` and `format-dispatch-prompt.mjs`:
-// a findings-bearing STAGE1_CORRECTION_REQUIRED verdict gains `checkoutBinding` (the settled
-// surface the formatter requires); every other verdict passes through unchanged. A failed
-// reservation replaces the verdict with CHECKOUT_BINDING_UNVERIFIED, which the formatter refuses
-// to render, so no worker is ever spawned without a settled surface.
+// a findings-bearing STAGE1_CORRECTION_REQUIRED verdict, or a STAGE1_CORRECTION_SATISFIED_
+// MERGE_CONFLICT verdict (issue #665's conflict-recovery worker -- Stage 1 review finding on
+// PR #719, P1: this recovery worker mutates source exactly like a findings correction worker
+// does, so dispatching it without the same exclusive PR-head reservation reintroduces the
+// path/worktree ambiguity this reservation pipeline exists to prevent), gains `checkoutBinding`
+// (the settled surface the formatter requires); every other verdict passes through unchanged.
+// A failed reservation replaces the verdict with CHECKOUT_BINDING_UNVERIFIED, which the
+// formatter refuses to render, so no worker is ever spawned without a settled surface.
+//
+// The conflict-recovery case also pins the reservation to `gate.correctedHead` (the exact head
+// `next-review-transition-gate.mjs` gated its conflict verdict against, via `reserve`'s own
+// `expectedHead` check above) -- Stage 1 review finding on PR #719, P2: without this pin, a
+// commit that lands on the PR after the gate ran, but before reservation, would silently
+// become the worker's starting point without ever having passed the transition that
+// authorized recovery.
 export async function reserveFromGate(gate, { repo, cwd } = {}, deps = {}) {
-  if (!gate || gate.state !== "STAGE1_CORRECTION_REQUIRED" || gate.correctionReason === "closing-reference") {
+  const isFindingsCorrection = gate?.state === "STAGE1_CORRECTION_REQUIRED" && gate.correctionReason !== "closing-reference";
+  const isConflictRecovery = gate?.state === "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT";
+  if (!gate || (!isFindingsCorrection && !isConflictRecovery)) {
     return { exitCode: 0, output: gate };
   }
-  const result = await reserve({ repo, pr: gate.pr, cwd }, deps);
+  const expectedHead = isConflictRecovery ? gate.correctedHead : null;
+  const result = await reserve({ repo, pr: gate.pr, cwd, expectedHead }, deps);
   if (result.exitCode !== 0) {
     // Issue #703 Stage 1 correction (P2 finding on PR #710): a failed reservation must reach a
     // terminal, no-dispatch outcome that is itself representable as compliant -- the original

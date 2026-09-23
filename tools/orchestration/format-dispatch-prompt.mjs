@@ -64,6 +64,14 @@
 //     | node tools/orchestration/format-dispatch-prompt.mjs
 // and the equivalent for `STAGE2_CORRECTION_REQUIRED` from a post-merge NOT CLEAN verdict.
 //
+// Issue #665 adds `STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT` (the live #639/#638/PR #640
+// reproduction: a correction-satisfied PR's merge is mechanically blocked by a real conflict
+// against the current target branch), selecting `formatConflictRecoveryWorkerDispatchPrompt`
+// the same table-driven way. Stage 1 review finding on PR #719: this template requires the same
+// pre-spawn `checkoutBinding` (`pr-head-checkout-preflight.mjs --reserve-from-gate`, pinned to
+// the gated `correctedHead`) as the findings-bearing `STAGE1_CORRECTION_REQUIRED` template, since
+// its worker mutates source too.
+//
 // Tests: node --test tools/orchestration/format-dispatch-prompt.test.mjs
 
 import { readFileSync } from "node:fs";
@@ -323,7 +331,12 @@ const BINDING_TOKEN_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 // required alongside `path`/`token` and is what the template actually invokes, so verification
 // code always comes from the controller's authoritative checkout while still evaluating the
 // reserved checkout's own live state as its cwd. Same validation/length budget as `path` above.
-function assertCheckoutBinding(checkoutBinding) {
+//
+// Stage 1 review finding on PR #719 (issue #665, P1): the conflict-recovery template below now
+// requires the identical pre-spawn binding for the identical reason (its worker mutates source
+// too), so this check is shared rather than duplicated; `callerName`/`purpose` let each caller's
+// error message stay self-identifying without forking the validation logic itself.
+function assertCheckoutBinding(checkoutBinding, callerName = "formatStage1CorrectionWorkerDispatchPrompt", purpose = "a findings correction") {
   if (
     !checkoutBinding ||
     typeof checkoutBinding.path !== "string" ||
@@ -355,10 +368,22 @@ function assertCheckoutBinding(checkoutBinding) {
     /["$`]/.test(checkoutBinding.scriptPath)
   ) {
     throw new Error(
-      "formatStage1CorrectionWorkerDispatchPrompt requires a pre-spawn checkoutBinding { path, token, scriptPath } for a findings correction -- " +
+      `${callerName} requires a pre-spawn checkoutBinding { path, token, scriptPath } for ${purpose} -- ` +
         "pipe the gate verdict through pr-head-checkout-preflight.mjs --reserve-from-gate first",
     );
   }
+}
+
+// Pure. Shared "pre-bound checkout" preamble -- Stage 1 review finding on PR #719 (issue #665,
+// P1) extends the same pre-spawn-reservation invariant from the findings-bearing Stage 1
+// correction template to the conflict-recovery template below, so this text (and its
+// budget-exclusion treatment in main()'s `bindingAllowance`) is shared rather than duplicated.
+function renderPreBoundCheckoutClause({ path, token, scriptPath, pr }) {
+  return (
+    `Pre-bound checkout: ${path}. From it, first run node "${scriptPath}" ` +
+    `--verify-binding ${token} --pr ${pr} (nonzero: CHECKOUT_BINDING_UNVERIFIED ${pr}, stop); work only ` +
+    `there, push via its pushRefspec.\n\n`
+  );
 }
 
 export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null, issue, pr, correctionReason, checkoutBinding = null }) {
@@ -432,9 +457,7 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
   // expand/substitute inside, this quoting (Stage 1 review finding on PR #712, P2).
   return (
     `Stage 1 correction worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
-    `Pre-bound checkout: ${path}. From it, first run node "${scriptPath}" ` +
-    `--verify-binding ${token} --pr ${pr} (nonzero: CHECKOUT_BINDING_UNVERIFIED ${pr}, stop); work only ` +
-    `there, push via its pushRefspec.\n\n` +
+    renderPreBoundCheckoutClause({ path, token, scriptPath, pr }) +
     `Read PR #${pr}'s Stage 1 review${executionReadClause} for findings (not restated). Apply one ` +
     `consolidated correction per docs/bounded-review-cycle.md, push, run ` +
     `tools/orchestration/finalize-correction-breakpoint.mjs (on CORRECTION_BREAKPOINT_UNVERIFIED report ` +
@@ -504,6 +527,92 @@ export function formatStage2CorrectionWorkerDispatchPrompt({ controlIssue = null
   );
 }
 
+// Pure. Renders the fixed reference-only "Conflict-recovery worker dispatch" template for
+// issue #665 — `next-review-transition-gate.mjs`'s `STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT`
+// verdict (live #639/#638/PR #640 reproduction: a correction-satisfied PR reached
+// `STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2` but GitHub's own live mergeable state
+// reported a real conflict against the current target branch, and the merge action could not
+// mechanically execute). `action-envelope.mjs` authorizes `reserve-correction-checkout` then
+// `dispatch-conflict-recovery-worker` for this state.
+//
+// Stage 1 review finding on PR #719 (issue #665's own correction — both findings accepted and
+// addressed together as one dispatch-boundary invariant, not two unrelated patches):
+//
+//   P1 (PR-head checkout reservation): this recovery worker mutates source exactly like a
+//   findings-bearing Stage 1 correction worker does, so it must not be dispatched onto an
+//   unsettled surface either. `checkoutBinding` (the same `{ path, token, scriptPath }` shape
+//   `pr-head-checkout-preflight.mjs --reserve-from-gate` adds to a findings correction) is now
+//   required here too — `assertCheckoutBinding` fails closed without it — and the template opens
+//   with the identical pre-bound-checkout preamble via `renderPreBoundCheckoutClause`.
+//
+//   P2 (pin the gated corrected head): the worker no longer starts from "whatever the PR's live
+//   head happens to be" — that was a TOCTOU gap, since a post-gate commit could become the
+//   worker's starting point without ever having passed the transition that authorized recovery.
+//   `pr-head-checkout-preflight.mjs`'s `reserve`/`reserveFromGate` now pin the reservation itself
+//   to `correctedHead` (the exact head this verdict gated) and fail closed
+//   (`STALE_HEAD_MISMATCH`) if the PR's live head has already moved past it; the worker's
+//   mandatory `--verify-binding` first step (named by the shared preamble) then re-proves both
+//   the reserved checkout and that head identity still hold before any source mutation. Nothing
+//   further needs restating in the prompt text itself — the pin already happened before this
+//   template was ever rendered.
+//
+// `reviewedHead` keeps its pre-existing, separate role and exception: when a Controlling Issue
+// is present, the reviewed head is already durably recorded there (the exact
+// `- **Stage 1:** correction-satisfied at <corrected-head> (reviewed <reviewed-head>)` bullet
+// `finalize-correction-breakpoint.mjs` persisted), so the worker reads it from that bullet
+// instead of it being restated in the prompt — keeping this template immune to SHA length
+// regardless of how long a real commit SHA is. Only `next-review-transition-gate.mjs`'s rare
+// no-control-Issue direct-reference path (a `--stage1-disposition` supplied ad hoc, with no
+// durable bullet anywhere) has nowhere else for the worker to recover it, so `reviewedHead` is
+// required only in that one case.
+//
+// The worker's job: integrate the current target branch into the PR branch with a real merge
+// commit (never rebase/force-push — `stage1-correction-gate.mjs`'s own ancestry check requires
+// the final head to remain a strict, non-diverged descendant of the reviewed head), resolve
+// only the conflicts needed for current target-branch authority plus this execution's
+// already-accepted outcome, rerun verification, push via the reservation's own `pushRefspec`,
+// and re-run `finalize-correction-breakpoint.mjs` (same reviewed head, the new pushed head) to
+// re-establish correction-satisfied evidence at the new live head before releasing the binding
+// and stopping. A conflict that instead requires a new semantic/product/architecture/security/
+// privacy decision fails closed as a founder interrupt rather than being auto-resolved — this
+// template says so explicitly rather than leaving it to be inferred.
+export function formatConflictRecoveryWorkerDispatchPrompt({ controlIssue = null, issue, pr, reviewedHead = null, checkoutBinding = null }) {
+  if (!isPositiveInteger(pr)) {
+    throw new Error("formatConflictRecoveryWorkerDispatchPrompt requires pr to be a positive integer");
+  }
+  const hasExecutionIssue = issue !== "none";
+  if (hasExecutionIssue && !isPositiveInteger(issue)) {
+    throw new Error(
+      'formatConflictRecoveryWorkerDispatchPrompt requires issue to be a positive integer or the literal "none" sentinel',
+    );
+  }
+  const hasControlIssue = controlIssue !== null && controlIssue !== undefined;
+  if (hasControlIssue && !isPositiveInteger(controlIssue)) {
+    throw new Error("formatConflictRecoveryWorkerDispatchPrompt requires controlIssue to be a positive integer when present");
+  }
+  if (!hasControlIssue && (typeof reviewedHead !== "string" || !reviewedHead.trim())) {
+    throw new Error(
+      "formatConflictRecoveryWorkerDispatchPrompt requires a non-empty reviewedHead when controlIssue is absent " +
+        "(no durable Stage 1 bullet exists for the worker to recover it from otherwise)",
+    );
+  }
+  assertCheckoutBinding(checkoutBinding, "formatConflictRecoveryWorkerDispatchPrompt", "a conflict-recovery dispatch");
+  const { path, token, scriptPath } = checkoutBinding;
+  const executionLine = hasExecutionIssue ? ` Execution Issue: #${issue}.` : "";
+  const controlLine = hasControlIssue ? ` Controlling Issue: #${controlIssue}.` : "";
+  const reviewedHeadClause = hasControlIssue
+    ? "reviewed head: Controlling Issue's Stage 1 bullet"
+    : `reviewed head: ${reviewedHead}`;
+  return (
+    `Conflict-recovery worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
+    renderPreBoundCheckoutClause({ path, token, scriptPath, pr }) +
+    `Correction-satisfied reserved head (${reviewedHeadClause}) conflicts with target. Merge target in ` +
+    `(never rebase/force-push); a semantic/security conflict is a founder interrupt, not auto-resolved. ` +
+    `Verify, push, run tools/orchestration/finalize-correction-breakpoint.mjs (nonzero: ` +
+    `CORRECTION_BREAKPOINT_UNVERIFIED), --release-binding ${token}; no re-review, merge, or Stage 2.`
+  );
+}
+
 // Pure. Same reference-only size proxy diagnostic-trace.mjs's classifyPreDispatch uses
 // (DEFAULT_REFERENCE_THRESHOLD_CHARS = 700), duplicated rather than imported: this
 // directory and tools/telemetry are separate consumer-distributed units that should not
@@ -564,6 +673,10 @@ const TEMPLATES_BY_STATE = {
     fields: ["controlIssue", "issue", "pr", "correctionReason", "checkoutBinding"],
   },
   STAGE2_CORRECTION_REQUIRED: { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
+  STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT: {
+    formatter: formatConflictRecoveryWorkerDispatchPrompt,
+    fields: ["controlIssue", "issue", "pr", "reviewedHead", "checkoutBinding"],
+  },
 };
 
 // Explicit-fields mode's equivalent of the state-based selection above, for a caller
@@ -589,6 +702,10 @@ const FORMATTERS_BY_KIND = {
     fields: ["controlIssue", "issue", "pr", "correctionReason", "checkoutBinding"],
   },
   "stage2-correction": { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
+  "conflict-recovery": {
+    formatter: formatConflictRecoveryWorkerDispatchPrompt,
+    fields: ["controlIssue", "issue", "pr", "reviewedHead", "checkoutBinding"],
+  },
 };
 
 const CLI_FLAG_BY_FIELD = {
@@ -601,6 +718,7 @@ const CLI_FLAG_BY_FIELD = {
   pr: "pr",
   auditIssue: "audit-issue",
   correctionReason: "correction-reason",
+  reviewedHead: "reviewed-head",
 };
 
 // Pure. Reads one field's value out of an explicit-fields `args` map or a piped gate-result
@@ -659,7 +777,7 @@ function main() {
     if (!entry) {
       process.stderr.write(
         `format-dispatch-prompt.mjs: unknown --kind ${JSON.stringify(kind)} — use "implementation", "planning", ` +
-          `"integration", "planning-correction", "stage1-correction", or "stage2-correction"\n`,
+          `"integration", "planning-correction", "stage1-correction", "stage2-correction", or "conflict-recovery"\n`,
       );
       process.exit(2);
       return;
@@ -694,8 +812,8 @@ function main() {
       process.stderr.write(
         `format-dispatch-prompt.mjs: input state is ${JSON.stringify(parsed.state ?? null)}, not "READY_TO_DISPATCH" ` +
           `(or "READY_TO_DISPATCH_PLANNING"/"READY_TO_DISPATCH_INTEGRATION"/"REPLAN_REQUIRED"/` +
-          `"STAGE1_CORRECTION_REQUIRED"/"STAGE2_CORRECTION_REQUIRED") — refusing to format a dispatch prompt for a ` +
-          "non-ready or malformed gate result\n",
+          `"STAGE1_CORRECTION_REQUIRED"/"STAGE2_CORRECTION_REQUIRED"/"STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT") — ` +
+          "refusing to format a dispatch prompt for a non-ready or malformed gate result\n",
       );
       process.exit(2);
       return;
