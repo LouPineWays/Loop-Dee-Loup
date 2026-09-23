@@ -262,10 +262,19 @@ export function sanitizeSessionId(id) {
   return String(id).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 200);
 }
 
-// The only two scripts that ever emit an action-envelope-stamped verdict. Kept as a literal
-// set (not derived from a directory scan) so an unrelated script sharing a stdout shape by
-// coincidence is never treated as a verdict source.
-const GATE_SCRIPT_BASENAMES = new Set(["ready-dispatch-gate.mjs", "next-review-transition-gate.mjs"]);
+// The scripts that ever emit an action-envelope-stamped verdict. Kept as a literal set (not
+// derived from a directory scan) so an unrelated script sharing a stdout shape by coincidence is
+// never treated as a verdict source. `session-entry-gate.mjs` (issue #675) is a deliberate
+// third member, not an "unrelated script sharing a stdout shape by coincidence": it composes the
+// other two and, on success, prints their final resolved verdict's fields verbatim (same `state`
+// + `actionEnvelope.mode` shape `extractVerdict` already requires) plus its own `provenance`
+// array — so a session invoking the gate chain through this entrypoint gets the identical live
+// "none"/"bounded" stop-boundary enforcement as a session invoking either leaf gate directly.
+const GATE_SCRIPT_BASENAMES = new Set([
+  "ready-dispatch-gate.mjs",
+  "next-review-transition-gate.mjs",
+  "session-entry-gate.mjs",
+]);
 
 // Strips one layer of matching surrounding quotes (both '"' and "'") from a single shell
 // token, e.g. the `"$CLAUDE_PROJECT_DIR/tools/orchestration/next-review-transition-gate.mjs"`

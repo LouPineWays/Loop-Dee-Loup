@@ -88,8 +88,8 @@ test("`## Code Review Rules` explicitly forbids running the executor's READY/lif
   );
   assert.match(
     codeReviewRules,
-    /must never run `node tools\/orchestration\/ready-dispatch-gate\.mjs` or `node tools\/orchestration\/next-review-transition-gate\.mjs`/,
-    "Code Review Rules no longer names the two executor gate scripts a `@codex review` invocation must never run -- " +
+    /must never run `node tools\/orchestration\/ready-dispatch-gate\.mjs`, `node tools\/orchestration\/next-review-transition-gate\.mjs`, or `node tools\/orchestration\/session-entry-gate\.mjs`/,
+    "Code Review Rules no longer names all three executor gate/wrapper scripts a `@codex review` invocation must never run -- " +
       "this is the exact #625 reproduction (ready-dispatch-gate.mjs's missing-origin failure, then " +
       "next-review-transition-gate.mjs's waiting verdict reported as the audit response)."
   );
@@ -97,6 +97,18 @@ test("`## Code Review Rules` explicitly forbids running the executor's READY/lif
     codeReviewRules,
     /reads `docs\/stage2-audit-contract\.md` in full and posts the audit response it defines/,
     "Code Review Rules no longer directs a Stage 2 invocation to docs/stage2-audit-contract.md for the actual response contract."
+  );
+});
+
+test("`## Code Review Rules` excludes the canonical `session-entry-gate.mjs` wrapper, not only the two leaf gates (issue #675/#716)", () => {
+  // Stage 1 review finding on PR #716: `session-entry-gate.mjs` is now the advertised executor
+  // first action and internally invokes both leaf gates. Without an explicit exclusion here, a
+  // `@codex review` invocation that reaches for the new canonical entrypoint instead of either
+  // leaf gate directly would reopen the exact #625 failure class this guard exists to close.
+  assert.match(
+    codeReviewRules,
+    /node tools\/orchestration\/session-entry-gate\.mjs.*canonical wrapper/,
+    "Code Review Rules no longer names `session-entry-gate.mjs` as an excluded canonical wrapper entrypoint."
   );
 });
 
@@ -157,8 +169,8 @@ test("the derived consumer AGENTS.md (via ldl-init's own deriveConsumerAgents, n
   );
   assert.match(
     derived,
-    /must never run `node tools\/orchestration\/ready-dispatch-gate\.mjs` or `node tools\/orchestration\/next-review-transition-gate\.mjs`/,
-    "Derived consumer AGENTS.md lost the named executor-gate-script exclusion."
+    /must never run `node tools\/orchestration\/ready-dispatch-gate\.mjs`, `node tools\/orchestration\/next-review-transition-gate\.mjs`, or `node tools\/orchestration\/session-entry-gate\.mjs`/,
+    "Derived consumer AGENTS.md lost the named executor-gate/wrapper-script exclusion."
   );
   assert.match(
     derived,
