@@ -1780,20 +1780,29 @@ async function findCorrectionChainSuccessor(repo, auditIssueNumber, auditCreated
 // inline review disposition" block itself — all present at once; a real audit issue always has
 // all three, and an arbitrary unrelated issue essentially never does by coincidence.
 //
-// Exported (issue #729 Stage 1 correction, P1 finding on PR #730): a durably-recovered Stage 2
-// preparation result must be authorized only against the *complete* canonical audit shape, never
-// a two-field-only shell (matching "Exact merge commit"/"Work issue" alone, which the resumed
-// preparation-worker return `AUDIT_READY #<n>` cannot itself guarantee if the worker was
-// interrupted before finishing the template). Both `tools/orchestration/next-review-transition-
-// gate.mjs` (the initial reconciliation search) and `tools/orchestration/finalize-audit-
-// breakpoint.mjs` (the final pre-projection/trigger boundary) reuse this exact predicate rather
-// than each defining their own competing notion of "audit ready."
+// Exported (issue #729 Stage 1 correction, P1 finding on PR #730; tightened again by the #731
+// Stage 2 audit P1 finding on this same predicate). A durably-recovered Stage 2 preparation
+// result must be authorized only against the *complete* canonical audit shape — every field the
+// `.github/ISSUE_TEMPLATE/audit-control-issue.yml` template requires before "Findings"/"Verdict"
+// — never a partial shell. The Stage 1 correction on PR #730 required three fields (Exact merge
+// commit, Work issue, Stage 1 inline review disposition), but the #731 Stage 2 audit found that
+// requiring only those three still lets an interrupted preparation attempt that stopped before
+// authoring "Merged PR", "Audit scope", or "Verification checklist" pass as canonical: reconcile
+// onto it, project it into control state, and trigger the reviewer against an issue that cannot
+// supply the required Stage 2 assurance (no scope, no checklist to work through). Requiring all
+// six upstream fields — Merged PR, Work issue, Exact merge commit, Stage 1 inline review
+// disposition, Audit scope, and Verification checklist — closes that gap: a real, fully-authored
+// audit issue always has all six, and a genuinely interrupted or unrelated issue essentially
+// never does by coincidence.
 export function hasCanonicalAuditShape(body) {
   const text = body ?? "";
   return (
-    parseMergeCommitRef(text) !== null &&
+    parseFormFieldBlock(text, "Merged PR") !== null &&
     parseWorkIssueRef(text) !== null &&
-    parseFormFieldBlock(text, "Stage 1 inline review disposition") !== null
+    parseMergeCommitRef(text) !== null &&
+    parseFormFieldBlock(text, "Stage 1 inline review disposition") !== null &&
+    parseFormFieldBlock(text, "Audit scope") !== null &&
+    parseFormFieldBlock(text, "Verification checklist") !== null
   );
 }
 
@@ -1886,8 +1895,9 @@ async function retirePredecessorChain(
         auditIssue: predecessorNumber,
         reason:
           `#${predecessorNumber} does not have the canonical Stage 2 audit-control-issue shape ` +
-          `(missing Exact merge commit / Work issue / Stage 1 inline review disposition fields); ` +
-          `fails closed rather than closing a possibly-mistyped reference`,
+          `(missing one or more of Merged PR / Work issue / Exact merge commit / Stage 1 inline ` +
+          `review disposition / Audit scope / Verification checklist); fails closed rather than ` +
+          `closing a possibly-mistyped reference`,
       });
       break;
     }

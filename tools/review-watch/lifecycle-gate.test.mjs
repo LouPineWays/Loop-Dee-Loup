@@ -2759,15 +2759,19 @@ function correctsSentence(predecessorAuditIssue) {
 function chainFixtureWithCorrects({ workIssue = "none", commit = MERGE_COMMIT, verdict, createdAt, corrects = null }) {
   // A real audit-control-issue always has a "Stage 1 inline review disposition" field (required
   // by the template) whether or not it is itself a correction responding to a prior verdict --
-  // hasCanonicalAuditShape's predecessor-shape check (Stage 1 review finding on PR #515) relies on
-  // this field's mere presence, distinct from parseCorrectsAuditRef's separate check for the
-  // "corrects" phrase specifically inside it.
+  // hasCanonicalAuditShape's predecessor-shape check (Stage 1 review finding on PR #515, tightened
+  // to all six template fields by the #731 Stage 2 audit P1 finding) relies on this field's mere
+  // presence, distinct from parseCorrectsAuditRef's separate check for the "corrects" phrase
+  // specifically inside it. Includes "Merged PR" and "Audit scope" too so the full canonical shape
+  // is present, not only the three fields the #730 Stage 1 correction originally checked.
   const dispositionBody =
     corrects !== null ? correctsSentence(corrects) : "Stage 1 inline review at frozen head `abc123` found no issues.";
   return {
     body:
+      `### Merged PR\n\nhttps://github.com/owner/repo/pull/1\n\n` +
       `### Work issue\n\n${workIssue}\n\n### Exact merge commit\n\n${commit}\n\n` +
       `### Stage 1 inline review disposition\n\n${dispositionBody}\n\n` +
+      `### Audit scope\n\nDiff of the PR against pre-PR main.\n\n` +
       `### Verification checklist\n\n1. Confirm A.\n\n### Verdict\n\n${verdict}\n`,
     state: "OPEN",
     createdAt,
@@ -3257,6 +3261,7 @@ function misplacedCorrectsAuditFixture({ workIssue, commit = MERGE_COMMIT, verdi
       : "Complete diff review.";
   return {
     body:
+      `### Merged PR\n\nhttps://github.com/owner/repo/pull/1\n\n` +
       `### Work issue\n\n${workIssue}\n\n### Exact merge commit\n\n${commit}\n\n` +
       `### Stage 1 inline review disposition\n\nStage 1 inline review at frozen head \`${MERGE_COMMIT}\` found no issues.\n\n` +
       `### Audit scope\n\n${scope}\n\n` +

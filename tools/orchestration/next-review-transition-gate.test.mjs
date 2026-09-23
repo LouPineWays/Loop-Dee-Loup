@@ -1667,10 +1667,26 @@ test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 referenc
 // includes a real "Stage 1 inline review disposition" field too. `incomplete: true` reproduces the
 // exact two-field-only shell the finding describes (a prior preparation attempt that created an
 // issue but failed/was interrupted before completing the required template).
-function auditIssueBody({ workIssue, mergeCommit, incomplete = false }) {
-  const fields = ["### Work issue", "", String(workIssue), "", "### Exact merge commit", "", `\`${mergeCommit}\``, ""];
+//
+// #731 Stage 2 audit P1 finding on the same predicate: requiring only those three fields still let
+// a candidate missing "Merged PR", "Audit scope", or "Verification checklist" pass as
+// canonical-complete, so this fixture now includes all six required template fields by default and
+// takes independent `omitMergedPr`/`omitAuditScope`/`omitVerificationChecklist` flags to reproduce
+// a candidate missing exactly one of them.
+function auditIssueBody({ workIssue, mergeCommit, incomplete = false, omitMergedPr = false, omitAuditScope = false, omitVerificationChecklist = false }) {
+  const fields = [];
+  if (!omitMergedPr) {
+    fields.push("### Merged PR", "", "https://github.com/o/r/pull/376", "");
+  }
+  fields.push("### Work issue", "", String(workIssue), "", "### Exact merge commit", "", `\`${mergeCommit}\``, "");
   if (!incomplete) {
     fields.push("### Stage 1 inline review disposition", "", "One inline @codex review round at frozen head; no findings.", "");
+  }
+  if (!omitAuditScope) {
+    fields.push("### Audit scope", "", "Complete diff of the PR against pre-PR main.", "");
+  }
+  if (!omitVerificationChecklist) {
+    fields.push("### Verification checklist", "", "1. Confirm the change works as described.", "");
   }
   return fields.join("\n");
 }
@@ -1821,6 +1837,33 @@ test("findMatchingOpenAuditIssues: matches only an OPEN candidate whose own merg
 test("findMatchingOpenAuditIssues: a two-field-only (incomplete canonical shape) candidate is never a match, even when merge commit and work issue both match", () => {
   const candidates = [
     { number: 727, state: "OPEN", body: auditIssueBody({ workIssue: "#375", mergeCommit: MERGE_COMMIT_723, incomplete: true }) },
+  ];
+  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid: MERGE_COMMIT_723, executionIssue: 375 });
+  assert.deepEqual(matches, []);
+});
+
+// Issue #731 Stage 2 audit P1 finding: requiring only Exact merge commit/Work issue/Stage 1
+// inline review disposition still let a candidate missing "Merged PR", "Audit scope", or
+// "Verification checklist" pass as canonical-complete. Each must independently reject.
+test("findMatchingOpenAuditIssues: a candidate missing the Merged PR field is never a match", () => {
+  const candidates = [
+    { number: 727, state: "OPEN", body: auditIssueBody({ workIssue: "#375", mergeCommit: MERGE_COMMIT_723, omitMergedPr: true }) },
+  ];
+  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid: MERGE_COMMIT_723, executionIssue: 375 });
+  assert.deepEqual(matches, []);
+});
+
+test("findMatchingOpenAuditIssues: a candidate missing the Audit scope field is never a match", () => {
+  const candidates = [
+    { number: 727, state: "OPEN", body: auditIssueBody({ workIssue: "#375", mergeCommit: MERGE_COMMIT_723, omitAuditScope: true }) },
+  ];
+  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid: MERGE_COMMIT_723, executionIssue: 375 });
+  assert.deepEqual(matches, []);
+});
+
+test("findMatchingOpenAuditIssues: a candidate missing the Verification checklist field is never a match", () => {
+  const candidates = [
+    { number: 727, state: "OPEN", body: auditIssueBody({ workIssue: "#375", mergeCommit: MERGE_COMMIT_723, omitVerificationChecklist: true }) },
   ];
   const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid: MERGE_COMMIT_723, executionIssue: 375 });
   assert.deepEqual(matches, []);

@@ -76,8 +76,84 @@ const MERGED_PR_VIEW = { state: "MERGED", mergeCommit: { oid: "d34db33fd34db33fd
 
 // Issue #729 Stage 1 review finding P1 on PR #730: a genuine, matching Audit Issue view must also
 // carry the complete canonical audit shape (a real "Stage 1 inline review disposition" field), not
-// only the two structured pointer fields -- so every fixture below includes it.
+// only the two structured pointer fields -- so every fixture below includes it. Tightened again by
+// the #731 Stage 2 audit's own P1 finding on the same predicate: "complete canonical shape" now
+// means all six upstream template fields (Merged PR, Work issue, Exact merge commit, Stage 1
+// inline review disposition, Audit scope, Verification checklist), so every "matching" fixture
+// below also carries Merged PR, Audit scope, and Verification checklist.
 const MATCHING_AUDIT_VIEW = {
+  state: "OPEN",
+  body: [
+    "### Merged PR",
+    "",
+    "https://github.com/o/r/pull/558",
+    "",
+    "### Work issue",
+    "",
+    "#440",
+    "",
+    "### Exact merge commit",
+    "",
+    "`d34db33fd34db33fd34db33fd34db33fd34db33f`",
+    "",
+    "### Stage 1 inline review disposition",
+    "",
+    "One inline @codex review round at frozen head; no findings.",
+    "",
+    "### Audit scope",
+    "",
+    "Complete diff of the PR against pre-PR main.",
+    "",
+    "### Verification checklist",
+    "",
+    "1. Confirm the change works as described.",
+    "",
+  ].join("\n"),
+};
+
+const MATCHING_AUDIT_VIEW_NO_WORK_ISSUE = {
+  state: "OPEN",
+  body: [
+    "### Merged PR",
+    "",
+    "https://github.com/o/r/pull/558",
+    "",
+    "### Work issue",
+    "",
+    "none",
+    "",
+    "### Exact merge commit",
+    "",
+    "`d34db33fd34db33fd34db33fd34db33fd34db33f`",
+    "",
+    "### Stage 1 inline review disposition",
+    "",
+    "One inline @codex review round at frozen head; no findings.",
+    "",
+    "### Audit scope",
+    "",
+    "Complete diff of the PR against pre-PR main.",
+    "",
+    "### Verification checklist",
+    "",
+    "1. Confirm the change works as described.",
+    "",
+  ].join("\n"),
+};
+
+// The exact two-field-only shell the P1 finding describes: matching Exact merge commit/Work
+// issue, but no "Stage 1 inline review disposition" field -- a prior preparation attempt that
+// failed or was interrupted before completing the required template.
+const INCOMPLETE_AUDIT_VIEW = {
+  state: "OPEN",
+  body: ["### Work issue", "", "#440", "", "### Exact merge commit", "", "`d34db33fd34db33fd34db33fd34db33fd34db33f`", ""].join("\n"),
+};
+
+// #731 Stage 2 audit P1 finding: a candidate that has the three fields the #730 Stage 1 correction
+// checked (Merged PR is not one of them; Work issue/Exact merge commit/Stage 1 inline review
+// disposition are), but omits one of the *other* three required template fields, must equally
+// never be treated as canonical-complete. Each fixture below omits exactly one such field.
+const MISSING_MERGED_PR_AUDIT_VIEW = {
   state: "OPEN",
   body: [
     "### Work issue",
@@ -92,15 +168,27 @@ const MATCHING_AUDIT_VIEW = {
     "",
     "One inline @codex review round at frozen head; no findings.",
     "",
+    "### Audit scope",
+    "",
+    "Complete diff of the PR against pre-PR main.",
+    "",
+    "### Verification checklist",
+    "",
+    "1. Confirm the change works as described.",
+    "",
   ].join("\n"),
 };
 
-const MATCHING_AUDIT_VIEW_NO_WORK_ISSUE = {
+const MISSING_AUDIT_SCOPE_AUDIT_VIEW = {
   state: "OPEN",
   body: [
+    "### Merged PR",
+    "",
+    "https://github.com/o/r/pull/558",
+    "",
     "### Work issue",
     "",
-    "none",
+    "#440",
     "",
     "### Exact merge commit",
     "",
@@ -110,15 +198,37 @@ const MATCHING_AUDIT_VIEW_NO_WORK_ISSUE = {
     "",
     "One inline @codex review round at frozen head; no findings.",
     "",
+    "### Verification checklist",
+    "",
+    "1. Confirm the change works as described.",
+    "",
   ].join("\n"),
 };
 
-// The exact two-field-only shell the P1 finding describes: matching Exact merge commit/Work
-// issue, but no "Stage 1 inline review disposition" field -- a prior preparation attempt that
-// failed or was interrupted before completing the required template.
-const INCOMPLETE_AUDIT_VIEW = {
+const MISSING_VERIFICATION_CHECKLIST_AUDIT_VIEW = {
   state: "OPEN",
-  body: ["### Work issue", "", "#440", "", "### Exact merge commit", "", "`d34db33fd34db33fd34db33fd34db33fd34db33f`", ""].join("\n"),
+  body: [
+    "### Merged PR",
+    "",
+    "https://github.com/o/r/pull/558",
+    "",
+    "### Work issue",
+    "",
+    "#440",
+    "",
+    "### Exact merge commit",
+    "",
+    "`d34db33fd34db33fd34db33fd34db33fd34db33f`",
+    "",
+    "### Stage 1 inline review disposition",
+    "",
+    "One inline @codex review round at frozen head; no findings.",
+    "",
+    "### Audit scope",
+    "",
+    "Complete diff of the PR against pre-PR main.",
+    "",
+  ].join("\n"),
 };
 
 function fixedGhIssueView(body) {
@@ -214,6 +324,37 @@ test("verifyAuditIssueMatches: rejects a work-issue mismatch", () => {
 // projection or a reviewer trigger, even though its Exact-merge-commit/Work-issue fields match.
 test("verifyAuditIssueMatches: rejects an incomplete (two-field-only) audit issue even when its pointer fields match", () => {
   const result = verifyAuditIssueMatches(INCOMPLETE_AUDIT_VIEW, {
+    mergeCommitOid: MERGED_PR_VIEW.mergeCommit.oid,
+    executionIssue: 440,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /complete canonical Stage 2 audit-control-issue shape/);
+});
+
+// #731 Stage 2 audit P1 finding: requiring only the three fields the #730 Stage 1 correction
+// checked still let a candidate missing "Merged PR", "Audit scope", or "Verification checklist"
+// pass as canonical-complete. Each of these must independently reject, even with matching pointer
+// fields and a genuine Stage 1 inline review disposition present.
+test("verifyAuditIssueMatches: rejects a candidate missing the Merged PR field", () => {
+  const result = verifyAuditIssueMatches(MISSING_MERGED_PR_AUDIT_VIEW, {
+    mergeCommitOid: MERGED_PR_VIEW.mergeCommit.oid,
+    executionIssue: 440,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /complete canonical Stage 2 audit-control-issue shape/);
+});
+
+test("verifyAuditIssueMatches: rejects a candidate missing the Audit scope field", () => {
+  const result = verifyAuditIssueMatches(MISSING_AUDIT_SCOPE_AUDIT_VIEW, {
+    mergeCommitOid: MERGED_PR_VIEW.mergeCommit.oid,
+    executionIssue: 440,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /complete canonical Stage 2 audit-control-issue shape/);
+});
+
+test("verifyAuditIssueMatches: rejects a candidate missing the Verification checklist field", () => {
+  const result = verifyAuditIssueMatches(MISSING_VERIFICATION_CHECKLIST_AUDIT_VIEW, {
     mergeCommitOid: MERGED_PR_VIEW.mergeCommit.oid,
     executionIssue: 440,
   });

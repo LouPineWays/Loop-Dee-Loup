@@ -196,17 +196,18 @@ export function verifyPrMerged(prView) {
 // `lifecycle-gate.mjs`'s own `parseMergeCommitRef`/`parseWorkIssueRef` (the same evidence
 // `post-audit` itself trusts), never a second, competing parse of the template fields.
 //
-// Stage 1 review finding P1 on PR #730 (issue #729): also requires the complete canonical audit
-// shape (`hasCanonicalAuditShape`), not only these two structured pointer fields. A prior
-// preparation attempt that created an Audit Issue but failed or was interrupted before completing
-// or validating the required template (merged PR, Stage 1 disposition, audit scope, verification
-// checklist) would otherwise satisfy this check on a two-field-only shell — letting this finalize
-// step, the last deterministic boundary before control projection and the reviewer trigger,
-// authorize a Stage 2 response against an issue that cannot actually provide the required
-// assurance. Applies identically whether this Audit Issue was just freshly created by the ordinary
-// preparation-worker flow or recovered by next-review-transition-gate.mjs's own reconciliation
-// search — a legitimately created Audit Issue from the required template always satisfies this,
-// since every one of its fields is `required: true`.
+// Stage 1 review finding P1 on PR #730 (issue #729), tightened again by the #731 Stage 2 audit's
+// own P1 finding on the same predicate: also requires the complete canonical audit shape
+// (`hasCanonicalAuditShape`), not only the two structured pointer fields. A prior preparation
+// attempt that created an Audit Issue but failed or was interrupted before completing or
+// validating the required template (Merged PR, Stage 1 disposition, audit scope, verification
+// checklist) would otherwise satisfy this check on a partial shell — letting this finalize step,
+// the last deterministic boundary before control projection and the reviewer trigger, authorize a
+// Stage 2 response against an issue that cannot actually provide the required assurance. Applies
+// identically whether this Audit Issue was just freshly created by the ordinary preparation-worker
+// flow or recovered by next-review-transition-gate.mjs's own reconciliation search — a
+// legitimately created Audit Issue from the required template always satisfies this, since every
+// one of its fields is `required: true`.
 export function verifyAuditIssueMatches(auditView, { mergeCommitOid, executionIssue }) {
   if (!auditView || auditView.state !== "OPEN") {
     return {
@@ -219,9 +220,9 @@ export function verifyAuditIssueMatches(auditView, { mergeCommitOid, executionIs
     return {
       ok: false,
       reason:
-        "Audit Issue does not have the complete canonical Stage 2 audit-control-issue shape (missing Exact merge " +
-        'commit / Work issue / "Stage 1 inline review disposition" fields) — an incomplete issue must never ' +
-        "authorize control projection or a reviewer trigger",
+        "Audit Issue does not have the complete canonical Stage 2 audit-control-issue shape (missing one or more " +
+        'of Merged PR / Work issue / Exact merge commit / "Stage 1 inline review disposition" / Audit scope / ' +
+        "Verification checklist) — an incomplete issue must never authorize control projection or a reviewer trigger",
     };
   }
   const auditMergeCommit = parseMergeCommitRef(body);
