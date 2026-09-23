@@ -1691,15 +1691,24 @@ test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 referenc
 // successful strict parseCorrectionSatisfiedDisposition result -- mutually exclusive by
 // construction, so a canonical correction-satisfied disposition could never be accepted here.
 // This is the #398 reproduction for execution #718 / merged PR #721.
-test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 reference that is already MERGED, and whose control Issue carries a canonical correction-satisfied disposition, resolves to STAGE2_PREPARATION_REQUIRED (issue #722 regression)", async () => {
+//
+// Stage 1 correction on PR #724 (Codex P1 finding on #722): a successful strict parse proves
+// only the bullet's syntax, not that its correction evidence is still valid authority for the
+// PR head actually being resumed. This positive case must now also independently validate
+// through checkCorrectionDeltaImpl -- the corrected head must match the actual merged PR head
+// (CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED's disposition names corrected head
+// "0009c54b18", so the merged head must match it, unlike the pre-#724 "mergedhead" stand-in
+// that never actually needed to match anything before this fix existed).
+test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 reference that is already MERGED, and whose control Issue carries a canonical correction-satisfied disposition with valid correction evidence at the actual merged head, resolves to STAGE2_PREPARATION_REQUIRED (issue #722 regression, issue #724 correction)", async () => {
   let prStateReadFor = null;
+  let correctionDeltaCallArgs = null;
   const result = await runNextReviewTransitionGate(
     { repo: "o/r", controlIssue: "322" },
     {
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
       ghPrStateImpl: async ({ number }) => {
         prStateReadFor = number;
-        return { headRefOid: "mergedhead", state: "MERGED" };
+        return { headRefOid: "0009c54b18", state: "MERGED" };
       },
       stage1RunImpl: async () => {
         throw new Error("should never be called -- the PR is already merged, resume forward instead");
@@ -1707,9 +1716,20 @@ test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 referenc
       checkMergeReadyImpl: async () => {
         throw new Error("should never be called -- the PR is already merged, resume forward instead");
       },
+      checkCorrectionDeltaImpl: async (args) => {
+        correctionDeltaCallArgs = args;
+        return { exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: "0009c54b18" };
+      },
     },
   );
   assert.equal(prStateReadFor, 376);
+  assert.deepEqual(correctionDeltaCallArgs, {
+    repo: "o/r",
+    pr: 376,
+    reviewedHead: "30b36035c9",
+    correctedHead: "0009c54b18",
+    gatedHead: "0009c54b18",
+  });
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "STAGE2_PREPARATION_REQUIRED");
   assert.equal(result.stopAfter, true);
@@ -1720,6 +1740,115 @@ test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 referenc
     mode: "bounded",
     authorizedActions: ["dispatch-stage2-preparation-worker"],
   });
+});
+
+// Issue #724 correction: canonical bullet syntax, but the recorded corrected head does not
+// match the PR's actual merged head -- a stale/superseded disposition must never authorize
+// Stage 2 preparation merely because it happens to parse.
+test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 reference that is already MERGED, whose control Issue's correction-satisfied disposition names a corrected head that does not match the actual merged head, fails closed to STAGE2_PREPARATION_BLOCKED_ON_STAGE1 (issue #724 correction)", async () => {
+  let correctionDeltaCallArgs = null;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "somedifferenthead", state: "MERGED" }),
+      stage1RunImpl: async () => {
+        throw new Error("should never be called -- the PR is already merged, resume forward instead");
+      },
+      checkMergeReadyImpl: async () => {
+        throw new Error("should never be called -- the PR is already merged, resume forward instead");
+      },
+      checkCorrectionDeltaImpl: async (args) => {
+        correctionDeltaCallArgs = args;
+        return { exitCode: 2, state: "HEAD_MISMATCH", reviewedHead: "30b36035c9", correctedHead: "0009c54b18", gatedHead: "somedifferenthead" };
+      },
+    },
+  );
+  assert.deepEqual(correctionDeltaCallArgs, {
+    repo: "o/r",
+    pr: 376,
+    reviewedHead: "30b36035c9",
+    correctedHead: "0009c54b18",
+    gatedHead: "somedifferenthead",
+  });
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE2_PREPARATION_BLOCKED_ON_STAGE1");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.controlIssue, 322);
+  assert.equal(result.pr, 376);
+  assert.equal(result.issue, 375);
+  assert.match(result.reason, /did not independently validate/);
+  assert.match(result.reason, /HEAD_MISMATCH/);
+  assert.match(
+    result.nextCommand,
+    /finalize-stage1-satisfied-breakpoint\.mjs --control-issue 322 --execution-issue 375 --pr 376 --recover true/,
+  );
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["run-finalize-stage1-satisfied-recover"],
+  });
+});
+
+// Issue #724 correction: canonical bullet syntax, corrected head matches the merged head, but
+// the reviewed head's findings-provenance or the reviewed->corrected ancestry does not hold --
+// the correction's underlying evidence contract still must not be silently accepted.
+test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 reference that is already MERGED, whose control Issue's correction-satisfied disposition names a corrected head matching the merged head but whose correction evidence is NOT_SATISFIED, fails closed to STAGE2_PREPARATION_BLOCKED_ON_STAGE1 (issue #724 correction)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "0009c54b18", state: "MERGED" }),
+      stage1RunImpl: async () => {
+        throw new Error("should never be called -- the PR is already merged, resume forward instead");
+      },
+      checkMergeReadyImpl: async () => {
+        throw new Error("should never be called -- the PR is already merged, resume forward instead");
+      },
+      checkCorrectionDeltaImpl: async () => ({
+        exitCode: 2,
+        state: "NOT_SATISFIED",
+        reviewedHead: "30b36035c9",
+        correctedHead: "0009c54b18",
+        reason: "compare(30b36035c9...0009c54b18) reported status \"diverged\", not \"ahead\"",
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE2_PREPARATION_BLOCKED_ON_STAGE1");
+  assert.equal(result.stopAfter, true);
+  assert.match(result.reason, /did not independently validate/);
+  assert.match(result.reason, /NOT_SATISFIED/);
+  assert.match(result.reason, /diverged/);
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["run-finalize-stage1-satisfied-recover"],
+  });
+});
+
+// Issue #724 correction: an operational error from checkCorrectionDeltaImpl itself (not a
+// merely-unsatisfied evidence result) must fail closed to AMBIGUOUS, never silently authorize
+// or silently block Stage 2 preparation.
+test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 reference that is already MERGED, whose control Issue's correction-satisfied disposition triggers an operational checkCorrectionDeltaImpl error, fails closed to AMBIGUOUS (issue #724 correction)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "0009c54b18", state: "MERGED" }),
+      stage1RunImpl: async () => {
+        throw new Error("should never be called -- the PR is already merged, resume forward instead");
+      },
+      checkMergeReadyImpl: async () => {
+        throw new Error("should never be called -- the PR is already merged, resume forward instead");
+      },
+      checkCorrectionDeltaImpl: async () => {
+        throw new Error("stage1-correction-gate blew up");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.equal(result.stopAfter, true);
+  assert.match(result.reason, /stage1-correction-gate blew up/);
 });
 
 // Issue #722: a correction-satisfied bullet that is clearly attempting the shape but is
