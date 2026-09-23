@@ -1467,10 +1467,26 @@ async function runNextReviewTransitionGateCore(
       // present, this is not a safe resume: stop at STAGE2_PREPARATION_BLOCKED_ON_STAGE1 and name
       // the documented recovery command (finalize-stage1-satisfied-breakpoint.mjs --recover true)
       // rather than silently authorizing Stage 2 preparation on unverified Stage 1 authority.
+      // Issue #722: looksLikeCorrectionSatisfiedDisposition is defined to return false whenever
+      // the strict parse below already succeeds (it exists only to flag a correction-shaped
+      // bullet whose strict parse failed, so malformed state can fail closed -- see its own
+      // module comment in stage1-correction-gate.mjs). ANDing it with a successful strict parse
+      // was therefore mutually exclusive by construction: hasCorrectionSatisfiedDisposition could
+      // never be true, so a canonical "correction-satisfied at <corrected> (reviewed <reviewed>)"
+      // disposition was always rejected here, incorrectly reaching
+      // STAGE2_PREPARATION_BLOCKED_ON_STAGE1 on the merged-PR resume path (the #398 reproduction
+      // for execution #718 / merged PR #721). A successful strict parse is sufficient on its own
+      // to prove the bullet's *syntax*; it is never sufficient on its own to prove the recorded
+      // correction is still valid *authority* for the PR head actually being resumed here -- see
+      // the independent re-validation against checkCorrectionDeltaImpl below (Stage 1 correction
+      // on PR #724, Codex P1 finding on #722: a syntactically-canonical bullet naming a stale,
+      // unverified, or provenance-invalid correction must still fail closed). The lenient
+      // helper's role remains limited to distinguishing "absent" from "malformed" for a strict
+      // parse that already failed, never to gating an already-successful strict parse.
       const stage1Bullet = parseControlBullet(body, "Stage 1");
       const hasAffirmativeDisposition = parseAffirmativeStage1Disposition(stage1Bullet) !== null;
-      const hasCorrectionSatisfiedDisposition =
-        looksLikeCorrectionSatisfiedDisposition(stage1Bullet) && parseCorrectionSatisfiedDisposition(stage1Bullet) !== null;
+      const parsedCorrectionSatisfied = parseCorrectionSatisfiedDisposition(stage1Bullet);
+      const hasCorrectionSatisfiedDisposition = parsedCorrectionSatisfied !== null;
       if (!hasAffirmativeDisposition && !hasCorrectionSatisfiedDisposition) {
         return {
           exitCode: 3,
@@ -1488,6 +1504,64 @@ async function runNextReviewTransitionGateCore(
             `node tools/orchestration/finalize-stage1-satisfied-breakpoint.mjs --control-issue ${controlIssueNumber} ` +
             `--execution-issue ${executionRef.issue} --pr ${prRef.issue} --recover true`,
         };
+      }
+      // Stage 1 correction on PR #724 (Codex P1 finding on #722): a canonical
+      // "correction-satisfied at <corrected> (reviewed <reviewed>)" bullet proves only that the
+      // bullet parses -- it does not by itself prove the recorded correction is still valid
+      // authority for the PR head actually being resumed. Re-derive the full evidence invariant
+      // the pre-merge phase already enforces (resolvePreMerge above) by independently validating
+      // through the same checkCorrectionDeltaImpl: the corrected head must match the actual
+      // merged PR head, the reviewed head must carry genuine findings-bearing Stage 1 evidence,
+      // and the corrected head must be a strict, non-diverged descendant of the reviewed head.
+      // Skipped entirely when an ordinary satisfied/exempt disposition is already present --
+      // that shape needs no correction-evidence re-derivation.
+      if (!hasAffirmativeDisposition) {
+        let correctionDelta;
+        try {
+          correctionDelta = await checkCorrectionDeltaImpl({
+            repo,
+            pr: prRef.issue,
+            reviewedHead: parsedCorrectionSatisfied.reviewedHead,
+            correctedHead: parsedCorrectionSatisfied.correctedHead,
+            gatedHead: prState.headRefOid,
+          });
+        } catch (err) {
+          correctionDelta = { exitCode: 1, message: `stage1-correction-gate threw: ${err.message}` };
+        }
+        if (!hasTrustworthyExitCode(correctionDelta) || correctionDelta.exitCode === 1) {
+          return {
+            exitCode: 4,
+            state: "AMBIGUOUS",
+            stopAfter: true,
+            repo,
+            controlIssue: controlIssueNumber,
+            reason:
+              "tools/review-watch/stage1-correction-gate.mjs's checkCorrectionDelta returned output without a " +
+              "trustworthy exitCode (or reported an operational error) while independently validating the " +
+              `merged-PR resume correction-satisfied disposition for PR #${prRef.issue}: ` +
+              `${correctionDelta && correctionDelta.message}`,
+          };
+        }
+        if (correctionDelta.state !== "CORRECTION_SATISFIED") {
+          return {
+            exitCode: 3,
+            state: "STAGE2_PREPARATION_BLOCKED_ON_STAGE1",
+            stopAfter: true,
+            repo,
+            controlIssue: controlIssueNumber,
+            pr: prRef.issue,
+            issue: executionRef.issue,
+            reason:
+              `control Issue #${controlIssueNumber}'s "Stage 1" bullet (${JSON.stringify(stage1Bullet)}) names a ` +
+              "correction-satisfied disposition, but its correction evidence did not independently validate " +
+              `against merged PR #${prRef.issue}'s actual head ${prState.headRefOid} (checkCorrectionDelta ` +
+              `reported ${correctionDelta.state}${correctionDelta.reason ? `: ${correctionDelta.reason}` : ""}) -- ` +
+              "Stage 2 preparation must not resume on unverified Stage 1 authority",
+            nextCommand:
+              `node tools/orchestration/finalize-stage1-satisfied-breakpoint.mjs --control-issue ${controlIssueNumber} ` +
+              `--execution-issue ${executionRef.issue} --pr ${prRef.issue} --recover true`,
+          };
+        }
       }
       // This verdict's own context shape (repo, pr, issue, controlIssue) matches
       // STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2's exactly -- tools/orchestration/format-
