@@ -133,6 +133,51 @@
 //   `shouldConsumeBoundedDispatch` returns false for it, exactly as designed, and remains
 //   governed only by the gate-rerun denial above plus the existing post-hoc classifier.
 //
+// Stage 1 correction on PR #714 (execution issue #678). Codex found the initial "bounded"
+// implementation above incomplete in three independent ways, all rooted in the same mismatch:
+// the new live-enforcement state was modeled around "session + first SubagentStart", while the
+// actual authority boundary is "bounded controller action + its complete consumption".
+//
+//   1. Verdict capture was not reliable on the real dispatch pipeline. The documented normal
+//      path pipes a gate's JSON stdout into `format-dispatch-prompt.mjs` (Stage 1 correction
+//      additionally pipes through `pr-head-checkout-preflight.mjs --reserve-from-gate` first),
+//      so the Bash tool's own captured stdout is that downstream stage's rendered output, not
+//      the gate's verdict — `extractVerdict` found nothing and no marker was ever written,
+//      leaving the exact #631 gate-rerun failure mechanically possible on the canonical path.
+//      Both gate scripts now separately persist the verdict they are about to print — via
+//      `persistLastGateVerdict`, at the exact point they emit it — to a small side-channel file
+//      (`LAST_GATE_VERDICT_PATH`, next to the marker state dir) the instant it is known, before
+//      any downstream pipeline stage can transform the command's final captured stdout.
+//      `markObservedVerdict` falls back to `consumeLastGateVerdict` (which reads and clears
+//      that file) only when the command invoked a gate script but stdout extraction found no
+//      recognizable verdict — so the common non-piped case still needs no extra file I/O.
+//      Both gate scripts also clear the channel at the very start of their own `main()`, so a
+//      run that crashes before ever computing a verdict never leaves a stale one behind for a
+//      later, unrelated command to pick up.
+//
+//   2. `SubagentStart` treated any single worker start as fully consuming a dispatch-shaped
+//      envelope, but `dispatch-unit-wave` (`READY_TO_DISPATCH_UNITS`) can legitimately require
+//      several worker starts for one authorized wave. Exhausting the marker on the first start
+//      denied the formatter/Agent calls needed for every remaining ready unit. `writeMarker` now
+//      also carries the verdict's own `dispatchReadyUnitIds` (when present); `main()` routes
+//      every `SubagentStart` through `recordSubagentDispatchStart`, which increments a
+//      `dispatchStartsConsumed` counter on the still-bounded marker until it reaches
+//      `expectedDispatchCount(marker)` (the wave size, or 1 for every other dispatch-shaped
+//      envelope, preserving the original single-start behavior for those), only then calling
+//      `consumeBoundedDispatch` to exhaust it into the identical `mode: "none"` shape.
+//
+//   3. `SubagentStart`'s marker mutation, and `PreToolUse`'s marker read, were both keyed only
+//      by `session_id` — but a dispatched worker's own subsequent tool calls share that same
+//      `session_id` with the controller that spawned it, distinguished only by a separate
+//      `agent_id` Claude Code stamps on every hook event that happens inside that worker's own
+//      context (the same field `tools/telemetry/hook.mjs` already reads off `SubagentStart`/
+//      `SubagentStop`). Once the marker was exhausted, the worker's own first tool call inherited
+//      the controller's now-`"none"` marker and was wrongly denied — the live stop boundary must
+//      constrain the initiating controller, not the worker it just authorized. `decidePreToolUse`
+//      now allows unconditionally whenever `toolCall.agentId` is a non-empty string, before ever
+//      consulting the marker: a hook event carrying an `agent_id` is, by construction, a
+//      dispatched worker's own tool call, never the controller's.
+//
 // A fresh invocation is a new session_id, so it never inherits a predecessor's marker (of
 // either mode) — unchanged from the "none" mechanism's own existing fresh-session behavior.
 //
@@ -140,13 +185,71 @@
 // PostToolUseFailure (Bash only), and SubagentStart (issue #678).
 // Tests: node --test tools/orchestration/action-envelope-hook.test.mjs
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pathToFileURL } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const STATE_DIR = process.env.LDL_ACTION_ENVELOPE_STATE_DIR || join(ROOT, ".claude", "action-envelope-state");
+
+// Stage 1 correction on PR #714 (issue #678, finding 1): a side channel the two gate scripts
+// themselves write to, at the exact point they compute and are about to print their verdict —
+// see the module header. Deliberately a single file rather than session-scoped: the gate
+// scripts have no access to a session_id (Claude Code does not inject one into the Bash tool's
+// environment), so this hook, which does know the session_id from its own PostToolUse payload,
+// is the one that turns this content into a session-scoped marker via markObservedVerdict
+// below. This relies on the same one-session-per-exact-checkout-path invariant AGENTS.md's own
+// "Concurrent subagent directory isolation" already documents: two different live sessions do
+// not concurrently run gate scripts from the same checkout, so a single shared last-verdict
+// slot per checkout does not cross session boundaries in practice.
+export const LAST_GATE_VERDICT_PATH = join(STATE_DIR, "last-gate-verdict.json");
+
+// Persists `result` (a gate script's own verdict object, about to be printed to stdout) to the
+// side channel. Never throws — a gate script's primary duty (printing the correct verdict to
+// stdout with the correct exit code) must never be put at risk by this side channel failing to
+// write, mirroring this module's own documented fail-open philosophy on infrastructure trouble.
+export function persistLastGateVerdict(result, { mkdirImpl = mkdirSync, writeFileImpl = writeFileSync } = {}) {
+  try {
+    mkdirImpl(STATE_DIR, { recursive: true });
+    writeFileImpl(LAST_GATE_VERDICT_PATH, JSON.stringify(result), "utf8");
+  } catch {
+    // Deliberately swallowed -- see comment above.
+  }
+}
+
+// Clears the side channel. Both gate scripts call this at the very start of their own main(),
+// before doing any work, so a run that errors or crashes before ever computing a verdict never
+// leaves a stale prior verdict behind for a later, unrelated command to mistakenly consume.
+export function clearLastGateVerdict({ existsImpl = existsSync, unlinkImpl = unlinkSync } = {}) {
+  try {
+    if (existsImpl(LAST_GATE_VERDICT_PATH)) unlinkImpl(LAST_GATE_VERDICT_PATH);
+  } catch {
+    // Deliberately swallowed -- see persistLastGateVerdict above.
+  }
+}
+
+// Reads and parses the side channel, then deletes it so the same persisted verdict is never
+// consumed twice by a later, unrelated command. Returns null on any problem (missing file,
+// unreadable, malformed JSON) -- the correct default when nothing was actually observed.
+export function consumeLastGateVerdict({
+  readFileImpl = readFileSync,
+  existsImpl = existsSync,
+  unlinkImpl = unlinkSync,
+} = {}) {
+  try {
+    if (!existsImpl(LAST_GATE_VERDICT_PATH)) return null;
+    const parsed = JSON.parse(readFileImpl(LAST_GATE_VERDICT_PATH, "utf8"));
+    try {
+      unlinkImpl(LAST_GATE_VERDICT_PATH);
+    } catch {
+      // Deletion failure does not invalidate the read -- see fail-open philosophy above.
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
 
 // Inlined rather than imported from tools/telemetry/collect.mjs (Stage 1 review finding on
 // PR #642): tools/orchestration/** is a MANAGED_ITEMS-installed path for consumer repositories
@@ -302,6 +405,12 @@ export function writeMarker(
       ? verdict.actionEnvelope.authorizedActions
       : [],
     reason: typeof verdict.reason === "string" ? verdict.reason : null,
+    // Issue #678 Stage 1 correction, finding 2: carried through so a dispatch-shaped bounded
+    // marker for a multi-unit wave (READY_TO_DISPATCH_UNITS) knows its own expected wave size —
+    // see expectedDispatchCount/recordSubagentDispatchStart below. Absent/empty for every other
+    // verdict shape, which is exactly the "wave size 1" default those helpers already apply.
+    dispatchReadyUnitIds: Array.isArray(verdict.dispatchReadyUnitIds) ? verdict.dispatchReadyUnitIds : [],
+    dispatchStartsConsumed: 0,
     ts: new Date().toISOString(),
   };
   writeFileImpl(markerPath(sessionId), JSON.stringify(marker), "utf8");
@@ -348,6 +457,43 @@ export function consumeBoundedDispatch(
   return exhausted;
 }
 
+// Issue #678 Stage 1 correction, finding 2: how many SubagentStart events this bounded,
+// dispatch-shaped marker's own authorized action expects before it is fully consumed. Every
+// dispatch-shaped envelope authorizes exactly one worker (dispatch-correction-worker,
+// dispatch-execution-worker, ...) except dispatch-unit-wave (READY_TO_DISPATCH_UNITS), whose
+// own verdict names every ready unit in `dispatchReadyUnitIds` -- one worker per unit. A missing
+// or empty list (every non-wave dispatch verdict, and any wave verdict with no units recorded)
+// defaults to 1, preserving the original single-start-exhausts behavior for those.
+export function expectedDispatchCount(marker) {
+  const ids = marker?.dispatchReadyUnitIds;
+  return Array.isArray(ids) && ids.length > 0 ? ids.length : 1;
+}
+
+// Issue #678 Stage 1 correction, finding 2: the SubagentStart handler `main()` now calls,
+// replacing a direct shouldConsumeBoundedDispatch + consumeBoundedDispatch pair. A non-dispatch
+// bounded marker (shouldConsumeBoundedDispatch false) is left untouched, exactly as before. A
+// dispatch-shaped marker that has not yet seen its full expectedDispatchCount(marker) worth of
+// worker starts has its dispatchStartsConsumed counter incremented but stays bounded -- the
+// controller may keep dispatching the wave's remaining ready units, and the gate-rerun denial in
+// decidePreToolUse keeps applying throughout. Once the count is reached, this defers to
+// consumeBoundedDispatch for the identical final exhaustion into mode "none" that function
+// already implements and is independently tested for.
+export function recordSubagentDispatchStart(
+  sessionId,
+  marker,
+  { mkdirImpl = mkdirSync, writeFileImpl = writeFileSync } = {},
+) {
+  if (!shouldConsumeBoundedDispatch(marker)) return null;
+  const consumed = (typeof marker.dispatchStartsConsumed === "number" ? marker.dispatchStartsConsumed : 0) + 1;
+  if (consumed < expectedDispatchCount(marker)) {
+    mkdirImpl(STATE_DIR, { recursive: true });
+    const updated = { ...marker, dispatchStartsConsumed: consumed, ts: new Date().toISOString() };
+    writeFileImpl(markerPath(sessionId), JSON.stringify(updated), "utf8");
+    return updated;
+  }
+  return consumeBoundedDispatch(sessionId, marker, { mkdirImpl, writeFileImpl });
+}
+
 // Pure: given an already-read marker (or null) and the tool call about to run, decide the
 // PreToolUse hook's own output.
 //
@@ -368,6 +514,16 @@ export function consumeBoundedDispatch(
 // authority for whether a non-gate-script action was itself one of those named actions.
 export function decidePreToolUse(marker, toolCall = {}) {
   if (!marker) return { permissionDecision: "allow" };
+
+  // Issue #678 Stage 1 correction, finding 3: a hook event carrying a non-empty `agentId` is,
+  // by construction, a dispatched subagent's own tool call -- it shares the controller's
+  // session_id but is distinguished by this separate field (see module header). This
+  // controller-scoped marker -- including one a dispatch itself just exhausted into mode
+  // "none" -- must never be read as restricting the worker that dispatch just authorized to
+  // start; the live stop boundary constrains the initiating controller, never the worker.
+  if (typeof toolCall.agentId === "string" && toolCall.agentId.length > 0) {
+    return { permissionDecision: "allow" };
+  }
 
   if (marker.mode === "bounded") {
     const command = toolCall.toolName === "Bash" ? toolCall.command : undefined;
@@ -425,14 +581,26 @@ function readStdinJson() {
 // "bounded" (new); either one writes the corresponding marker. Any other mode (bounded is the
 // only other one detectable here — chain/fallthrough verdicts are never marked, unchanged)
 // leaves the session's existing marker, if any, untouched.
-function markObservedVerdict(sessionId, command, stdout) {
+export function markObservedVerdict(sessionId, command, stdout) {
   const noneVerdict = detectNoActionVerdict(command, stdout);
   if (noneVerdict) {
     writeMarker(sessionId, noneVerdict);
     return;
   }
   const boundedVerdict = detectBoundedVerdict(command, stdout);
-  if (boundedVerdict) writeMarker(sessionId, boundedVerdict);
+  if (boundedVerdict) {
+    writeMarker(sessionId, boundedVerdict);
+    return;
+  }
+  // Issue #678 Stage 1 correction, finding 1: the command's own captured stdout carried no
+  // recognizable none/bounded verdict -- on the canonical dispatch pipeline this is expected
+  // whenever a downstream formatter/reservation stage transformed it. Only when the command
+  // actually invoked a gate script do we fall back to the side channel that script itself
+  // persisted at the moment it emitted the verdict; otherwise there is nothing to recover.
+  if (invokedGateScriptBasenames(command).length === 0) return;
+  const sideChannelVerdict = consumeLastGateVerdict();
+  const mode = sideChannelVerdict?.actionEnvelope?.mode;
+  if (mode === "none" || mode === "bounded") writeMarker(sessionId, sideChannelVerdict);
 }
 
 function main() {
@@ -461,7 +629,9 @@ function main() {
     // header and shouldConsumeBoundedDispatch/consumeBoundedDispatch above.
     if (payload?.hook_event_name === "SubagentStart" && sessionId) {
       const marker = readMarker(sessionId);
-      if (shouldConsumeBoundedDispatch(marker)) consumeBoundedDispatch(sessionId, marker);
+      // Issue #678 Stage 1 correction, finding 2: routes through the counting wrapper so a
+      // multi-unit dispatch-unit-wave is not exhausted by its first worker's start alone.
+      recordSubagentDispatchStart(sessionId, marker);
       process.exit(0);
       return;
     }
@@ -471,6 +641,9 @@ function main() {
       const decision = decidePreToolUse(marker, {
         toolName: payload.tool_name,
         command: payload.tool_input?.command,
+        // Issue #678 Stage 1 correction, finding 3: present only for a hook event happening
+        // inside a dispatched subagent's own context; see decidePreToolUse's own comment.
+        agentId: typeof payload.agent_id === "string" ? payload.agent_id : undefined,
       });
       if (decision.permissionDecision === "deny") {
         process.stdout.write(
