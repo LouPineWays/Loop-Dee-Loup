@@ -20,6 +20,8 @@ import {
   checkPostAudit,
   checkRecordVerdict,
   findClosingKeywordMatch,
+  findMatchingOpenAuditIssues,
+  hasCanonicalAuditShape,
   isNoWorkIssueSentinel,
   normalizeIssueNumber,
   normalizeSearchIssuesPage,
@@ -362,6 +364,77 @@ test("parseFormFieldBlock: returns null when the heading is absent, empty, or '_
   assert.equal(parseFormFieldBlock("no headings here", "Verification checklist"), null);
   assert.equal(parseFormFieldBlock("### Verification checklist\n\n### Findings\n\nPending", "Verification checklist"), null);
   assert.equal(parseFormFieldBlock("### Verification checklist\n\n_No response_\n\n### Findings", "Verification checklist"), null);
+});
+
+// P1 Stage 1 review finding on PR #733 (issue #729): "Audit scope" and "Verification checklist"
+// are exactly the two audit-control-issue template fields (.github/ISSUE_TEMPLATE/
+// audit-control-issue.yml) the template follows with a permanent markdown block — rendered into
+// the issue body regardless of whether the preceding field was ever answered — before the next
+// "### " heading. A blank/"_No response_" field's collected block must not silently absorb that
+// trailing static prose and come back non-null.
+test("parseFormFieldBlock: a blank 'Audit scope' field still returns null even though the permanent 'Verification checklist instructions' markdown follows it before the next heading", () => {
+  const body = [
+    "### Audit scope",
+    "",
+    "_No response_",
+    "",
+    "**Verification checklist instructions:** fill in the field below now, before triggering " +
+      "`@codex review` — a numbered, change-specific list of concrete checks.",
+    "",
+    "### Verification checklist",
+    "",
+    "1. Confirm A.",
+  ].join("\n");
+  assert.equal(parseFormFieldBlock(body, "Audit scope"), null);
+});
+
+test("parseFormFieldBlock: a blank 'Verification checklist' field still returns null even though the permanent 'Required response format' markdown follows it before the next heading", () => {
+  const body = [
+    "### Verification checklist",
+    "",
+    "_No response_",
+    "",
+    '**Required response format:** replace "Pending" below with your completed audit report, ' +
+      "in the exact shape defined by docs/stage2-audit-contract.md.",
+    "",
+    "### Findings",
+    "",
+    "Pending — awaiting Stage 2 audit response.",
+  ].join("\n");
+  assert.equal(parseFormFieldBlock(body, "Verification checklist"), null);
+});
+
+test("parseFormFieldBlock: a genuinely authored 'Audit scope'/'Verification checklist' field still reads its own content, stopping before the trailing static markdown block", () => {
+  const scopeBody = [
+    "### Audit scope",
+    "",
+    "Complete diff of PR #733 against pre-PR main, plus lifecycle-gate.mjs's canonical-shape helpers.",
+    "",
+    "**Verification checklist instructions:** fill in the field below now, before triggering " +
+      "`@codex review`.",
+    "",
+    "### Verification checklist",
+    "",
+    "1. Confirm A.",
+  ].join("\n");
+  assert.equal(
+    parseFormFieldBlock(scopeBody, "Audit scope"),
+    "Complete diff of PR #733 against pre-PR main, plus lifecycle-gate.mjs's canonical-shape helpers.",
+  );
+
+  const checklistBody = [
+    "### Verification checklist",
+    "",
+    "1. Confirm A.",
+    "2. Confirm B.",
+    "",
+    '**Required response format:** replace "Pending" below with your completed audit report.',
+    "",
+    "### Findings",
+    "",
+    "Pending — awaiting Stage 2 audit response.",
+  ].join("\n");
+  assert.equal(parseFormFieldBlock(checklistBody, "Verification checklist"), "1. Confirm A.\n2. Confirm B.");
 });
 
 test("parseFormFieldBlock: anchors to the FIRST matching heading — the opposite of parseFormField's last-match convention (Stage 1 review finding on this PR)", () => {
@@ -2759,20 +2832,112 @@ function correctsSentence(predecessorAuditIssue) {
 function chainFixtureWithCorrects({ workIssue = "none", commit = MERGE_COMMIT, verdict, createdAt, corrects = null }) {
   // A real audit-control-issue always has a "Stage 1 inline review disposition" field (required
   // by the template) whether or not it is itself a correction responding to a prior verdict --
-  // hasCanonicalAuditShape's predecessor-shape check (Stage 1 review finding on PR #515) relies on
-  // this field's mere presence, distinct from parseCorrectsAuditRef's separate check for the
-  // "corrects" phrase specifically inside it.
+  // hasCanonicalAuditShape's predecessor-shape check (Stage 1 review finding on PR #515, tightened
+  // to all six template fields by the #731 Stage 2 audit P1 finding) relies on this field's mere
+  // presence, distinct from parseCorrectsAuditRef's separate check for the "corrects" phrase
+  // specifically inside it. Includes "Merged PR" and "Audit scope" too so the full canonical shape
+  // is present, not only the three fields the #730 Stage 1 correction originally checked.
   const dispositionBody =
     corrects !== null ? correctsSentence(corrects) : "Stage 1 inline review at frozen head `abc123` found no issues.";
   return {
     body:
+      `### Merged PR\n\nhttps://github.com/owner/repo/pull/1\n\n` +
       `### Work issue\n\n${workIssue}\n\n### Exact merge commit\n\n${commit}\n\n` +
       `### Stage 1 inline review disposition\n\n${dispositionBody}\n\n` +
+      `### Audit scope\n\nDiff of the PR against pre-PR main.\n\n` +
       `### Verification checklist\n\n1. Confirm A.\n\n### Verdict\n\n${verdict}\n`,
     state: "OPEN",
     createdAt,
   };
 }
+
+// -- hasCanonicalAuditShape: rendered-body regressions (P1 Stage 1 review finding on PR #733,
+// issue #729) ---------------------------------------------------------------------------------
+//
+// A field-presence-only fixture (e.g. chainFixtureWithCorrects above, which joins fields with a
+// bare "\n\n") never reproduces the real rendered-issue-body failure shape: the audit-control-
+// issue template renders a permanent markdown block immediately after "Audit scope" and after
+// "Verification checklist", before the next "### " heading. These tests build that exact
+// rendering so a regression here fails for the right reason.
+function renderedCanonicalAuditBody({ scope = "Diff of the PR against pre-PR main.", checklist = "1. Confirm A." } = {}) {
+  return [
+    "### Merged PR",
+    "",
+    "https://github.com/owner/repo/pull/1",
+    "",
+    "### Work issue",
+    "",
+    "#440",
+    "",
+    "### Exact merge commit",
+    "",
+    MERGE_COMMIT,
+    "",
+    "### Stage 1 inline review disposition",
+    "",
+    "Stage 1 inline review at frozen head `abc123` found no issues.",
+    "",
+    "### Audit scope",
+    "",
+    scope,
+    "",
+    "**Verification checklist instructions:** fill in the field below now, before triggering " +
+      "`@codex review` — a numbered, change-specific list of concrete checks.",
+    "",
+    "### Verification checklist",
+    "",
+    checklist,
+    "",
+    '**Required response format:** replace "Pending" below with your completed audit report.',
+    "",
+    "### Findings",
+    "",
+    "Pending — awaiting Stage 2 audit response.",
+    "",
+    "### Verdict",
+    "",
+    "PENDING",
+  ].join("\n");
+}
+
+test("hasCanonicalAuditShape: accepts a genuine, fully-authored six-field rendered audit body (with both permanent static markdown blocks present)", () => {
+  assert.equal(hasCanonicalAuditShape(renderedCanonicalAuditBody()), true);
+});
+
+test("hasCanonicalAuditShape: rejects a rendered body whose 'Audit scope' is blank/'_No response_', even though the permanent 'Verification checklist instructions' markdown that always follows it makes the raw block non-empty", () => {
+  assert.equal(hasCanonicalAuditShape(renderedCanonicalAuditBody({ scope: "_No response_" })), false);
+});
+
+test("hasCanonicalAuditShape: rejects a rendered body whose 'Verification checklist' is blank/'_No response_', even though the permanent 'Required response format' markdown that always follows it makes the raw block non-empty", () => {
+  assert.equal(hasCanonicalAuditShape(renderedCanonicalAuditBody({ checklist: "_No response_" })), false);
+});
+
+// Proves the fix at the initial reconciliation-search matcher (findMatchingOpenAuditIssues) as
+// well as the pure predicate above — the guidance's requirement that the rendered-body rejection
+// hold at both the initial matcher and the final pre-projection/trigger verification boundary
+// (the latter is `verifyAuditIssueMatches` in tools/orchestration/finalize-audit-breakpoint.mjs,
+// exercised by its own test file; both share this exact `hasCanonicalAuditShape` predicate).
+test("findMatchingOpenAuditIssues: a rendered candidate with a blank 'Audit scope' field is never a match, even though its pointer fields match", () => {
+  const candidates = [
+    { number: 900, state: "OPEN", body: renderedCanonicalAuditBody({ scope: "_No response_" }) },
+  ];
+  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid: MERGE_COMMIT, executionIssue: 440 });
+  assert.deepEqual(matches, []);
+});
+
+test("findMatchingOpenAuditIssues: a rendered candidate with a blank 'Verification checklist' field is never a match, even though its pointer fields match", () => {
+  const candidates = [
+    { number: 901, state: "OPEN", body: renderedCanonicalAuditBody({ checklist: "_No response_" }) },
+  ];
+  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid: MERGE_COMMIT, executionIssue: 440 });
+  assert.deepEqual(matches, []);
+});
+
+test("findMatchingOpenAuditIssues: a genuine, fully-authored rendered candidate is still a match", () => {
+  const candidates = [{ number: 902, state: "OPEN", body: renderedCanonicalAuditBody() }];
+  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid: MERGE_COMMIT, executionIssue: 440 });
+  assert.deepEqual(matches.map((m) => m.number), [902]);
+});
 
 test("parseCorrectsAuditRef: reads the predecessor audit issue number from the live recurring correction sentence", () => {
   assert.equal(parseCorrectsAuditRef(chainFixtureWithCorrects({ verdict: "NOT CLEAN", createdAt: "x", corrects: 506 }).body), 506);
@@ -3257,6 +3422,7 @@ function misplacedCorrectsAuditFixture({ workIssue, commit = MERGE_COMMIT, verdi
       : "Complete diff review.";
   return {
     body:
+      `### Merged PR\n\nhttps://github.com/owner/repo/pull/1\n\n` +
       `### Work issue\n\n${workIssue}\n\n### Exact merge commit\n\n${commit}\n\n` +
       `### Stage 1 inline review disposition\n\nStage 1 inline review at frozen head \`${MERGE_COMMIT}\` found no issues.\n\n` +
       `### Audit scope\n\n${scope}\n\n` +
@@ -3381,7 +3547,51 @@ test("checkCloseAudit: the shared-Work-issue sweep fails closed on a same-Work-i
   assert.equal(result.predecessorChainNotes.length, 1);
   assert.equal(result.predecessorChainNotes[0].auditIssue, 686);
   assert.match(result.predecessorChainNotes[0].reason, /canonical Stage 2 audit-control-issue shape/);
+  // P2 Stage 1 review finding on PR #733 (issue #729): this diagnostic must name the complete
+  // six-field requirement `hasCanonicalAuditShape` actually enforces, not the stale three-field
+  // list (Exact merge commit / Work issue / Stage 1 inline review disposition) from before the
+  // #731 Stage 2 audit tightened the predicate to all six upstream template fields.
+  assert.match(
+    result.predecessorChainNotes[0].reason,
+    /missing one or more of Merged PR \/ Work issue \/ Exact merge commit \/ Stage 1 inline review disposition \/ Audit scope \/ Verification checklist/,
+  );
   assert.deepEqual(closeCalls.map((c) => c.auditIssue), [688]);
+});
+
+// P2 Stage 1 review finding on PR #733 (issue #729): the shared-Work-issue sweep's skip reason
+// must name the full six-field requirement even for a candidate missing only one of the *newly*
+// required fields (Merged PR / Audit scope / Verification checklist) rather than the three
+// fields the diagnostic text used to enumerate — a candidate like this could otherwise mislead an
+// operator into looking for a missing merge commit or disposition that was never the real gap.
+test("checkCloseAudit: the shared-Work-issue sweep's skip reason names the complete six-field requirement even when only a newly-required field (Audit scope) is missing", async () => {
+  const chain = {
+    686: {
+      body:
+        "### Merged PR\n\nhttps://github.com/owner/repo/pull/1\n\n### Work issue\n\n#668\n\n" +
+        `### Exact merge commit\n\n${MERGE_COMMIT}\n\n` +
+        "### Stage 1 inline review disposition\n\nStage 1 inline review at frozen head `abc123` found no issues.\n\n" +
+        "### Verification checklist\n\n1. Confirm A.\n\n### Verdict\n\nPENDING\n",
+      state: "OPEN",
+      createdAt: "2026-09-21T21:50:33Z",
+    },
+    688: chainFixtureWithCorrects({ workIssue: "#668", verdict: "CLEAN", createdAt: "2026-09-21T23:16:16Z" }),
+  };
+  const ghIssueViewImpl = async ({ number }) => chain[number];
+  const ghIssueListImpl = async () => Object.entries(chain).map(([number, data]) => ({ number: Number(number), ...data }));
+  const ghApiImpl = ghApiForThreads({ 688: completedAuditThread({ verdict: "CLEAN" }) });
+
+  const result = await checkCloseAudit(
+    { repo: "owner/repo", "audit-issue": 688 },
+    { ghIssueViewImpl, ghIssueListImpl, ghApiImpl, ghCloseImpl: async () => {}, ghCommentImpl: async () => {} },
+  );
+
+  assert.equal(result.retiredPredecessors.length, 0, "#686 is missing the required Audit scope field and must never be closed");
+  assert.equal(result.predecessorChainNotes.length, 1);
+  assert.equal(result.predecessorChainNotes[0].auditIssue, 686);
+  assert.match(
+    result.predecessorChainNotes[0].reason,
+    /missing one or more of Merged PR \/ Work issue \/ Exact merge commit \/ Stage 1 inline review disposition \/ Audit scope \/ Verification checklist/,
+  );
 });
 
 test("checkCloseAudit: rerunning close-audit against an already-closed successor retroactively retires a predecessor the shared-Work-issue sweep missed before, then is a harmless no-op on a further rerun", async () => {
