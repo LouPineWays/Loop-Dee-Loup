@@ -29,6 +29,7 @@ test("getActionEnvelope: every ready-dispatch-gate.mjs and next-review-transitio
     "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
     "STAGE1_CORRECTION_REQUIRED",
     "CHECKOUT_BINDING_UNVERIFIED",
+    "STAGE2_PREPARATION_REQUIRED",
     "STAGE2_CORRECTION_REQUIRED",
     "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
     "STAGE2_CLOSE_READY",
@@ -96,10 +97,10 @@ test("duplicating an authorized action within one bounded transition is a violat
   assert.ok(result.reasons[0].includes("already performed once"));
 });
 
-test("performing an envelope's own authorized actions out of its declared order is a violation (write-control-snapshot, create-stage2-audit-issue, post-stage2-reviewer-trigger, merge-pr)", () => {
+test("performing an envelope's own authorized actions out of its declared order is a violation (write-control-snapshot, dispatch-stage2-preparation-worker, post-stage2-reviewer-trigger, merge-pr)", () => {
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
     "write-control-snapshot",
-    "create-stage2-audit-issue",
+    "dispatch-stage2-preparation-worker",
     "post-stage2-reviewer-trigger",
     "merge-pr",
   ]);
@@ -119,7 +120,7 @@ test("#559/#445/PR #558 shape: posting the Stage 2 reviewer trigger before the c
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
     "finalize-stage1-satisfied",
     "merge-pr",
-    "create-stage2-audit-issue",
+    "dispatch-stage2-preparation-worker",
     "post-stage2-reviewer-trigger",
     "write-control-snapshot",
   ]);
@@ -131,7 +132,7 @@ test("#559/#445/PR #558 shape: the corrected order (merge, create audit issue, p
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
     "finalize-stage1-satisfied",
     "merge-pr",
-    "create-stage2-audit-issue",
+    "dispatch-stage2-preparation-worker",
     "write-control-snapshot",
     "post-stage2-reviewer-trigger",
   ]);
@@ -144,7 +145,7 @@ test("#582/#583 shape: merging before the Stage 1 disposition is durably persist
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
     "merge-pr",
     "finalize-stage1-satisfied",
-    "create-stage2-audit-issue",
+    "dispatch-stage2-preparation-worker",
     "write-control-snapshot",
     "post-stage2-reviewer-trigger",
   ]);
@@ -155,7 +156,7 @@ test("#582/#583 shape: merging before the Stage 1 disposition is durably persist
 test("#582/#583 shape: omitting finalize-stage1-satisfied entirely is a violation even though every observed action is itself permitted and in order", () => {
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
     "merge-pr",
-    "create-stage2-audit-issue",
+    "dispatch-stage2-preparation-worker",
     "write-control-snapshot",
     "post-stage2-reviewer-trigger",
   ]);
@@ -280,7 +281,7 @@ test("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2: finalize-stage1-satisfied, merg
     classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
       "finalize-stage1-satisfied",
       "merge-pr",
-      "create-stage2-audit-issue",
+      "dispatch-stage2-preparation-worker",
       "write-control-snapshot",
       "post-stage2-reviewer-trigger",
     ]).status,
@@ -289,7 +290,7 @@ test("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2: finalize-stage1-satisfied, merg
   const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
     "finalize-stage1-satisfied",
     "merge-pr",
-    "create-stage2-audit-issue",
+    "dispatch-stage2-preparation-worker",
     "wait-for-completion",
   ]);
   assert.equal(result.status, "violation");
@@ -299,12 +300,50 @@ test("STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2: same bounded merge/c
   assert.equal(
     classifyEnvelopeCompliance("STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
       "merge-pr",
-      "create-stage2-audit-issue",
+      "dispatch-stage2-preparation-worker",
       "write-control-snapshot",
       "post-stage2-reviewer-trigger",
     ]).status,
     "compliant",
   );
+});
+
+// Issue #718 controller-context negative (Required check 2): the pre-#718 shape -- the
+// controller itself performing semantic Stage 2 audit-issue authoring, recorded here as the old
+// "create-stage2-audit-issue" action kind -- is no longer in either merge/trigger verdict's
+// authorized envelope at all. A controller that still performed it directly, instead of
+// dispatching the bounded preparation worker, is now a structural violation, not merely
+// discouraged by prose.
+test("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2: the pre-#718 controller-performed 'create-stage2-audit-issue' action is no longer authorized at all", () => {
+  const result = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", [
+    "finalize-stage1-satisfied",
+    "merge-pr",
+    "create-stage2-audit-issue",
+    "write-control-snapshot",
+    "post-stage2-reviewer-trigger",
+  ]);
+  assert.equal(result.status, "violation");
+  assert.ok(result.reasons.some((r) => r.includes("create-stage2-audit-issue") && r.includes("not in the authorized envelope")));
+  assert.ok(
+    result.reasons.some((r) => r.includes("dispatch-stage2-preparation-worker") && r.includes("required action")),
+    "the envelope must still require the bounded worker dispatch even though an unauthorized substitute was attempted",
+  );
+});
+
+// -- Issue #718: STAGE2_PREPARATION_REQUIRED -- the resumable post-merge/pre-preparation gap --
+
+test("STAGE2_PREPARATION_REQUIRED: one bounded dispatch is compliant; anything else (including a second merge-pr) is a violation", () => {
+  assert.equal(
+    classifyEnvelopeCompliance("STAGE2_PREPARATION_REQUIRED", ["dispatch-stage2-preparation-worker"]).status,
+    "compliant",
+  );
+  const result = classifyEnvelopeCompliance("STAGE2_PREPARATION_REQUIRED", [
+    "merge-pr",
+    "dispatch-stage2-preparation-worker",
+  ]);
+  assert.equal(result.status, "violation");
+  assert.equal(result.reasons.length, 1);
+  assert.ok(result.reasons[0].includes("merge-pr"));
 });
 
 // -- classifyEnvelopeCompliance: action-bearing correction --------------------------------

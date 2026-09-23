@@ -150,9 +150,13 @@ const ENVELOPES = {
   // trigger race ahead of the durable AUDIT projection: PR #558 merged, Audit Issue #559 was
   // created and triggered, and Codex read control #445 while it still said `Lifecycle:
   // REVIEW`, returning BLOCKED. `trigger-stage2` is split into its own two ordered actions —
-  // `create-stage2-audit-issue` (open the fresh audit-control-issue and verify it by direct
-  // read, docs/bounded-review-cycle.md Stage 2 steps 2-3) and `post-stage2-reviewer-trigger`
-  // (post the `@codex review` trigger, step 4) — with `write-control-snapshot` (in practice,
+  // `dispatch-stage2-preparation-worker` (dispatch the bounded Stage 2 preparation worker,
+  // which reads the merged PR/diff/execution Issue/Stage 1 disposition directly and persists
+  // the canonical audit-control-issue itself, verified by direct read — docs/bounded-review-
+  // cycle.md Stage 2 steps 2-3; issue #718 moved this out of the orchestrator's own action list
+  // and into a dispatched worker's, renaming it from the prior `create-stage2-audit-issue`,
+  // which the orchestrator performed itself) and `post-stage2-reviewer-trigger` (post the
+  // `@codex review` trigger, step 4) — with `write-control-snapshot` (in practice,
   // `tools/orchestration/finalize-audit-breakpoint.mjs`'s compose-write-verify sequence)
   // required strictly between them. The reviewer trigger is authorized only after the control
   // snapshot durably records the AUDIT state and the exact Stage 2 reference, and that write
@@ -177,15 +181,26 @@ const ENVELOPES = {
     authorizedActions: [
       "finalize-stage1-satisfied",
       "merge-pr",
-      "create-stage2-audit-issue",
+      "dispatch-stage2-preparation-worker",
       "write-control-snapshot",
       "post-stage2-reviewer-trigger",
     ],
   },
   STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2: {
     mode: ENVELOPE_MODES.BOUNDED,
-    authorizedActions: ["merge-pr", "create-stage2-audit-issue", "write-control-snapshot", "post-stage2-reviewer-trigger"],
+    authorizedActions: [
+      "merge-pr",
+      "dispatch-stage2-preparation-worker",
+      "write-control-snapshot",
+      "post-stage2-reviewer-trigger",
+    ],
   },
+  // Issue #718: the resumable post-merge/pre-preparation gap -- a prior controller already
+  // merged the PR (and possibly began Stage 2 preparation) but no settled Stage 2 reference was
+  // ever durably recorded. A fresh controller resuming this state (next-review-transition-
+  // gate.mjs's control-Issue-mode "PR" bullet settled, live PR state MERGED, no settled "Stage
+  // 2" bullet) authorizes exactly one more dispatch, never a second merge-pr.
+  STAGE2_PREPARATION_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-stage2-preparation-worker"] },
   // Issue #703: a findings-bearing Stage 1 correction settles the worker's exact PR-head checkout
   // BEFORE spawn (`pr-head-checkout-preflight.mjs --reserve-from-gate`, the pipeline stage between
   // this gate and `format-dispatch-prompt.mjs`), so `reserve-correction-checkout` is authorized

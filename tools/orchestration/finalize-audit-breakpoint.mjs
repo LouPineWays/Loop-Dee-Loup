@@ -47,8 +47,12 @@
 // untriggered Audit Issue is preferable to an auditor running against stale control state.
 // This script never posts the reviewer trigger itself; it only gates whether doing so next
 // is authorized. See `docs/bounded-review-cycle.md` Stage 2 steps 2-4 and
-// `tools/orchestration/action-envelope.mjs`'s `create-stage2-audit-issue` /
-// `write-control-snapshot` / `post-stage2-reviewer-trigger` ordering.
+// `tools/orchestration/action-envelope.mjs`'s `dispatch-stage2-preparation-worker` /
+// `write-control-snapshot` / `post-stage2-reviewer-trigger` ordering (issue #718 renamed the
+// first of these from the controller-performed `create-stage2-audit-issue` once that step moved
+// into a dispatched bounded worker — this script's own verification contract is unchanged
+// either way, since it only ever re-derives evidence from the live Audit Issue/PR, never from
+// who or what created them).
 //
 // Usage:
 //   node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue 445 \

@@ -1044,9 +1044,9 @@ test("runNextReviewTransitionGate: control-Issue mode with a settled PR (no Stag
         assert.equal(number, "322");
         return { body: CONTROL_BODY_PRE_MERGE, state: "OPEN" };
       },
-      ghPrHeadImpl: async ({ number }) => {
+      ghPrStateImpl: async ({ number }) => {
         prHeadReadFor = number;
-        return "livehead123";
+        return { headRefOid: "livehead123", state: "OPEN" };
       },
       stage1RunImpl: async (args) => {
         assert.equal(args.number, 376);
@@ -1075,7 +1075,7 @@ test("runNextReviewTransitionGate: control-Issue mode with a settled PR (no Stag
     authorizedActions: [
       "finalize-stage1-satisfied",
       "merge-pr",
-      "create-stage2-audit-issue",
+      "dispatch-stage2-preparation-worker",
       "write-control-snapshot",
       "post-stage2-reviewer-trigger",
     ],
@@ -1090,7 +1090,7 @@ test("runNextReviewTransitionGate: Stage 1 satisfied text does not override NOT_
         assert.equal(number, "322");
         return { body: CONTROL_BODY_PRE_MERGE_SATISFIED, state: "OPEN" };
       },
-      ghPrHeadImpl: async () => "deadbeefcafef00d",
+      ghPrStateImpl: async () => ({ headRefOid: "deadbeefcafef00d", state: "OPEN" }),
       stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
     },
@@ -1125,7 +1125,7 @@ test("runNextReviewTransitionGate: the exact #428/#449 regression -- a legacy 'S
         assert.equal(number, "428");
         return { body: CONTROL_BODY_428_SHAPE, state: "OPEN" };
       },
-      ghPrHeadImpl: async () => "67fa0c28fde901e721afe30a91451130668f0bb0",
+      ghPrStateImpl: async () => ({ headRefOid: "67fa0c28fde901e721afe30a91451130668f0bb0", state: "OPEN" }),
       stage1RunImpl: async () =>
         stage1("RESPONSE_RECEIVED", {
           matches: [
@@ -1150,7 +1150,7 @@ test("runNextReviewTransitionGate: the same #428-shaped body with a clean/no-fin
     { repo: "o/r", controlIssue: "428" },
     {
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_428_SHAPE, state: "OPEN" }),
-      ghPrHeadImpl: async () => "67fa0c28fde901e721afe30a91451130668f0bb0",
+      ghPrStateImpl: async () => ({ headRefOid: "67fa0c28fde901e721afe30a91451130668f0bb0", state: "OPEN" }),
       stage1RunImpl: async () => stage1("RESPONSE_RECEIVED"),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
     },
@@ -1178,7 +1178,7 @@ test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfie
     { repo: "o/r", controlIssue: "322" },
     {
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
-      ghPrHeadImpl: async () => "0009c54b18",
+      ghPrStateImpl: async () => ({ headRefOid: "0009c54b18", state: "OPEN" }),
       stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
       checkCorrectionDeltaImpl: async (args) => {
@@ -1203,7 +1203,7 @@ test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfie
   // issue/project-verify-control/trigger ordering as the ordinary satisfied path.
   assert.deepEqual(result.actionEnvelope, {
     mode: "bounded",
-    authorizedActions: ["merge-pr", "create-stage2-audit-issue", "write-control-snapshot", "post-stage2-reviewer-trigger"],
+    authorizedActions: ["merge-pr", "dispatch-stage2-preparation-worker", "write-control-snapshot", "post-stage2-reviewer-trigger"],
   });
 });
 
@@ -1212,7 +1212,7 @@ test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfie
     { repo: "o/r", controlIssue: "322" },
     {
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
-      ghPrHeadImpl: async () => "0009c54b18",
+      ghPrStateImpl: async () => ({ headRefOid: "0009c54b18", state: "OPEN" }),
       stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
       checkMergeReadyImpl: async () => ({ exitCode: 2, state: "BLOCKED_CLOSING_REFERENCE" }),
       checkCorrectionDeltaImpl: async () => ({ exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: "0009c54b18" }),
@@ -1228,7 +1228,7 @@ test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfie
     { repo: "o/r", controlIssue: "322" },
     {
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
-      ghPrHeadImpl: async () => "0009c54b18",
+      ghPrStateImpl: async () => ({ headRefOid: "0009c54b18", state: "OPEN" }),
       stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
       checkCorrectionDeltaImpl: async () => ({
@@ -1250,7 +1250,7 @@ test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfie
     { repo: "o/r", controlIssue: "322" },
     {
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
-      ghPrHeadImpl: async () => "somesupersededhead",
+      ghPrStateImpl: async () => ({ headRefOid: "somesupersededhead", state: "OPEN" }),
       stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
       checkCorrectionDeltaImpl: async () => ({
@@ -1299,7 +1299,7 @@ test("runNextReviewTransitionGate: exact #438/PR #610 regression, before finaliz
     { repo: "o/r", controlIssue: "438" },
     {
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_438_STALE_STAGE1_REQUESTED, state: "OPEN" }),
-      ghPrHeadImpl: async () => ISSUE_611_CORRECTED_HEAD,
+      ghPrStateImpl: async () => ({ headRefOid: ISSUE_611_CORRECTED_HEAD, state: "OPEN" }),
       stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
       checkCorrectionDeltaImpl: async () => {
@@ -1331,7 +1331,7 @@ test("runNextReviewTransitionGate: exact #438/PR #610 regression, after finaliza
     { repo: "o/r", controlIssue: "438" },
     {
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_438_CORRECTION_SATISFIED, state: "OPEN" }),
-      ghPrHeadImpl: async () => ISSUE_611_CORRECTED_HEAD,
+      ghPrStateImpl: async () => ({ headRefOid: ISSUE_611_CORRECTED_HEAD, state: "OPEN" }),
       stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
       checkCorrectionDeltaImpl: async (args) => {
@@ -1365,7 +1365,7 @@ test("runNextReviewTransitionGate: control-Issue mode with no correction-satisfi
     { repo: "o/r", controlIssue: "322" },
     {
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE, state: "OPEN" }),
-      ghPrHeadImpl: async () => "livehead123",
+      ghPrStateImpl: async () => ({ headRefOid: "livehead123", state: "OPEN" }),
       stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
       checkCorrectionDeltaImpl: async () => {
@@ -1384,7 +1384,7 @@ test("runNextReviewTransitionGate: control-Issue mode never invokes checkCorrect
     { repo: "o/r", controlIssue: "322" },
     {
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
-      ghPrHeadImpl: async () => "0009c54b18",
+      ghPrStateImpl: async () => ({ headRefOid: "0009c54b18", state: "OPEN" }),
       stage1RunImpl: async () => stage1("RESPONSE_RECEIVED"),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
       checkCorrectionDeltaImpl: async () => {
@@ -1417,6 +1417,97 @@ test("runNextReviewTransitionGate: control-Issue mode honors an explicit --head,
   );
   assert.equal(prHeadReadCalls, 0);
   assert.equal(result.exitCode, 0);
+});
+
+// -- Issue #718: STAGE2_PREPARATION_REQUIRED resume detection -------------------------------
+//
+// A prior controller merged the PR (dispatch-stage2-preparation-worker may even have started)
+// but never durably recorded a settled "Stage 2" reference -- e.g. the worker failed, or the
+// session was interrupted before finalize-audit-breakpoint.mjs ran. A fresh session resuming
+// this control Issue must not re-run stage1-gate/mergeReady against the now-merged PR (mergeReady
+// has no notion of "already merged" and would re-authorize a second merge-pr action); it must
+// resume forward by dispatching the Stage 2 preparation worker again.
+
+test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 reference that is already MERGED resolves to STAGE2_PREPARATION_REQUIRED, never re-running stage1-gate/mergeReady", async () => {
+  let prStateReadFor = null;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async ({ number }) => {
+        prStateReadFor = number;
+        return { headRefOid: "mergedhead", state: "MERGED" };
+      },
+      stage1RunImpl: async () => {
+        throw new Error("should never be called -- the PR is already merged, resume forward instead");
+      },
+      checkMergeReadyImpl: async () => {
+        throw new Error("should never be called -- the PR is already merged, resume forward instead");
+      },
+    },
+  );
+  assert.equal(prStateReadFor, 376);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_PREPARATION_REQUIRED");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.repo, "o/r");
+  assert.equal(result.controlIssue, 322);
+  assert.equal(result.pr, 376);
+  assert.equal(result.issue, 375);
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["dispatch-stage2-preparation-worker"],
+  });
+});
+
+test("runNextReviewTransitionGate: STAGE2_PREPARATION_REQUIRED fails closed to AMBIGUOUS when the Execution reference is malformed, without ever spending a live PR-state read", async () => {
+  const body = CONTROL_BODY_PRE_MERGE.replace("- **Execution:** #375", "- **Execution:** none");
+  let prStateCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      ghPrStateImpl: async () => {
+        prStateCalls++;
+        throw new Error("should never be called for a malformed Execution reference");
+      },
+    },
+  );
+  assert.equal(prStateCalls, 0);
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /Execution reference/);
+});
+
+test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 reference that is still OPEN resolves the ordinary pre-merge phase using the live-read head (unchanged behavior)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "livehead123", state: "OPEN" }),
+      stage1RunImpl: async (args) => {
+        assert.equal(args.head, "livehead123");
+        return stage1("RESPONSE_RECEIVED");
+      },
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 reference whose live-state read fails operationally fails closed with exit 1", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => {
+        throw new Error("gh pr view failed");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /gh pr view failed/);
 });
 
 test("runNextReviewTransitionGate: the exact #440 regression -- stale 'Stage 2: #480' plus live 'Stage 2 (current): #492' fails closed as AMBIGUOUS before either audit reference can select a Stage 2 transition, never calling checkPostAudit", async () => {
@@ -1833,7 +1924,7 @@ test("runNextReviewTransitionGate: control-Issue mode accepts the live 'Executio
     { repo: "o/r", controlIssue: "322" },
     {
       ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
-      ghPrHeadImpl: async () => "livehead123",
+      ghPrStateImpl: async () => ({ headRefOid: "livehead123", state: "OPEN" }),
       stage1RunImpl: async () => stage1("RESPONSE_RECEIVED"),
       checkMergeReadyImpl: async () => mergeReady("MERGE_READY"),
     },
@@ -1904,7 +1995,7 @@ test("runNextReviewTransitionGate: a #375-shaped mid-cycle control Issue (PR req
     { repo: "o/r", controlIssue: "375" },
     {
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE, state: "OPEN" }),
-      ghPrHeadImpl: async () => "sha-at-trigger",
+      ghPrStateImpl: async () => ({ headRefOid: "sha-at-trigger", state: "OPEN" }),
       stage1RunImpl: async () => ({ exitCode: 2, state: "PENDING", triggerTimestamp: "2026-09-01T00:00:00Z" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
     },

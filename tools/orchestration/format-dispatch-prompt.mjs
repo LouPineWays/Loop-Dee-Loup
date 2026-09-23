@@ -504,6 +504,54 @@ export function formatStage2CorrectionWorkerDispatchPrompt({ controlIssue = null
   );
 }
 
+// Pure. Renders the fixed reference-only "Stage 2 preparation worker dispatch" template —
+// issue #718's move of semantic Stage 2 audit preparation out of the orchestrator and into one
+// bounded worker (see docs/bounded-review-cycle.md, "Stage 2 preparation worker"). Selected for
+// three distinct verdicts from `next-review-transition-gate.mjs`:
+// `STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2` and
+// `STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2` (piped through unchanged after the
+// controller's own `finalize-stage1-satisfied`/`merge-pr` actions have already run — the PR
+// number these verdicts carry remains correct post-merge, and the worker re-derives the merge
+// commit live rather than trusting a pre-merge head), and the resume verdict
+// `STAGE2_PREPARATION_REQUIRED` (a prior preparation attempt never durably recorded a Stage 2
+// reference). All three verdicts carry the identical `{ repo, pr, issue, controlIssue }` context
+// shape, so one formatter and one field set serves every one of them.
+//
+// Carries only the PR/Execution/Controlling Issue references — never the diff, findings, or
+// checklist content restated. The dispatched worker reads the merged PR, its diff, the execution
+// Issue's acceptance authority, and the Stage 1 disposition directly from GitHub, resolves the
+// exact merge commit itself (never trusting a pre-merge head passed through the dispatch), and
+// creates the canonical Stage 2 Audit Issue per docs/bounded-review-cycle.md Stage 2 steps 1-3.
+// It must not trigger `@codex review`, write to any control Issue, or perform the audit itself —
+// those remain the controller's own deterministic follow-up (finalize-audit-breakpoint.mjs, then
+// the reviewer trigger) and Stage 2's own fresh independent context, respectively.
+export function formatStage2PreparationWorkerDispatchPrompt({ controlIssue = null, issue, pr }) {
+  if (!isPositiveInteger(pr)) {
+    throw new Error("formatStage2PreparationWorkerDispatchPrompt requires pr to be a positive integer");
+  }
+  const hasExecutionIssue = issue !== "none";
+  if (hasExecutionIssue && !isPositiveInteger(issue)) {
+    throw new Error(
+      'formatStage2PreparationWorkerDispatchPrompt requires issue to be a positive integer or the literal "none" sentinel',
+    );
+  }
+  if (controlIssue !== null && controlIssue !== undefined && !isPositiveInteger(controlIssue)) {
+    throw new Error("formatStage2PreparationWorkerDispatchPrompt requires controlIssue to be a positive integer when present");
+  }
+  const executionLine = hasExecutionIssue ? ` Execution Issue: #${issue}.` : "";
+  const controlLine = controlIssue != null ? ` Controlling Issue: #${controlIssue}.` : "";
+  const executionReadClause = hasExecutionIssue ? ` and Execution Issue #${issue}` : "";
+  return (
+    `Stage 2 preparation worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
+    `Read PR #${pr}${executionReadClause} from GitHub for the diff, Stage 1 disposition, and ` +
+    `authority (not restated). Resolve the exact merge commit and, for a control-plane PR, the ` +
+    `CI head via tools/review-watch/stage2-control-plane-ci-head.mjs. Create the canonical Stage ` +
+    `2 Audit Issue per docs/bounded-review-cycle.md Stage 2 and docs/stage2-audit-contract.md. ` +
+    `Verify by direct read. Do not trigger @codex review, write to any control Issue, or audit ` +
+    `it yourself. Stop; report one line: "AUDIT_READY #<n>" or "AUDIT_PREPARATION_FAILED <reason>".`
+  );
+}
+
 // Pure. Same reference-only size proxy diagnostic-trace.mjs's classifyPreDispatch uses
 // (DEFAULT_REFERENCE_THRESHOLD_CHARS = 700), duplicated rather than imported: this
 // directory and tools/telemetry are separate consumer-distributed units that should not
@@ -564,6 +612,21 @@ const TEMPLATES_BY_STATE = {
     fields: ["controlIssue", "issue", "pr", "correctionReason", "checkoutBinding"],
   },
   STAGE2_CORRECTION_REQUIRED: { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
+  // Issue #718: all three verdicts share the identical { controlIssue, issue, pr } context shape
+  // next-review-transition-gate.mjs already attaches — see formatStage2PreparationWorkerDispatchPrompt's
+  // own comment for why one formatter and field set covers every one of them.
+  STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2: {
+    formatter: formatStage2PreparationWorkerDispatchPrompt,
+    fields: ["controlIssue", "issue", "pr"],
+  },
+  STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2: {
+    formatter: formatStage2PreparationWorkerDispatchPrompt,
+    fields: ["controlIssue", "issue", "pr"],
+  },
+  STAGE2_PREPARATION_REQUIRED: {
+    formatter: formatStage2PreparationWorkerDispatchPrompt,
+    fields: ["controlIssue", "issue", "pr"],
+  },
 };
 
 // Explicit-fields mode's equivalent of the state-based selection above, for a caller
@@ -589,6 +652,7 @@ const FORMATTERS_BY_KIND = {
     fields: ["controlIssue", "issue", "pr", "correctionReason", "checkoutBinding"],
   },
   "stage2-correction": { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
+  "stage2-preparation": { formatter: formatStage2PreparationWorkerDispatchPrompt, fields: ["controlIssue", "issue", "pr"] },
 };
 
 const CLI_FLAG_BY_FIELD = {
@@ -659,7 +723,7 @@ function main() {
     if (!entry) {
       process.stderr.write(
         `format-dispatch-prompt.mjs: unknown --kind ${JSON.stringify(kind)} — use "implementation", "planning", ` +
-          `"integration", "planning-correction", "stage1-correction", or "stage2-correction"\n`,
+          `"integration", "planning-correction", "stage1-correction", "stage2-correction", or "stage2-preparation"\n`,
       );
       process.exit(2);
       return;
@@ -694,8 +758,9 @@ function main() {
       process.stderr.write(
         `format-dispatch-prompt.mjs: input state is ${JSON.stringify(parsed.state ?? null)}, not "READY_TO_DISPATCH" ` +
           `(or "READY_TO_DISPATCH_PLANNING"/"READY_TO_DISPATCH_INTEGRATION"/"REPLAN_REQUIRED"/` +
-          `"STAGE1_CORRECTION_REQUIRED"/"STAGE2_CORRECTION_REQUIRED") — refusing to format a dispatch prompt for a ` +
-          "non-ready or malformed gate result\n",
+          `"STAGE1_CORRECTION_REQUIRED"/"STAGE2_CORRECTION_REQUIRED"/"STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2"/` +
+          `"STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2"/"STAGE2_PREPARATION_REQUIRED") — refusing to format ` +
+          "a dispatch prompt for a non-ready or malformed gate result\n",
       );
       process.exit(2);
       return;
