@@ -1349,7 +1349,7 @@ test("runNextReviewTransitionGate: control-Issue mode, correction-satisfied + ME
   assert.equal(result.correctedHead, "0009c54b18");
   assert.deepEqual(result.actionEnvelope, {
     mode: "bounded",
-    authorizedActions: ["dispatch-conflict-recovery-worker"],
+    authorizedActions: ["reserve-correction-checkout", "dispatch-conflict-recovery-worker"],
   });
 });
 

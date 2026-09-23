@@ -193,9 +193,17 @@ const ENVELOPES = {
   // conflict-recovery worker dispatch, never a merge attempt, a second Stage 1 round, or
   // founder/controller-improvised branch surgery in this same context. See
   // docs/bounded-review-cycle.md's "Correction-satisfied merge-conflict recovery" section.
+  //
+  // Stage 1 review finding on PR #719 (P1): this recovery worker mutates source exactly like a
+  // findings-bearing STAGE1_CORRECTION_REQUIRED worker does, so it needs the same pre-spawn
+  // exclusive PR-head reservation (`pr-head-checkout-preflight.mjs --reserve-from-gate`) settled
+  // strictly before dispatch -- mirroring STAGE1_CORRECTION_REQUIRED's own
+  // `["reserve-correction-checkout", "dispatch-correction-worker"]` ordering below. A failed
+  // reservation still surfaces as its own terminal CHECKOUT_BINDING_UNVERIFIED verdict (see that
+  // row's own comment), never as a violation of this bounded envelope.
   STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT: {
     mode: ENVELOPE_MODES.BOUNDED,
-    authorizedActions: ["dispatch-conflict-recovery-worker"],
+    authorizedActions: ["reserve-correction-checkout", "dispatch-conflict-recovery-worker"],
   },
   // Issue #703: a findings-bearing Stage 1 correction settles the worker's exact PR-head checkout
   // BEFORE spawn (`pr-head-checkout-preflight.mjs --reserve-from-gate`, the pipeline stage between

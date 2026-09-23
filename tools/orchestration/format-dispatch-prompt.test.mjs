@@ -640,9 +640,19 @@ test("formatStage2CorrectionWorkerDispatchPrompt throws for missing/invalid requ
 
 // -- formatConflictRecoveryWorkerDispatchPrompt (issue #665, live #639/#638/PR #640 -----------
 // reproduction: STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT) -----------------------------------
+//
+// Stage 1 review finding on PR #719 (issue #665's own correction, both findings addressed as
+// one dispatch-boundary invariant): this recovery worker mutates source exactly like a
+// findings-bearing Stage 1 correction worker, so it now requires the identical pre-spawn
+// `checkoutBinding` (P1) -- every test below passes the shared `BINDING` fixture and fails
+// closed without it, mirroring `formatStage1CorrectionWorkerDispatchPrompt`'s own coverage. P2
+// (pinning the reservation to the gated `correctedHead`) is covered where the pin actually
+// happens -- `pr-head-checkout-preflight.test.mjs`'s `reserve`/`reserveFromGate` tests -- since
+// this formatter itself never sees `correctedHead` (the pin already happened upstream, before
+// this template is ever rendered).
 
 test("formatConflictRecoveryWorkerDispatchPrompt includes the exact PR, Execution Issue, and Controlling Issue references", () => {
-  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640 });
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
   assert.match(prompt, /^Conflict-recovery worker dispatch\./);
   assert.match(prompt, /#638/);
   assert.match(prompt, /#640/);
@@ -650,52 +660,77 @@ test("formatConflictRecoveryWorkerDispatchPrompt includes the exact PR, Executio
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt omits the Execution Issue line for the explicit no-work-issue sentinel", () => {
-  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: "none", pr: 640 });
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: "none", pr: 640, checkoutBinding: BINDING });
   assert.ok(!prompt.includes("Execution Issue"));
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt tells the worker to read the reviewed head from the Controlling Issue's Stage 1 bullet, not restated, when a control Issue is present", () => {
-  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640 });
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
   assert.match(prompt, /Controlling Issue's Stage 1 bullet/);
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt requires an explicit reviewedHead only when controlIssue is absent (direct-reference mode has no durable bullet to read)", () => {
-  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ issue: 638, pr: 640 }));
-  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ issue: 638, pr: 640, reviewedHead: "30b36035c9" });
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ issue: 638, pr: 640, checkoutBinding: BINDING }));
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ issue: 638, pr: 640, reviewedHead: "30b36035c9", checkoutBinding: BINDING });
   assert.match(prompt, /30b36035c9/);
   assert.ok(!prompt.includes("Controlling Issue"));
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt mandates a real merge commit (never rebase/force-push) and fails closed to a founder interrupt for a semantic conflict", () => {
-  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640 });
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
   assert.match(prompt, /never rebase\/force-push/);
   assert.match(prompt, /founder interrupt, not auto-resolved/);
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt mandates finalize-correction-breakpoint.mjs, naming its fail-closed CORRECTION_BREAKPOINT_UNVERIFIED reference, and forbids merge/Stage 2/re-review here", () => {
-  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640 });
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
   assert.match(prompt, /finalize-correction-breakpoint\.mjs/);
   assert.match(prompt, /CORRECTION_BREAKPOINT_UNVERIFIED/);
   assert.match(prompt, /no re-review, merge, or Stage 2/);
 });
 
-test("formatConflictRecoveryWorkerDispatchPrompt stays well under the reference-only threshold, with and without a control Issue and a full-length 40-char reviewedHead", () => {
-  const withControl = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640 });
-  assert.ok(withControl.length < 700, `expected < 700 chars, got ${withControl.length}`);
+// Stage 1 review finding on PR #719 (P1): names the pre-bound checkout and mandates
+// --verify-binding before any other step, mirroring the equivalent findings-correction test.
+test("formatConflictRecoveryWorkerDispatchPrompt names the pre-bound checkout and mandates --verify-binding before the recovery instructions", () => {
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
+  assert.ok(prompt.includes(`Pre-bound checkout: ${BINDING.path}.`));
+  assert.ok(prompt.includes(`node "${BINDING.scriptPath}" --verify-binding ${BINDING.token} --pr 640`));
+  assert.match(prompt, /pushRefspec/);
+  assert.ok(prompt.indexOf("--verify-binding") < prompt.indexOf("Correction-satisfied reserved head"));
+  assert.ok(prompt.includes(`--release-binding ${BINDING.token}`));
+});
+
+// Stage 1 review finding on PR #719 (P1): dispatching a conflict-recovery worker without a
+// pre-spawn checkout reservation must fail closed, exactly like the findings-correction sibling.
+test("formatConflictRecoveryWorkerDispatchPrompt fails closed with no pre-spawn checkoutBinding", () => {
+  for (const checkoutBinding of [null, undefined, {}, { path: "", token: "1a2b3c4d", scriptPath: "x" }]) {
+    assert.throws(
+      () => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding }),
+      /requires a pre-spawn checkoutBinding/,
+    );
+  }
+});
+
+test("formatConflictRecoveryWorkerDispatchPrompt stays under the 700-char reference-only threshold (excluding the pre-bound path and scriptPath), with and without a control Issue and a full-length 40-char reviewedHead", () => {
+  const withControl = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
+  const withControlProse = withControl.length - BINDING.path.length - BINDING.scriptPath.length;
+  assert.ok(withControlProse < 700, `expected < 700 chars, got ${withControlProse}`);
   const withoutControl = formatConflictRecoveryWorkerDispatchPrompt({
     issue: 638,
     pr: 640,
     reviewedHead: "a".repeat(40),
+    checkoutBinding: BINDING,
   });
-  assert.ok(withoutControl.length < 700, `expected < 700 chars, got ${withoutControl.length}`);
+  const withoutControlProse = withoutControl.length - BINDING.path.length - BINDING.scriptPath.length;
+  assert.ok(withoutControlProse < 700, `expected < 700 chars, got ${withoutControlProse}`);
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt throws for missing/invalid required fields", () => {
-  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: null }));
-  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: NaN }));
-  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: -1 }));
-  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 12.5, issue: 638, pr: 640 }));
-  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: -1, pr: 640 }));
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: null, checkoutBinding: BINDING }));
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: NaN, checkoutBinding: BINDING }));
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: -1, checkoutBinding: BINDING }));
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 12.5, issue: 638, pr: 640, checkoutBinding: BINDING }));
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: -1, pr: 640, checkoutBinding: BINDING }));
 });
 
 // -- CLI: state-based template selection (piped mode) ----------------------------------------
@@ -744,12 +779,27 @@ test("CLI: an unrecognized state is still refused, error message names every rec
 });
 
 test("CLI: piped STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT selects the conflict-recovery template", async () => {
-  const result = await runCli({ state: "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT", controlIssue: 666, issue: 638, pr: 640 });
+  const result = await runCli({
+    state: "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT",
+    controlIssue: 666,
+    issue: 638,
+    pr: 640,
+    checkoutBinding: BINDING,
+  });
   assert.equal(result.status, 0);
   assert.match(result.stdout, /^Conflict-recovery worker dispatch\./);
   assert.match(result.stdout, /#638/);
   assert.match(result.stdout, /#640/);
   assert.match(result.stdout, /#666/);
+});
+
+// Stage 1 review finding on PR #719 (P1): piping this verdict without a pre-spawn checkoutBinding
+// must fail closed, mirroring the equivalent STAGE1_CORRECTION_REQUIRED CLI coverage below.
+test("CLI: piped STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT without a pre-spawn checkoutBinding fails closed", async () => {
+  const result = await runCli({ state: "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT", controlIssue: 666, issue: 638, pr: 640 });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /requires a pre-spawn checkoutBinding/);
+  assert.equal(result.stdout, "");
 });
 
 test("CLI: explicit --kind conflict-recovery selects the conflict-recovery template", async () => {
@@ -758,7 +808,23 @@ test("CLI: explicit --kind conflict-recovery selects the conflict-recovery templ
   const scriptPath = fileURLToPath(new URL("./format-dispatch-prompt.mjs", import.meta.url));
   const result = spawnSync(
     process.execPath,
-    [scriptPath, "--kind", "conflict-recovery", "--control-issue", "666", "--issue", "638", "--pr", "640"],
+    [
+      scriptPath,
+      "--kind",
+      "conflict-recovery",
+      "--control-issue",
+      "666",
+      "--issue",
+      "638",
+      "--pr",
+      "640",
+      "--binding-path",
+      BINDING.path,
+      "--binding-token",
+      BINDING.token,
+      "--binding-script-path",
+      BINDING.scriptPath,
+    ],
     { encoding: "utf8" },
   );
   assert.equal(result.status, 0);
