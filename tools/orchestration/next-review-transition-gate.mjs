@@ -117,7 +117,24 @@
 //     - PR state MERGED, and the control Issue's own "Stage 1" bullet already carries a
 //       canonical satisfied/exempt or correction-satisfied disposition (Stage 1 correction on
 //       PR #721, Codex P1 finding: a prematurely/manually merged PR whose Stage 1 disposition
-//       was never durably settled must not bypass that authority merely because it merged) ->
+//       was never durably settled must not bypass that authority merely because it merged), then
+//       (issue #729, the #723/#727 liveness seam) this gate deterministically checks whether the
+//       canonical Stage 2 Audit Issue for this exact PR/merge commit already durably exists (an
+//       OPEN issue whose own "Exact merge commit"/"Work issue" fields match -- the same
+//       "[Audit] in:title" search lifecycle-gate.mjs's checkCloseAudit already performs,
+//       reused here, never a second competing search mechanism):
+//         - exactly one match -> STAGE2_AUDIT_ALREADY_PREPARED (a prior Stage 2 preparation
+//           worker already returned "AUDIT_READY #<n>" and durably created/reused that Audit
+//           Issue, but the bounded controller context that received that return was interrupted
+//           before finalize-audit-breakpoint.mjs ever ran -- this recovers the exact Audit
+//           reference deterministically, with no redispatch of semantic preparation and no
+//           diff/Stage-1-narrative/execution-Issue-body reading, and names `nextCommand`: the
+//           real finalize-audit-breakpoint.mjs invocation chained into the idempotent
+//           trigger.mjs, exactly the ordering issue #561 already requires)
+//         - more than one match -> AMBIGUOUS (genuinely conflicting durable evidence; fails
+//           closed rather than guessing which Audit Issue is authoritative)
+//         - no match, or the reconciliation search itself fails operationally (never blocks the
+//           transition -- the acceleration is simply unavailable) ->
 //       STAGE2_PREPARATION_REQUIRED (a prior controller already merged and possibly began Stage
 //       2 preparation, e.g. via dispatch-stage2-preparation-worker, without it durably
 //       completing; re-running stage1-gate/mergeReady against an already-merged PR is not a
@@ -258,7 +275,12 @@ import {
   defaultOpenExecutionLinkedPrList,
 } from "./ready-dispatch-gate.mjs";
 import { run as stage1Run } from "../review-watch/stage1-gate.mjs";
-import { checkMergeReady, checkPostAudit } from "../review-watch/lifecycle-gate.mjs";
+import {
+  checkMergeReady,
+  checkPostAudit,
+  findMatchingOpenAuditIssues,
+  defaultGhIssueList as defaultGhAuditIssueSearchList,
+} from "../review-watch/lifecycle-gate.mjs";
 import { isCleanStage1Response } from "../review-watch/consumer-sync-gate.mjs";
 import { isFindingsBearingResponse, isFormalReviewEndpoint } from "../review-watch/stage1-findings.mjs";
 // Issue #454, unit 454-C: stage1-correction-gate.mjs itself imports `stage1DispositionMatchesHead`
@@ -895,6 +917,12 @@ function exitCodeFor(state) {
     // preparation worker) -- the same "authorizes proceeding" bucket as the two merge/trigger
     // verdicts above, never an error or an outstanding correction.
     case "STAGE2_PREPARATION_REQUIRED":
+    // Issue #729: names a required, non-blocking resume action (finalize the already-durable
+    // Audit Issue, then trigger) -- same "authorizes proceeding" bucket as its
+    // STAGE2_PREPARATION_REQUIRED sibling. Not reached via this switch today (the inline
+    // construction sets its own literal exitCode: 0), kept here only for this function's own
+    // documented exhaustiveness.
+    case "STAGE2_AUDIT_ALREADY_PREPARED":
     case "STAGE2_CLOSE_READY":
     case "STAGE2_REPORT_READY_TO_RECORD":
       return 0;
@@ -1212,11 +1240,73 @@ function defaultGhPrMergeable({ repo, number }) {
 // mirroring this module's existing ghIssueViewImpl/ghPrHeadImpl/checkPostAuditImpl convention)
 // rather than a change to defaultGhPrHead's own return shape, so every existing caller of
 // ghPrHeadImpl (direct-reference mode, and control-Issue mode's PR-only branch) is unaffected.
+//
+// Issue #729: also fetches `mergeCommit` (the same field finalize-audit-breakpoint.mjs's own
+// defaultGhPrView reads) -- a harmless extra field for every caller that ignores it, and what
+// the merged-PR resume path's deterministic Stage 2 Audit Issue reconciliation below needs to
+// match against an already-prepared Audit Issue's own "Exact merge commit" field. Absent (a test
+// double that doesn't supply it) reads as `undefined`, which that reconciliation treats as "skip
+// reconciliation, fall through to STAGE2_PREPARATION_REQUIRED unchanged" -- never a crash.
 function defaultGhPrState({ repo, number }) {
-  const raw = execFileSync("gh", ["pr", "view", String(number), "--repo", repo, "--json", "headRefOid,state"], {
+  const raw = execFileSync("gh", ["pr", "view", String(number), "--repo", repo, "--json", "headRefOid,state,mergeCommit"], {
     encoding: "utf8",
   });
   return JSON.parse(raw);
+}
+
+// Issue #729 (control #398, the #723/#727 liveness seam): a prior Stage 2 preparation worker may
+// have already created (or reconciled onto) the canonical Stage 2 Audit Issue for this exact
+// PR/merge commit and returned "AUDIT_READY #<n>" -- but the bounded controller context that
+// received that return value ended (interruption, not a designed stop) before it could run
+// finalize-audit-breakpoint.mjs. The Audit Issue itself is already durable (it exists on GitHub);
+// only the *fact that it's the authoritative one for this control Issue* needs deterministic
+// recovery. `findMatchingOpenAuditIssues` now lives in `../review-watch/lifecycle-gate.mjs`
+// (Stage 1 review finding P1/P2 on PR #730) so this module's own initial reconciliation search
+// below and `finalize-audit-breakpoint.mjs`'s final pre-projection/trigger revalidation share one
+// definition of "audit ready" -- including the complete canonical audit shape requirement, not
+// only the two structured pointer fields -- rather than each maintaining a second, competing
+// filter that could silently drift apart. Re-exported here so existing callers/tests of this
+// module keep importing it from its established path.
+export { findMatchingOpenAuditIssues };
+
+// Issue #729: the async orchestration wrapper around findMatchingOpenAuditIssues above --
+// injectable `ghIssueListImpl` mirrors this module's existing reconcileStage2CorrectionPr
+// convention (its own `ghPrListImpl` injectable). Three outcomes:
+//   { exitCode: 0, state: "NONE_FOUND" }        -- no durable match; normal dispatch applies.
+//   { exitCode: 0, state: "FOUND", auditIssue }  -- exactly one durable match.
+//   { exitCode: 0, state: "AMBIGUOUS_MATCHES", matches, message } -- more than one OPEN Audit
+//     Issue durably matches the same merge commit/work issue -- genuinely conflicting evidence
+//     (#729 Required Behavior 6) that must fail closed to a founder-visible AMBIGUOUS stop, never
+//     be resolved by silently picking one.
+//   { exitCode: 1, message } -- an operational failure searching GitHub. Callers treat this the
+//     same as "the reconciliation mechanism itself is unavailable right now" and fall back to
+//     the always-safe normal dispatch path (STAGE2_PREPARATION_REQUIRED), never as a reason to
+//     block the whole transition on a transient search failure -- the dispatched worker performs
+//     its own direct-read reconciliation regardless.
+export async function reconcileExistingStage2AuditIssue(
+  { repo, mergeCommitOid, executionIssue },
+  { ghIssueListImpl = defaultGhAuditIssueSearchList } = {},
+) {
+  let candidates;
+  try {
+    candidates = await ghIssueListImpl({ repo });
+  } catch (err) {
+    return { exitCode: 1, message: `gh issue search failed while looking for an already-prepared Stage 2 Audit Issue: ${err.message}` };
+  }
+  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid, executionIssue });
+  if (matches.length === 0) return { exitCode: 0, state: "NONE_FOUND" };
+  if (matches.length > 1) {
+    const numbers = matches.map((m) => Number(m.number)).sort((a, b) => a - b);
+    return {
+      exitCode: 0,
+      state: "AMBIGUOUS_MATCHES",
+      matches: numbers,
+      message:
+        `more than one OPEN Audit Issue durably matches merge commit ${mergeCommitOid} and work issue ` +
+        `${JSON.stringify(executionIssue)}: ${numbers.map((n) => `#${n}`).join(", ")}`,
+    };
+  }
+  return { exitCode: 0, state: "FOUND", auditIssue: Number(matches[0].number) };
 }
 
 // The whole composed gate, wired for tests: every I/O dependency (control-Issue read, PR
@@ -1241,6 +1331,7 @@ async function runNextReviewTransitionGateCore(
     checkCorrectionDeltaImpl = checkCorrectionDelta,
     checkMergeConflictImpl = defaultGhPrMergeable,
     reconcileStage2CorrectionPrImpl = reconcileStage2CorrectionPr,
+    reconcileExistingStage2AuditIssueImpl = reconcileExistingStage2AuditIssue,
   } = {},
 ) {
   let repo = args.repo;
@@ -1560,6 +1651,76 @@ async function runNextReviewTransitionGateCore(
             nextCommand:
               `node tools/orchestration/finalize-stage1-satisfied-breakpoint.mjs --control-issue ${controlIssueNumber} ` +
               `--execution-issue ${executionRef.issue} --pr ${prRef.issue} --recover true`,
+          };
+        }
+      }
+      // Issue #729 (the #723/#727 liveness seam): before authorizing a fresh
+      // dispatch-stage2-preparation-worker action merely to rediscover state a prior worker may
+      // already have durably established, deterministically check whether the canonical Stage 2
+      // Audit Issue for this exact PR/merge commit already exists and is still OPEN. This uses
+      // only mechanically-decidable evidence -- the Audit Issue's own structured "Exact merge
+      // commit"/"Work issue" fields, the same evidence finalize-audit-breakpoint.mjs
+      // independently re-verifies before ever projecting control state -- never the diff, Stage 1
+      // finding narrative, or execution-Issue body content, so this never reintroduces semantic
+      // loading into the orchestrator. Skipped entirely when the live PR state carries no merge
+      // commit (a test double, or an unexpected `gh` response shape) -- falls through to the
+      // unchanged STAGE2_PREPARATION_REQUIRED dispatch below exactly as before this fix.
+      const mergeCommitOid = prState.mergeCommit?.oid;
+      if (typeof mergeCommitOid === "string" && mergeCommitOid.trim()) {
+        let reconciled;
+        try {
+          reconciled = await reconcileExistingStage2AuditIssueImpl({ repo, mergeCommitOid, executionIssue: executionRef.issue });
+        } catch (err) {
+          reconciled = { exitCode: 1, message: `reconcileExistingStage2AuditIssue threw: ${err.message}` };
+        }
+        // An operational search failure never blocks the transition -- it only means the
+        // acceleration this reconciliation offers is unavailable right now; fall through to the
+        // always-safe normal dispatch path, which performs its own direct-read reconciliation
+        // regardless. Only a genuinely conflicting result (more than one durable match) fails
+        // closed to AMBIGUOUS -- #729 Required Behavior 6: a stop, never a guess, never silently
+        // authorizing a trigger against ambiguous evidence.
+        if (reconciled && reconciled.exitCode === 0 && reconciled.state === "AMBIGUOUS_MATCHES") {
+          return {
+            exitCode: 4,
+            state: "AMBIGUOUS",
+            stopAfter: true,
+            repo,
+            controlIssue: controlIssueNumber,
+            reason: reconciled.message,
+          };
+        }
+        if (reconciled && reconciled.exitCode === 0 && reconciled.state === "FOUND") {
+          // Issue #561's own ordering invariant is unchanged: the reviewer trigger must occur
+          // only after the Audit Issue/control relationship and exact merge identity are
+          // deterministically verified/projected. finalize-audit-breakpoint.mjs independently
+          // re-derives and re-verifies every one of those facts from live GitHub state (it never
+          // trusts this reconciliation's own match as sufficient on its own) before
+          // trigger.mjs's own idempotent dedup check ever runs -- so a retry of this exact
+          // nextCommand (#729 Required Behavior 5) neither duplicates the Audit Issue (already
+          // durable, only reused) nor posts a duplicate reviewer trigger. Stage 1 review finding
+          // P2 on PR #730 (the TOCTOU gap): a second preparation worker could durably create
+          // another matching canonical Audit Issue between this reconciliation search and the
+          // finalize step's own control write/trigger authorization, so this recovery path's own
+          // `nextCommand` -- and only this path, since it alone performs a discovery search a
+          // race can land behind -- opts finalize-audit-breakpoint.mjs into re-searching and
+          // revalidating that `reconciled.auditIssue` is still the sole matching OPEN canonical
+          // Audit Issue immediately before it writes/triggers, failing closed to
+          // AUDIT_BREAKPOINT_UNVERIFIED rather than silently proceeding against ambiguous
+          // evidence if a second match has since appeared.
+          return {
+            exitCode: 0,
+            state: "STAGE2_AUDIT_ALREADY_PREPARED",
+            stopAfter: true,
+            repo,
+            controlIssue: controlIssueNumber,
+            pr: prRef.issue,
+            issue: executionRef.issue,
+            auditIssue: reconciled.auditIssue,
+            nextCommand:
+              `node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue ${controlIssueNumber} ` +
+              `--execution-issue ${executionRef.issue} --pr ${prRef.issue} --audit-issue ${reconciled.auditIssue} ` +
+              `--revalidate-uniqueness true && ` +
+              `node tools/review-watch/trigger.mjs --repo ${repo} --kind issue --number ${reconciled.auditIssue}`,
           };
         }
       }

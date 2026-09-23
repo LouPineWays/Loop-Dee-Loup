@@ -1779,13 +1779,55 @@ async function findCorrectionChainSuccessor(repo, auditIssueNumber, auditCreated
 // callers already parse elsewhere in this file — Exact merge commit, Work issue, and the "Stage 1
 // inline review disposition" block itself — all present at once; a real audit issue always has
 // all three, and an arbitrary unrelated issue essentially never does by coincidence.
-function hasCanonicalAuditShape(body) {
+//
+// Exported (issue #729 Stage 1 correction, P1 finding on PR #730): a durably-recovered Stage 2
+// preparation result must be authorized only against the *complete* canonical audit shape, never
+// a two-field-only shell (matching "Exact merge commit"/"Work issue" alone, which the resumed
+// preparation-worker return `AUDIT_READY #<n>` cannot itself guarantee if the worker was
+// interrupted before finishing the template). Both `tools/orchestration/next-review-transition-
+// gate.mjs` (the initial reconciliation search) and `tools/orchestration/finalize-audit-
+// breakpoint.mjs` (the final pre-projection/trigger boundary) reuse this exact predicate rather
+// than each defining their own competing notion of "audit ready."
+export function hasCanonicalAuditShape(body) {
   const text = body ?? "";
   return (
     parseMergeCommitRef(text) !== null &&
     parseWorkIssueRef(text) !== null &&
     parseFormFieldBlock(text, "Stage 1 inline review disposition") !== null
   );
+}
+
+// Pure. Given a list of `[Audit] in:title` search candidates (the `{ number, title, body, state,
+// createdAt }` shape `defaultGhIssueList` below returns), filters to those that are genuinely
+// OPEN, carry the *complete* canonical audit shape (`hasCanonicalAuditShape` above), and whose
+// own structured "Exact merge commit"/"Work issue" fields match `mergeCommitOid`/`executionIssue`
+// exactly. Issue #729 (control #398, the #723/#727 liveness seam): a prior Stage 2 preparation
+// worker may have already created (or reconciled onto) the canonical Stage 2 Audit Issue for
+// this exact PR/merge commit and returned "AUDIT_READY #<n>" -- but the bounded controller
+// context that received that return value ended (interruption, not a designed stop) before it
+// could run finalize-audit-breakpoint.mjs. The Audit Issue itself is already durable (it exists
+// on GitHub); only the *fact that it's the authoritative one for this control Issue* needs
+// deterministic recovery. A CLOSED candidate (e.g. superseded, or closed for an unrelated
+// reason), one whose fields don't match, or one that is not yet a complete canonical audit (Stage
+// 1 review finding P1 on PR #730: a two-field-only shell from an interrupted preparation attempt
+// must never authorize a trigger) is never treated as a match -- fail closed to "not found"
+// (normal STAGE2_PREPARATION_REQUIRED dispatch, which can redispatch the preparation worker to
+// repair/reject the incomplete issue) rather than guessing.
+//
+// Lives here, not in either of its two callers, so `next-review-transition-gate.mjs`'s initial
+// reconciliation search and `finalize-audit-breakpoint.mjs`'s own final pre-projection/trigger
+// revalidation (Stage 1 review finding P2 on PR #730, the TOCTOU gap) share the exact same
+// matching semantics rather than each maintaining a second, competing definition of "audit
+// ready" that could silently drift apart.
+export function findMatchingOpenAuditIssues(candidates, { mergeCommitOid, executionIssue }) {
+  const expectedWorkIssue = executionIssue === "none" ? "none" : executionIssue;
+  return (candidates ?? []).filter((candidate) => {
+    if (candidate.state !== "OPEN") return false;
+    if (!hasCanonicalAuditShape(candidate.body ?? "")) return false;
+    const candidateMergeCommit = parseMergeCommitRef(candidate.body ?? "");
+    if (!candidateMergeCommit || candidateMergeCommit.toLowerCase() !== String(mergeCommitOid).toLowerCase()) return false;
+    return parseWorkIssueRef(candidate.body ?? "") === expectedWorkIssue;
+  });
 }
 
 // Walks the `correctsAuditRef` chain backward from an audit issue this same `checkCloseAudit`
@@ -2603,7 +2645,12 @@ export function normalizeSearchIssuesPage(page) {
 // stopping at one fixed page — recovering every candidate up to GitHub Search's own
 // documented 1,000-result ceiling, a platform limit this script cannot raise, rather than an
 // arbitrary client-side cap chosen without evidence of the real corpus size.
-function defaultGhIssueList({ repo }) {
+// Exported (issue #729) so tools/orchestration/next-review-transition-gate.mjs can reuse this
+// exact "[Audit] in:title" candidate-discovery search for its own deterministic Stage 2
+// preparation-result reconciliation, rather than duplicating a second `gh api search/issues`
+// invocation. Candidate discovery only, unchanged from checkCloseAudit's own use above — every
+// candidate found this way still requires its own structured-field verification by the caller.
+export function defaultGhIssueList({ repo }) {
   const raw = execFileSync(
     "gh",
     [

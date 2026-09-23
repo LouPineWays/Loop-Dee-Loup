@@ -67,6 +67,14 @@
 //   node tools/orchestration/finalize-audit-breakpoint.mjs \
 //     --execution-issue 440 --pr 558 --audit-issue 559
 //
+// Usage (issue #729 P2 correction, PR #730): `--revalidate-uniqueness true`, appended only by
+// next-review-transition-gate.mjs's own STAGE2_AUDIT_ALREADY_PREPARED nextCommand, makes `run`
+// re-search for and revalidate that --audit-issue is still the sole matching OPEN canonical Audit
+// Issue immediately before control projection/trigger -- closing the TOCTOU gap between that
+// verdict's own reconciliation search and this finalize step. Omitted (the default) on every
+// other call site, including the ordinary preparation-worker-authored finalize call, which needs
+// no re-search since it already knows the Audit Issue it just created is the only one.
+//
 // Exit codes: 0 (FINALIZED for the control-Issue flow, AUDIT_VERIFIED for the direct-reference
 // flow), 1 (operational error — missing/invalid args, unresolved repository identity, or an
 // underlying `gh` read that itself failed), 2 (AUDIT_BREAKPOINT_UNVERIFIED — a fail-closed
@@ -87,7 +95,13 @@ import {
   isNoneSentinel,
 } from "./ready-dispatch-gate.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
-import { parseMergeCommitRef, parseWorkIssueRef } from "../review-watch/lifecycle-gate.mjs";
+import {
+  parseMergeCommitRef,
+  parseWorkIssueRef,
+  hasCanonicalAuditShape,
+  findMatchingOpenAuditIssues,
+  defaultGhIssueList,
+} from "../review-watch/lifecycle-gate.mjs";
 
 // Lifecycle values this script is authorized to transition *from*. `REVIEW` is the normal
 // pre-audit state a `STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2`/
@@ -181,6 +195,18 @@ export function verifyPrMerged(prView) {
 // evidence on its own that this is the *correct* Audit Issue for this merge. Reuses
 // `lifecycle-gate.mjs`'s own `parseMergeCommitRef`/`parseWorkIssueRef` (the same evidence
 // `post-audit` itself trusts), never a second, competing parse of the template fields.
+//
+// Stage 1 review finding P1 on PR #730 (issue #729): also requires the complete canonical audit
+// shape (`hasCanonicalAuditShape`), not only these two structured pointer fields. A prior
+// preparation attempt that created an Audit Issue but failed or was interrupted before completing
+// or validating the required template (merged PR, Stage 1 disposition, audit scope, verification
+// checklist) would otherwise satisfy this check on a two-field-only shell — letting this finalize
+// step, the last deterministic boundary before control projection and the reviewer trigger,
+// authorize a Stage 2 response against an issue that cannot actually provide the required
+// assurance. Applies identically whether this Audit Issue was just freshly created by the ordinary
+// preparation-worker flow or recovered by next-review-transition-gate.mjs's own reconciliation
+// search — a legitimately created Audit Issue from the required template always satisfies this,
+// since every one of its fields is `required: true`.
 export function verifyAuditIssueMatches(auditView, { mergeCommitOid, executionIssue }) {
   if (!auditView || auditView.state !== "OPEN") {
     return {
@@ -189,6 +215,15 @@ export function verifyAuditIssueMatches(auditView, { mergeCommitOid, executionIs
     };
   }
   const body = auditView.body ?? "";
+  if (!hasCanonicalAuditShape(body)) {
+    return {
+      ok: false,
+      reason:
+        "Audit Issue does not have the complete canonical Stage 2 audit-control-issue shape (missing Exact merge " +
+        'commit / Work issue / "Stage 1 inline review disposition" fields) — an incomplete issue must never ' +
+        "authorize control projection or a reviewer trigger",
+    };
+  }
   const auditMergeCommit = parseMergeCommitRef(body);
   if (!auditMergeCommit || auditMergeCommit.toLowerCase() !== mergeCommitOid.toLowerCase()) {
     return {
@@ -206,6 +241,46 @@ export function verifyAuditIssueMatches(auditView, { mergeCommitOid, executionIs
       reason:
         `Audit Issue's "Work issue" field resolves to ${JSON.stringify(auditWorkIssue)}, expected ` +
         `${JSON.stringify(expectedWorkIssue)} (the given --execution-issue)`,
+    };
+  }
+  return { ok: true };
+}
+
+// Pure. Stage 1 review finding P2 on PR #730 (issue #729, the TOCTOU gap): confirms `auditIssue`
+// is *still* the sole OPEN canonical Audit Issue durably matching `mergeCommitOid`/
+// `executionIssue` at this exact moment — immediately before this finalize step's own control
+// write/trigger authorization — not only at next-review-transition-gate.mjs's earlier
+// reconciliation search. A second matching candidate (e.g. a concurrently dispatched preparation
+// worker) created between that search and this call must still resolve to the documented
+// AMBIGUOUS/fail-closed rule, never a silent selection of the originally recovered candidate.
+// Reuses `findMatchingOpenAuditIssues` — the exact same matching semantics the initial
+// reconciliation search already applied — rather than a second, competing definition of "audit
+// ready." `candidates` is the same `{ number, title, body, state, createdAt }` shape
+// `defaultGhIssueList`'s "[Audit] in:title" search returns.
+export function verifyAuditIssueStillUnique(candidates, { mergeCommitOid, executionIssue, auditIssue }) {
+  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid, executionIssue });
+  const numbers = matches.map((m) => Number(m.number)).sort((a, b) => a - b);
+  if (numbers.length === 0) {
+    return {
+      ok: false,
+      reason:
+        `no OPEN canonical Audit Issue currently matches merge commit ${mergeCommitOid} and work issue ` +
+        `${JSON.stringify(executionIssue)} (expected to still find #${auditIssue})`,
+    };
+  }
+  if (numbers.length > 1) {
+    return {
+      ok: false,
+      reason:
+        `more than one OPEN canonical Audit Issue currently matches merge commit ${mergeCommitOid} and work issue ` +
+        `${JSON.stringify(executionIssue)}: ${numbers.map((n) => `#${n}`).join(", ")} — refusing to finalize/` +
+        "trigger against ambiguous evidence",
+    };
+  }
+  if (numbers[0] !== auditIssue) {
+    return {
+      ok: false,
+      reason: `the sole currently matching OPEN canonical Audit Issue is #${numbers[0]}, not the given --audit-issue #${auditIssue}`,
     };
   }
   return { ok: true };
@@ -291,15 +366,24 @@ function unverified({ controlIssue, executionIssue, pr, auditIssue, reason }) {
   };
 }
 
-// `ghIssueViewImpl`, `ghPrViewImpl`, `ghAuditIssueViewImpl`, and `writeControlSnapshotImpl` are
-// injected so tests can drive `run` end-to-end without touching the real network or `gh` CLI —
-// see this script's own test file for the fixture shapes.
+// `ghIssueViewImpl`, `ghPrViewImpl`, `ghAuditIssueViewImpl`, `ghIssueListImpl`, and
+// `writeControlSnapshotImpl` are injected so tests can drive `run` end-to-end without touching the
+// real network or `gh` CLI — see this script's own test file for the fixture shapes.
+//
+// `revalidateUniqueness` (Stage 1 review finding P2 on PR #730, issue #729's TOCTOU gap):
+// opt-in, set only by next-review-transition-gate.mjs's own `STAGE2_AUDIT_ALREADY_PREPARED`
+// `nextCommand` (`--revalidate-uniqueness true`) — the one caller that reached `auditIssue` via a
+// discovery search a race can land behind. Left `false` by default so the ordinary
+// preparation-worker-authored finalize call, which already knows the Audit Issue it just created
+// is the only one, never pays for (or risks a spurious failure from) an extra "[Audit] in:title"
+// GitHub Search API query subject to brief indexing lag.
 export async function run(
-  { repo, controlIssue, executionIssue, pr, auditIssue },
+  { repo, controlIssue, executionIssue, pr, auditIssue, revalidateUniqueness = false },
   {
     ghIssueViewImpl = defaultGhIssueView,
     ghPrViewImpl = defaultGhPrView,
     ghAuditIssueViewImpl = defaultGhAuditIssueView,
+    ghIssueListImpl = defaultGhIssueList,
     writeControlSnapshotImpl = checkWriteControlSnapshot,
   } = {},
 ) {
@@ -379,6 +463,34 @@ export async function run(
   const auditMatchCheck = verifyAuditIssueMatches(auditView, { mergeCommitOid: mergedCheck.mergeCommitOid, executionIssue });
   if (!auditMatchCheck.ok) {
     return unverified({ controlIssue, executionIssue, pr, auditIssue, reason: auditMatchCheck.reason });
+  }
+
+  // Stage 1 review finding P2 on PR #730 (issue #729's TOCTOU gap): when this finalize call was
+  // reached via next-review-transition-gate.mjs's own recovery reconciliation search, re-confirm
+  // `auditIssue` is still the sole matching OPEN canonical Audit Issue immediately before control
+  // projection/trigger — a second matching candidate durably created after that earlier search
+  // must still fail closed here rather than silently proceeding against ambiguous evidence.
+  if (revalidateUniqueness) {
+    let candidates;
+    try {
+      candidates = await ghIssueListImpl({ repo });
+    } catch (err) {
+      return unverified({
+        controlIssue,
+        executionIssue,
+        pr,
+        auditIssue,
+        reason: `gh issue search failed while revalidating Audit Issue uniqueness: ${err.message}`,
+      });
+    }
+    const uniquenessCheck = verifyAuditIssueStillUnique(candidates, {
+      mergeCommitOid: mergedCheck.mergeCommitOid,
+      executionIssue,
+      auditIssue,
+    });
+    if (!uniquenessCheck.ok) {
+      return unverified({ controlIssue, executionIssue, pr, auditIssue, reason: uniquenessCheck.reason });
+    }
   }
 
   // Re-read the control Issue immediately before composing/writing, then re-validate the
@@ -558,6 +670,9 @@ async function main() {
   const auditIssue = args["audit-issue"] != null ? Number(args["audit-issue"]) : null;
   const rawExecutionIssue = args["execution-issue"];
   const executionIssue = rawExecutionIssue === "none" ? "none" : rawExecutionIssue != null ? Number(rawExecutionIssue) : null;
+  // Issue #729 P2 correction (PR #730): opt-in TOCTOU revalidation, set only by
+  // next-review-transition-gate.mjs's own STAGE2_AUDIT_ALREADY_PREPARED nextCommand.
+  const revalidateUniqueness = args["revalidate-uniqueness"] === "true" || args["revalidate-uniqueness"] === "1";
 
   // Stage 1 correction on PR #721: omitting --control-issue selects the direct-reference
   // verification continuation (runDirectReferenceVerification) instead of the split thin/thick
@@ -565,7 +680,7 @@ async function main() {
   // that mode.
   const result =
     controlIssue !== null
-      ? await run({ repo: resolvedRepo, controlIssue, executionIssue, pr, auditIssue })
+      ? await run({ repo: resolvedRepo, controlIssue, executionIssue, pr, auditIssue, revalidateUniqueness })
       : await runDirectReferenceVerification({ repo: resolvedRepo, executionIssue, pr, auditIssue });
 
   if (result.exitCode === 1) {

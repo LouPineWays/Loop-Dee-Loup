@@ -20,6 +20,8 @@ import {
   runNextReviewTransitionGate,
   reconcileStage2CorrectionPr,
   composeStage2CorrectionFinalizeCommand,
+  findMatchingOpenAuditIssues,
+  reconcileExistingStage2AuditIssue,
 } from "./next-review-transition-gate.mjs";
 
 // -- parseOptionalIssueRef ------------------------------------------------------------------
@@ -1650,6 +1652,225 @@ test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 referenc
     mode: "bounded",
     authorizedActions: ["dispatch-stage2-preparation-worker"],
   });
+});
+
+// -- Issue #729: STAGE2_AUDIT_ALREADY_PREPARED deterministic recovery -----------------------
+//
+// The #723/#727 liveness seam: a prior (possibly interrupted) Stage 2 preparation worker
+// already created/reused the canonical Audit Issue and returned "AUDIT_READY #727", but the
+// bounded controller context that received it ended before finalize-audit-breakpoint.mjs ever
+// ran. A fresh controller must deterministically recover #727 rather than redispatching
+// semantic preparation merely to rediscover already-known state.
+
+// Issue #729 Stage 1 review finding P1 on PR #730: a durable match must now have the *complete*
+// canonical audit shape, not only these two structured pointer fields -- so this default fixture
+// includes a real "Stage 1 inline review disposition" field too. `incomplete: true` reproduces the
+// exact two-field-only shell the finding describes (a prior preparation attempt that created an
+// issue but failed/was interrupted before completing the required template).
+function auditIssueBody({ workIssue, mergeCommit, incomplete = false }) {
+  const fields = ["### Work issue", "", String(workIssue), "", "### Exact merge commit", "", `\`${mergeCommit}\``, ""];
+  if (!incomplete) {
+    fields.push("### Stage 1 inline review disposition", "", "One inline @codex review round at frozen head; no findings.", "");
+  }
+  return fields.join("\n");
+}
+
+const MERGE_COMMIT_723 = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+
+test("runNextReviewTransitionGate: a merged PR with no settled Stage 2 reference whose canonical Audit Issue already durably exists (matching merge commit and work issue, still OPEN) resolves to STAGE2_AUDIT_ALREADY_PREPARED, never dispatching a fresh preparation worker", async () => {
+  let issueListCallArgs = null;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_SATISFIED, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED", mergeCommit: { oid: MERGE_COMMIT_723 } }),
+      stage1RunImpl: async () => {
+        throw new Error("should never be called -- the PR is already merged, resume forward instead");
+      },
+      checkMergeReadyImpl: async () => {
+        throw new Error("should never be called -- the PR is already merged, resume forward instead");
+      },
+      reconcileExistingStage2AuditIssueImpl: async (args) => {
+        issueListCallArgs = args;
+        return { exitCode: 0, state: "FOUND", auditIssue: 727 };
+      },
+    },
+  );
+  assert.deepEqual(issueListCallArgs, { repo: "o/r", mergeCommitOid: MERGE_COMMIT_723, executionIssue: 375 });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_AUDIT_ALREADY_PREPARED");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.repo, "o/r");
+  assert.equal(result.controlIssue, 322);
+  assert.equal(result.pr, 376);
+  assert.equal(result.issue, 375);
+  assert.equal(result.auditIssue, 727);
+  assert.match(
+    result.nextCommand,
+    /finalize-audit-breakpoint\.mjs --control-issue 322 --execution-issue 375 --pr 376 --audit-issue 727 --revalidate-uniqueness true && node tools\/review-watch\/trigger\.mjs --repo o\/r --kind issue --number 727/,
+  );
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["write-control-snapshot", "post-stage2-reviewer-trigger"],
+  });
+});
+
+test("runNextReviewTransitionGate: a merged PR with no settled Stage 2 reference and no durably matching Audit Issue falls through unchanged to STAGE2_PREPARATION_REQUIRED", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_SATISFIED, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED", mergeCommit: { oid: MERGE_COMMIT_723 } }),
+      reconcileExistingStage2AuditIssueImpl: async () => ({ exitCode: 0, state: "NONE_FOUND" }),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_PREPARATION_REQUIRED");
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["dispatch-stage2-preparation-worker"],
+  });
+});
+
+test("runNextReviewTransitionGate: more than one durably-matching OPEN Audit Issue fails closed to AMBIGUOUS rather than guessing which is authoritative (#729 Required Behavior 6)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_SATISFIED, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED", mergeCommit: { oid: MERGE_COMMIT_723 } }),
+      reconcileExistingStage2AuditIssueImpl: async () => ({
+        exitCode: 0,
+        state: "AMBIGUOUS_MATCHES",
+        matches: [727, 730],
+        message: "more than one OPEN Audit Issue durably matches merge commit ... : #727, #730",
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.equal(result.stopAfter, true);
+  assert.match(result.reason, /#727, #730/);
+  assert.deepEqual(result.actionEnvelope, { mode: "none", authorizedActions: [] });
+});
+
+test("runNextReviewTransitionGate: an operational failure reconciling the Audit Issue never blocks the transition -- falls back to the always-safe STAGE2_PREPARATION_REQUIRED dispatch", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_SATISFIED, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED", mergeCommit: { oid: MERGE_COMMIT_723 } }),
+      reconcileExistingStage2AuditIssueImpl: async () => {
+        throw new Error("gh api search/issues: network error");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_PREPARATION_REQUIRED");
+});
+
+test("runNextReviewTransitionGate: no mergeCommit on the live PR state (e.g. an older test double) skips reconciliation entirely and preserves the unchanged STAGE2_PREPARATION_REQUIRED path", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_SATISFIED, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      reconcileExistingStage2AuditIssueImpl: async () => {
+        throw new Error("should never be called -- no mergeCommit was supplied");
+      },
+    },
+  );
+  assert.equal(result.state, "STAGE2_PREPARATION_REQUIRED");
+});
+
+test("runNextReviewTransitionGate: retrying STAGE2_AUDIT_ALREADY_PREPARED against the same durable evidence is idempotent (same verdict, same auditIssue, same nextCommand)", async () => {
+  const impls = {
+    ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_SATISFIED, state: "OPEN" }),
+    ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED", mergeCommit: { oid: MERGE_COMMIT_723 } }),
+    reconcileExistingStage2AuditIssueImpl: async () => ({ exitCode: 0, state: "FOUND", auditIssue: 727 }),
+  };
+  const first = await runNextReviewTransitionGate({ repo: "o/r", controlIssue: "322" }, impls);
+  const second = await runNextReviewTransitionGate({ repo: "o/r", controlIssue: "322" }, impls);
+  assert.equal(first.state, "STAGE2_AUDIT_ALREADY_PREPARED");
+  assert.deepEqual(first, second);
+});
+
+// -- findMatchingOpenAuditIssues / reconcileExistingStage2AuditIssue (pure/unit) -------------
+
+test("findMatchingOpenAuditIssues: matches only an OPEN candidate whose own merge-commit and work-issue fields both match", () => {
+  const candidates = [
+    { number: 727, state: "OPEN", body: auditIssueBody({ workIssue: "#375", mergeCommit: MERGE_COMMIT_723 }) },
+    // Wrong work issue -- never a match even though the merge commit matches.
+    { number: 800, state: "OPEN", body: auditIssueBody({ workIssue: "#999", mergeCommit: MERGE_COMMIT_723 }) },
+    // Wrong merge commit -- never a match even though the work issue matches.
+    { number: 801, state: "OPEN", body: auditIssueBody({ workIssue: "#375", mergeCommit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" }) },
+    // Genuinely matches, but CLOSED -- superseded/retired candidates are never matches.
+    { number: 802, state: "CLOSED", body: auditIssueBody({ workIssue: "#375", mergeCommit: MERGE_COMMIT_723 }) },
+  ];
+  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid: MERGE_COMMIT_723, executionIssue: 375 });
+  assert.deepEqual(
+    matches.map((m) => m.number),
+    [727],
+  );
+});
+
+// Issue #729 Stage 1 review finding P1 on PR #730: an OPEN candidate whose "Exact merge commit"
+// and "Work issue" fields both match, but which lacks the "Stage 1 inline review disposition"
+// field (the exact two-field-only shell a prior preparation attempt would leave behind if it
+// failed or was interrupted before completing the required template), must never be treated as a
+// match -- an incomplete audit cannot provide the required Stage 2 assurance.
+test("findMatchingOpenAuditIssues: a two-field-only (incomplete canonical shape) candidate is never a match, even when merge commit and work issue both match", () => {
+  const candidates = [
+    { number: 727, state: "OPEN", body: auditIssueBody({ workIssue: "#375", mergeCommit: MERGE_COMMIT_723, incomplete: true }) },
+  ];
+  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid: MERGE_COMMIT_723, executionIssue: 375 });
+  assert.deepEqual(matches, []);
+});
+
+test("findMatchingOpenAuditIssues: is case-insensitive on the merge commit SHA and supports the explicit 'none' work-issue sentinel", () => {
+  const candidates = [{ number: 900, state: "OPEN", body: auditIssueBody({ workIssue: "none", mergeCommit: MERGE_COMMIT_723.toUpperCase() }) }];
+  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid: MERGE_COMMIT_723, executionIssue: "none" });
+  assert.deepEqual(
+    matches.map((m) => m.number),
+    [900],
+  );
+});
+
+test("reconcileExistingStage2AuditIssue: NONE_FOUND, FOUND, and AMBIGUOUS_MATCHES outcomes from an injected ghIssueListImpl", async () => {
+  const none = await reconcileExistingStage2AuditIssue(
+    { repo: "o/r", mergeCommitOid: MERGE_COMMIT_723, executionIssue: 375 },
+    { ghIssueListImpl: async () => [] },
+  );
+  assert.deepEqual(none, { exitCode: 0, state: "NONE_FOUND" });
+
+  const found = await reconcileExistingStage2AuditIssue(
+    { repo: "o/r", mergeCommitOid: MERGE_COMMIT_723, executionIssue: 375 },
+    { ghIssueListImpl: async () => [{ number: 727, state: "OPEN", body: auditIssueBody({ workIssue: "#375", mergeCommit: MERGE_COMMIT_723 }) }] },
+  );
+  assert.deepEqual(found, { exitCode: 0, state: "FOUND", auditIssue: 727 });
+
+  const ambiguous = await reconcileExistingStage2AuditIssue(
+    { repo: "o/r", mergeCommitOid: MERGE_COMMIT_723, executionIssue: 375 },
+    {
+      ghIssueListImpl: async () => [
+        { number: 730, state: "OPEN", body: auditIssueBody({ workIssue: "#375", mergeCommit: MERGE_COMMIT_723 }) },
+        { number: 727, state: "OPEN", body: auditIssueBody({ workIssue: "#375", mergeCommit: MERGE_COMMIT_723 }) },
+      ],
+    },
+  );
+  assert.equal(ambiguous.exitCode, 0);
+  assert.equal(ambiguous.state, "AMBIGUOUS_MATCHES");
+  assert.deepEqual(ambiguous.matches, [727, 730]);
+
+  const opError = await reconcileExistingStage2AuditIssue(
+    { repo: "o/r", mergeCommitOid: MERGE_COMMIT_723, executionIssue: 375 },
+    {
+      ghIssueListImpl: async () => {
+        throw new Error("boom");
+      },
+    },
+  );
+  assert.equal(opError.exitCode, 1);
+  assert.match(opError.message, /boom/);
 });
 
 // Stage 1 correction on PR #721 (Codex P1 finding): a merged PR whose control Issue never
