@@ -335,7 +335,14 @@ function assertCheckoutBinding(checkoutBinding) {
     typeof checkoutBinding.scriptPath !== "string" ||
     !checkoutBinding.scriptPath ||
     /[\r\n]/.test(checkoutBinding.scriptPath) ||
-    checkoutBinding.scriptPath.length > 200
+    checkoutBinding.scriptPath.length > 200 ||
+    // Stage 2 audit finding on PR #710 (issue #711, P2): `scriptPath` is rendered below as a
+    // double-quoted shell word so a controller installation path containing a space (a valid
+    // Windows/POSIX path segment -- the whole reason this check exists) still parses as one
+    // argument. A literal double quote is the one character that could break out of that
+    // quoting, so it is rejected up front -- fail-closed, consistent with the CRLF/length
+    // checks above -- rather than attempting cross-shell escaping for it.
+    /"/.test(checkoutBinding.scriptPath)
   ) {
     throw new Error(
       "formatStage1CorrectionWorkerDispatchPrompt requires a pre-spawn checkoutBinding { path, token, scriptPath } for a findings correction -- " +
@@ -407,9 +414,14 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
   }
   assertCheckoutBinding(checkoutBinding);
   const { path, token, scriptPath } = checkoutBinding;
+  // Stage 2 audit finding on PR #710 (issue #711, P2): this used to interpolate `scriptPath`
+  // unquoted into the rendered `node <scriptPath> ...` invocation, so a controller installation
+  // path containing a space split into multiple shell words and the worker's mandatory first
+  // step failed to parse. Quote it as a single argument; `assertCheckoutBinding` above already
+  // rejects the one character (`"`) that could break out of this quoting.
   return (
     `Stage 1 correction worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
-    `Pre-bound checkout: ${path}. From it, first run node ${scriptPath} ` +
+    `Pre-bound checkout: ${path}. From it, first run node "${scriptPath}" ` +
     `--verify-binding ${token} --pr ${pr} (nonzero: CHECKOUT_BINDING_UNVERIFIED ${pr}, stop); work only ` +
     `there, push via its pushRefspec.\n\n` +
     `Read PR #${pr}'s Stage 1 review${executionReadClause} for findings (not restated). Apply one ` +
