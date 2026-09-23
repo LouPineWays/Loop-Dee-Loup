@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Claude Code PreToolUse/PostToolUse hook — issue #641, extending issue #486/#607's
-// action-envelope invariant from post-hoc classification to live, fail-closed tool-call
-// denial for the "none" envelope mode.
+// Claude Code PreToolUse/PostToolUse/SubagentStart hook — issue #641, extending issue
+// #486/#607's action-envelope invariant from post-hoc classification to live, fail-closed
+// tool-call denial for the "none" envelope mode, and issue #678, extending that same live
+// enforcement to the "bounded" mode's exact live-#631 failure shape (see below).
 //
 // Problem this closes: `tools/orchestration/action-envelope.mjs`'s `classifyEnvelopeCompliance`
 // already correctly judges a RECORDED action sequence against a verdict's envelope, and
@@ -45,25 +46,26 @@
 //   PostToolUseFailure wiring to cross-check against, consistent with this module's fail-open
 //   philosophy on payload-shape uncertainty).
 //
-//   PreToolUse (every tool): if this session already has that marker, deny the call —
+//   PreToolUse (every tool): if this session already has a "none"-mode marker, deny the call —
 //   unconditionally, regardless of tool or intent — with a reason naming the verdict and
 //   pointing at the fresh-invocation path. A denial does not itself end the turn (Claude Code
 //   feeds the denial reason back and the model may attempt something else), but every further
 //   attempt in the same session is denied identically, so the mechanically enforced outcome is
 //   exactly "zero further operational tool calls succeed in this context" — provable from the
 //   marker and the denied-call log alone, not from a transcript reading of whether the model
-//   "chose" to stop.
+//   "chose" to stop. (A "bounded"-mode marker is narrower — see issue #678 below.)
 //
-// Scope: deliberately narrow to `mode === "none"`, reusing the verdict's own stamped field
-// rather than hand-listing states — so `AMBIGUOUS`, `STAGE2_RESPONSE_UNUSABLE`, ordinary
-// `BLOCKED`, and any future no-action verdict state are covered automatically, with zero
-// changes here when action-envelope.mjs's table changes. `bounded`/`chain`-mode verdicts never
-// set this marker, so an action-bearing transition's own authorized tool calls (dispatching a
-// worker, merging, writing a control snapshot, chaining to the next gate) are never blocked by
-// this mechanism — only `action-envelope.mjs`'s existing post-hoc classifier polices those,
-// unchanged. This hook adds real-time enforcement for the "none" case specifically because
-// that is the shape the #639/PR #640 near-miss (and #440 before it) actually demonstrated:
-// deliberation drift after a verdict that authorizes nothing at all.
+// Scope (originally `mode === "none"` only; issue #678 below extends it to `"bounded"`),
+// reusing the verdict's own stamped field rather than hand-listing states — so `AMBIGUOUS`,
+// `STAGE2_RESPONSE_UNUSABLE`, ordinary `BLOCKED`, and any future no-action verdict state are
+// covered automatically, with zero changes here when action-envelope.mjs's table changes.
+// `chain`-mode verdicts never set a marker, so the one further chained gate invocation they
+// authorize is never blocked by this mechanism — only `action-envelope.mjs`'s existing
+// post-hoc classifier polices those, unchanged. This hook adds real-time enforcement for the
+// "none" case specifically because that is the shape the #639/PR #640 near-miss (and #440
+// before it) actually demonstrated: deliberation drift after a verdict that authorizes nothing
+// at all. See the "Live enforcement for the 'bounded' mode" section below for the equivalent
+// #631 near-miss this hook now also closes for action-bearing (bounded) verdicts.
 //
 // Marker storage mirrors tools/telemetry/collect.mjs's own TELEMETRY_DIR convention: a
 // gitignored, session-scoped directory outside durable repository state
@@ -80,17 +82,174 @@
 // "no verdict observed yet in this session," which is the correct default allow state for
 // every session before it ever runs a gate script.
 //
-// Wired in .claude/settings.json for PreToolUse (all tools), PostToolUse (Bash only), and
-// PostToolUseFailure (Bash only).
+// Live enforcement for the "bounded" mode (issue #678). The #631 live reproduction
+// (control #631 / execution #630 / PR #637, 2026-09-21) proved the "none"-mode mechanism
+// above was not enough: `next-review-transition-gate.mjs` correctly returned
+// `STAGE1_CORRECTION_REQUIRED` — a bounded verdict naming `dispatch-correction-worker` as
+// the exclusive next action — the controller correctly began dispatching the correction
+// worker, and then, in the SAME initiating context, invoked `next-review-transition-gate.mjs`
+// a SECOND time instead of stopping. No bounded envelope in `action-envelope.mjs`'s own table
+// ever authorizes a "run-<gate-script>"-shaped action (only `chain`-mode verdicts do, and only
+// for the one specific chained gate they name), so a same-session rerun of either gate script
+// while a bounded verdict is outstanding is never itself an authorized action — it is exactly
+// the `rerun-gate` failure mode issue #486's own unconditional deny-list already names, just
+// never mechanically enforced in real time before now.
+//
+// This closes that gap with the same marker mechanism the "none" mode already uses, extended
+// two ways:
+//
+//   PostToolUse/PostToolUseFailure (Bash only): recognizing a completed gate invocation whose
+//   own stamped `actionEnvelope.mode` is `"bounded"` (not only `"none"`) writes a marker
+//   carrying that verdict's `state` and `authorizedActions`. `detectBoundedVerdict` is the
+//   dedicated bounded-mode counterpart to `detectNoActionVerdict` above — kept as a distinct
+//   function, rather than widening `detectNoActionVerdict` itself, so the existing "must not
+//   mark a bounded verdict" contract that function's own tests already assert stays literally
+//   true and unchanged.
+//
+//   PreToolUse (every tool): while a bounded marker is active, `decidePreToolUse` denies only
+//   a same-session attempt to invoke either gate script (`invokedGateScriptBasenames`) —
+//   exactly the #631 failure shape — and otherwise allows the call through, so the envelope's
+//   own authorized action(s) (a Bash pre-step such as `reserve-correction-checkout`, then the
+//   actual worker dispatch) proceed unobstructed. This hook does not attempt to classify every
+//   tool call into one of `action-envelope.mjs`'s named action-kind strings — that remains
+//   `classifyEnvelopeCompliance`'s post-hoc job — it mechanically closes only the one concrete,
+//   live-reproduced failure mode: a gate rerun mistaken for forward progress.
+//
+//   SubagentStart (new event, every subagent dispatch): when a bounded marker's own
+//   `authorizedActions` names a worker dispatch (any action starting with `"dispatch-"` —
+//   `dispatch-correction-worker`, `dispatch-execution-worker`, `dispatch-planning-worker`, and
+//   so on), the fact that a subagent was just started is itself the deterministic signal that
+//   the envelope's authorized dispatch has now been consumed (Claude Code's own
+//   `SubagentStart` hook fires exactly once per dispatched worker, carrying the dispatching
+//   session's own `session_id` — see tools/telemetry/hook.mjs's identical use of this event).
+//   `shouldConsumeBoundedDispatch` is the pure decision; `consumeBoundedDispatch` overwrites
+//   the marker into the same exhausted (`mode: "none"`) shape the "none" mechanism above
+//   already enforces unconditionally for every further tool call — so AGENTS.md's own
+//   "enforces controller termination after the bounded action is consumed" requirement reuses
+//   the existing zero-further-tool-calls mechanism rather than a second, parallel one. A
+//   non-dispatch bounded envelope (e.g. `READY_TO_RUN_DISPATCH_MANIFEST`'s
+//   `["prepare-dispatch-manifest", "write-control-snapshot"]`, both performed directly by the
+//   controller, never via a subagent dispatch) is deliberately never exhausted by this signal —
+//   `shouldConsumeBoundedDispatch` returns false for it, exactly as designed, and remains
+//   governed only by the gate-rerun denial above plus the existing post-hoc classifier.
+//
+// Stage 1 correction on PR #714 (execution issue #678). Codex found the initial "bounded"
+// implementation above incomplete in three independent ways, all rooted in the same mismatch:
+// the new live-enforcement state was modeled around "session + first SubagentStart", while the
+// actual authority boundary is "bounded controller action + its complete consumption".
+//
+//   1. Verdict capture was not reliable on the real dispatch pipeline. The documented normal
+//      path pipes a gate's JSON stdout into `format-dispatch-prompt.mjs` (Stage 1 correction
+//      additionally pipes through `pr-head-checkout-preflight.mjs --reserve-from-gate` first),
+//      so the Bash tool's own captured stdout is that downstream stage's rendered output, not
+//      the gate's verdict — `extractVerdict` found nothing and no marker was ever written,
+//      leaving the exact #631 gate-rerun failure mechanically possible on the canonical path.
+//      Both gate scripts now separately persist the verdict they are about to print — via
+//      `persistLastGateVerdict`, at the exact point they emit it — to a small side-channel file
+//      (`LAST_GATE_VERDICT_PATH`, next to the marker state dir) the instant it is known, before
+//      any downstream pipeline stage can transform the command's final captured stdout.
+//      `markObservedVerdict` falls back to `consumeLastGateVerdict` (which reads and clears
+//      that file) only when the command invoked a gate script but stdout extraction found no
+//      recognizable verdict — so the common non-piped case still needs no extra file I/O.
+//      Both gate scripts also clear the channel at the very start of their own `main()`, so a
+//      run that crashes before ever computing a verdict never leaves a stale one behind for a
+//      later, unrelated command to pick up.
+//
+//   2. `SubagentStart` treated any single worker start as fully consuming a dispatch-shaped
+//      envelope, but `dispatch-unit-wave` (`READY_TO_DISPATCH_UNITS`) can legitimately require
+//      several worker starts for one authorized wave. Exhausting the marker on the first start
+//      denied the formatter/Agent calls needed for every remaining ready unit. `writeMarker` now
+//      also carries the verdict's own `dispatchReadyUnitIds` (when present); `main()` routes
+//      every `SubagentStart` through `recordSubagentDispatchStart`, which increments a
+//      `dispatchStartsConsumed` counter on the still-bounded marker until it reaches
+//      `expectedDispatchCount(marker)` (the wave size, or 1 for every other dispatch-shaped
+//      envelope, preserving the original single-start behavior for those), only then calling
+//      `consumeBoundedDispatch` to exhaust it into the identical `mode: "none"` shape.
+//
+//   3. `SubagentStart`'s marker mutation, and `PreToolUse`'s marker read, were both keyed only
+//      by `session_id` — but a dispatched worker's own subsequent tool calls share that same
+//      `session_id` with the controller that spawned it, distinguished only by a separate
+//      `agent_id` Claude Code stamps on every hook event that happens inside that worker's own
+//      context (the same field `tools/telemetry/hook.mjs` already reads off `SubagentStart`/
+//      `SubagentStop`). Once the marker was exhausted, the worker's own first tool call inherited
+//      the controller's now-`"none"` marker and was wrongly denied — the live stop boundary must
+//      constrain the initiating controller, not the worker it just authorized. `decidePreToolUse`
+//      now allows unconditionally whenever `toolCall.agentId` is a non-empty string, before ever
+//      consulting the marker: a hook event carrying an `agent_id` is, by construction, a
+//      dispatched worker's own tool call, never the controller's.
+//
+// A fresh invocation is a new session_id, so it never inherits a predecessor's marker (of
+// either mode) — unchanged from the "none" mechanism's own existing fresh-session behavior.
+//
+// Wired in .claude/settings.json for PreToolUse (all tools), PostToolUse (Bash only),
+// PostToolUseFailure (Bash only), and SubagentStart (issue #678).
 // Tests: node --test tools/orchestration/action-envelope-hook.test.mjs
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pathToFileURL } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const STATE_DIR = process.env.LDL_ACTION_ENVELOPE_STATE_DIR || join(ROOT, ".claude", "action-envelope-state");
+
+// Stage 1 correction on PR #714 (issue #678, finding 1): a side channel the two gate scripts
+// themselves write to, at the exact point they compute and are about to print their verdict —
+// see the module header. Deliberately a single file rather than session-scoped: the gate
+// scripts have no access to a session_id (Claude Code does not inject one into the Bash tool's
+// environment), so this hook, which does know the session_id from its own PostToolUse payload,
+// is the one that turns this content into a session-scoped marker via markObservedVerdict
+// below. This relies on the same one-session-per-exact-checkout-path invariant AGENTS.md's own
+// "Concurrent subagent directory isolation" already documents: two different live sessions do
+// not concurrently run gate scripts from the same checkout, so a single shared last-verdict
+// slot per checkout does not cross session boundaries in practice.
+export const LAST_GATE_VERDICT_PATH = join(STATE_DIR, "last-gate-verdict.json");
+
+// Persists `result` (a gate script's own verdict object, about to be printed to stdout) to the
+// side channel. Never throws — a gate script's primary duty (printing the correct verdict to
+// stdout with the correct exit code) must never be put at risk by this side channel failing to
+// write, mirroring this module's own documented fail-open philosophy on infrastructure trouble.
+export function persistLastGateVerdict(result, { mkdirImpl = mkdirSync, writeFileImpl = writeFileSync } = {}) {
+  try {
+    mkdirImpl(STATE_DIR, { recursive: true });
+    writeFileImpl(LAST_GATE_VERDICT_PATH, JSON.stringify(result), "utf8");
+  } catch {
+    // Deliberately swallowed -- see comment above.
+  }
+}
+
+// Clears the side channel. Both gate scripts call this at the very start of their own main(),
+// before doing any work, so a run that errors or crashes before ever computing a verdict never
+// leaves a stale prior verdict behind for a later, unrelated command to mistakenly consume.
+export function clearLastGateVerdict({ existsImpl = existsSync, unlinkImpl = unlinkSync } = {}) {
+  try {
+    if (existsImpl(LAST_GATE_VERDICT_PATH)) unlinkImpl(LAST_GATE_VERDICT_PATH);
+  } catch {
+    // Deliberately swallowed -- see persistLastGateVerdict above.
+  }
+}
+
+// Reads and parses the side channel, then deletes it so the same persisted verdict is never
+// consumed twice by a later, unrelated command. Returns null on any problem (missing file,
+// unreadable, malformed JSON) -- the correct default when nothing was actually observed.
+export function consumeLastGateVerdict({
+  readFileImpl = readFileSync,
+  existsImpl = existsSync,
+  unlinkImpl = unlinkSync,
+} = {}) {
+  try {
+    if (!existsImpl(LAST_GATE_VERDICT_PATH)) return null;
+    const parsed = JSON.parse(readFileImpl(LAST_GATE_VERDICT_PATH, "utf8"));
+    try {
+      unlinkImpl(LAST_GATE_VERDICT_PATH);
+    } catch {
+      // Deletion failure does not invalidate the read -- see fail-open philosophy above.
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
 
 // Inlined rather than imported from tools/telemetry/collect.mjs (Stage 1 review finding on
 // PR #642): tools/orchestration/** is a MANAGED_ITEMS-installed path for consumer repositories
@@ -197,6 +356,20 @@ export function detectNoActionVerdict(command, stdout) {
   return verdict.actionEnvelope.mode === "none" ? verdict : null;
 }
 
+// Bounded-mode counterpart to detectNoActionVerdict, above (issue #678) — deliberately a
+// separate function rather than widening detectNoActionVerdict itself, so that function's own
+// existing "must not mark a bounded verdict" contract (action-envelope-hook.test.mjs) stays
+// literally true. Returns the verdict object to persist when the completed command invoked one
+// of the two gate scripts and its own stamped actionEnvelope.mode is "bounded"; null otherwise
+// (no gate script invoked, no verdict-shaped JSON found, or a none/chain/fallthrough mode —
+// each of those remains this module's or action-envelope.mjs's own existing, unchanged path).
+export function detectBoundedVerdict(command, stdout) {
+  if (invokedGateScriptBasenames(command).length === 0) return null;
+  const verdict = extractVerdict(stdout);
+  if (!verdict) return null;
+  return verdict.actionEnvelope.mode === "bounded" ? verdict : null;
+}
+
 function markerPath(sessionId) {
   return join(STATE_DIR, `${sanitizeSessionId(sessionId)}.json`);
 }
@@ -214,9 +387,10 @@ export function readMarker(sessionId, { readFileImpl = readFileSync, existsImpl 
   }
 }
 
-// Persists the marker recording that this session's controller action authority is exhausted.
-// Idempotent: re-observing another "none"-mode verdict in the same session simply overwrites
-// the marker with the latest one (still a marker; still denies).
+// Persists the marker recording that this session's controller action authority is exhausted
+// (mode "none") or bounded to exactly the named authorizedActions (mode "bounded", issue #678).
+// Idempotent: re-observing another verdict in the same session simply overwrites the marker
+// with the latest one.
 export function writeMarker(
   sessionId,
   verdict,
@@ -227,25 +401,154 @@ export function writeMarker(
   const marker = {
     state: verdict.state,
     mode: verdict.actionEnvelope.mode,
+    authorizedActions: Array.isArray(verdict.actionEnvelope.authorizedActions)
+      ? verdict.actionEnvelope.authorizedActions
+      : [],
     reason: typeof verdict.reason === "string" ? verdict.reason : null,
+    // Issue #678 Stage 1 correction, finding 2: carried through so a dispatch-shaped bounded
+    // marker for a multi-unit wave (READY_TO_DISPATCH_UNITS) knows its own expected wave size —
+    // see expectedDispatchCount/recordSubagentDispatchStart below. Absent/empty for every other
+    // verdict shape, which is exactly the "wave size 1" default those helpers already apply.
+    dispatchReadyUnitIds: Array.isArray(verdict.dispatchReadyUnitIds) ? verdict.dispatchReadyUnitIds : [],
+    dispatchStartsConsumed: 0,
     ts: new Date().toISOString(),
   };
   writeFileImpl(markerPath(sessionId), JSON.stringify(marker), "utf8");
   return marker;
 }
 
-// Pure: given an already-read marker (or null), decide the PreToolUse hook's own output.
-// No exceptions by tool name or intent — a "none" envelope authorizes zero further
-// operational tool calls, full stop; the one legitimate remaining action (a concise text
-// handoff) needs no tool call at all and is therefore never denied by this hook.
-export function decidePreToolUse(marker) {
+// Issue #678: does this bounded marker's own authorizedActions name a worker dispatch as one
+// of its authorized actions? Any action-kind string starting with "dispatch-" is a subagent
+// dispatch in every current envelope shape (dispatch-correction-worker, dispatch-execution-
+// worker, dispatch-planning-worker, dispatch-planning-correction-worker, dispatch-unit-wave,
+// dispatch-integration-worker — see action-envelope.mjs's own ENVELOPES table). A non-dispatch
+// bounded envelope (e.g. write-control-snapshot, merge-pr, run-close-control — all performed
+// directly by the controller, never via a subagent) deliberately returns false here: nothing
+// about starting an unrelated subagent should be read as consuming a bounded action that was
+// never going to be fulfilled by a dispatch in the first place.
+export function shouldConsumeBoundedDispatch(marker) {
+  if (!marker || marker.mode !== "bounded") return false;
+  return Array.isArray(marker.authorizedActions) && marker.authorizedActions.some((a) => a.startsWith("dispatch-"));
+}
+
+// Overwrites a bounded, dispatch-shaped marker into the same exhausted shape the "none"
+// mechanism already enforces unconditionally (issue #678): a SubagentStart event is the
+// deterministic signal that this bounded envelope's one authorized worker dispatch has now
+// occurred, so every further tool call in this same controller context — a lifecycle-gate
+// rerun, a control-kickoff restart, or any other repository/GitHub operation — is denied
+// exactly like any other "none"-mode stop, until a fresh invocation reads durable state again.
+export function consumeBoundedDispatch(
+  sessionId,
+  marker,
+  { mkdirImpl = mkdirSync, writeFileImpl = writeFileSync } = {},
+) {
+  if (!sessionId || !marker) return null;
+  mkdirImpl(STATE_DIR, { recursive: true });
+  const exhausted = {
+    state: marker.state,
+    mode: "none",
+    authorizedActions: [],
+    reason:
+      `bounded dispatch action consumed via SubagentStart for verdict "${marker.state}" ` +
+      "(issue #678); further operational tool calls in this controller context are not authorized.",
+    ts: new Date().toISOString(),
+  };
+  writeFileImpl(markerPath(sessionId), JSON.stringify(exhausted), "utf8");
+  return exhausted;
+}
+
+// Issue #678 Stage 1 correction, finding 2: how many SubagentStart events this bounded,
+// dispatch-shaped marker's own authorized action expects before it is fully consumed. Every
+// dispatch-shaped envelope authorizes exactly one worker (dispatch-correction-worker,
+// dispatch-execution-worker, ...) except dispatch-unit-wave (READY_TO_DISPATCH_UNITS), whose
+// own verdict names every ready unit in `dispatchReadyUnitIds` -- one worker per unit. A missing
+// or empty list (every non-wave dispatch verdict, and any wave verdict with no units recorded)
+// defaults to 1, preserving the original single-start-exhausts behavior for those.
+export function expectedDispatchCount(marker) {
+  const ids = marker?.dispatchReadyUnitIds;
+  return Array.isArray(ids) && ids.length > 0 ? ids.length : 1;
+}
+
+// Issue #678 Stage 1 correction, finding 2: the SubagentStart handler `main()` now calls,
+// replacing a direct shouldConsumeBoundedDispatch + consumeBoundedDispatch pair. A non-dispatch
+// bounded marker (shouldConsumeBoundedDispatch false) is left untouched, exactly as before. A
+// dispatch-shaped marker that has not yet seen its full expectedDispatchCount(marker) worth of
+// worker starts has its dispatchStartsConsumed counter incremented but stays bounded -- the
+// controller may keep dispatching the wave's remaining ready units, and the gate-rerun denial in
+// decidePreToolUse keeps applying throughout. Once the count is reached, this defers to
+// consumeBoundedDispatch for the identical final exhaustion into mode "none" that function
+// already implements and is independently tested for.
+export function recordSubagentDispatchStart(
+  sessionId,
+  marker,
+  { mkdirImpl = mkdirSync, writeFileImpl = writeFileSync } = {},
+) {
+  if (!shouldConsumeBoundedDispatch(marker)) return null;
+  const consumed = (typeof marker.dispatchStartsConsumed === "number" ? marker.dispatchStartsConsumed : 0) + 1;
+  if (consumed < expectedDispatchCount(marker)) {
+    mkdirImpl(STATE_DIR, { recursive: true });
+    const updated = { ...marker, dispatchStartsConsumed: consumed, ts: new Date().toISOString() };
+    writeFileImpl(markerPath(sessionId), JSON.stringify(updated), "utf8");
+    return updated;
+  }
+  return consumeBoundedDispatch(sessionId, marker, { mkdirImpl, writeFileImpl });
+}
+
+// Pure: given an already-read marker (or null) and the tool call about to run, decide the
+// PreToolUse hook's own output.
+//
+// `toolCall` is `{ toolName, command }` — `command` is only read when `toolName === "Bash"`.
+// Both are optional; omitting them (as every pre-#678 caller/test still does) preserves the
+// exact pre-#678 "none"-mode behavior below unchanged.
+//
+// mode "none": no exceptions by tool name or intent — zero further operational tool calls are
+// authorized, full stop; the one legitimate remaining action (a concise text handoff) needs no
+// tool call at all and is therefore never denied by this hook.
+//
+// mode "bounded" (issue #678): denies only a same-session attempt to invoke either lifecycle
+// gate script — the exact #631 failure shape, and never itself an authorized action for any
+// bounded envelope (see action-envelope.mjs's ENVELOPES table: no bounded row ever authorizes a
+// "run-<gate-script>"-shaped action). Every other tool call is allowed through, so the
+// envelope's own named authorizedActions — a Bash pre-step, the worker dispatch itself — can
+// actually proceed; classifyEnvelopeCompliance (action-envelope.mjs) remains the post-hoc
+// authority for whether a non-gate-script action was itself one of those named actions.
+export function decidePreToolUse(marker, toolCall = {}) {
   if (!marker) return { permissionDecision: "allow" };
+
+  // Issue #678 Stage 1 correction, finding 3: a hook event carrying a non-empty `agentId` is,
+  // by construction, a dispatched subagent's own tool call -- it shares the controller's
+  // session_id but is distinguished by this separate field (see module header). This
+  // controller-scoped marker -- including one a dispatch itself just exhausted into mode
+  // "none" -- must never be read as restricting the worker that dispatch just authorized to
+  // start; the live stop boundary constrains the initiating controller, never the worker.
+  if (typeof toolCall.agentId === "string" && toolCall.agentId.length > 0) {
+    return { permissionDecision: "allow" };
+  }
+
+  if (marker.mode === "bounded") {
+    const command = toolCall.toolName === "Bash" ? toolCall.command : undefined;
+    if (invokedGateScriptBasenames(command).length === 0) {
+      return { permissionDecision: "allow" };
+    }
+    const authorized = Array.isArray(marker.authorizedActions) ? marker.authorizedActions : [];
+    return {
+      permissionDecision: "deny",
+      permissionDecisionReason:
+        `Action-envelope bounded stop boundary already reached in this session (verdict "${marker.state}", ` +
+        `authorized action(s): ${authorized.length > 0 ? authorized.join(", ") : "none"}). Per AGENTS.md § ` +
+        "Session execution and docs/operating-model.md § Action envelope enforcement (issue #486/#678), a " +
+        "bounded envelope never authorizes re-running a lifecycle gate — the named action(s) above are the " +
+        "exclusive next step. Do not retry this call; perform the authorized action if it has not run yet, " +
+        "or end this turn with the concise handoff if it already has.",
+    };
+  }
+
   return {
     permissionDecision: "deny",
     permissionDecisionReason:
       `Action-envelope stop boundary already reached in this session (verdict "${marker.state}", ` +
       `envelope mode "${marker.mode}"). Per AGENTS.md § Session execution and docs/operating-model.md ` +
-      "§ Action envelope enforcement (issue #486/#641), a no-action verdict authorizes zero further " +
+      "§ Action envelope enforcement (issue #486/#641/#678), a no-action verdict authorizes zero further " +
       "repository/GitHub operational tool calls in this controller context. Do not retry this or any " +
       "other tool call — end this turn with the concise handoff instead. A fresh invocation re-reads " +
       "durable state and decides the next authorized transition.",
@@ -273,6 +576,33 @@ function readStdinJson() {
   }
 }
 
+// Shared PostToolUse/PostToolUseFailure marking logic (issue #678): a completed gate
+// invocation's own stamped actionEnvelope.mode is either "none" (existing #641 behavior) or
+// "bounded" (new); either one writes the corresponding marker. Any other mode (bounded is the
+// only other one detectable here — chain/fallthrough verdicts are never marked, unchanged)
+// leaves the session's existing marker, if any, untouched.
+export function markObservedVerdict(sessionId, command, stdout) {
+  const noneVerdict = detectNoActionVerdict(command, stdout);
+  if (noneVerdict) {
+    writeMarker(sessionId, noneVerdict);
+    return;
+  }
+  const boundedVerdict = detectBoundedVerdict(command, stdout);
+  if (boundedVerdict) {
+    writeMarker(sessionId, boundedVerdict);
+    return;
+  }
+  // Issue #678 Stage 1 correction, finding 1: the command's own captured stdout carried no
+  // recognizable none/bounded verdict -- on the canonical dispatch pipeline this is expected
+  // whenever a downstream formatter/reservation stage transformed it. Only when the command
+  // actually invoked a gate script do we fall back to the side channel that script itself
+  // persisted at the moment it emitted the verdict; otherwise there is nothing to recover.
+  if (invokedGateScriptBasenames(command).length === 0) return;
+  const sideChannelVerdict = consumeLastGateVerdict();
+  const mode = sideChannelVerdict?.actionEnvelope?.mode;
+  if (mode === "none" || mode === "bounded") writeMarker(sessionId, sideChannelVerdict);
+}
+
 function main() {
   try {
     const payload = readStdinJson();
@@ -280,10 +610,7 @@ function main() {
 
     if (payload?.hook_event_name === "PostToolUse" && sessionId) {
       if (payload.tool_name === "Bash") {
-        const command = payload.tool_input?.command;
-        const stdout = payload.tool_response?.stdout;
-        const verdict = detectNoActionVerdict(command, stdout);
-        if (verdict) writeMarker(sessionId, verdict);
+        markObservedVerdict(sessionId, payload.tool_input?.command, payload.tool_response?.stdout);
       }
       process.exit(0);
       return;
@@ -291,18 +618,33 @@ function main() {
 
     if (payload?.hook_event_name === "PostToolUseFailure" && sessionId) {
       if (payload.tool_name === "Bash") {
-        const command = payload.tool_input?.command;
-        const stdout = extractFailureOutput(payload);
-        const verdict = detectNoActionVerdict(command, stdout);
-        if (verdict) writeMarker(sessionId, verdict);
+        markObservedVerdict(sessionId, payload.tool_input?.command, extractFailureOutput(payload));
       }
+      process.exit(0);
+      return;
+    }
+
+    // Issue #678: a dispatched subagent is the deterministic signal that a bounded,
+    // dispatch-shaped envelope's one authorized action has now been consumed — see the module
+    // header and shouldConsumeBoundedDispatch/consumeBoundedDispatch above.
+    if (payload?.hook_event_name === "SubagentStart" && sessionId) {
+      const marker = readMarker(sessionId);
+      // Issue #678 Stage 1 correction, finding 2: routes through the counting wrapper so a
+      // multi-unit dispatch-unit-wave is not exhausted by its first worker's start alone.
+      recordSubagentDispatchStart(sessionId, marker);
       process.exit(0);
       return;
     }
 
     if (payload?.hook_event_name === "PreToolUse" && sessionId) {
       const marker = readMarker(sessionId);
-      const decision = decidePreToolUse(marker);
+      const decision = decidePreToolUse(marker, {
+        toolName: payload.tool_name,
+        command: payload.tool_input?.command,
+        // Issue #678 Stage 1 correction, finding 3: present only for a hook event happening
+        // inside a dispatched subagent's own context; see decidePreToolUse's own comment.
+        agentId: typeof payload.agent_id === "string" ? payload.agent_id : undefined,
+      });
       if (decision.permissionDecision === "deny") {
         process.stdout.write(
           JSON.stringify({

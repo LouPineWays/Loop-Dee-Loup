@@ -27,6 +27,9 @@
     "SubagentStart": [
       {
         "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/tools/telemetry/hook.mjs\"" }]
+      },
+      {
+        "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/tools/orchestration/action-envelope-hook.mjs\"" }]
       }
     ],
     "SubagentStop": [

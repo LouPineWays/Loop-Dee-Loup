@@ -351,6 +351,563 @@ test("#486 action-bearing verdict control: READY_TO_DISPATCH's authorized dispat
   delete process.env.LDL_ACTION_ENVELOPE_STATE_DIR;
 });
 
+// -- detectBoundedVerdict: the PostToolUse/PostToolUseFailure bounded-mode marking decision --
+// (issue #678)
+
+test("detectBoundedVerdict: marks a genuine STAGE1_CORRECTION_REQUIRED bounded verdict from next-review-transition-gate.mjs", async () => {
+  const { detectBoundedVerdict } = await import("./action-envelope-hook.mjs");
+  const stdout = JSON.stringify({
+    state: "STAGE1_CORRECTION_REQUIRED",
+    stopAfter: true,
+    correctionReason: "findings",
+    actionEnvelope: { mode: "bounded", authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"] },
+  });
+  const verdict = detectBoundedVerdict(
+    "node tools/orchestration/next-review-transition-gate.mjs --control-issue 631",
+    stdout,
+  );
+  assert.equal(verdict?.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.deepEqual(verdict?.actionEnvelope.authorizedActions, ["reserve-correction-checkout", "dispatch-correction-worker"]);
+});
+
+test("detectBoundedVerdict: does NOT mark a none-mode verdict (must not widen the none-mode marker path)", async () => {
+  const { detectBoundedVerdict } = await import("./action-envelope-hook.mjs");
+  const stdout = JSON.stringify({ state: "NO_ACTION_YET", actionEnvelope: { mode: "none", authorizedActions: [] } });
+  assert.equal(
+    detectBoundedVerdict("node tools/orchestration/next-review-transition-gate.mjs --control-issue 487", stdout),
+    null,
+  );
+});
+
+test("detectBoundedVerdict: does NOT mark a chain or fallthrough verdict", async () => {
+  const { detectBoundedVerdict } = await import("./action-envelope-hook.mjs");
+  const chainStdout = JSON.stringify({
+    state: "AUDIT_ISSUE_DETECTED",
+    actionEnvelope: { mode: "chain", authorizedActions: ["run-next-review-transition-gate"] },
+  });
+  assert.equal(
+    detectBoundedVerdict("node tools/orchestration/ready-dispatch-gate.mjs --control-issue 487", chainStdout),
+    null,
+  );
+  const fallthroughStdout = JSON.stringify({ state: "NOT_READY", actionEnvelope: { mode: "fallthrough", authorizedActions: [] } });
+  assert.equal(
+    detectBoundedVerdict("node tools/orchestration/ready-dispatch-gate.mjs --control-issue 999", fallthroughStdout),
+    null,
+  );
+});
+
+test("detectBoundedVerdict: ignores a bounded-shaped JSON line from an unrelated command", async () => {
+  const { detectBoundedVerdict } = await import("./action-envelope-hook.mjs");
+  const stdout = JSON.stringify({
+    state: "STAGE1_CORRECTION_REQUIRED",
+    actionEnvelope: { mode: "bounded", authorizedActions: ["dispatch-correction-worker"] },
+  });
+  assert.equal(detectBoundedVerdict("node some-other-script.mjs", stdout), null);
+});
+
+// -- shouldConsumeBoundedDispatch / consumeBoundedDispatch (issue #678) --------------------
+
+test("shouldConsumeBoundedDispatch: true for a bounded marker naming a worker-dispatch action", async () => {
+  const { shouldConsumeBoundedDispatch } = await import("./action-envelope-hook.mjs");
+  assert.equal(
+    shouldConsumeBoundedDispatch({ mode: "bounded", authorizedActions: ["dispatch-correction-worker"] }),
+    true,
+  );
+  assert.equal(
+    shouldConsumeBoundedDispatch({
+      mode: "bounded",
+      authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"],
+    }),
+    true,
+  );
+});
+
+test("shouldConsumeBoundedDispatch: false for a non-dispatch bounded marker, a none marker, or no marker", async () => {
+  const { shouldConsumeBoundedDispatch } = await import("./action-envelope-hook.mjs");
+  assert.equal(
+    shouldConsumeBoundedDispatch({
+      mode: "bounded",
+      authorizedActions: ["prepare-dispatch-manifest", "write-control-snapshot"],
+    }),
+    false,
+  );
+  assert.equal(shouldConsumeBoundedDispatch({ mode: "none", authorizedActions: [] }), false);
+  assert.equal(shouldConsumeBoundedDispatch(null), false);
+});
+
+test("consumeBoundedDispatch: overwrites a bounded marker into an exhausted none-mode marker", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-action-envelope-hook-test-"));
+  process.env.LDL_ACTION_ENVELOPE_STATE_DIR = dir;
+  const mod = await import(`./action-envelope-hook.mjs?isolate=${Date.now()}`);
+  const sessionId = "session-consume";
+
+  mod.writeMarker(sessionId, {
+    state: "STAGE2_CORRECTION_REQUIRED",
+    actionEnvelope: { mode: "bounded", authorizedActions: ["dispatch-correction-worker"] },
+  });
+  const marker = mod.readMarker(sessionId);
+  const exhausted = mod.consumeBoundedDispatch(sessionId, marker);
+  assert.equal(exhausted.mode, "none");
+  assert.equal(exhausted.state, "STAGE2_CORRECTION_REQUIRED");
+
+  const readBack = mod.readMarker(sessionId);
+  assert.equal(readBack.mode, "none");
+  assert.equal(mod.decidePreToolUse(readBack).permissionDecision, "deny");
+
+  rmSync(dir, { recursive: true, force: true });
+  delete process.env.LDL_ACTION_ENVELOPE_STATE_DIR;
+});
+
+// -- decidePreToolUse: bounded-mode gate-rerun denial (issue #678) -------------------------
+
+test("decidePreToolUse: bounded marker denies a Bash rerun of either gate script", async () => {
+  const { decidePreToolUse } = await import("./action-envelope-hook.mjs");
+  const marker = {
+    state: "STAGE1_CORRECTION_REQUIRED",
+    mode: "bounded",
+    authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"],
+  };
+  const decision = decidePreToolUse(marker, {
+    toolName: "Bash",
+    command: "node tools/orchestration/next-review-transition-gate.mjs --control-issue 631",
+  });
+  assert.equal(decision.permissionDecision, "deny");
+  assert.match(decision.permissionDecisionReason, /STAGE1_CORRECTION_REQUIRED/);
+  assert.match(decision.permissionDecisionReason, /dispatch-correction-worker/);
+
+  const decisionOtherGate = decidePreToolUse(marker, {
+    toolName: "Bash",
+    command: "node tools/orchestration/ready-dispatch-gate.mjs --control-issue 487",
+  });
+  assert.equal(decisionOtherGate.permissionDecision, "deny");
+});
+
+test("decidePreToolUse: bounded marker allows a non-gate-script Bash call and a subagent dispatch", async () => {
+  const { decidePreToolUse } = await import("./action-envelope-hook.mjs");
+  const marker = {
+    state: "STAGE1_CORRECTION_REQUIRED",
+    mode: "bounded",
+    authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"],
+  };
+  assert.deepEqual(
+    decidePreToolUse(marker, { toolName: "Bash", command: "node tools/orchestration/pr-head-checkout-preflight.mjs --reserve-from-gate" }),
+    { permissionDecision: "allow" },
+  );
+  assert.deepEqual(decidePreToolUse(marker, { toolName: "Agent" }), { permissionDecision: "allow" });
+  // Omitted toolCall (backward compatible with every pre-#678 caller) also allows through.
+  assert.deepEqual(decidePreToolUse(marker), { permissionDecision: "allow" });
+});
+
+// -- #631 live reproduction: bounded STAGE1_CORRECTION_REQUIRED rerun denied, dispatch --------
+// allowed exactly once, and every action after consumption is denied.
+
+test("#631 reproduction: bounded correction verdict rejects a same-context gate rerun before the dispatch", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-action-envelope-hook-test-"));
+  process.env.LDL_ACTION_ENVELOPE_STATE_DIR = dir;
+  const mod = await import(`./action-envelope-hook.mjs?isolate=${Date.now()}`);
+  const sessionId = "session-631-work-on-487";
+
+  // 1. next-review-transition-gate.mjs returns the exact #631 bounded verdict.
+  const stdout = JSON.stringify({
+    state: "STAGE1_CORRECTION_REQUIRED",
+    stopAfter: true,
+    correctionReason: "findings",
+    controlIssue: 631,
+    issue: 630,
+    pr: 637,
+    actionEnvelope: { mode: "bounded", authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"] },
+  });
+  const verdict = mod.detectBoundedVerdict(
+    "node tools/orchestration/next-review-transition-gate.mjs --control-issue 631",
+    stdout,
+  );
+  assert.ok(verdict, "the bounded STAGE1_CORRECTION_REQUIRED verdict must be detected");
+  mod.writeMarker(sessionId, verdict);
+
+  // 2. AC2: attempting to rerun next-review-transition-gate.mjs before consuming the
+  //    authorized dispatch — the exact #631 defect — is rejected; the second gate never runs.
+  const rerunDecision = mod.decidePreToolUse(mod.readMarker(sessionId), {
+    toolName: "Bash",
+    command: "node tools/orchestration/next-review-transition-gate.mjs --control-issue 631",
+  });
+  assert.equal(rerunDecision.permissionDecision, "deny");
+
+  // 3. AC3: the reservation pre-step and the correction-worker dispatch itself remain
+  //    permitted — this hook never blocks the envelope's own authorized action(s).
+  const reserveDecision = mod.decidePreToolUse(mod.readMarker(sessionId), {
+    toolName: "Bash",
+    command: "node tools/orchestration/pr-head-checkout-preflight.mjs --reserve-from-gate --execution-issue 630",
+  });
+  assert.equal(reserveDecision.permissionDecision, "allow");
+  const dispatchDecision = mod.decidePreToolUse(mod.readMarker(sessionId), { toolName: "Agent" });
+  assert.equal(dispatchDecision.permissionDecision, "allow");
+
+  // 4. The dispatch actually happens: Claude Code fires SubagentStart for the spawned
+  //    correction worker, carrying this same orchestrating session's session_id.
+  const markerBeforeDispatch = mod.readMarker(sessionId);
+  assert.equal(mod.shouldConsumeBoundedDispatch(markerBeforeDispatch), true);
+  mod.consumeBoundedDispatch(sessionId, markerBeforeDispatch);
+
+  // 5. AC4: after the bounded dispatch is consumed, a same-context gate rerun, a
+  //     representative repository/GitHub operation, and any other operational continuation
+  //     are all rejected — the initiating controller cannot continue.
+  const postDispatchMarker = mod.readMarker(sessionId);
+  const postRerun = mod.decidePreToolUse(postDispatchMarker, {
+    toolName: "Bash",
+    command: "node tools/orchestration/next-review-transition-gate.mjs --control-issue 631",
+  });
+  assert.equal(postRerun.permissionDecision, "deny");
+  const postGhOp = mod.decidePreToolUse(postDispatchMarker, { toolName: "Bash", command: "gh pr view 637" });
+  assert.equal(postGhOp.permissionDecision, "deny");
+  const postRead = mod.decidePreToolUse(postDispatchMarker, { toolName: "Read" });
+  assert.equal(postRead.permissionDecision, "deny");
+
+  // 6. AC5: a fresh invocation (new session_id) is unaffected by this session's exhausted marker.
+  assert.deepEqual(mod.decidePreToolUse(mod.readMarker("a-later-fresh-session-487")), { permissionDecision: "allow" });
+
+  rmSync(dir, { recursive: true, force: true });
+  delete process.env.LDL_ACTION_ENVELOPE_STATE_DIR;
+});
+
+// -- Stage 2 correction-required parity fixture (AC6) ---------------------------------------
+
+test("Stage 2 correction-required parity: STAGE2_CORRECTION_REQUIRED gets identical bounded enforcement", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-action-envelope-hook-test-"));
+  process.env.LDL_ACTION_ENVELOPE_STATE_DIR = dir;
+  const mod = await import(`./action-envelope-hook.mjs?isolate=${Date.now()}`);
+  const sessionId = "session-stage2-correction";
+
+  const stdout = JSON.stringify({
+    state: "STAGE2_CORRECTION_REQUIRED",
+    stopAfter: true,
+    actionEnvelope: { mode: "bounded", authorizedActions: ["dispatch-correction-worker"] },
+  });
+  const verdict = mod.detectBoundedVerdict(
+    "node tools/orchestration/next-review-transition-gate.mjs --audit-issue 700",
+    stdout,
+  );
+  assert.ok(verdict);
+  mod.writeMarker(sessionId, verdict);
+
+  // Rerun denied before dispatch.
+  assert.equal(
+    mod.decidePreToolUse(mod.readMarker(sessionId), {
+      toolName: "Bash",
+      command: "node tools/orchestration/next-review-transition-gate.mjs --audit-issue 700",
+    }).permissionDecision,
+    "deny",
+  );
+  // Dispatch allowed, then consumed via SubagentStart.
+  assert.equal(mod.decidePreToolUse(mod.readMarker(sessionId), { toolName: "Agent" }).permissionDecision, "allow");
+  mod.consumeBoundedDispatch(sessionId, mod.readMarker(sessionId));
+  // Everything denied afterward.
+  assert.equal(mod.decidePreToolUse(mod.readMarker(sessionId), { toolName: "Agent" }).permissionDecision, "deny");
+
+  rmSync(dir, { recursive: true, force: true });
+  delete process.env.LDL_ACTION_ENVELOPE_STATE_DIR;
+});
+
+// -- Non-dispatch bounded envelope control: gate rerun still denied, but SubagentStart never --
+// exhausts it (a stray dispatch is not how this envelope's own actions are fulfilled).
+
+test("non-dispatch bounded envelope: gate rerun denied, but an unrelated SubagentStart never exhausts it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-action-envelope-hook-test-"));
+  process.env.LDL_ACTION_ENVELOPE_STATE_DIR = dir;
+  const mod = await import(`./action-envelope-hook.mjs?isolate=${Date.now()}`);
+  const sessionId = "session-manifest";
+
+  const stdout = JSON.stringify({
+    state: "READY_TO_RUN_DISPATCH_MANIFEST",
+    actionEnvelope: { mode: "bounded", authorizedActions: ["prepare-dispatch-manifest", "write-control-snapshot"] },
+  });
+  const verdict = mod.detectBoundedVerdict("node tools/orchestration/ready-dispatch-gate.mjs --control-issue 487", stdout);
+  assert.ok(verdict);
+  mod.writeMarker(sessionId, verdict);
+
+  assert.equal(
+    mod.decidePreToolUse(mod.readMarker(sessionId), {
+      toolName: "Bash",
+      command: "node tools/orchestration/ready-dispatch-gate.mjs --control-issue 487",
+    }).permissionDecision,
+    "deny",
+  );
+  assert.equal(mod.shouldConsumeBoundedDispatch(mod.readMarker(sessionId)), false);
+  // Its own authorized Bash actions remain allowed.
+  assert.equal(
+    mod.decidePreToolUse(mod.readMarker(sessionId), {
+      toolName: "Bash",
+      command: "node tools/orchestration/prepare-dispatch-manifest.mjs --execution-issue 630 --create",
+    }).permissionDecision,
+    "allow",
+  );
+
+  rmSync(dir, { recursive: true, force: true });
+  delete process.env.LDL_ACTION_ENVELOPE_STATE_DIR;
+});
+
+// -- Regression: none/chain/fallthrough modes remain unaffected by the bounded extension -----
+// (AC7)
+
+test("regression: a none-mode marker's enforcement is identical with or without a toolCall argument", async () => {
+  const { decidePreToolUse } = await import("./action-envelope-hook.mjs");
+  const marker = { state: "NO_ACTION_YET", mode: "none", authorizedActions: [] };
+  const withoutToolCall = decidePreToolUse(marker);
+  const withToolCall = decidePreToolUse(marker, { toolName: "Bash", command: "gh pr view 1" });
+  assert.equal(withoutToolCall.permissionDecision, "deny");
+  assert.equal(withToolCall.permissionDecision, "deny");
+  assert.equal(withoutToolCall.permissionDecisionReason, withToolCall.permissionDecisionReason);
+});
+
+test("regression: chain and fallthrough verdicts are still never marked by either detector", async () => {
+  const { detectNoActionVerdict, detectBoundedVerdict } = await import("./action-envelope-hook.mjs");
+  const chainStdout = JSON.stringify({
+    state: "BLOCKED",
+    blockerReconciliationEligible: true,
+    actionEnvelope: { mode: "chain", authorizedActions: ["run-reconcile-control-blocker"] },
+  });
+  const fallthroughStdout = JSON.stringify({ state: "NOT_READY", actionEnvelope: { mode: "fallthrough", authorizedActions: [] } });
+  for (const stdout of [chainStdout, fallthroughStdout]) {
+    assert.equal(detectNoActionVerdict("node tools/orchestration/ready-dispatch-gate.mjs --control-issue 1", stdout), null);
+    assert.equal(detectBoundedVerdict("node tools/orchestration/ready-dispatch-gate.mjs --control-issue 1", stdout), null);
+  }
+});
+
+// -- Stage 1 correction on PR #714 (issue #678): finding 1, verdict capture on the real -------
+// piped dispatch pipeline, via the side channel gate scripts persist at emission time.
+
+test("persistLastGateVerdict/consumeLastGateVerdict round-trip through the side channel; consuming deletes it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-action-envelope-hook-test-"));
+  process.env.LDL_ACTION_ENVELOPE_STATE_DIR = dir;
+  const mod = await import(`./action-envelope-hook.mjs?isolate=${Date.now()}`);
+
+  assert.equal(mod.consumeLastGateVerdict(), null);
+  const verdict = {
+    state: "STAGE1_CORRECTION_REQUIRED",
+    actionEnvelope: { mode: "bounded", authorizedActions: ["dispatch-correction-worker"] },
+  };
+  mod.persistLastGateVerdict(verdict);
+  assert.deepEqual(mod.consumeLastGateVerdict(), verdict);
+  // Consuming deletes it -- a second read finds nothing, so the same verdict is never
+  // attributed to a later, unrelated command.
+  assert.equal(mod.consumeLastGateVerdict(), null);
+
+  mod.persistLastGateVerdict(verdict);
+  mod.clearLastGateVerdict();
+  assert.equal(mod.consumeLastGateVerdict(), null);
+
+  rmSync(dir, { recursive: true, force: true });
+  delete process.env.LDL_ACTION_ENVELOPE_STATE_DIR;
+});
+
+test("markObservedVerdict: falls back to the side channel when a downstream pipeline stage transformed the command's captured stdout", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-action-envelope-hook-test-"));
+  process.env.LDL_ACTION_ENVELOPE_STATE_DIR = dir;
+  const mod = await import(`./action-envelope-hook.mjs?isolate=${Date.now()}`);
+  const sessionId = "session-piped-dispatch";
+
+  const verdict = {
+    state: "STAGE1_CORRECTION_REQUIRED",
+    stopAfter: true,
+    actionEnvelope: { mode: "bounded", authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"] },
+  };
+  // The gate script's own side effect (added to both gate scripts' main()): persists its
+  // verdict the instant it is emitted, before any downstream stage can transform stdout.
+  mod.persistLastGateVerdict(verdict);
+
+  // The Bash tool's own captured stdout is the FINAL pipeline stage's rendered prompt text,
+  // not JSON at all -- exactly the real
+  // `next-review-transition-gate.mjs | pr-head-checkout-preflight.mjs --reserve-from-gate |
+  // format-dispatch-prompt.mjs` dispatch pipeline shape.
+  const renderedPromptText = "Stage 1 correction worker dispatch.\nExecution Issue: #678.\n";
+  mod.markObservedVerdict(
+    sessionId,
+    "node tools/orchestration/next-review-transition-gate.mjs --control-issue 487 | node tools/orchestration/format-dispatch-prompt.mjs",
+    renderedPromptText,
+  );
+
+  const marker = mod.readMarker(sessionId);
+  assert.ok(marker, "the side channel must supply the verdict the transformed stdout lost");
+  assert.equal(marker.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.equal(marker.mode, "bounded");
+  // The side channel is consumed (deleted), so a later unrelated command never reuses it.
+  assert.equal(mod.consumeLastGateVerdict(), null);
+
+  rmSync(dir, { recursive: true, force: true });
+  delete process.env.LDL_ACTION_ENVELOPE_STATE_DIR;
+});
+
+test("markObservedVerdict: the direct stdout extraction is preferred over the side channel when both are present", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-action-envelope-hook-test-"));
+  process.env.LDL_ACTION_ENVELOPE_STATE_DIR = dir;
+  const mod = await import(`./action-envelope-hook.mjs?isolate=${Date.now()}`);
+  const sessionId = "session-direct-preferred";
+
+  // A stale/unrelated side-channel entry must not override a verdict already recovered
+  // directly from this command's own captured stdout (the common non-piped case).
+  mod.persistLastGateVerdict({
+    state: "STALE_UNRELATED",
+    actionEnvelope: { mode: "none", authorizedActions: [] },
+  });
+  const stdout = JSON.stringify({
+    state: "NO_ACTION_YET",
+    actionEnvelope: { mode: "none", authorizedActions: [] },
+  });
+  mod.markObservedVerdict(sessionId, "node tools/orchestration/next-review-transition-gate.mjs --control-issue 487", stdout);
+  assert.equal(mod.readMarker(sessionId).state, "NO_ACTION_YET");
+  // The side channel is left alone since it was never consulted.
+  assert.equal(mod.consumeLastGateVerdict().state, "STALE_UNRELATED");
+
+  rmSync(dir, { recursive: true, force: true });
+  delete process.env.LDL_ACTION_ENVELOPE_STATE_DIR;
+});
+
+test("markObservedVerdict: the side-channel fallback is never consulted when the command did not invoke a gate script", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-action-envelope-hook-test-"));
+  process.env.LDL_ACTION_ENVELOPE_STATE_DIR = dir;
+  const mod = await import(`./action-envelope-hook.mjs?isolate=${Date.now()}`);
+  const sessionId = "session-unrelated-command";
+
+  mod.persistLastGateVerdict({ state: "NO_ACTION_YET", actionEnvelope: { mode: "none", authorizedActions: [] } });
+  mod.markObservedVerdict(sessionId, "gh pr view 637", "some unrelated output");
+  assert.equal(mod.readMarker(sessionId), null);
+  // Leftover side-channel content from an unrelated prior gate run is untouched here.
+  assert.ok(mod.consumeLastGateVerdict());
+
+  rmSync(dir, { recursive: true, force: true });
+  delete process.env.LDL_ACTION_ENVELOPE_STATE_DIR;
+});
+
+// -- Stage 1 correction on PR #714 (issue #678): finding 2, a dispatch-unit-wave marker -------
+// must survive multiple SubagentStart events until its full authorized wave has started.
+
+test("expectedDispatchCount/recordSubagentDispatchStart: a dispatch-unit-wave marker survives multiple SubagentStart events until its full wave has started", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-action-envelope-hook-test-"));
+  process.env.LDL_ACTION_ENVELOPE_STATE_DIR = dir;
+  const mod = await import(`./action-envelope-hook.mjs?isolate=${Date.now()}`);
+  const sessionId = "session-unit-wave";
+
+  const verdict = {
+    state: "READY_TO_DISPATCH_UNITS",
+    stopAfter: true,
+    dispatchReadyUnitIds: ["498-A", "498-B", "498-C"],
+    actionEnvelope: { mode: "bounded", authorizedActions: ["dispatch-unit-wave"] },
+  };
+  mod.writeMarker(sessionId, verdict);
+  assert.equal(mod.expectedDispatchCount(mod.readMarker(sessionId)), 3);
+
+  // First worker starts: the wave is not fully dispatched yet, so the marker must stay
+  // bounded and the formatter/Agent calls for the remaining ready units must still be allowed.
+  mod.recordSubagentDispatchStart(sessionId, mod.readMarker(sessionId));
+  let marker = mod.readMarker(sessionId);
+  assert.equal(marker.mode, "bounded", "one worker start must not exhaust a 3-unit wave");
+  assert.equal(marker.dispatchStartsConsumed, 1);
+  assert.equal(
+    mod.decidePreToolUse(marker, {
+      toolName: "Bash",
+      command: "node tools/orchestration/format-unit-dispatch-prompt.mjs --execution-issue 487 --unit 498-B",
+    }).permissionDecision,
+    "allow",
+  );
+  // A same-controller gate rerun stays denied throughout the wave.
+  assert.equal(
+    mod.decidePreToolUse(marker, {
+      toolName: "Bash",
+      command: "node tools/orchestration/ready-dispatch-gate.mjs --control-issue 487",
+    }).permissionDecision,
+    "deny",
+  );
+
+  // Second worker starts: still short of the full wave.
+  mod.recordSubagentDispatchStart(sessionId, mod.readMarker(sessionId));
+  marker = mod.readMarker(sessionId);
+  assert.equal(marker.mode, "bounded");
+  assert.equal(marker.dispatchStartsConsumed, 2);
+
+  // Third worker starts: the wave is now fully dispatched -- exhaust exactly like the
+  // single-worker case already does.
+  mod.recordSubagentDispatchStart(sessionId, mod.readMarker(sessionId));
+  marker = mod.readMarker(sessionId);
+  assert.equal(marker.mode, "none");
+  assert.equal(mod.decidePreToolUse(marker, { toolName: "Bash", command: "gh pr view 1" }).permissionDecision, "deny");
+
+  rmSync(dir, { recursive: true, force: true });
+  delete process.env.LDL_ACTION_ENVELOPE_STATE_DIR;
+});
+
+test("recordSubagentDispatchStart: a single-worker dispatch-shaped envelope (no dispatchReadyUnitIds) still exhausts on the first start, unchanged", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-action-envelope-hook-test-"));
+  process.env.LDL_ACTION_ENVELOPE_STATE_DIR = dir;
+  const mod = await import(`./action-envelope-hook.mjs?isolate=${Date.now()}`);
+  const sessionId = "session-single-worker";
+
+  mod.writeMarker(sessionId, {
+    state: "STAGE1_CORRECTION_REQUIRED",
+    actionEnvelope: { mode: "bounded", authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"] },
+  });
+  assert.equal(mod.expectedDispatchCount(mod.readMarker(sessionId)), 1);
+  mod.recordSubagentDispatchStart(sessionId, mod.readMarker(sessionId));
+  assert.equal(mod.readMarker(sessionId).mode, "none");
+
+  rmSync(dir, { recursive: true, force: true });
+  delete process.env.LDL_ACTION_ENVELOPE_STATE_DIR;
+});
+
+test("recordSubagentDispatchStart: a non-dispatch bounded marker is left untouched by any SubagentStart", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-action-envelope-hook-test-"));
+  process.env.LDL_ACTION_ENVELOPE_STATE_DIR = dir;
+  const mod = await import(`./action-envelope-hook.mjs?isolate=${Date.now()}`);
+  const sessionId = "session-non-dispatch";
+
+  mod.writeMarker(sessionId, {
+    state: "READY_TO_RUN_DISPATCH_MANIFEST",
+    actionEnvelope: { mode: "bounded", authorizedActions: ["prepare-dispatch-manifest", "write-control-snapshot"] },
+  });
+  const before = mod.readMarker(sessionId);
+  const result = mod.recordSubagentDispatchStart(sessionId, before);
+  assert.equal(result, null);
+  assert.deepEqual(mod.readMarker(sessionId), before);
+
+  rmSync(dir, { recursive: true, force: true });
+  delete process.env.LDL_ACTION_ENVELOPE_STATE_DIR;
+});
+
+// -- Stage 1 correction on PR #714 (issue #678): finding 3, a dispatched worker's own tool ----
+// calls (sharing session_id, carrying their own agentId) are exempt from the controller's
+// marker, including one the worker's own dispatch just exhausted.
+
+test("decidePreToolUse: a dispatched worker's own tool call (carrying agentId) is exempt from the controller's marker, including one just exhausted by its own dispatch", async () => {
+  const { decidePreToolUse } = await import("./action-envelope-hook.mjs");
+
+  const boundedMarker = {
+    state: "STAGE1_CORRECTION_REQUIRED",
+    mode: "bounded",
+    authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"],
+  };
+  assert.deepEqual(
+    decidePreToolUse(boundedMarker, { toolName: "Bash", command: "gh pr view 637", agentId: "agent-worker-1" }),
+    { permissionDecision: "allow" },
+  );
+
+  const exhaustedMarker = { state: "STAGE1_CORRECTION_REQUIRED", mode: "none", authorizedActions: [] };
+  // The controller itself (no agentId) is still denied -- the live stop boundary this hook
+  // enforces.
+  assert.equal(decidePreToolUse(exhaustedMarker).permissionDecision, "deny");
+  assert.equal(decidePreToolUse(exhaustedMarker, { toolName: "Read" }).permissionDecision, "deny");
+  // The worker that dispatch just authorized to start (carrying its own agentId) is not --
+  // the exact defect this finding closes.
+  assert.deepEqual(
+    decidePreToolUse(exhaustedMarker, { toolName: "Read", agentId: "agent-worker-1" }),
+    { permissionDecision: "allow" },
+  );
+});
+
+test("decidePreToolUse: an empty-string or non-string agentId does not exempt the call (fail-closed default)", async () => {
+  const { decidePreToolUse } = await import("./action-envelope-hook.mjs");
+  const exhaustedMarker = { state: "NO_ACTION_YET", mode: "none", authorizedActions: [] };
+  assert.equal(decidePreToolUse(exhaustedMarker, { toolName: "Read", agentId: "" }).permissionDecision, "deny");
+  assert.equal(decidePreToolUse(exhaustedMarker, { toolName: "Read", agentId: 42 }).permissionDecision, "deny");
+});
+
 test("#486 blocker/founder-interrupt no-action control: ordinary BLOCKED also stops the session via this hook", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ldl-action-envelope-hook-test-"));
   process.env.LDL_ACTION_ENVELOPE_STATE_DIR = dir;
