@@ -41,10 +41,30 @@
 //       <corrected-head-sha> (reviewed <reviewed-head-sha>)`, issue #454) whose evidence
 //       tools/review-watch/stage1-correction-gate.mjs's `checkCorrectionDelta` independently
 //       re-derives (unit 454-C), and
-//         CORRECTION_SATISFIED, lifecycle-gate merge-ready MERGE_READY(*)  -> STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2
+//         CORRECTION_SATISFIED, lifecycle-gate merge-ready MERGE_READY(*), and the live PR's
+//         own GitHub mergeable state is not a confirmed conflict against the current target
+//         branch                                            -> STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2
 //           (same effect as STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2 — merge, open/trigger
 //           Stage 2, then stop — kept as a distinct verdict string purely for durable
 //           auditability of which path authorized the merge)
+//         CORRECTION_SATISFIED, lifecycle-gate merge-ready MERGE_READY(*), but the live PR's
+//         own GitHub mergeable state ("gh pr view --json mergeable") reports "CONFLICTING"
+//         against the current target branch (issue #665, the live #639/#638/PR #640
+//         reproduction: every documented merge prerequisite passed, but the merge action itself
+//         was mechanically blocked by real target-branch drift)   -> STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT
+//           (authorizes exactly one bounded conflict-recovery worker dispatch — see
+//           docs/bounded-review-cycle.md's "Correction-satisfied merge-conflict recovery"
+//           section — never a merge attempt, a second Stage 1 round, or founder/controller-
+//           improvised branch surgery in this same context; the recovery worker integrates the
+//           current target branch into the PR branch with a real merge commit, never a rebase/
+//           force-push, so stage1-correction-gate.mjs's own strict-descendant ancestry check
+//           still holds at the new head, then re-runs finalize-correction-breakpoint.mjs with
+//           the same reviewedHead and the new correctedHead so a fresh invocation of this gate
+//           re-derives the normal merge/Stage 2 transition once the conflict is gone)
+//         CORRECTION_SATISFIED, lifecycle-gate merge-ready MERGE_READY(*), but the live PR's own
+//         GitHub mergeable state reports "UNKNOWN" (not yet computed)  -> NO_ACTION_YET (re-invoke
+//           later; never misdiagnosed as a genuine conflict, and never authorizes merge on
+//           unconfirmed evidence)
 //         CORRECTION_SATISFIED, lifecycle-gate merge-ready BLOCKED_CLOSING_REFERENCE -> STAGE1_CORRECTION_REQUIRED
 //           (correctionReason: "closing-reference" -- see #613 note below)
 //         CORRECTION_SATISFIED, any other lifecycle-gate merge-ready state -> AMBIGUOUS
@@ -267,6 +287,12 @@ import {
 import { combineMergeReadyResult } from "../review-watch/merge-ready-gate.mjs";
 // Issue #486: the deterministic action-envelope table every verdict below is stamped with.
 import { getActionEnvelope } from "./action-envelope.mjs";
+// Issue #678 Stage 1 correction (PR #714, finding 1): persists this gate's own verdict to a
+// side channel at the exact moment main() is about to print it, so action-envelope-hook.mjs
+// can still observe a bounded/none verdict when a downstream pipeline stage (e.g.
+// pr-head-checkout-preflight.mjs --reserve-from-gate, format-dispatch-prompt.mjs) transforms
+// the Bash tool's own captured stdout.
+import { clearLastGateVerdict, persistLastGateVerdict } from "./action-envelope-hook.mjs";
 
 // Pure. Reads one optional "- **Label:** value" control-Issue bullet that is expected to
 // hold either the explicit "none" sentinel or exactly one "#N" issue reference (the same
@@ -400,7 +426,10 @@ function hasFindingsStage1Response(stage1) {
   });
 }
 
-export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition = null, correctionDelta = null }, context = {}) {
+export function resolvePreMergeVerdict(
+  { stage1, mergeReady, stage1Disposition = null, correctionDelta = null, mergeConflict = null },
+  context = {},
+) {
   if (!hasTrustworthyExitCode(stage1) || !hasTrustworthyExitCode(mergeReady)) {
     return {
       state: "AMBIGUOUS",
@@ -464,6 +493,43 @@ export function resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition =
       // verdict says merge anyway.
       const composed = combineMergeReadyResult({ stage1, lifecycle: mergeReady, correctionDelta }, context);
       if (composed.exitCode === 0) {
+        // Issue #665 (live #639/#638/PR #640 reproduction): every documented merge
+        // prerequisite passed, but GitHub's own live mergeable state against the current
+        // target branch is a distinct dimension none of them inspect. `mergeConflict` is
+        // `null` whenever the caller did not fetch it (e.g. a direct unit-test call into this
+        // pure function) -- preserving today's behavior exactly, since resolvePreMerge below
+        // only ever fetches it on this exact branch.
+        if (mergeConflict && (!hasTrustworthyExitCode(mergeConflict) || mergeConflict.exitCode === 1)) {
+          return {
+            state: "AMBIGUOUS",
+            stopAfter: true,
+            ...context,
+            stage1,
+            mergeReady,
+            reason: `mergeability check for a correction-satisfied merge failed operationally: ${mergeConflict.message}`,
+          };
+        }
+        if (mergeConflict && mergeConflict.mergeable === "CONFLICTING") {
+          // A real pre-merge conflict against the current target branch. Merge is not
+          // authorized until this is deterministically recovered -- see
+          // docs/bounded-review-cycle.md's "Correction-satisfied merge-conflict recovery"
+          // section and this verdict's own action-envelope entry for the one bounded
+          // recovery worker this state authorizes.
+          return {
+            state: "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT",
+            stopAfter: true,
+            ...context,
+            reviewedHead: correctionDelta.reviewedHead,
+            correctedHead: correctionDelta.correctedHead,
+          };
+        }
+        if (mergeConflict && mergeConflict.mergeable === "UNKNOWN") {
+          // GitHub has not finished computing mergeability yet -- neither confirmed
+          // mergeable nor a confirmed conflict. Wait and re-invoke rather than either
+          // authorizing merge on unconfirmed evidence or misdiagnosing a transient
+          // "not yet computed" state as a genuine conflict requiring recovery.
+          return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
+        }
         return {
           state: "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
           stopAfter: true,
@@ -833,6 +899,7 @@ function exitCodeFor(state) {
     case "STAGE2_REPORT_READY_TO_RECORD":
       return 0;
     case "STAGE1_CORRECTION_REQUIRED":
+    case "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT":
     case "STAGE2_CORRECTION_REQUIRED":
     // Issue #646: STAGE2_CORRECTION_PR_NEEDS_FINALIZATION names a concrete, non-blocking
     // corrective action too (run the trigger/finalize nextCommand) -- same exit-code bucket as
@@ -855,7 +922,7 @@ function exitCodeFor(state) {
 
 async function resolvePreMerge(
   { repo, pr, head, issue, stage1Disposition = null, controlIssue },
-  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
+  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl = defaultGhPrMergeable },
 ) {
   let stage1;
   try {
@@ -893,8 +960,31 @@ async function resolvePreMerge(
     }
   }
 
+  // Issue #665: only ever fetched once correctionDelta itself already reports
+  // CORRECTION_SATISFIED *and* lifecycle-gate's own merge-ready leg already succeeded --
+  // exactly the one case where resolvePreMergeVerdict's own composed check below could
+  // otherwise authorize STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2. A
+  // BLOCKED_CLOSING_REFERENCE (or any other non-zero) mergeReady result is already routed to
+  // STAGE1_CORRECTION_REQUIRED regardless of live mergeability, so no extra `gh` call is spent
+  // fetching evidence that branch never consults -- mirroring correctionDelta's own "only
+  // fetched when it might matter" convention above.
+  let mergeConflict = null;
+  if (
+    correctionDelta &&
+    correctionDelta.exitCode === 0 &&
+    correctionDelta.state === "CORRECTION_SATISFIED" &&
+    mergeReady &&
+    mergeReady.exitCode === 0
+  ) {
+    try {
+      mergeConflict = await checkMergeConflictImpl({ repo, number: pr });
+    } catch (err) {
+      mergeConflict = { exitCode: 1, message: `mergeability check threw: ${err.message}` };
+    }
+  }
+
   const context = { repo, pr, head, issue, ...(controlIssue != null ? { controlIssue } : {}) };
-  const verdict = resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition, correctionDelta }, context);
+  const verdict = resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition, correctionDelta, mergeConflict }, context);
   return { exitCode: exitCodeFor(verdict.state), ...verdict };
 }
 
@@ -1050,7 +1140,7 @@ async function resolvePostMerge({ repo, auditIssue, controlIssue }, { checkPostA
 // the head itself, only once the Execution reference has already checked out.
 async function resolvePreMergeFromControlBody(
   { repo, body, prIssue, controlIssueNumber, head, ghPrHeadImpl },
-  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
+  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl },
 ) {
   const executionField = readExecutionBulletField(body);
   const executionRef = executionField.conflict
@@ -1081,7 +1171,7 @@ async function resolvePreMergeFromControlBody(
   const stage1Disposition = parseControlBullet(body, "Stage 1");
   return resolvePreMerge(
     { repo, pr: prIssue, head: resolvedHead, issue: executionRef.issue, stage1Disposition, controlIssue: controlIssueNumber },
-    { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
+    { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl },
   );
 }
 
@@ -1097,6 +1187,22 @@ function defaultGhPrHead({ repo, number }) {
     encoding: "utf8",
   });
   return JSON.parse(raw).headRefOid;
+}
+
+// Issue #665 (the live #639/#638/PR #640 reproduction): `checkMergeReady` (lifecycle-gate.mjs)
+// and `combineMergeReadyResult` (merge-ready-gate.mjs) both authorize merge without ever
+// inspecting GitHub's own live mergeability against the current target branch -- a real
+// conflict caused purely by target-branch drift is a dimension neither one checks. This reads
+// exactly that one field, `gh pr view --json mergeable`, which GitHub reports as one of
+// "MERGEABLE", "CONFLICTING", or "UNKNOWN" (computed asynchronously; not yet resolved). Scoped
+// narrowly to the one call site below that fetches it -- the correction-satisfied merge path
+// only, per this issue's own explicit scope -- so no other pre-merge path pays for this extra
+// `gh` call or changes behavior at all.
+function defaultGhPrMergeable({ repo, number }) {
+  const raw = execFileSync("gh", ["pr", "view", String(number), "--repo", repo, "--json", "mergeable"], {
+    encoding: "utf8",
+  });
+  return { exitCode: 0, mergeable: JSON.parse(raw).mergeable };
 }
 
 // Issue #537: control-Issue mode's own live-PR-state read, used only when a settled "PR" and a
@@ -1133,6 +1239,7 @@ async function runNextReviewTransitionGateCore(
     checkMergeReadyImpl = checkMergeReady,
     checkPostAuditImpl = checkPostAudit,
     checkCorrectionDeltaImpl = checkCorrectionDelta,
+    checkMergeConflictImpl = defaultGhPrMergeable,
     reconcileStage2CorrectionPrImpl = reconcileStage2CorrectionPr,
   } = {},
 ) {
@@ -1177,7 +1284,7 @@ async function runNextReviewTransitionGateCore(
         stage1Disposition: args.stage1Disposition ?? null,
         controlIssue: null,
       },
-      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
+      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl },
     );
   }
 
@@ -1276,7 +1383,7 @@ async function runNextReviewTransitionGateCore(
       const head = args.head || prState.headRefOid;
       return resolvePreMergeFromControlBody(
         { repo, body, prIssue: prRef.issue, controlIssueNumber, head, ghPrHeadImpl },
-        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
+        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl },
       );
     }
     // CLOSED without merging (or any other state gh might report): a genuinely contradictory
@@ -1399,7 +1506,7 @@ async function runNextReviewTransitionGateCore(
     const head = prState.headRefOid;
     return resolvePreMergeFromControlBody(
       { repo, body, prIssue: prRef.issue, controlIssueNumber, head, ghPrHeadImpl },
-      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
+      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl },
     );
   }
 
@@ -1440,6 +1547,10 @@ function parseArgs(argv) {
 }
 
 async function main() {
+  // Issue #678 Stage 1 correction, finding 1: clear any stale prior verdict before computing a
+  // new one, so a run that errors out below never leaves an old side-channel entry behind for
+  // a later, unrelated command to mistakenly consume.
+  clearLastGateVerdict();
   const raw = parseArgs(process.argv.slice(2));
   const result = await runNextReviewTransitionGate({
     repo: raw.repo,
@@ -1455,6 +1566,9 @@ async function main() {
     process.exit(1);
     return;
   }
+  // Issue #678 Stage 1 correction, finding 1: persist the verdict to the side channel at the
+  // exact point it is emitted, before any downstream pipeline stage can transform stdout.
+  persistLastGateVerdict(result);
   console.log(JSON.stringify(result));
   process.exit(result.exitCode);
 }

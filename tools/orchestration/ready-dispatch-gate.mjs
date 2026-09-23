@@ -197,6 +197,11 @@ import { execFileSync } from "node:child_process";
 import { parseStage2Verdict, parseFormField } from "../review-watch/lifecycle-gate.mjs";
 // Issue #486: the deterministic action-envelope table every verdict below is stamped with.
 import { getActionEnvelope } from "./action-envelope.mjs";
+// Issue #678 Stage 1 correction (PR #714, finding 1): persists this gate's own verdict to a
+// side channel at the exact moment main() is about to print it, so action-envelope-hook.mjs
+// can still observe a bounded/none verdict when a downstream pipeline stage (e.g.
+// format-dispatch-prompt.mjs) transforms the Bash tool's own captured stdout.
+import { clearLastGateVerdict, persistLastGateVerdict } from "./action-envelope-hook.mjs";
 
 const KNOWN_LIFECYCLE_STATES = [
   "READY",
@@ -2208,6 +2213,10 @@ function parseArgs(argv) {
 }
 
 async function main() {
+  // Issue #678 Stage 1 correction, finding 1: clear any stale prior verdict before computing a
+  // new one, so a run that errors out below never leaves an old side-channel entry behind for
+  // a later, unrelated command to mistakenly consume.
+  clearLastGateVerdict();
   const args = parseArgs(process.argv.slice(2));
   const result = await checkReadyDispatch({ repo: args.repo, controlIssue: args["control-issue"] });
   if (result.exitCode === 1) {
@@ -2215,6 +2224,9 @@ async function main() {
     process.exit(1);
     return;
   }
+  // Issue #678 Stage 1 correction, finding 1: persist the verdict to the side channel at the
+  // exact point it is emitted, before any downstream pipeline stage can transform stdout.
+  persistLastGateVerdict(result);
   console.log(JSON.stringify(result));
   process.exit(result.exitCode);
 }

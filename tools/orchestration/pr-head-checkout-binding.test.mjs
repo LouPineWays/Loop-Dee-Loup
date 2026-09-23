@@ -329,6 +329,35 @@ test("stale-head race: origin disagrees with the PR head at reservation time -- 
   assert.equal(worktreeCount(fx.primary), before);
 });
 
+// Stage 1 review finding on PR #719 (issue #665's own correction, P2): `expectedHead` pins a
+// reservation to the exact head a caller already gated its own verdict against -- closing the
+// conflict-recovery TOCTOU gap where a commit landing on the PR between the gate running and
+// reservation happening could otherwise silently become the worker's starting point.
+test("reserve: expectedHead matching the live PR head reserves normally", async (t) => {
+  const fx = makeFixture(t);
+  const result = await reserve(
+    { repo: "o/r", pr: PR, cwd: fx.primary, expectedHead: fx.prHead.sha },
+    { ghPrViewImpl: fx.ghPrViewImpl, tokenImpl: () => "tokpin1" },
+  );
+  assert.equal(result.verdict, "RESERVED_CREATED");
+  assert.equal(result.sha, fx.prHead.sha);
+});
+
+test("reserve: expectedHead pins the reservation to the gated head -- a live head that already advanced past it fails closed before any worktree is created", async (t) => {
+  const fx = makeFixture(t);
+  const before = worktreeCount(fx.primary);
+  const gatedHead = fx.prHead.sha;
+  fx.prHead.sha = commitFile(fx.implementer, "feature.txt", "v2 landed after the gate ran\n");
+  git(fx.implementer, "push", "-q", "origin", BRANCH);
+  const result = await reserve(
+    { repo: "o/r", pr: PR, cwd: fx.primary, expectedHead: gatedHead },
+    { ghPrViewImpl: fx.ghPrViewImpl, tokenImpl: () => "tokpin2" },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.verdict, "STALE_HEAD_MISMATCH");
+  assert.equal(worktreeCount(fx.primary), before);
+});
+
 // -------------------------------------------------------------------------------------------
 // Required check 7: already-correct checkout -- no longer trusted in place (superseded by Stage
 // 1 finding P1 on PR #710; see "occupancy negative" above, which covers this exact shape and
@@ -512,4 +541,59 @@ test("reserveFromGate: a failed reservation becomes CHECKOUT_BINDING_UNVERIFIED 
   assert.deepEqual(out.output.actionEnvelope, getActionEnvelope("CHECKOUT_BINDING_UNVERIFIED"));
   assert.equal(out.output.actionEnvelope.mode, "none");
   assert.deepEqual(out.output.actionEnvelope.authorizedActions, []);
+});
+
+// Stage 1 review finding on PR #719 (issue #665's own correction): both accepted findings as one
+// dispatch-boundary invariant. P1 -- the conflict-recovery worker mutates source exactly like a
+// findings correction worker, so it needs the same pre-spawn exclusive reservation. P2 -- that
+// reservation must be pinned to the gate's own `correctedHead`, never "whatever is live now".
+test("reserveFromGate: a STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT verdict gains checkoutBinding too, pinned to the gated correctedHead", async (t) => {
+  const fx = makeFixture(t);
+  const gate = {
+    state: "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT",
+    stopAfter: true,
+    pr: PR,
+    issue: 638,
+    controlIssue: 666,
+    reviewedHead: "3".repeat(40),
+    correctedHead: fx.prHead.sha,
+  };
+  const out = await reserveFromGate(gate, { repo: "o/r", cwd: fx.primary }, { ghPrViewImpl: fx.ghPrViewImpl, tokenImpl: () => "tokconf1" });
+  assert.equal(out.exitCode, 0);
+  assert.equal(out.output.state, "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT");
+  assert.equal(out.output.checkoutBinding.token, "tokconf1");
+  assert.equal(out.output.checkoutBinding.verdict, "RESERVED_CREATED");
+  assert.equal(out.output.checkoutBinding.sha, fx.prHead.sha);
+  assert.equal(out.output.checkoutBinding.scriptPath, SELF_SCRIPT_PATH);
+  assert.ok(existsSync(out.output.checkoutBinding.path));
+  // reviewedHead/correctedHead/every other verdict field survive the pass-through unchanged.
+  assert.equal(out.output.reviewedHead, gate.reviewedHead);
+  assert.equal(out.output.correctedHead, gate.correctedHead);
+});
+
+// The exact TOCTOU gap this closes: a commit that lands on the PR after
+// next-review-transition-gate.mjs produced its verdict, but before reservation runs, must never
+// silently become the worker's starting point -- it never passed the transition that authorized
+// recovery.
+test("reserveFromGate: STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT fails closed to CHECKOUT_BINDING_UNVERIFIED when the PR head already advanced past the gated correctedHead", async (t) => {
+  const fx = makeFixture(t);
+  const gatedCorrectedHead = fx.prHead.sha;
+  fx.prHead.sha = commitFile(fx.implementer, "feature.txt", "v2 landed after the conflict verdict\n");
+  git(fx.implementer, "push", "-q", "origin", BRANCH);
+  const gate = {
+    state: "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT",
+    stopAfter: true,
+    pr: PR,
+    issue: 638,
+    controlIssue: 666,
+    reviewedHead: "3".repeat(40),
+    correctedHead: gatedCorrectedHead,
+  };
+  const out = await reserveFromGate(gate, { repo: "o/r", cwd: fx.primary }, { ghPrViewImpl: fx.ghPrViewImpl, tokenImpl: () => "tokconf2" });
+  assert.equal(out.exitCode, 2);
+  assert.equal(out.output.state, "CHECKOUT_BINDING_UNVERIFIED");
+  assert.equal(out.output.verdict, "STALE_HEAD_MISMATCH");
+  assert.equal(out.output.stopAfter, true);
+  assert.deepEqual(out.output.actionEnvelope, getActionEnvelope("CHECKOUT_BINDING_UNVERIFIED"));
+  assert.equal(out.output.actionEnvelope.mode, "none");
 });

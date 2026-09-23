@@ -210,6 +210,25 @@ const ENVELOPES = {
     mode: ENVELOPE_MODES.BOUNDED,
     authorizedActions: ["run-finalize-stage1-satisfied-recover"],
   },
+  // Issue #665 (live #639/#638/PR #640 reproduction): every documented merge prerequisite for a
+  // correction-satisfied disposition passed, but GitHub's own live mergeable state reported a
+  // real conflict against the current target branch -- a dimension neither stage1-gate.mjs nor
+  // lifecycle-gate.mjs's merge-ready check inspects. Authorizes exactly one bounded
+  // conflict-recovery worker dispatch, never a merge attempt, a second Stage 1 round, or
+  // founder/controller-improvised branch surgery in this same context. See
+  // docs/bounded-review-cycle.md's "Correction-satisfied merge-conflict recovery" section.
+  //
+  // Stage 1 review finding on PR #719 (P1): this recovery worker mutates source exactly like a
+  // findings-bearing STAGE1_CORRECTION_REQUIRED worker does, so it needs the same pre-spawn
+  // exclusive PR-head reservation (`pr-head-checkout-preflight.mjs --reserve-from-gate`) settled
+  // strictly before dispatch -- mirroring STAGE1_CORRECTION_REQUIRED's own
+  // `["reserve-correction-checkout", "dispatch-correction-worker"]` ordering below. A failed
+  // reservation still surfaces as its own terminal CHECKOUT_BINDING_UNVERIFIED verdict (see that
+  // row's own comment), never as a violation of this bounded envelope.
+  STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["reserve-correction-checkout", "dispatch-conflict-recovery-worker"],
+  },
   // Issue #703: a findings-bearing Stage 1 correction settles the worker's exact PR-head checkout
   // BEFORE spawn (`pr-head-checkout-preflight.mjs --reserve-from-gate`, the pipeline stage between
   // this gate and `format-dispatch-prompt.mjs`), so `reserve-correction-checkout` is authorized
