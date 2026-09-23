@@ -278,8 +278,7 @@ import { run as stage1Run } from "../review-watch/stage1-gate.mjs";
 import {
   checkMergeReady,
   checkPostAudit,
-  parseMergeCommitRef,
-  parseWorkIssueRef,
+  findMatchingOpenAuditIssues,
   defaultGhIssueList as defaultGhAuditIssueSearchList,
 } from "../review-watch/lifecycle-gate.mjs";
 import { isCleanStage1Response } from "../review-watch/consumer-sync-gate.mjs";
@@ -1255,30 +1254,20 @@ function defaultGhPrState({ repo, number }) {
   return JSON.parse(raw);
 }
 
-// Pure. Issue #729 (control #398, the #723/#727 liveness seam): a prior Stage 2 preparation
-// worker may have already created (or reconciled onto) the canonical Stage 2 Audit Issue for
-// this exact PR/merge commit and returned "AUDIT_READY #<n>" -- but the bounded controller
-// context that received that return value ended (interruption, not a designed stop) before it
-// could run finalize-audit-breakpoint.mjs. The Audit Issue itself is already durable (it exists
-// on GitHub); only the *fact that it's the authoritative one for this control Issue* needs
-// deterministic recovery. Filters `candidates` (the same `{ number, title, body, state,
-// createdAt }` shape lifecycle-gate.mjs's own "[Audit] in:title" search returns, reused rather
-// than a second search mechanism) to those that are genuinely OPEN and whose own structured
-// "Exact merge commit"/"Work issue" fields match -- the identical evidence
-// finalize-audit-breakpoint.mjs's verifyAuditIssueMatches independently re-verifies before ever
-// projecting control state, so this is a query, never a second source of truth. A CLOSED
-// candidate (e.g. superseded, or closed for an unrelated reason) or one whose fields don't match
-// is never treated as a match -- fail closed to "not found" (normal STAGE2_PREPARATION_REQUIRED
-// dispatch) rather than guessing.
-export function findMatchingOpenAuditIssues(candidates, { mergeCommitOid, executionIssue }) {
-  const expectedWorkIssue = executionIssue === "none" ? "none" : executionIssue;
-  return (candidates ?? []).filter((candidate) => {
-    if (candidate.state !== "OPEN") return false;
-    const candidateMergeCommit = parseMergeCommitRef(candidate.body ?? "");
-    if (!candidateMergeCommit || candidateMergeCommit.toLowerCase() !== String(mergeCommitOid).toLowerCase()) return false;
-    return parseWorkIssueRef(candidate.body ?? "") === expectedWorkIssue;
-  });
-}
+// Issue #729 (control #398, the #723/#727 liveness seam): a prior Stage 2 preparation worker may
+// have already created (or reconciled onto) the canonical Stage 2 Audit Issue for this exact
+// PR/merge commit and returned "AUDIT_READY #<n>" -- but the bounded controller context that
+// received that return value ended (interruption, not a designed stop) before it could run
+// finalize-audit-breakpoint.mjs. The Audit Issue itself is already durable (it exists on GitHub);
+// only the *fact that it's the authoritative one for this control Issue* needs deterministic
+// recovery. `findMatchingOpenAuditIssues` now lives in `../review-watch/lifecycle-gate.mjs`
+// (Stage 1 review finding P1/P2 on PR #730) so this module's own initial reconciliation search
+// below and `finalize-audit-breakpoint.mjs`'s final pre-projection/trigger revalidation share one
+// definition of "audit ready" -- including the complete canonical audit shape requirement, not
+// only the two structured pointer fields -- rather than each maintaining a second, competing
+// filter that could silently drift apart. Re-exported here so existing callers/tests of this
+// module keep importing it from its established path.
+export { findMatchingOpenAuditIssues };
 
 // Issue #729: the async orchestration wrapper around findMatchingOpenAuditIssues above --
 // injectable `ghIssueListImpl` mirrors this module's existing reconcileStage2CorrectionPr
@@ -1708,7 +1697,16 @@ async function runNextReviewTransitionGateCore(
           // trusts this reconciliation's own match as sufficient on its own) before
           // trigger.mjs's own idempotent dedup check ever runs -- so a retry of this exact
           // nextCommand (#729 Required Behavior 5) neither duplicates the Audit Issue (already
-          // durable, only reused) nor posts a duplicate reviewer trigger.
+          // durable, only reused) nor posts a duplicate reviewer trigger. Stage 1 review finding
+          // P2 on PR #730 (the TOCTOU gap): a second preparation worker could durably create
+          // another matching canonical Audit Issue between this reconciliation search and the
+          // finalize step's own control write/trigger authorization, so this recovery path's own
+          // `nextCommand` -- and only this path, since it alone performs a discovery search a
+          // race can land behind -- opts finalize-audit-breakpoint.mjs into re-searching and
+          // revalidating that `reconciled.auditIssue` is still the sole matching OPEN canonical
+          // Audit Issue immediately before it writes/triggers, failing closed to
+          // AUDIT_BREAKPOINT_UNVERIFIED rather than silently proceeding against ambiguous
+          // evidence if a second match has since appeared.
           return {
             exitCode: 0,
             state: "STAGE2_AUDIT_ALREADY_PREPARED",
@@ -1720,7 +1718,8 @@ async function runNextReviewTransitionGateCore(
             auditIssue: reconciled.auditIssue,
             nextCommand:
               `node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue ${controlIssueNumber} ` +
-              `--execution-issue ${executionRef.issue} --pr ${prRef.issue} --audit-issue ${reconciled.auditIssue} && ` +
+              `--execution-issue ${executionRef.issue} --pr ${prRef.issue} --audit-issue ${reconciled.auditIssue} ` +
+              `--revalidate-uniqueness true && ` +
               `node tools/review-watch/trigger.mjs --repo ${repo} --kind issue --number ${reconciled.auditIssue}`,
           };
         }

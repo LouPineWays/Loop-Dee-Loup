@@ -1662,8 +1662,17 @@ test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 referenc
 // ran. A fresh controller must deterministically recover #727 rather than redispatching
 // semantic preparation merely to rediscover already-known state.
 
-function auditIssueBody({ workIssue, mergeCommit }) {
-  return ["### Work issue", "", String(workIssue), "", "### Exact merge commit", "", `\`${mergeCommit}\``, ""].join("\n");
+// Issue #729 Stage 1 review finding P1 on PR #730: a durable match must now have the *complete*
+// canonical audit shape, not only these two structured pointer fields -- so this default fixture
+// includes a real "Stage 1 inline review disposition" field too. `incomplete: true` reproduces the
+// exact two-field-only shell the finding describes (a prior preparation attempt that created an
+// issue but failed/was interrupted before completing the required template).
+function auditIssueBody({ workIssue, mergeCommit, incomplete = false }) {
+  const fields = ["### Work issue", "", String(workIssue), "", "### Exact merge commit", "", `\`${mergeCommit}\``, ""];
+  if (!incomplete) {
+    fields.push("### Stage 1 inline review disposition", "", "One inline @codex review round at frozen head; no findings.", "");
+  }
+  return fields.join("\n");
 }
 
 const MERGE_COMMIT_723 = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
@@ -1698,7 +1707,7 @@ test("runNextReviewTransitionGate: a merged PR with no settled Stage 2 reference
   assert.equal(result.auditIssue, 727);
   assert.match(
     result.nextCommand,
-    /finalize-audit-breakpoint\.mjs --control-issue 322 --execution-issue 375 --pr 376 --audit-issue 727 && node tools\/review-watch\/trigger\.mjs --repo o\/r --kind issue --number 727/,
+    /finalize-audit-breakpoint\.mjs --control-issue 322 --execution-issue 375 --pr 376 --audit-issue 727 --revalidate-uniqueness true && node tools\/review-watch\/trigger\.mjs --repo o\/r --kind issue --number 727/,
   );
   assert.deepEqual(result.actionEnvelope, {
     mode: "bounded",
@@ -1802,6 +1811,19 @@ test("findMatchingOpenAuditIssues: matches only an OPEN candidate whose own merg
     matches.map((m) => m.number),
     [727],
   );
+});
+
+// Issue #729 Stage 1 review finding P1 on PR #730: an OPEN candidate whose "Exact merge commit"
+// and "Work issue" fields both match, but which lacks the "Stage 1 inline review disposition"
+// field (the exact two-field-only shell a prior preparation attempt would leave behind if it
+// failed or was interrupted before completing the required template), must never be treated as a
+// match -- an incomplete audit cannot provide the required Stage 2 assurance.
+test("findMatchingOpenAuditIssues: a two-field-only (incomplete canonical shape) candidate is never a match, even when merge commit and work issue both match", () => {
+  const candidates = [
+    { number: 727, state: "OPEN", body: auditIssueBody({ workIssue: "#375", mergeCommit: MERGE_COMMIT_723, incomplete: true }) },
+  ];
+  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid: MERGE_COMMIT_723, executionIssue: 375 });
+  assert.deepEqual(matches, []);
 });
 
 test("findMatchingOpenAuditIssues: is case-insensitive on the merge commit SHA and supports the explicit 'none' work-issue sentinel", () => {

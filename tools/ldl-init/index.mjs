@@ -677,6 +677,14 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/correct-unit-dependency.mjs", dependsOnDest: "tools/orchestration/dependency-grammar.mjs" },
   { dest: "tools/orchestration/correct-unit-dependency.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
   { dest: "tools/orchestration/correct-unit-dependency.mjs", dependsOnDest: "tools/orchestration/prepare-dispatch-manifest.mjs" },
+  // Issue #729 Stage 1 review finding (P2, on PR #730): next-review-transition-gate.mjs's own
+  // #729 Stage 2 preparation-result recovery now hard-imports `findMatchingOpenAuditIssues` (and
+  // reuses `defaultGhIssueList`) from tools/review-watch/lifecycle-gate.mjs -- a named export a
+  // consumer's own pre-existing unmanaged lifecycle-gate.mjs would not carry. Without this edge,
+  // that unmanaged file would be preserved while the managed importer is (re)installed hard-
+  // importing it, so install/update would report success while the mandatory session-entry gate
+  // then fails at ESM load time.
+  { dest: "tools/orchestration/next-review-transition-gate.mjs", dependsOnDest: "tools/review-watch/lifecycle-gate.mjs" },
 ];
 
 // Pure. Given one install/update run's final toInstall/toSkip classification, returns one

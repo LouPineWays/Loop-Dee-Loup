@@ -13,6 +13,7 @@ import {
   verifyControlPrMatches,
   verifyPrMerged,
   verifyAuditIssueMatches,
+  verifyAuditIssueStillUnique,
   composeAuditFinalizedControlBody,
   verifyAuditFinalizedBody,
 } from "./finalize-audit-breakpoint.mjs";
@@ -73,6 +74,9 @@ REVIEW
 
 const MERGED_PR_VIEW = { state: "MERGED", mergeCommit: { oid: "d34db33fd34db33fd34db33fd34db33fd34db33f" } };
 
+// Issue #729 Stage 1 review finding P1 on PR #730: a genuine, matching Audit Issue view must also
+// carry the complete canonical audit shape (a real "Stage 1 inline review disposition" field), not
+// only the two structured pointer fields -- so every fixture below includes it.
 const MATCHING_AUDIT_VIEW = {
   state: "OPEN",
   body: [
@@ -83,6 +87,10 @@ const MATCHING_AUDIT_VIEW = {
     "### Exact merge commit",
     "",
     "`d34db33fd34db33fd34db33fd34db33fd34db33f`",
+    "",
+    "### Stage 1 inline review disposition",
+    "",
+    "One inline @codex review round at frozen head; no findings.",
     "",
   ].join("\n"),
 };
@@ -98,7 +106,19 @@ const MATCHING_AUDIT_VIEW_NO_WORK_ISSUE = {
     "",
     "`d34db33fd34db33fd34db33fd34db33fd34db33f`",
     "",
+    "### Stage 1 inline review disposition",
+    "",
+    "One inline @codex review round at frozen head; no findings.",
+    "",
   ].join("\n"),
+};
+
+// The exact two-field-only shell the P1 finding describes: matching Exact merge commit/Work
+// issue, but no "Stage 1 inline review disposition" field -- a prior preparation attempt that
+// failed or was interrupted before completing the required template.
+const INCOMPLETE_AUDIT_VIEW = {
+  state: "OPEN",
+  body: ["### Work issue", "", "#440", "", "### Exact merge commit", "", "`d34db33fd34db33fd34db33fd34db33fd34db33f`", ""].join("\n"),
 };
 
 function fixedGhIssueView(body) {
@@ -189,6 +209,62 @@ test("verifyAuditIssueMatches: rejects a work-issue mismatch", () => {
   assert.match(result.reason, /"Work issue" field/);
 });
 
+// Issue #729 Stage 1 review finding P1 on PR #730: a two-field-only shell (matching pointer
+// fields, but no "Stage 1 inline review disposition" field) must never authorize control
+// projection or a reviewer trigger, even though its Exact-merge-commit/Work-issue fields match.
+test("verifyAuditIssueMatches: rejects an incomplete (two-field-only) audit issue even when its pointer fields match", () => {
+  const result = verifyAuditIssueMatches(INCOMPLETE_AUDIT_VIEW, {
+    mergeCommitOid: MERGED_PR_VIEW.mergeCommit.oid,
+    executionIssue: 440,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /complete canonical Stage 2 audit-control-issue shape/);
+});
+
+// -- verifyAuditIssueStillUnique (Issue #729 P2 -- TOCTOU revalidation) ---------------------
+
+test("verifyAuditIssueStillUnique: accepts when the given auditIssue is the sole currently matching OPEN canonical candidate", () => {
+  const candidates = [{ number: 727, ...MATCHING_AUDIT_VIEW }];
+  const result = verifyAuditIssueStillUnique(candidates, {
+    mergeCommitOid: MERGED_PR_VIEW.mergeCommit.oid,
+    executionIssue: 440,
+    auditIssue: 727,
+  });
+  assert.equal(result.ok, true);
+});
+
+test("verifyAuditIssueStillUnique: fails closed when a second matching OPEN candidate has appeared since the initial reconciliation search", () => {
+  const candidates = [
+    { number: 727, ...MATCHING_AUDIT_VIEW },
+    { number: 730, ...MATCHING_AUDIT_VIEW },
+  ];
+  const result = verifyAuditIssueStillUnique(candidates, {
+    mergeCommitOid: MERGED_PR_VIEW.mergeCommit.oid,
+    executionIssue: 440,
+    auditIssue: 727,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /more than one OPEN canonical Audit Issue/);
+  assert.match(result.reason, /#727, #730/);
+});
+
+test("verifyAuditIssueStillUnique: fails closed when no currently matching OPEN candidate is found (e.g. the recovered issue was closed in the interim)", () => {
+  const result = verifyAuditIssueStillUnique([], { mergeCommitOid: MERGED_PR_VIEW.mergeCommit.oid, executionIssue: 440, auditIssue: 727 });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /no OPEN canonical Audit Issue currently matches/);
+});
+
+test("verifyAuditIssueStillUnique: fails closed when the sole currently matching candidate is a different issue than the given auditIssue", () => {
+  const candidates = [{ number: 730, ...MATCHING_AUDIT_VIEW }];
+  const result = verifyAuditIssueStillUnique(candidates, {
+    mergeCommitOid: MERGED_PR_VIEW.mergeCommit.oid,
+    executionIssue: 440,
+    auditIssue: 727,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /is #730, not the given --audit-issue #727/);
+});
+
 test("composeAuditFinalizedControlBody / verifyAuditFinalizedBody round-trip", () => {
   const composed = composeAuditFinalizedControlBody(REVIEW_BODY, { auditIssue: 559, executionIssue: 440, pr: 558 });
   assert.equal(composed.ok, true);
@@ -274,6 +350,94 @@ test("run(): the happy path — merged PR, matching audit issue, write verified 
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "FINALIZED");
   assert.equal(result.message, "FINALIZED 445 558 559");
+});
+
+// -- run(): revalidateUniqueness (Issue #729 P2 -- TOCTOU gap, opt-in) ----------------------
+
+test("run(): revalidateUniqueness defaults to false and never calls ghIssueListImpl -- the ordinary preparation-worker-authored finalize call pays no search cost", async () => {
+  let listCalled = false;
+  let controlBody = REVIEW_BODY;
+  const result = await run(
+    { repo: "o/r", controlIssue: 445, executionIssue: 440, pr: 558, auditIssue: 559 },
+    {
+      ghIssueViewImpl: async () => controlBody,
+      ghPrViewImpl: async () => MERGED_PR_VIEW,
+      ghAuditIssueViewImpl: async () => MATCHING_AUDIT_VIEW,
+      ghIssueListImpl: async () => {
+        listCalled = true;
+        return [];
+      },
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        controlBody = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.state, "FINALIZED");
+  assert.equal(listCalled, false);
+});
+
+test("run(): revalidateUniqueness true, and the given auditIssue is still the sole matching OPEN candidate -> FINALIZED", async () => {
+  let controlBody = REVIEW_BODY;
+  const result = await run(
+    { repo: "o/r", controlIssue: 445, executionIssue: 440, pr: 558, auditIssue: 559, revalidateUniqueness: true },
+    {
+      ghIssueViewImpl: async () => controlBody,
+      ghPrViewImpl: async () => MERGED_PR_VIEW,
+      ghAuditIssueViewImpl: async () => MATCHING_AUDIT_VIEW,
+      ghIssueListImpl: async () => [{ number: 559, ...MATCHING_AUDIT_VIEW }],
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        controlBody = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.state, "FINALIZED");
+});
+
+test("run(): revalidateUniqueness true, and a second matching OPEN Audit Issue has appeared since the initial reconciliation search -> AUDIT_BREAKPOINT_UNVERIFIED, never reaches write-control-snapshot", async () => {
+  let writeAttempted = false;
+  const result = await run(
+    { repo: "o/r", controlIssue: 445, executionIssue: 440, pr: 558, auditIssue: 559, revalidateUniqueness: true },
+    {
+      ghIssueViewImpl: async () => REVIEW_BODY,
+      ghPrViewImpl: async () => MERGED_PR_VIEW,
+      ghAuditIssueViewImpl: async () => MATCHING_AUDIT_VIEW,
+      ghIssueListImpl: async () => [
+        { number: 559, ...MATCHING_AUDIT_VIEW },
+        { number: 560, ...MATCHING_AUDIT_VIEW },
+      ],
+      writeControlSnapshotImpl: async () => {
+        writeAttempted = true;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.state, "AUDIT_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /more than one OPEN canonical Audit Issue/);
+  assert.equal(writeAttempted, false, "must never write once uniqueness revalidation finds ambiguous evidence");
+});
+
+test("run(): revalidateUniqueness true, and the gh issue search itself fails operationally -> AUDIT_BREAKPOINT_UNVERIFIED, never reaches write-control-snapshot", async () => {
+  let writeAttempted = false;
+  const result = await run(
+    { repo: "o/r", controlIssue: 445, executionIssue: 440, pr: 558, auditIssue: 559, revalidateUniqueness: true },
+    {
+      ghIssueViewImpl: async () => REVIEW_BODY,
+      ghPrViewImpl: async () => MERGED_PR_VIEW,
+      ghAuditIssueViewImpl: async () => MATCHING_AUDIT_VIEW,
+      ghIssueListImpl: async () => {
+        throw new Error("gh api search/issues: network error");
+      },
+      writeControlSnapshotImpl: async () => {
+        writeAttempted = true;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.state, "AUDIT_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /gh issue search failed while revalidating/);
+  assert.equal(writeAttempted, false);
 });
 
 test("run(): issue #585 — a template State-heading-only control body (no ad hoc Lifecycle bullet at all) still finalizes to AUDIT, not AUDIT_BREAKPOINT_UNVERIFIED", async () => {
@@ -493,12 +657,7 @@ test('runDirectReferenceVerification(): the explicit no-work-issue sentinel ("no
     { repo: "o/r", executionIssue: "none", pr: 558, auditIssue: 559 },
     {
       ghPrViewImpl: async () => MERGED_PR_VIEW,
-      ghAuditIssueViewImpl: async () => ({
-        state: "OPEN",
-        body: ["### Work issue", "", "none", "", "### Exact merge commit", "", "`d34db33fd34db33fd34db33fd34db33fd34db33f`", ""].join(
-          "\n",
-        ),
-      }),
+      ghAuditIssueViewImpl: async () => MATCHING_AUDIT_VIEW_NO_WORK_ISSUE,
     },
   );
   assert.equal(result.exitCode, 0);

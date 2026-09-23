@@ -641,6 +641,18 @@ test("findHardDependencyCollisions: flags a skipped ready-dispatch-gate.mjs depe
   assert.match(collisions[0].reason, /correct-unit-dependency\.mjs/);
 });
 
+// Issue #729 Stage 1 review finding (P2, on PR #730): the analogous collision coverage for
+// next-review-transition-gate.mjs's own new hard import of lifecycle-gate.mjs's
+// `findMatchingOpenAuditIssues`, mirroring the coverage above.
+test("findHardDependencyCollisions: flags a skipped lifecycle-gate.mjs dependency whose importer (next-review-transition-gate.mjs) is about to be (re)installed", () => {
+  const toInstall = [{ destRel: "tools/orchestration/next-review-transition-gate.mjs", content: Buffer.from("x") }];
+  const toSkip = [{ dest: "tools/review-watch/lifecycle-gate.mjs", reason: "destination already exists and is not LDL-managed" }];
+  const collisions = findHardDependencyCollisions({ toInstall, toSkip });
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].dest, "tools/review-watch/lifecycle-gate.mjs");
+  assert.match(collisions[0].reason, /next-review-transition-gate\.mjs/);
+});
+
 test("HARD_MODULE_DEPENDENCIES: every declared importer/dependency pair is a real path this repository actually ships", () => {
   for (const { dest, dependsOnDest } of HARD_MODULE_DEPENDENCIES) {
     assert.ok(existsSync(join(REPO_ROOT, dest)), `${dest} does not exist in this repository`);
