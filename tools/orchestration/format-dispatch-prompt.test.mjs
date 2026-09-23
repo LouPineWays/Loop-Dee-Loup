@@ -441,6 +441,12 @@ test("formatStage1CorrectionWorkerDispatchPrompt rejects an unsafe binding path/
     // quote could break out of the quoting the prompt now wraps it in -- reject it up front
     // rather than splicing it in unescaped.
     { path: BINDING.path, token: BINDING.token, scriptPath: `${BINDING.scriptPath.slice(0, -1)}"; rm -rf /#.mjs` },
+    // Stage 1 review finding on PR #712 (P2): a double-quoted argument still lets `$variable` /
+    // `$(command)` expansion and backtick command substitution run -- both must be rejected up
+    // front too, not just the literal double quote.
+    { path: BINDING.path, token: BINDING.token, scriptPath: `${BINDING.scriptPath.slice(0, -4)}$(touch /tmp/x).mjs` },
+    { path: BINDING.path, token: BINDING.token, scriptPath: `${BINDING.scriptPath.slice(0, -4)}\${HOME}.mjs` },
+    { path: BINDING.path, token: BINDING.token, scriptPath: `${BINDING.scriptPath.slice(0, -4)}\`touch /tmp/x\`.mjs` },
   ]) {
     assert.throws(() => formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 571, issue: 570, pr: 569, checkoutBinding }));
   }

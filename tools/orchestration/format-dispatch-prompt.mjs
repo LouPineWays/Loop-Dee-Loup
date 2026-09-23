@@ -339,10 +339,20 @@ function assertCheckoutBinding(checkoutBinding) {
     // Stage 2 audit finding on PR #710 (issue #711, P2): `scriptPath` is rendered below as a
     // double-quoted shell word so a controller installation path containing a space (a valid
     // Windows/POSIX path segment -- the whole reason this check exists) still parses as one
-    // argument. A literal double quote is the one character that could break out of that
-    // quoting, so it is rejected up front -- fail-closed, consistent with the CRLF/length
-    // checks above -- rather than attempting cross-shell escaping for it.
-    /"/.test(checkoutBinding.scriptPath)
+    // argument.
+    //
+    // Stage 1 review finding on PR #712 (P2): a literal double quote is not the only character
+    // that stays shell-active inside POSIX double quotes -- `$` still triggers variable
+    // expansion / `$(command)` substitution, and a backtick still triggers command substitution,
+    // even when the whole argument is wrapped in `"..."`. A valid controller installation path
+    // containing either (e.g. a `$HOME`-derived mount point) would previously pass this check
+    // and then have its substitution executed by the worker's shell. Reject all three
+    // shell-active characters up front -- fail-closed, consistent with the CRLF/length checks
+    // above -- rather than attempting cross-shell escaping for them. A bare backslash is not
+    // included: `SELF_SCRIPT_PATH` is a native path (backslash-separated on Windows) and a lone
+    // backslash not immediately preceding one of these three characters is inert inside POSIX
+    // double quotes.
+    /["$`]/.test(checkoutBinding.scriptPath)
   ) {
     throw new Error(
       "formatStage1CorrectionWorkerDispatchPrompt requires a pre-spawn checkoutBinding { path, token, scriptPath } for a findings correction -- " +
@@ -418,7 +428,8 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
   // unquoted into the rendered `node <scriptPath> ...` invocation, so a controller installation
   // path containing a space split into multiple shell words and the worker's mandatory first
   // step failed to parse. Quote it as a single argument; `assertCheckoutBinding` above already
-  // rejects the one character (`"`) that could break out of this quoting.
+  // rejects the double quote, `$`, and backtick characters that would otherwise break out of, or
+  // expand/substitute inside, this quoting (Stage 1 review finding on PR #712, P2).
   return (
     `Stage 1 correction worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
     `Pre-bound checkout: ${path}. From it, first run node "${scriptPath}" ` +
