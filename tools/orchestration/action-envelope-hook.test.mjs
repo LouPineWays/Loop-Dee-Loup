@@ -81,6 +81,19 @@ test("invokedGateScriptBasenames: a quoted non-gate script still does not match"
   assert.deepEqual(invokedGateScriptBasenames('node "some-other-tool.mjs" --flag'), []);
 });
 
+// Issue #675: session-entry-gate.mjs composes the two leaf gates and, on success, prints their
+// final resolved verdict's fields verbatim (same state + actionEnvelope.mode shape). It must be
+// recognized as a verdict source exactly like the two leaf gates, so a session invoking the gate
+// chain through this entrypoint gets the identical live "none"/"bounded" stop-boundary
+// enforcement as a session invoking either leaf gate directly.
+test("invokedGateScriptBasenames: recognizes a direct session-entry-gate.mjs invocation", async () => {
+  const { invokedGateScriptBasenames } = await import("./action-envelope-hook.mjs");
+  assert.deepEqual(
+    invokedGateScriptBasenames("node tools/orchestration/session-entry-gate.mjs --control-issue 639"),
+    ["session-entry-gate.mjs"],
+  );
+});
+
 // -- extractVerdict: robust last-JSON-line parsing -----------------------------------------
 
 test("extractVerdict: parses the gate script's single JSON stdout line", async () => {
@@ -143,6 +156,25 @@ test("detectNoActionVerdict: marks ordinary BLOCKED (none-mode) from ready-dispa
   });
   const verdict = detectNoActionVerdict("node tools/orchestration/ready-dispatch-gate.mjs --control-issue 301", stdout);
   assert.equal(verdict?.state, "BLOCKED");
+});
+
+// Issue #675: session-entry-gate.mjs's own final resolved verdict (after it has internally
+// consumed any "chain" hops) carries the identical state + actionEnvelope shape as a leaf gate's
+// own output, so it must be recognized as a marking source in exactly the same way.
+test("detectNoActionVerdict: marks a no-action verdict resolved via session-entry-gate.mjs (the #639 shape after chaining)", async () => {
+  const { detectNoActionVerdict } = await import("./action-envelope-hook.mjs");
+  const stdout = JSON.stringify({
+    ok: true,
+    state: "STAGE2_RESPONSE_UNUSABLE",
+    stopAfter: true,
+    actionEnvelope: { mode: "none", authorizedActions: [] },
+    provenance: [
+      { gate: "ready-dispatch-gate", state: "NOT_READY", leafExitCode: 3, actionEnvelopeMode: "chain" },
+      { gate: "next-review-transition-gate", state: "STAGE2_RESPONSE_UNUSABLE", leafExitCode: 4, actionEnvelopeMode: "none" },
+    ],
+  });
+  const verdict = detectNoActionVerdict("node tools/orchestration/session-entry-gate.mjs --control-issue 639", stdout);
+  assert.equal(verdict?.state, "STAGE2_RESPONSE_UNUSABLE");
 });
 
 test("detectNoActionVerdict: does NOT mark a bounded action-bearing verdict (must not over-constrain authorized actions)", async () => {
