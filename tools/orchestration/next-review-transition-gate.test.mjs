@@ -1104,6 +1104,21 @@ const CONTROL_BODY_PRE_MERGE_SATISFIED = `## Current state
 - **Founder decision:** none
 `;
 
+// Issue #722: a correction-satisfied bullet that is malformed -- clearly attempting the shape
+// (opens with the keyword) but missing the required "(reviewed <sha>)" clause. This must remain
+// fail-closed on the merged-PR resume path exactly as it does elsewhere.
+const CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED_MALFORMED = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #375
+- **Route:** implementation worker
+- **PR:** #376
+- **Stage 1:** correction-satisfied at 0009c54b18
+- **Stage 2:** none
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
 const CONTROL_BODY_POST_MERGE = `## Current state
 
 - **Lifecycle:** AUDIT
@@ -1665,6 +1680,73 @@ test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 referenc
     result.nextCommand,
     /finalize-stage1-satisfied-breakpoint\.mjs --control-issue 322 --execution-issue 375 --pr 376 --recover true/,
   );
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["run-finalize-stage1-satisfied-recover"],
+  });
+});
+
+// Issue #722: the exact defect this correction fixes. The merged-PR resume predicate ANDed
+// looksLikeCorrectionSatisfiedDisposition (true only when the strict parse fails) with a
+// successful strict parseCorrectionSatisfiedDisposition result -- mutually exclusive by
+// construction, so a canonical correction-satisfied disposition could never be accepted here.
+// This is the #398 reproduction for execution #718 / merged PR #721.
+test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 reference that is already MERGED, and whose control Issue carries a canonical correction-satisfied disposition, resolves to STAGE2_PREPARATION_REQUIRED (issue #722 regression)", async () => {
+  let prStateReadFor = null;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrStateImpl: async ({ number }) => {
+        prStateReadFor = number;
+        return { headRefOid: "mergedhead", state: "MERGED" };
+      },
+      stage1RunImpl: async () => {
+        throw new Error("should never be called -- the PR is already merged, resume forward instead");
+      },
+      checkMergeReadyImpl: async () => {
+        throw new Error("should never be called -- the PR is already merged, resume forward instead");
+      },
+    },
+  );
+  assert.equal(prStateReadFor, 376);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_PREPARATION_REQUIRED");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.controlIssue, 322);
+  assert.equal(result.pr, 376);
+  assert.equal(result.issue, 375);
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["dispatch-stage2-preparation-worker"],
+  });
+});
+
+// Issue #722: a correction-satisfied bullet that is clearly attempting the shape but is
+// malformed (missing the required "(reviewed <sha>)" clause) must remain fail-closed on the
+// merged-PR resume path -- the strict parse alone governs acceptance, so a malformed bullet
+// (which the strict parse rejects) is never mistaken for the canonical shape.
+test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 reference that is already MERGED, but whose control Issue's correction-satisfied disposition is malformed, fails closed to STAGE2_PREPARATION_BLOCKED_ON_STAGE1 and never resumes Stage 2 preparation (issue #722 regression)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED_MALFORMED, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      stage1RunImpl: async () => {
+        throw new Error("should never be called -- Stage 1 is unverified, not a re-run case");
+      },
+      checkMergeReadyImpl: async () => {
+        throw new Error("should never be called -- Stage 1 is unverified, not a re-run case");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE2_PREPARATION_BLOCKED_ON_STAGE1");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.controlIssue, 322);
+  assert.equal(result.pr, 376);
+  assert.equal(result.issue, 375);
+  assert.match(result.reason, /not a canonical satisfied\/exempt or correction-satisfied disposition/);
   assert.deepEqual(result.actionEnvelope, {
     mode: "bounded",
     authorizedActions: ["run-finalize-stage1-satisfied-recover"],

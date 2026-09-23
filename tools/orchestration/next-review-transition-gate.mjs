@@ -1467,10 +1467,20 @@ async function runNextReviewTransitionGateCore(
       // present, this is not a safe resume: stop at STAGE2_PREPARATION_BLOCKED_ON_STAGE1 and name
       // the documented recovery command (finalize-stage1-satisfied-breakpoint.mjs --recover true)
       // rather than silently authorizing Stage 2 preparation on unverified Stage 1 authority.
+      // Issue #722: looksLikeCorrectionSatisfiedDisposition is defined to return false whenever
+      // the strict parse below already succeeds (it exists only to flag a correction-shaped
+      // bullet whose strict parse failed, so malformed state can fail closed -- see its own
+      // module comment in stage1-correction-gate.mjs). ANDing it with a successful strict parse
+      // was therefore mutually exclusive by construction: hasCorrectionSatisfiedDisposition could
+      // never be true, so a canonical "correction-satisfied at <corrected> (reviewed <reviewed>)"
+      // disposition was always rejected here, incorrectly reaching
+      // STAGE2_PREPARATION_BLOCKED_ON_STAGE1 on the merged-PR resume path (the #398 reproduction
+      // for execution #718 / merged PR #721). A successful strict parse is sufficient on its own;
+      // the lenient helper's role is limited to distinguishing "absent" from "malformed" for a
+      // strict parse that already failed, never to gating an already-successful strict parse.
       const stage1Bullet = parseControlBullet(body, "Stage 1");
       const hasAffirmativeDisposition = parseAffirmativeStage1Disposition(stage1Bullet) !== null;
-      const hasCorrectionSatisfiedDisposition =
-        looksLikeCorrectionSatisfiedDisposition(stage1Bullet) && parseCorrectionSatisfiedDisposition(stage1Bullet) !== null;
+      const hasCorrectionSatisfiedDisposition = parseCorrectionSatisfiedDisposition(stage1Bullet) !== null;
       if (!hasAffirmativeDisposition && !hasCorrectionSatisfiedDisposition) {
         return {
           exitCode: 3,
