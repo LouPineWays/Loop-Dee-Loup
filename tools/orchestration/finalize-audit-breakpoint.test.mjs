@@ -362,6 +362,102 @@ test("verifyAuditIssueMatches: rejects a candidate missing the Verification chec
   assert.match(result.reason, /complete canonical Stage 2 audit-control-issue shape/);
 });
 
+// P1 Stage 1 review finding on PR #733 (issue #729): the fixtures above join fields with a bare
+// blank line and never reproduce the real rendered-issue-body failure shape -- the
+// audit-control-issue template (.github/ISSUE_TEMPLATE/audit-control-issue.yml) renders a
+// permanent markdown block immediately after "Audit scope" and after "Verification checklist",
+// before the next "### " heading, regardless of whether the preceding field was ever answered.
+// This is the final pre-projection/trigger verification boundary (the last deterministic check
+// before an incomplete audit issue could otherwise be projected into control state and receive
+// the reviewer trigger) -- it must reject the same rendered-body shape lifecycle-gate.test.mjs's
+// own hasCanonicalAuditShape/findMatchingOpenAuditIssues tests prove the initial matcher rejects.
+const RENDERED_BLANK_AUDIT_SCOPE_AUDIT_VIEW = {
+  state: "OPEN",
+  body: [
+    "### Merged PR",
+    "",
+    "https://github.com/o/r/pull/558",
+    "",
+    "### Work issue",
+    "",
+    "#440",
+    "",
+    "### Exact merge commit",
+    "",
+    "`d34db33fd34db33fd34db33fd34db33fd34db33f`",
+    "",
+    "### Stage 1 inline review disposition",
+    "",
+    "One inline @codex review round at frozen head; no findings.",
+    "",
+    "### Audit scope",
+    "",
+    "_No response_",
+    "",
+    "**Verification checklist instructions:** fill in the field below now, before triggering " +
+      "`@codex review` — a numbered, change-specific list of concrete checks.",
+    "",
+    "### Verification checklist",
+    "",
+    "1. Confirm the change works as described.",
+    "",
+  ].join("\n"),
+};
+
+const RENDERED_BLANK_VERIFICATION_CHECKLIST_AUDIT_VIEW = {
+  state: "OPEN",
+  body: [
+    "### Merged PR",
+    "",
+    "https://github.com/o/r/pull/558",
+    "",
+    "### Work issue",
+    "",
+    "#440",
+    "",
+    "### Exact merge commit",
+    "",
+    "`d34db33fd34db33fd34db33fd34db33fd34db33f`",
+    "",
+    "### Stage 1 inline review disposition",
+    "",
+    "One inline @codex review round at frozen head; no findings.",
+    "",
+    "### Audit scope",
+    "",
+    "Complete diff of the PR against pre-PR main.",
+    "",
+    "### Verification checklist",
+    "",
+    "_No response_",
+    "",
+    '**Required response format:** replace "Pending" below with your completed audit report.',
+    "",
+    "### Findings",
+    "",
+    "Pending — awaiting Stage 2 audit response.",
+    "",
+  ].join("\n"),
+};
+
+test("verifyAuditIssueMatches: rejects a rendered candidate with a blank 'Audit scope' field, even though the permanent 'Verification checklist instructions' markdown that always follows it makes the raw block non-empty", () => {
+  const result = verifyAuditIssueMatches(RENDERED_BLANK_AUDIT_SCOPE_AUDIT_VIEW, {
+    mergeCommitOid: MERGED_PR_VIEW.mergeCommit.oid,
+    executionIssue: 440,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /complete canonical Stage 2 audit-control-issue shape/);
+});
+
+test("verifyAuditIssueMatches: rejects a rendered candidate with a blank 'Verification checklist' field, even though the permanent 'Required response format' markdown that always follows it makes the raw block non-empty", () => {
+  const result = verifyAuditIssueMatches(RENDERED_BLANK_VERIFICATION_CHECKLIST_AUDIT_VIEW, {
+    mergeCommitOid: MERGED_PR_VIEW.mergeCommit.oid,
+    executionIssue: 440,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /complete canonical Stage 2 audit-control-issue shape/);
+});
+
 // -- verifyAuditIssueStillUnique (Issue #729 P2 -- TOCTOU revalidation) ---------------------
 
 test("verifyAuditIssueStillUnique: accepts when the given auditIssue is the sole currently matching OPEN canonical candidate", () => {

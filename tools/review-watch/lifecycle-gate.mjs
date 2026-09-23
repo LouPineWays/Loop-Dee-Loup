@@ -387,11 +387,39 @@ export function parseFormField(body, label) {
   return null;
 }
 
+// Two of the audit-control-issue template's "markdown" blocks (.github/ISSUE_TEMPLATE/
+// audit-control-issue.yml) render as permanent body prose immediately after a required textarea
+// field's own answer and *before* the next "### " field heading: the "Verification checklist
+// instructions" block sits between "### Audit scope" and "### Verification checklist", and the
+// "Required response format" block sits between "### Verification checklist" and "### Findings".
+// Unlike a field's `description` (form-authoring-time only, dropped from the created issue), a
+// markdown block's `value` is rendered into the issue body verbatim and permanently — so it is
+// always present, even when the textarea above it was left blank or shows GitHub's own
+// "_No response_" marker for an unanswered required field. Recorded here as literal boundary
+// prefixes, not derived from the template file at runtime, matching this module's existing
+// preference for parsing the rendered body over introducing a runtime dependency on the template
+// source.
+const STATIC_TEMPLATE_MARKDOWN_BOUNDARY_PREFIXES = [
+  "**Verification checklist instructions:**",
+  "**Required response format:**",
+];
+
 // Pure. Like parseFormField, but returns the field's *entire* rendered block (every line under
-// the heading up to the next "### " heading or end of body, trimmed), not just the first
+// the heading up to the next "### " heading, a known static template markdown boundary (see
+// STATIC_TEMPLATE_MARKDOWN_BOUNDARY_PREFIXES above), or end of body, trimmed), not just the first
 // non-blank line — for a multi-line textarea field such as "Verification checklist" where the
 // first line alone would discard every item after it. Returns null when the heading is absent
 // or its block is empty / GitHub's own "_No response_" marker for an unanswered field.
+//
+// The static-boundary stop is required, not merely tidy: P1 Stage 1 review finding on PR #733
+// (issue #729) — "Audit scope" and "Verification checklist" are exactly the two fields the
+// template follows with a permanent markdown block before the next heading (see above). Without
+// this stop, a blank/`_No response_` field's collected block also swallows that trailing static
+// prose, producing a non-empty, non-"_No response_" joined string that no longer text-equals
+// either sentinel — so `hasCanonicalAuditShape` (below) would treat an unauthored scope or
+// checklist as present. Stopping at the static block's own known first line, before it ever
+// enters `collected`, keeps the blank/`_No response_` field's true (empty) content visible to the
+// sentinel check regardless of what permanent prose follows it in the rendered body.
 //
 // Anchors to the *first* matching heading, deliberately the opposite of parseFormField's
 // last-match convention. parseFormField reads "Verdict"/"Work issue"/"Exact merge commit",
@@ -419,7 +447,9 @@ export function parseFormFieldBlock(body, label) {
   if (headingIdx === -1) return null;
   const collected = [];
   for (let i = headingIdx + 1; i < lines.length; i++) {
-    if (lines[i].trim().startsWith("### ")) break;
+    const trimmed = lines[i].trim();
+    if (trimmed.startsWith("### ")) break;
+    if (STATIC_TEMPLATE_MARKDOWN_BOUNDARY_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) break;
     collected.push(lines[i]);
   }
   const text = collected.join("\n").trim();
@@ -2004,8 +2034,9 @@ async function retireSharedWorkIssuePredecessors(
         auditIssue: candidateNumber,
         reason:
           `#${candidateNumber} names the same Work issue but does not have the canonical Stage 2 ` +
-          `audit-control-issue shape (missing Exact merge commit / Work issue / Stage 1 inline ` +
-          `review disposition fields); fails closed rather than closing a possibly-unrelated issue`,
+          `audit-control-issue shape (missing one or more of Merged PR / Work issue / Exact merge ` +
+          `commit / Stage 1 inline review disposition / Audit scope / Verification checklist); ` +
+          `fails closed rather than closing a possibly-unrelated issue`,
       });
       continue;
     }
