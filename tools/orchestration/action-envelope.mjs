@@ -201,6 +201,21 @@ const ENVELOPES = {
   // gate.mjs's control-Issue-mode "PR" bullet settled, live PR state MERGED, no settled "Stage
   // 2" bullet) authorizes exactly one more dispatch, never a second merge-pr.
   STAGE2_PREPARATION_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-stage2-preparation-worker"] },
+  // Issue #729 (the #723/#727 liveness seam): next-review-transition-gate.mjs's own
+  // deterministic reconciliation found that the canonical Stage 2 Audit Issue for this exact
+  // PR/merge commit already durably exists (a prior, possibly-interrupted preparation worker
+  // already returned "AUDIT_READY #<n>") -- no worker dispatch is authorized or needed here.
+  // Only the same two deterministic follow-up actions STAGE1_SATISFIED_MERGE_AND_TRIGGER_
+  // STAGE2's own AUDIT_READY branch already authorizes (write-control-snapshot, in practice
+  // finalize-audit-breakpoint.mjs's compose-write-verify sequence, then post-stage2-reviewer-
+  // trigger) — always in that order, per issue #561's unchanged ordering invariant. This
+  // verdict only ever arises in control-Issue mode (the reconciliation is scoped to that mode),
+  // so unlike STAGE2_CLOSE_READY/STAGE2_CORRECTION_PR_NEEDS_FINALIZATION this is a fixed row,
+  // never derived from `context.nextCommand` — the shape is always the same two actions.
+  STAGE2_AUDIT_ALREADY_PREPARED: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["write-control-snapshot", "post-stage2-reviewer-trigger"],
+  },
   // Stage 1 correction on PR #721 (Codex P1 finding): a merged PR whose control Issue's Stage 1
   // disposition was never durably settled -- named by next-review-transition-gate.mjs's own
   // STAGE2_PREPARATION_BLOCKED_ON_STAGE1 verdict. Authorizes exactly the one recovery command

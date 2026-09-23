@@ -199,13 +199,46 @@ identity is already truthful and durable; no Stage 2 Audit Issue reference has b
 fresh session resuming this control Issue re-runs `next-review-transition-gate.mjs`, which
 resolves this exact shape — a settled `PR` bullet whose live state is `MERGED` with no settled
 `Stage 2` bullet, and a control Issue's own `Stage 1` bullet already carrying a canonical
-satisfied/exempt or correction-satisfied disposition (see below) — to
-`STAGE2_PREPARATION_REQUIRED` (`tools/orchestration/action-envelope.mjs` authorizes exactly one
-more `dispatch-stage2-preparation-worker` action from it, never a second `merge-pr`), and
-dispatches a fresh preparation worker exactly as above, carrying the same
-`{ controlIssue, issue, pr }` reference triple. Re-running `stage1-gate`/`mergeReady` against an
-already-merged PR is not this recovery path — `next-review-transition-gate.mjs` never attempts it
-once state resolves `MERGED`.
+satisfied/exempt or correction-satisfied disposition (see below).
+
+Issue #729 (the #723/#727 liveness seam): a genuinely completed preparation is a different case
+from a failed one, and deserves a different recovery. If the worker instead already succeeded —
+returned `AUDIT_READY #<n>` and durably created/reused the canonical Audit Issue — but the
+bounded controller context that received that return ended (an interruption, never a designed
+stop point) before `finalize-audit-breakpoint.mjs` ever ran, the Audit Issue itself is already
+durable on GitHub; only the fact that it is *this control Issue's* authoritative one needs
+recovering. Before authorizing a fresh `dispatch-stage2-preparation-worker` action merely to
+rediscover that already-known state, `next-review-transition-gate.mjs` deterministically checks
+for an already-existing, still-`OPEN` Audit Issue whose own structured `Exact merge commit`/
+`Work issue` fields match this exact PR's merge commit and gated execution Issue — the identical
+`[Audit] in:title` candidate search `tools/review-watch/lifecycle-gate.mjs`'s `checkCloseAudit`
+already uses for its own supersession search, and the identical field-match evidence
+`finalize-audit-breakpoint.mjs`'s `verifyAuditIssueMatches` independently re-verifies before ever
+projecting control state — never the diff, Stage 1 finding narrative, or execution-Issue body
+content, so this never reintroduces semantic loading into the orchestrator:
+
+- Exactly one match → `STAGE2_AUDIT_ALREADY_PREPARED`, naming the exact recovered Audit Issue
+  and a `nextCommand` chaining `finalize-audit-breakpoint.mjs` into the idempotent
+  `trigger.mjs` — the same ordering issue #561 already requires, preserved unchanged.
+  `tools/orchestration/action-envelope.mjs` authorizes exactly
+  `["write-control-snapshot", "post-stage2-reviewer-trigger"]` from it, never a fresh worker
+  dispatch. `finalize-audit-breakpoint.mjs`'s own independent re-verification (PR genuinely
+  `MERGED`, the Audit Issue's fields genuinely matching) means a retry of this exact recovery is
+  idempotent: it neither creates a duplicate Audit Issue (already durable, only reused) nor
+  posts a duplicate reviewer trigger (`trigger.mjs`'s own dedup check).
+- More than one durable match → `AMBIGUOUS`, a fail-closed founder-visible stop — genuinely
+  conflicting evidence is never resolved by silently picking one.
+- No match, or the reconciliation search itself fails operationally (a transient GitHub search
+  outage) → falls straight through, unchanged, to `STAGE2_PREPARATION_REQUIRED` below
+  (`tools/orchestration/action-envelope.mjs` authorizes exactly one more
+  `dispatch-stage2-preparation-worker` action from it, never a second `merge-pr`), which
+  dispatches a fresh preparation worker exactly as above, carrying the same
+  `{ controlIssue, issue, pr }` reference triple. The dispatched worker performs its own
+  direct-read reconciliation regardless, so a search outage only costs one extra dispatch, never
+  a missed duplicate.
+
+Re-running `stage1-gate`/`mergeReady` against an already-merged PR is not this recovery path —
+`next-review-transition-gate.mjs` never attempts it once state resolves `MERGED`.
 
 When that same merged-PR/no-settled-Stage-2 shape is found but the control Issue's own `Stage 1`
 bullet is *not* one of those two affirmative dispositions (Stage 1 correction on PR #721, Codex

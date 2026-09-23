@@ -2603,7 +2603,12 @@ export function normalizeSearchIssuesPage(page) {
 // stopping at one fixed page — recovering every candidate up to GitHub Search's own
 // documented 1,000-result ceiling, a platform limit this script cannot raise, rather than an
 // arbitrary client-side cap chosen without evidence of the real corpus size.
-function defaultGhIssueList({ repo }) {
+// Exported (issue #729) so tools/orchestration/next-review-transition-gate.mjs can reuse this
+// exact "[Audit] in:title" candidate-discovery search for its own deterministic Stage 2
+// preparation-result reconciliation, rather than duplicating a second `gh api search/issues`
+// invocation. Candidate discovery only, unchanged from checkCloseAudit's own use above — every
+// candidate found this way still requires its own structured-field verification by the caller.
+export function defaultGhIssueList({ repo }) {
   const raw = execFileSync(
     "gh",
     [
