@@ -13,6 +13,7 @@ import {
   formatIntegrationWorkerDispatchPrompt,
   formatStage1CorrectionWorkerDispatchPrompt,
   formatStage2CorrectionWorkerDispatchPrompt,
+  formatConflictRecoveryWorkerDispatchPrompt,
   assertReferenceOnly,
 } from "./format-dispatch-prompt.mjs";
 
@@ -637,6 +638,66 @@ test("formatStage2CorrectionWorkerDispatchPrompt throws for missing/invalid requ
   assert.throws(() => formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 12.5, auditIssue: 559 }));
 });
 
+// -- formatConflictRecoveryWorkerDispatchPrompt (issue #665, live #639/#638/PR #640 -----------
+// reproduction: STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT) -----------------------------------
+
+test("formatConflictRecoveryWorkerDispatchPrompt includes the exact PR, Execution Issue, and Controlling Issue references", () => {
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640 });
+  assert.match(prompt, /^Conflict-recovery worker dispatch\./);
+  assert.match(prompt, /#638/);
+  assert.match(prompt, /#640/);
+  assert.match(prompt, /#666/);
+});
+
+test("formatConflictRecoveryWorkerDispatchPrompt omits the Execution Issue line for the explicit no-work-issue sentinel", () => {
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: "none", pr: 640 });
+  assert.ok(!prompt.includes("Execution Issue"));
+});
+
+test("formatConflictRecoveryWorkerDispatchPrompt tells the worker to read the reviewed head from the Controlling Issue's Stage 1 bullet, not restated, when a control Issue is present", () => {
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640 });
+  assert.match(prompt, /Controlling Issue's Stage 1 bullet/);
+});
+
+test("formatConflictRecoveryWorkerDispatchPrompt requires an explicit reviewedHead only when controlIssue is absent (direct-reference mode has no durable bullet to read)", () => {
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ issue: 638, pr: 640 }));
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ issue: 638, pr: 640, reviewedHead: "30b36035c9" });
+  assert.match(prompt, /30b36035c9/);
+  assert.ok(!prompt.includes("Controlling Issue"));
+});
+
+test("formatConflictRecoveryWorkerDispatchPrompt mandates a real merge commit (never rebase/force-push) and fails closed to a founder interrupt for a semantic conflict", () => {
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640 });
+  assert.match(prompt, /never rebase\/force-push/);
+  assert.match(prompt, /founder interrupt, not auto-resolved/);
+});
+
+test("formatConflictRecoveryWorkerDispatchPrompt mandates finalize-correction-breakpoint.mjs, naming its fail-closed CORRECTION_BREAKPOINT_UNVERIFIED reference, and forbids merge/Stage 2/re-review here", () => {
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640 });
+  assert.match(prompt, /finalize-correction-breakpoint\.mjs/);
+  assert.match(prompt, /CORRECTION_BREAKPOINT_UNVERIFIED/);
+  assert.match(prompt, /no re-review, merge, or Stage 2/);
+});
+
+test("formatConflictRecoveryWorkerDispatchPrompt stays well under the reference-only threshold, with and without a control Issue and a full-length 40-char reviewedHead", () => {
+  const withControl = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640 });
+  assert.ok(withControl.length < 700, `expected < 700 chars, got ${withControl.length}`);
+  const withoutControl = formatConflictRecoveryWorkerDispatchPrompt({
+    issue: 638,
+    pr: 640,
+    reviewedHead: "a".repeat(40),
+  });
+  assert.ok(withoutControl.length < 700, `expected < 700 chars, got ${withoutControl.length}`);
+});
+
+test("formatConflictRecoveryWorkerDispatchPrompt throws for missing/invalid required fields", () => {
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: null }));
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: NaN }));
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: -1 }));
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 12.5, issue: 638, pr: 640 }));
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: -1, pr: 640 }));
+});
+
 // -- CLI: state-based template selection (piped mode) ----------------------------------------
 
 function runCli(input) {
@@ -679,6 +740,29 @@ test("CLI: an unrecognized state is still refused, error message names every rec
   assert.match(result.stderr, /REPLAN_REQUIRED/);
   assert.match(result.stderr, /STAGE1_CORRECTION_REQUIRED/);
   assert.match(result.stderr, /STAGE2_CORRECTION_REQUIRED/);
+  assert.match(result.stderr, /STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT/);
+});
+
+test("CLI: piped STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT selects the conflict-recovery template", async () => {
+  const result = await runCli({ state: "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT", controlIssue: 666, issue: 638, pr: 640 });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Conflict-recovery worker dispatch\./);
+  assert.match(result.stdout, /#638/);
+  assert.match(result.stdout, /#640/);
+  assert.match(result.stdout, /#666/);
+});
+
+test("CLI: explicit --kind conflict-recovery selects the conflict-recovery template", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const scriptPath = fileURLToPath(new URL("./format-dispatch-prompt.mjs", import.meta.url));
+  const result = spawnSync(
+    process.execPath,
+    [scriptPath, "--kind", "conflict-recovery", "--control-issue", "666", "--issue", "638", "--pr", "640"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^Conflict-recovery worker dispatch\./);
 });
 
 // Issue #570, exact live reproduction: `next-review-transition-gate.mjs --control-issue 451`

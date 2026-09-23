@@ -64,6 +64,11 @@
 //     | node tools/orchestration/format-dispatch-prompt.mjs
 // and the equivalent for `STAGE2_CORRECTION_REQUIRED` from a post-merge NOT CLEAN verdict.
 //
+// Issue #665 adds `STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT` (the live #639/#638/PR #640
+// reproduction: a correction-satisfied PR's merge is mechanically blocked by a real conflict
+// against the current target branch), selecting `formatConflictRecoveryWorkerDispatchPrompt`
+// the same table-driven way.
+//
 // Tests: node --test tools/orchestration/format-dispatch-prompt.test.mjs
 
 import { readFileSync } from "node:fs";
@@ -504,6 +509,72 @@ export function formatStage2CorrectionWorkerDispatchPrompt({ controlIssue = null
   );
 }
 
+// Pure. Renders the fixed reference-only "Conflict-recovery worker dispatch" template for
+// issue #665 — `next-review-transition-gate.mjs`'s `STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT`
+// verdict (live #639/#638/PR #640 reproduction: a correction-satisfied PR reached
+// `STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2` but GitHub's own live mergeable state
+// reported a real conflict against the current target branch, and the merge action could not
+// mechanically execute). `action-envelope.mjs` authorizes exactly
+// `dispatch-conflict-recovery-worker` for this state.
+//
+// Deliberately carries no `correctedHead` at all — the worker reads the PR's own live head
+// directly, exactly the "read it, don't restate it" convention every other template in this
+// file uses. `reviewedHead` is the one exception, and only conditionally: when a Controlling
+// Issue is present, the reviewed head is already durably recorded there (the exact
+// `- **Stage 1:** correction-satisfied at <corrected-head> (reviewed <reviewed-head>)` bullet
+// `finalize-correction-breakpoint.mjs` persisted), so the worker reads it from that bullet
+// instead of it being restated in the prompt — keeping this template immune to SHA length
+// regardless of how long a real commit SHA is. Only `next-review-transition-gate.mjs`'s rare
+// no-control-Issue direct-reference path (a `--stage1-disposition` supplied ad hoc, with no
+// durable bullet anywhere) has nowhere else for the worker to recover it, so `reviewedHead` is
+// required only in that one case.
+//
+// The worker's job: integrate the current target branch into the PR branch with a real merge
+// commit (never rebase/force-push — `stage1-correction-gate.mjs`'s own ancestry check requires
+// the final head to remain a strict, non-diverged descendant of the reviewed head), resolve
+// only the conflicts needed for current target-branch authority plus this execution's
+// already-accepted outcome, rerun verification, push, and re-run
+// `finalize-correction-breakpoint.mjs` (same reviewed head, the new pushed head) to
+// re-establish correction-satisfied evidence at the new live head before stopping. A conflict
+// that instead requires a new semantic/product/architecture/security/privacy decision fails
+// closed as a founder interrupt rather than being auto-resolved — this template says so
+// explicitly rather than leaving it to be inferred.
+export function formatConflictRecoveryWorkerDispatchPrompt({ controlIssue = null, issue, pr, reviewedHead = null }) {
+  if (!isPositiveInteger(pr)) {
+    throw new Error("formatConflictRecoveryWorkerDispatchPrompt requires pr to be a positive integer");
+  }
+  const hasExecutionIssue = issue !== "none";
+  if (hasExecutionIssue && !isPositiveInteger(issue)) {
+    throw new Error(
+      'formatConflictRecoveryWorkerDispatchPrompt requires issue to be a positive integer or the literal "none" sentinel',
+    );
+  }
+  const hasControlIssue = controlIssue !== null && controlIssue !== undefined;
+  if (hasControlIssue && !isPositiveInteger(controlIssue)) {
+    throw new Error("formatConflictRecoveryWorkerDispatchPrompt requires controlIssue to be a positive integer when present");
+  }
+  if (!hasControlIssue && (typeof reviewedHead !== "string" || !reviewedHead.trim())) {
+    throw new Error(
+      "formatConflictRecoveryWorkerDispatchPrompt requires a non-empty reviewedHead when controlIssue is absent " +
+        "(no durable Stage 1 bullet exists for the worker to recover it from otherwise)",
+    );
+  }
+  const executionLine = hasExecutionIssue ? ` Execution Issue: #${issue}.` : "";
+  const controlLine = hasControlIssue ? ` Controlling Issue: #${controlIssue}.` : "";
+  const reviewedHeadClause = hasControlIssue
+    ? "reviewed head: Controlling Issue's Stage 1 bullet"
+    : `reviewed head: ${reviewedHead}`;
+  return (
+    `Conflict-recovery worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
+    `PR #${pr}'s live head is correction-satisfied (${reviewedHeadClause}) but conflicts with target. ` +
+    `Merge target into the PR branch (never rebase/force-push -- ancestry checks reject it); resolve only ` +
+    `conflicts for target authority plus this execution's outcome. A semantic/product/security/founder ` +
+    `conflict is a founder interrupt, not auto-resolved. Verify, push, then run ` +
+    `tools/orchestration/finalize-correction-breakpoint.mjs with the same reviewed head and new pushed ` +
+    `head (nonzero: CORRECTION_BREAKPOINT_UNVERIFIED). Stop: no re-review, merge, or Stage 2.`
+  );
+}
+
 // Pure. Same reference-only size proxy diagnostic-trace.mjs's classifyPreDispatch uses
 // (DEFAULT_REFERENCE_THRESHOLD_CHARS = 700), duplicated rather than imported: this
 // directory and tools/telemetry are separate consumer-distributed units that should not
@@ -564,6 +635,10 @@ const TEMPLATES_BY_STATE = {
     fields: ["controlIssue", "issue", "pr", "correctionReason", "checkoutBinding"],
   },
   STAGE2_CORRECTION_REQUIRED: { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
+  STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT: {
+    formatter: formatConflictRecoveryWorkerDispatchPrompt,
+    fields: ["controlIssue", "issue", "pr", "reviewedHead"],
+  },
 };
 
 // Explicit-fields mode's equivalent of the state-based selection above, for a caller
@@ -589,6 +664,10 @@ const FORMATTERS_BY_KIND = {
     fields: ["controlIssue", "issue", "pr", "correctionReason", "checkoutBinding"],
   },
   "stage2-correction": { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
+  "conflict-recovery": {
+    formatter: formatConflictRecoveryWorkerDispatchPrompt,
+    fields: ["controlIssue", "issue", "pr", "reviewedHead"],
+  },
 };
 
 const CLI_FLAG_BY_FIELD = {
@@ -601,6 +680,7 @@ const CLI_FLAG_BY_FIELD = {
   pr: "pr",
   auditIssue: "audit-issue",
   correctionReason: "correction-reason",
+  reviewedHead: "reviewed-head",
 };
 
 // Pure. Reads one field's value out of an explicit-fields `args` map or a piped gate-result
@@ -659,7 +739,7 @@ function main() {
     if (!entry) {
       process.stderr.write(
         `format-dispatch-prompt.mjs: unknown --kind ${JSON.stringify(kind)} — use "implementation", "planning", ` +
-          `"integration", "planning-correction", "stage1-correction", or "stage2-correction"\n`,
+          `"integration", "planning-correction", "stage1-correction", "stage2-correction", or "conflict-recovery"\n`,
       );
       process.exit(2);
       return;
@@ -694,8 +774,8 @@ function main() {
       process.stderr.write(
         `format-dispatch-prompt.mjs: input state is ${JSON.stringify(parsed.state ?? null)}, not "READY_TO_DISPATCH" ` +
           `(or "READY_TO_DISPATCH_PLANNING"/"READY_TO_DISPATCH_INTEGRATION"/"REPLAN_REQUIRED"/` +
-          `"STAGE1_CORRECTION_REQUIRED"/"STAGE2_CORRECTION_REQUIRED") — refusing to format a dispatch prompt for a ` +
-          "non-ready or malformed gate result\n",
+          `"STAGE1_CORRECTION_REQUIRED"/"STAGE2_CORRECTION_REQUIRED"/"STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT") — ` +
+          "refusing to format a dispatch prompt for a non-ready or malformed gate result\n",
       );
       process.exit(2);
       return;

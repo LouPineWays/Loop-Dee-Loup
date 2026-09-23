@@ -27,6 +27,7 @@ test("getActionEnvelope: every ready-dispatch-gate.mjs and next-review-transitio
     "NO_ACTION_YET",
     "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
     "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
+    "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT",
     "STAGE1_CORRECTION_REQUIRED",
     "CHECKOUT_BINDING_UNVERIFIED",
     "STAGE2_CORRECTION_REQUIRED",
@@ -322,6 +323,35 @@ test("STAGE2_CORRECTION_REQUIRED: one bounded correction dispatch, no extra audi
   ]);
   assert.equal(result.status, "violation");
   assert.equal(result.reasons.length, 2);
+});
+
+// Issue #665 (live #639/#638/PR #640 reproduction): a correction-satisfied PR's merge is
+// mechanically blocked by a real conflict against the current target branch. Exactly one
+// bounded conflict-recovery worker dispatch is authorized -- never a merge attempt, a second
+// Stage 1 round, or founder/controller-improvised branch surgery in the same context.
+test("STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT: one bounded conflict-recovery dispatch, never a merge attempt or a second gate invocation in the same context", () => {
+  assert.deepEqual(getActionEnvelope("STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT"), {
+    mode: "bounded",
+    authorizedActions: ["dispatch-conflict-recovery-worker"],
+  });
+  assert.equal(
+    classifyEnvelopeCompliance("STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT", ["dispatch-conflict-recovery-worker"]).status,
+    "compliant",
+  );
+  const mergeAttempt = classifyEnvelopeCompliance("STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT", [
+    "dispatch-conflict-recovery-worker",
+    "merge-pr",
+  ]);
+  assert.equal(mergeAttempt.status, "violation");
+  assert.ok(mergeAttempt.reasons.some((r) => r.includes("merge-pr")));
+  const rerun = classifyEnvelopeCompliance("STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT", [
+    "dispatch-conflict-recovery-worker",
+    "rerun-gate",
+  ]);
+  assert.equal(rerun.status, "violation");
+  const missingDispatch = classifyEnvelopeCompliance("STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT", []);
+  assert.equal(missingDispatch.status, "violation");
+  assert.ok(missingDispatch.reasons.some((r) => r.includes("dispatch-conflict-recovery-worker")));
 });
 
 // Issue #703: a findings-bearing Stage 1 correction reserves its PR-head checkout before spawn
