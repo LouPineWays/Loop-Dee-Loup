@@ -243,9 +243,44 @@
 //                  the composed `STAGE2_RESPONSE_UNUSABLE` fail-closed transition this state
 //                  authorizes).
 //
+//   post-audit TRIGGER_REQUIRED — issue #735 (live #398/#729/PR #733/Audit #734 reproduction):
+//                  the prior packet proved canonical Stage 2 Audit Issue recovery (issue #729),
+//                  but a fresh `work on #398` still returned terminal `NO_ACTION_YET` for #734
+//                  once recovered, solely because its durable Verdict was PENDING -- even though
+//                  #734's own thread carried zero issue comments and no `@codex review` trigger
+//                  had ever been posted. `findStage2ReportEvidence`'s existing `backed: false,
+//                  hasGenuineResponse: false` result was, before this fix, identical whether the
+//                  thread had never been triggered at all or had been triggered and was
+//                  legitimately still awaiting a response -- both collapsed into the same generic
+//                  `OK`/`rawVerdict: "PENDING"` fallthrough. A PENDING dropdown value alone is
+//                  never evidence that independent review was requested.
+//
+//                  `findStage2ReportEvidence` now also reports `hasTrigger` (reusing
+//                  `trigger.mjs`'s own `findExistingTrigger` -- the same dedup authority
+//                  `tools/review-watch/trigger.mjs` and `next-review-transition-gate.mjs`'s
+//                  `STAGE2_AUDIT_ALREADY_PREPARED` reconciliation already trust, never a second,
+//                  competing `@codex review` detector). `checkPostAudit` reports the new
+//                  `TRIGGER_REQUIRED` state -- instead of falling through to the generic
+//                  OK/PENDING result -- exactly when no completed report and no unusable genuine
+//                  response exist (the same PENDING/malformed-Verdict precondition
+//                  REPORT_READY_TO_RECORD/RESPONSE_UNUSABLE already use) AND `hasTrigger` is
+//                  false. Once any trigger exists on the thread -- valid or not, complete
+//                  response or not -- `hasTrigger` is true and this state never fires again for
+//                  that thread; the unmodified generic OK/PENDING result (ordinary "still
+//                  waiting") applies exactly as before. This never authorizes a second trigger
+//                  once one already exists (issue #259's anti-retrigger authority is unaffected --
+//                  this state only ever fires for a thread with *zero* trigger comments), and it
+//                  never changes RESPONSE_UNUSABLE/REPORT_READY_TO_RECORD's own existing,
+//                  unmodified precedence (both are checked first; TRIGGER_REQUIRED only applies to
+//                  what would otherwise be the generic OK/PENDING fallthrough). See
+//                  `resolvePostMergeVerdict` in next-review-transition-gate.mjs for the composed
+//                  `STAGE2_TRIGGER_REQUIRED` transition this state authorizes -- posting exactly
+//                  one idempotent `tools/review-watch/trigger.mjs --kind issue` invocation, never a
+//                  second semantic Stage 2 preparation pass.
+//
 // Exit codes: 0 = MERGE_READY / MERGE_READY_NO_WORK_ISSUE / OK / READY_TO_CLOSE /
-// REPORT_READY_TO_RECORD / RECORDED / ALREADY_RECORDED / ALREADY_TERMINAL / CLOSE_READY / CLOSED /
-// SUPERSEDED_CLOSE_READY / SUPERSEDED_CLOSED / NOT_TERMINAL_YET (safe to proceed),
+// REPORT_READY_TO_RECORD / TRIGGER_REQUIRED / RECORDED / ALREADY_RECORDED / ALREADY_TERMINAL /
+// CLOSE_READY / CLOSED / SUPERSEDED_CLOSE_READY / SUPERSEDED_CLOSED / NOT_TERMINAL_YET (safe to proceed),
 // 2 = BLOCKED_CLOSING_REFERENCE / PREMATURE_CLOSURE / CONFLICTING_VERDICT / RESPONSE_UNUSABLE
 // (must not merge / must not treat as accepted / must not silently overwrite / must not be
 // treated as ordinary waiting — a genuine response landed and needs a bounded recovery decision),
@@ -724,6 +759,14 @@ async function findStage2ReportEvidence(
   const commentsPath = endpointsFor("issue", repo, auditIssue).find((e) => e.name === "issue-comments").path;
   const comments = await ghApiImpl(commentsPath);
   const trigger = findExistingTrigger(comments, {});
+  // Issue #735: `hasTrigger` is the one bit checkPostAudit needs to distinguish "prepared but
+  // never triggered" from "triggered and legitimately awaiting a response" -- both shapes
+  // otherwise return the identical `backed: false, hasGenuineResponse: false` result below,
+  // which is exactly what let a canonical PENDING Audit Issue with zero issue comments (the live
+  // #734 reproduction) resolve to the same generic OK/PENDING result as an ordinary in-flight
+  // review. Reuses trigger.mjs's own `findExistingTrigger` -- the same authority
+  // `next-review-transition-gate.mjs`'s STAGE2_AUDIT_ALREADY_PREPARED/trigger.mjs's own dedup
+  // already trust -- never a second, competing `@codex review` detector.
   if (!trigger) {
     return {
       backed: false,
@@ -733,6 +776,7 @@ async function findStage2ReportEvidence(
       hasUnusableGenuineResponse: false,
       genuineResponsesSeen: 0,
       genuineResponses: [],
+      hasTrigger: false,
       reason: "no @codex review trigger found on the audit issue thread",
     };
   }
@@ -793,6 +837,7 @@ async function findStage2ReportEvidence(
       hasUnusableGenuineResponse: substantiveGenuineReports.length > 0,
       genuineResponsesSeen: genuineReports.length,
       genuineResponses: substantiveGenuineReports.map((r) => ({ id: r.id, url: r.url, reasons: r.reasons })),
+      hasTrigger: true,
       reason:
         reports.length === 0
           ? "no post-trigger bot response found on the audit issue thread"
@@ -807,6 +852,7 @@ async function findStage2ReportEvidence(
     verdict: latest.verdict,
     responsesSeen: reports.length,
     hasGenuineResponse: true,
+    hasTrigger: true,
     genuineResponsesSeen: genuineReports.length,
     matchedCommentUrl: latest.url,
     legacyCompatible: latest.legacyCompatible,
@@ -1069,6 +1115,26 @@ export async function checkPostAudit(
             `reviewer (issue #259). A bounded recovery/founder-interrupt decision is required.`,
         };
       }
+      // Issue #735 (live #734 reproduction): neither a completed report nor even an unusable
+      // genuine response exists -- reportEvidence.hasTrigger is the deciding bit between "this
+      // thread was never triggered" (this branch) and true state A, "triggered, correctly still
+      // waiting for a response" (the unmodified generic OK/PENDING fallthrough just below, which
+      // this condition never reaches when hasTrigger is true). A canonical, exact-merge, PENDING
+      // Audit Issue with zero issue comments -- the live #734 shape, where the prior packet's
+      // control projection landed but the reviewer trigger (Stage 2 step 4) never did -- must not
+      // be indistinguishable from an ordinary in-flight review. This never fires once any trigger
+      // exists, valid or not (findExistingTrigger's own dedup semantics), so a controller can
+      // never re-trigger a thread that already has one merely by resolving this state repeatedly.
+      if (!reportEvidence.hasTrigger) {
+        return {
+          exitCode: 0,
+          state: "TRIGGER_REQUIRED",
+          workIssue: null,
+          auditIssue: Number(auditIssue),
+          rawVerdict,
+          reportEvidence,
+        };
+      }
     }
 
     return {
@@ -1218,6 +1284,18 @@ export async function checkPostAudit(
           `completed Stage 2 audit report under the current evidence contract (${pendingReportEvidence.reason}). ` +
           `This must not be treated as ordinary waiting, and it must not automatically retrigger or coach the ` +
           `reviewer (issue #259). A bounded recovery/founder-interrupt decision is required.`,
+      };
+    }
+    // Issue #735 (live #734 reproduction): same prepared-vs-triggered distinction as the
+    // no-work-issue branch above -- reused verbatim via `hasTrigger`, never a second detector.
+    if (!pendingReportEvidence.hasTrigger) {
+      return {
+        exitCode: 0,
+        state: "TRIGGER_REQUIRED",
+        workIssue: workIssueNumber,
+        auditIssue: Number(auditIssue),
+        rawVerdict,
+        reportEvidence: pendingReportEvidence,
       };
     }
   }

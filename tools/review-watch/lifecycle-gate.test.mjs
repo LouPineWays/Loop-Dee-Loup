@@ -836,18 +836,70 @@ test('checkPostAudit: parseThinControlStage2Ref accepts a full GitHub issue URL 
   assert.equal(result.workIssue, 456);
 });
 
-test("checkPostAudit: OK — work issue open, verdict PENDING (verification #8)", async () => {
+test("checkPostAudit: TRIGGER_REQUIRED — work issue open, verdict PENDING, zero issue comments (issue #735, the live #734 reproduction; supersedes verification #8's prior OK expectation)", async () => {
   const result = await checkPostAudit(
     { repo: "owner/repo", "audit-issue": 160 },
     {
       ghIssueViewImpl: async ({ number }) =>
         number === 160 ? { body: auditBody({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
-      ghApiImpl: async () => [], // no trigger, no response — genuinely still waiting (issue #439)
+      ghApiImpl: async () => [], // zero comments at all -- never triggered, not merely "no response yet"
     },
   );
   assert.equal(result.exitCode, 0);
-  assert.equal(result.state, "OK");
+  assert.equal(
+    result.state,
+    "TRIGGER_REQUIRED",
+    "a canonical Audit Issue with zero issue comments was never triggered -- this must not collapse into the same OK/PENDING result as an ordinary in-flight review (issue #735)",
+  );
+  assert.equal(result.rawVerdict, "PENDING");
+  assert.equal(result.reportEvidence.hasTrigger, false);
+});
+
+test("checkPostAudit: OK — work issue open, verdict PENDING, a valid trigger already exists but no response has landed yet (issue #735: the ordinary-wait sibling of the TRIGGER_REQUIRED case above; verification #8)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBody({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: async (path) =>
+        path.includes("/issues/") ? [{ id: 1, body: triggerCommentBody(), created_at: "2026-08-20T00:00:00Z" }] : [],
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "OK", "a thread that already carries a valid trigger and no response is ordinary waiting, not TRIGGER_REQUIRED");
   assert.equal(result.verdict, "PENDING");
+});
+
+test("checkPostAudit: hasTrigger reuses trigger.mjs's own findExistingTrigger contract verbatim -- a non-bot comment merely mentioning the trigger text still counts as triggered, never a second, looser detector (issue #735 required check #3)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBody({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      // A human discussing the trigger convention in prose, not a real reviewer-trigger post --
+      // trigger.mjs's own findExistingTrigger (reused here verbatim, never a second, competing
+      // parser) already treats any comment containing the trigger text as a match regardless of
+      // authorship; this proves checkPostAudit inherits that exact contract rather than tightening
+      // or loosening it.
+      ghApiImpl: async (path) =>
+        path.includes("/issues/")
+          ? [
+              {
+                id: 1,
+                user: { login: "LouPineWays" },
+                body: "Note: we already asked @codex review to look at this in the linked PR discussion.",
+                created_at: "2026-08-20T00:00:00Z",
+              },
+            ]
+          : [],
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(
+    result.state,
+    "OK",
+    "reusing trigger.mjs's own dedup contract means this thread already reads as triggered, so this must not resolve to TRIGGER_REQUIRED",
+  );
 });
 
 test("checkPostAudit: OK — work issue open, verdict NOT CLEAN (verification #9)", async () => {
@@ -1293,7 +1345,7 @@ function noWorkIssueAuditBody({ verdict = "PENDING", commit = MERGE_COMMIT }) {
   return `### Work issue\n\nnone\n\n### Exact merge commit\n\n${commit}\n\n### Verdict\n\n${verdict}\n`;
 }
 
-test("checkPostAudit: OK — no work issue, verdict PENDING; no implementation issue is fetched", async () => {
+test("checkPostAudit: TRIGGER_REQUIRED — no work issue, verdict PENDING, zero issue comments; no implementation issue is fetched (issue #735)", async () => {
   let issueViewCalls = 0;
   const result = await checkPostAudit(
     { repo: "owner/repo", "audit-issue": 160 },
@@ -1302,14 +1354,30 @@ test("checkPostAudit: OK — no work issue, verdict PENDING; no implementation i
         issueViewCalls++;
         return number === 160 ? { body: noWorkIssueAuditBody({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" };
       },
-      ghApiImpl: async () => [], // no trigger, no response — genuinely still waiting (issue #439)
+      ghApiImpl: async () => [], // zero comments at all -- never triggered, not merely "no response yet"
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "TRIGGER_REQUIRED", "the explicit no-work-issue state must distinguish never-triggered from ordinary waiting too (issue #735)");
+  assert.equal(result.workIssue, null);
+  assert.equal(result.reportEvidence.hasTrigger, false);
+  assert.equal(issueViewCalls, 1, "only the audit issue itself should be fetched — no work issue to look up");
+});
+
+test("checkPostAudit: OK — no work issue, verdict PENDING, a valid trigger already exists but no response has landed yet (issue #735)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: noWorkIssueAuditBody({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: async (path) =>
+        path.includes("/issues/") ? [{ id: 1, body: triggerCommentBody(), created_at: "2026-08-20T00:00:00Z" }] : [],
     },
   );
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "OK");
   assert.equal(result.workIssue, null);
   assert.equal(result.verdict, "PENDING");
-  assert.equal(issueViewCalls, 1, "only the audit issue itself should be fetched — no work issue to look up");
 });
 
 test("checkPostAudit: OK — no work issue, verdict NOT CLEAN, remains non-accepted", async () => {
@@ -1432,13 +1500,16 @@ test("checkPostAudit: REPORT_READY_TO_RECORD — the explicit no-work-issue stat
   assert.equal(result.workIssue, null);
 });
 
-test("checkPostAudit: PENDING + no response at all stays true NO_ACTION_YET-shaped OK, not REPORT_READY_TO_RECORD (verification #3)", async () => {
+test("checkPostAudit: PENDING + triggered, no response at all stays true NO_ACTION_YET-shaped OK, not REPORT_READY_TO_RECORD (verification #3)", async () => {
   const result = await checkPostAudit(
     { repo: "owner/repo", "audit-issue": 160 },
     {
       ghIssueViewImpl: async ({ number }) =>
         number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
-      ghApiImpl: async () => [],
+      // A valid trigger with no response at all -- distinct from issue #735's TRIGGER_REQUIRED
+      // (zero comments, never triggered), which this test's own suite covers separately.
+      ghApiImpl: async (path) =>
+        path.includes("/issues/") ? [{ id: 1, body: triggerCommentBody(), created_at: "2026-08-20T00:00:00Z" }] : [],
     },
   );
   assert.equal(result.exitCode, 0);
@@ -1813,6 +1884,34 @@ test("checkPostAudit: idempotent — re-evaluating a bare #229 kickoff against u
   assert.equal(second.rawVerdict, "PENDING");
 });
 
+test("checkPostAudit: idempotent — re-evaluating TRIGGER_REQUIRED against unchanged durable evidence (zero issue comments) reports the same state every time, no duplicate work performed (issue #735)", async () => {
+  const ghApiImpl = async () => [];
+  const ghIssueViewImpl = async ({ number }) =>
+    number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" };
+  const first = await checkPostAudit({ repo: "owner/repo", "audit-issue": 160 }, { ghIssueViewImpl, ghApiImpl });
+  const second = await checkPostAudit({ repo: "owner/repo", "audit-issue": 160 }, { ghIssueViewImpl, ghApiImpl });
+  assert.equal(first.state, "TRIGGER_REQUIRED");
+  assert.equal(second.state, "TRIGGER_REQUIRED");
+  assert.deepEqual(first.reportEvidence, second.reportEvidence, "unchanged durable evidence must resolve to the same result every time");
+});
+
+test("checkPostAudit: recovery — once a trigger lands on a thread that previously had none, the very next evaluation reports ordinary OK/PENDING instead of TRIGGER_REQUIRED (issue #735)", async () => {
+  const ghIssueViewImpl = async ({ number }) =>
+    number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" };
+  const before = await checkPostAudit({ repo: "owner/repo", "audit-issue": 160 }, { ghIssueViewImpl, ghApiImpl: async () => [] });
+  assert.equal(before.state, "TRIGGER_REQUIRED");
+
+  const after = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl,
+      ghApiImpl: async (path) =>
+        path.includes("/issues/") ? [{ id: 1, body: triggerCommentBody(), created_at: "2026-08-20T00:00:00Z" }] : [],
+    },
+  );
+  assert.equal(after.state, "OK", "once the missing trigger has been posted, a fresh evaluation resumes the ordinary wait state with no special-cased transition of its own");
+});
+
 test("checkPostAudit: late recovery — once a genuine complete bot report lands after the unusable one, the very next evaluation reports REPORT_READY_TO_RECORD instead", async () => {
   const withLateCompleteReport = async (path) => {
     if (!path.includes("/issues/")) return [];
@@ -2102,7 +2201,7 @@ test("checkRecordVerdict: RECORDED — repairs an empty '### Verdict' field (hea
   assert.match(editCalls[0].body, /### Next authorized action\n\nPending audit\./, "the neighboring field must be preserved");
 });
 
-test("checkRecordVerdict: no completed report exists yet — passes checkPostAudit's own OK result through unchanged, no mutation attempted", async () => {
+test("checkRecordVerdict: no completed report exists yet (never triggered) — passes checkPostAudit's own TRIGGER_REQUIRED result through unchanged, no mutation attempted (issue #735)", async () => {
   const editCalls = [];
   const result = await checkRecordVerdict(
     { repo: "owner/repo", "audit-issue": 160 },
@@ -2110,6 +2209,28 @@ test("checkRecordVerdict: no completed report exists yet — passes checkPostAud
       ghIssueViewImpl: async ({ number }) =>
         number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
       ghApiImpl: async () => [],
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(
+    result.state,
+    "TRIGGER_REQUIRED",
+    "checkPostAudit's own vocabulary is passed through verbatim rather than an invented state",
+  );
+  assert.equal(editCalls.length, 0);
+});
+
+test("checkRecordVerdict: no completed report exists yet (triggered, awaiting response) — passes checkPostAudit's own OK result through unchanged, no mutation attempted", async () => {
+  const editCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: async (path) =>
+        path.includes("/issues/") ? [{ id: 1, body: triggerCommentBody(), created_at: "2026-08-20T00:00:00Z" }] : [],
       ghEditImpl: async (a) => editCalls.push(a),
       ghCommentImpl: async () => {},
     },
