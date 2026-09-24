@@ -848,6 +848,17 @@ test("resolvePostMergeVerdict: TRIGGER_REQUIRED never carries a finalize-audit-b
   assert.doesNotMatch(v.nextCommand, /write-control-snapshot/);
 });
 
+test("resolvePostMergeVerdict: TRIGGER_BLOCKED_UNVERIFIED -> AMBIGUOUS (issue #736 Stage 1 correction: a stale/closed/superseded/malformed candidate that failed checkPostAudit's own canonical-identity revalidation must never be treated as STAGE2_TRIGGER_REQUIRED, never an improvised recovery)", () => {
+  const v = resolvePostMergeVerdict({
+    postAudit: postAudit("TRIGGER_BLOCKED_UNVERIFIED", {
+      rawVerdict: "PENDING",
+      message: "audit issue owner/repo#160 is not OPEN (state: CLOSED)",
+    }),
+  });
+  assert.equal(v.state, "AMBIGUOUS");
+  assert.equal(v.stopAfter, true);
+});
+
 test("resolvePostMergeVerdict: PREMATURE_CLOSURE -> AMBIGUOUS (a recoverable-but-abnormal state this read-only gate does not resolve on its own)", () => {
   const v = resolvePostMergeVerdict({ postAudit: postAudit("PREMATURE_CLOSURE", { verdict: null, rawVerdict: null }) });
   assert.equal(v.state, "AMBIGUOUS");

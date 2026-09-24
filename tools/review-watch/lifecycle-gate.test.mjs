@@ -139,6 +139,18 @@ function auditBodyWithReviewedHead({ workIssue = 151, verdict = "PENDING", commi
   );
 }
 
+// Issue #736 Stage 1 correction: checkPostAudit's TRIGGER_REQUIRED path now revalidates
+// (verifyAuditCanonicalForTrigger) that the candidate Audit Issue is still OPEN, still has the
+// complete six-field canonical audit shape (hasCanonicalAuditShape), and is still the sole match
+// for its own recorded exact-merge/work identity in a fresh `[Audit] in:title` search
+// (findMatchingOpenAuditIssues) before authorizing a trigger. A TRIGGER_REQUIRED fixture must
+// therefore use a full canonical body (renderedCanonicalAuditBody below, not the minimal
+// auditBody/auditBodyWithCommit helpers above) and supply a matching ghIssueListImpl -- this
+// helper builds the simplest one, where the candidate issue is exactly itself.
+function ghIssueListMatchingSelf({ number, body }) {
+  return async () => [{ number, state: "OPEN", body, createdAt: "2026-08-20T00:00:00Z" }];
+}
+
 // -- normalizeIssueNumber ----------------------------------------------------------------
 
 test("normalizeIssueNumber: accepts a bare integer and a '#'-prefixed one", () => {
@@ -735,15 +747,17 @@ const THIN_CONTROL_457_BODY = [
 ].join("\n");
 
 test('checkPostAudit: redirects through a thin control Issue\'s own "- **Stage 2:**" bullet to the real Audit Issue instead of blocking on a missing Work issue field (issue #550, the #548/#457 incident)', async () => {
+  const auditBody548 = renderedCanonicalAuditBody({ workIssue: 456, verdict: "PENDING" });
   const result = await checkPostAudit(
     { repo: "owner/repo", "audit-issue": 457 },
     {
       ghIssueViewImpl: async ({ number }) => {
         if (number === 457) return { body: THIN_CONTROL_457_BODY, state: "OPEN" };
-        if (number === 548) return { body: auditBodyWithCommit({ workIssue: 456, verdict: "PENDING" }), state: "OPEN" };
+        if (number === 548) return { body: auditBody548, state: "OPEN" };
         return { body: "", state: "OPEN" };
       },
       ghApiImpl: async () => [],
+      ghIssueListImpl: ghIssueListMatchingSelf({ number: 548, body: auditBody548 }),
     },
   );
   assert.equal(result.exitCode, 0);
@@ -820,15 +834,17 @@ test('checkPostAudit: parseThinControlStage2Ref accepts a full GitHub issue URL 
     "- **PR:** #547",
     "- **Stage 2:** https://github.com/owner/repo/issues/548",
   ].join("\n");
+  const auditBody548 = renderedCanonicalAuditBody({ workIssue: 456, verdict: "PENDING" });
   const result = await checkPostAudit(
     { repo: "owner/repo", "audit-issue": 457 },
     {
       ghIssueViewImpl: async ({ number }) => {
         if (number === 457) return { body: bodyWithUrl, state: "OPEN" };
-        if (number === 548) return { body: auditBodyWithCommit({ workIssue: 456, verdict: "PENDING" }), state: "OPEN" };
+        if (number === 548) return { body: auditBody548, state: "OPEN" };
         return { body: "", state: "OPEN" };
       },
       ghApiImpl: async () => [],
+      ghIssueListImpl: ghIssueListMatchingSelf({ number: 548, body: auditBody548 }),
     },
   );
   assert.equal(result.exitCode, 0);
@@ -837,12 +853,13 @@ test('checkPostAudit: parseThinControlStage2Ref accepts a full GitHub issue URL 
 });
 
 test("checkPostAudit: TRIGGER_REQUIRED — work issue open, verdict PENDING, zero issue comments (issue #735, the live #734 reproduction; supersedes verification #8's prior OK expectation)", async () => {
+  const body = renderedCanonicalAuditBody({ workIssue: 151, verdict: "PENDING" });
   const result = await checkPostAudit(
     { repo: "owner/repo", "audit-issue": 160 },
     {
-      ghIssueViewImpl: async ({ number }) =>
-        number === 160 ? { body: auditBody({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghIssueViewImpl: async ({ number }) => (number === 160 ? { body, state: "OPEN" } : { body: "", state: "OPEN" }),
       ghApiImpl: async () => [], // zero comments at all -- never triggered, not merely "no response yet"
+      ghIssueListImpl: ghIssueListMatchingSelf({ number: 160, body }),
     },
   );
   assert.equal(result.exitCode, 0);
@@ -853,6 +870,60 @@ test("checkPostAudit: TRIGGER_REQUIRED — work issue open, verdict PENDING, zer
   );
   assert.equal(result.rawVerdict, "PENDING");
   assert.equal(result.reportEvidence.hasTrigger, false);
+});
+
+test("checkPostAudit: TRIGGER_BLOCKED_UNVERIFIED — the referenced Audit Issue has gone CLOSED since it was first prepared (issue #736 Stage 1 correction)", async () => {
+  const body = renderedCanonicalAuditBody({ workIssue: 151, verdict: "PENDING" });
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) => (number === 160 ? { body, state: "CLOSED" } : { body: "", state: "OPEN" }),
+      ghApiImpl: async () => [],
+      ghIssueListImpl: ghIssueListMatchingSelf({ number: 160, body }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(
+    result.state,
+    "TRIGGER_BLOCKED_UNVERIFIED",
+    "a CLOSED candidate must never authorize the one permitted reviewer trigger",
+  );
+  assert.match(result.message, /not OPEN/);
+});
+
+test("checkPostAudit: TRIGGER_BLOCKED_UNVERIFIED — the referenced Audit Issue no longer carries the complete canonical audit shape (issue #736 Stage 1 correction)", async () => {
+  // Missing "Merged PR"/"Stage 1 inline review disposition"/"Audit scope"/"Verification
+  // checklist" -- the minimal auditBody shape earlier revisions of this test relied on.
+  const body = auditBodyWithCommit({ workIssue: 151, verdict: "PENDING" });
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) => (number === 160 ? { body, state: "OPEN" } : { body: "", state: "OPEN" }),
+      ghApiImpl: async () => [],
+      ghIssueListImpl: ghIssueListMatchingSelf({ number: 160, body }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "TRIGGER_BLOCKED_UNVERIFIED", "an incomplete/malformed candidate must never authorize a trigger");
+  assert.match(result.message, /canonical audit shape/);
+});
+
+test("checkPostAudit: TRIGGER_BLOCKED_UNVERIFIED — a fresh search no longer finds this Audit Issue as the sole canonical OPEN match (superseded/stale) (issue #736 Stage 1 correction)", async () => {
+  const body = renderedCanonicalAuditBody({ workIssue: 151, verdict: "PENDING" });
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) => (number === 160 ? { body, state: "OPEN" } : { body: "", state: "OPEN" }),
+      ghApiImpl: async () => [],
+      // A fresh search finds a different, newer OPEN issue as the canonical match instead of
+      // #160 -- #160 has been superseded and must never be trusted for a trigger merely because
+      // it was the number originally passed in.
+      ghIssueListImpl: async () => [{ number: 161, state: "OPEN", body, createdAt: "2026-08-21T00:00:00Z" }],
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "TRIGGER_BLOCKED_UNVERIFIED", "a superseded/stale candidate must never authorize a trigger");
+  assert.match(result.message, /no longer the sole canonical OPEN Audit Issue/);
 });
 
 test("checkPostAudit: OK — work issue open, verdict PENDING, a valid trigger already exists but no response has landed yet (issue #735: the ordinary-wait sibling of the TRIGGER_REQUIRED case above; verification #8)", async () => {
@@ -1347,14 +1418,16 @@ function noWorkIssueAuditBody({ verdict = "PENDING", commit = MERGE_COMMIT }) {
 
 test("checkPostAudit: TRIGGER_REQUIRED — no work issue, verdict PENDING, zero issue comments; no implementation issue is fetched (issue #735)", async () => {
   let issueViewCalls = 0;
+  const body = renderedCanonicalAuditBody({ workIssue: "none", verdict: "PENDING" });
   const result = await checkPostAudit(
     { repo: "owner/repo", "audit-issue": 160 },
     {
       ghIssueViewImpl: async ({ number }) => {
         issueViewCalls++;
-        return number === 160 ? { body: noWorkIssueAuditBody({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" };
+        return number === 160 ? { body, state: "OPEN" } : { body: "", state: "OPEN" };
       },
       ghApiImpl: async () => [], // zero comments at all -- never triggered, not merely "no response yet"
+      ghIssueListImpl: ghIssueListMatchingSelf({ number: 160, body }),
     },
   );
   assert.equal(result.exitCode, 0);
@@ -1885,20 +1958,24 @@ test("checkPostAudit: idempotent — re-evaluating a bare #229 kickoff against u
 });
 
 test("checkPostAudit: idempotent — re-evaluating TRIGGER_REQUIRED against unchanged durable evidence (zero issue comments) reports the same state every time, no duplicate work performed (issue #735)", async () => {
+  const body = renderedCanonicalAuditBody({ workIssue: 151, verdict: "PENDING" });
   const ghApiImpl = async () => [];
-  const ghIssueViewImpl = async ({ number }) =>
-    number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" };
-  const first = await checkPostAudit({ repo: "owner/repo", "audit-issue": 160 }, { ghIssueViewImpl, ghApiImpl });
-  const second = await checkPostAudit({ repo: "owner/repo", "audit-issue": 160 }, { ghIssueViewImpl, ghApiImpl });
+  const ghIssueViewImpl = async ({ number }) => (number === 160 ? { body, state: "OPEN" } : { body: "", state: "OPEN" });
+  const ghIssueListImpl = ghIssueListMatchingSelf({ number: 160, body });
+  const first = await checkPostAudit({ repo: "owner/repo", "audit-issue": 160 }, { ghIssueViewImpl, ghApiImpl, ghIssueListImpl });
+  const second = await checkPostAudit({ repo: "owner/repo", "audit-issue": 160 }, { ghIssueViewImpl, ghApiImpl, ghIssueListImpl });
   assert.equal(first.state, "TRIGGER_REQUIRED");
   assert.equal(second.state, "TRIGGER_REQUIRED");
   assert.deepEqual(first.reportEvidence, second.reportEvidence, "unchanged durable evidence must resolve to the same result every time");
 });
 
 test("checkPostAudit: recovery — once a trigger lands on a thread that previously had none, the very next evaluation reports ordinary OK/PENDING instead of TRIGGER_REQUIRED (issue #735)", async () => {
-  const ghIssueViewImpl = async ({ number }) =>
-    number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" };
-  const before = await checkPostAudit({ repo: "owner/repo", "audit-issue": 160 }, { ghIssueViewImpl, ghApiImpl: async () => [] });
+  const body = renderedCanonicalAuditBody({ workIssue: 151, verdict: "PENDING" });
+  const ghIssueViewImpl = async ({ number }) => (number === 160 ? { body, state: "OPEN" } : { body: "", state: "OPEN" });
+  const before = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    { ghIssueViewImpl, ghApiImpl: async () => [], ghIssueListImpl: ghIssueListMatchingSelf({ number: 160, body }) },
+  );
   assert.equal(before.state, "TRIGGER_REQUIRED");
 
   const after = await checkPostAudit(
@@ -2203,12 +2280,13 @@ test("checkRecordVerdict: RECORDED — repairs an empty '### Verdict' field (hea
 
 test("checkRecordVerdict: no completed report exists yet (never triggered) — passes checkPostAudit's own TRIGGER_REQUIRED result through unchanged, no mutation attempted (issue #735)", async () => {
   const editCalls = [];
+  const body = renderedCanonicalAuditBody({ workIssue: 151, verdict: "PENDING" });
   const result = await checkRecordVerdict(
     { repo: "owner/repo", "audit-issue": 160 },
     {
-      ghIssueViewImpl: async ({ number }) =>
-        number === 160 ? { body: auditBodyWithCommit({ verdict: "PENDING" }), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghIssueViewImpl: async ({ number }) => (number === 160 ? { body, state: "OPEN" } : { body: "", state: "OPEN" }),
       ghApiImpl: async () => [],
+      ghIssueListImpl: ghIssueListMatchingSelf({ number: 160, body }),
       ghEditImpl: async (a) => editCalls.push(a),
       ghCommentImpl: async () => {},
     },
@@ -2980,7 +3058,13 @@ function chainFixtureWithCorrects({ workIssue = "none", commit = MERGE_COMMIT, v
 // issue template renders a permanent markdown block immediately after "Audit scope" and after
 // "Verification checklist", before the next "### " heading. These tests build that exact
 // rendering so a regression here fails for the right reason.
-function renderedCanonicalAuditBody({ scope = "Diff of the PR against pre-PR main.", checklist = "1. Confirm A." } = {}) {
+function renderedCanonicalAuditBody({
+  scope = "Diff of the PR against pre-PR main.",
+  checklist = "1. Confirm A.",
+  workIssue = 440,
+  commit = MERGE_COMMIT,
+  verdict = "PENDING",
+} = {}) {
   return [
     "### Merged PR",
     "",
@@ -2988,11 +3072,11 @@ function renderedCanonicalAuditBody({ scope = "Diff of the PR against pre-PR mai
     "",
     "### Work issue",
     "",
-    "#440",
+    workIssue === "none" ? "none" : `#${workIssue}`,
     "",
     "### Exact merge commit",
     "",
-    MERGE_COMMIT,
+    commit,
     "",
     "### Stage 1 inline review disposition",
     "",
@@ -3017,7 +3101,7 @@ function renderedCanonicalAuditBody({ scope = "Diff of the PR against pre-PR mai
     "",
     "### Verdict",
     "",
-    "PENDING",
+    verdict,
   ].join("\n");
 }
 
