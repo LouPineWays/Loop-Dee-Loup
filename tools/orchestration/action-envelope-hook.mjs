@@ -183,12 +183,42 @@
 //
 // Wired in .claude/settings.json for PreToolUse (all tools), PostToolUse (Bash only),
 // PostToolUseFailure (Bash only), and SubagentStart (issue #678).
+//
+// Live enforcement of the pre-bound Stage 1 correction dispatch boundary (issue #737, control
+// #691). Live reproduction (#398/#735/PR #736): `pr-head-checkout-preflight.mjs
+// --reserve-from-gate` correctly reserved an exclusive PR-head checkout and
+// `format-dispatch-prompt.mjs` correctly emitted the pre-bound path/token, but nothing stopped
+// the controller from then spawning the correction worker with agent-tool `isolation:
+// "worktree"` — pinning it to an unrelated sandbox instead of the reserved checkout — and once
+// that spawn happened, `SubagentStart` (issue #678, below) unconditionally treated it as having
+// consumed the bounded `dispatch-correction-worker` action, so the controller could not stop and
+// redispatch correctly: the bounded stop boundary was already exhausted.
+//
+// The fix lives entirely in `decidePreToolUse`, at the earliest deterministic boundary this
+// repository's own tooling owns: the `PreToolUse` event for the dispatch tool call itself, BEFORE
+// any subagent starts and BEFORE `SubagentStart` can ever fire for it. When the active bounded
+// marker's own `authorizedActions` requires a pre-bound, non-isolated dispatch
+// (`requiresPreBoundNonIsolatedDispatch`, action-envelope.mjs — true only for the
+// findings-bearing Stage 1 correction and the merge-conflict recovery worker, never the Stage 2
+// or closing-reference siblings that share the same `dispatch-correction-worker` action-kind
+// string but never reserve a pre-spawn checkout), a dispatch-tool call carrying a truthy
+// `isolation` value is denied outright. A denied `PreToolUse` call never starts a subagent, so
+// `SubagentStart` never fires for it and the marker is never mutated — the bounded envelope stays
+// exactly as authorized, and the controller's very next call may retry the identical dispatch
+// with no `isolation` argument, which this hook allows through unchanged (see the existing
+// "bounded marker allows a non-gate-script Bash call and a subagent dispatch" behavior below).
+// This makes the invariant docs/operating-model.md § PR-head checkout preflight for Stage 1
+// correction already documents in prose ("the Claude Code adapter dispatches the correction
+// worker without isolation: 'worktree'") a property of the dispatch mechanism itself, not of the
+// controller's own memory of that sentence.
+//
 // Tests: node --test tools/orchestration/action-envelope-hook.test.mjs
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pathToFileURL } from "node:url";
+import { requiresPreBoundNonIsolatedDispatch } from "./action-envelope.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const STATE_DIR = process.env.LDL_ACTION_ENVELOPE_STATE_DIR || join(ROOT, ".claude", "action-envelope-state");
@@ -275,6 +305,16 @@ const GATE_SCRIPT_BASENAMES = new Set([
   "next-review-transition-gate.mjs",
   "session-entry-gate.mjs",
 ]);
+
+// The subagent-dispatch tool's name as it actually appears in a real Claude Code `PreToolUse`
+// payload's `tool_name`. Mirrors `tools/telemetry/diagnostic-trace.mjs`'s own
+// `DISPATCH_TOOL_NAMES` constant (issue #321: this repository's own environment has only ever
+// emitted "Agent" for a subagent dispatch, never "Task", but "Task" is kept alongside it since a
+// different Claude Code build/consumer environment may still use it — additive, not a rename).
+// Duplicated locally rather than imported, same reasoning as `sanitizeSessionId` above:
+// `tools/telemetry/**` is deliberately not an installed consumer path
+// (`docs/consumer-contract.md`), but `tools/orchestration/**` is.
+const SUBAGENT_DISPATCH_TOOL_NAMES = new Set(["Task", "Agent"]);
 
 // Strips one layer of matching surrounding quotes (both '"' and "'") from a single shell
 // token, e.g. the `"$CLAUDE_PROJECT_DIR/tools/orchestration/next-review-transition-gate.mjs"`
@@ -521,6 +561,13 @@ export function recordSubagentDispatchStart(
 // envelope's own named authorizedActions — a Bash pre-step, the worker dispatch itself — can
 // actually proceed; classifyEnvelopeCompliance (action-envelope.mjs) remains the post-hoc
 // authority for whether a non-gate-script action was itself one of those named actions.
+//
+// mode "bounded", pre-bound correction dispatch (issue #737, control #691): additionally denies
+// a dispatch-tool call (`SUBAGENT_DISPATCH_TOOL_NAMES`) carrying a truthy `isolation` value when
+// this marker's own `authorizedActions` requires the pre-reserved, non-isolated checkout
+// (`requiresPreBoundNonIsolatedDispatch`, action-envelope.mjs) — see the module header for the
+// live #398/#735/PR #736 reproduction this closes. Checked before the gate-rerun denial above so
+// it applies even though the dispatch tool is never a gate script itself.
 export function decidePreToolUse(marker, toolCall = {}) {
   if (!marker) return { permissionDecision: "allow" };
 
@@ -535,6 +582,24 @@ export function decidePreToolUse(marker, toolCall = {}) {
   }
 
   if (marker.mode === "bounded") {
+    if (
+      SUBAGENT_DISPATCH_TOOL_NAMES.has(toolCall.toolName) &&
+      typeof toolCall.isolation === "string" &&
+      toolCall.isolation.length > 0 &&
+      requiresPreBoundNonIsolatedDispatch(marker.authorizedActions)
+    ) {
+      return {
+        permissionDecision: "deny",
+        permissionDecisionReason:
+          `This bounded dispatch (verdict "${marker.state}") requires the pre-reserved, exclusive ` +
+          `PR-head checkout an earlier "reserve-correction-checkout" step already settled -- never ` +
+          `agent-tool isolation ("${toolCall.isolation}"). Per docs/operating-model.md § PR-head ` +
+          "checkout preflight for Stage 1 correction (issue #703/#737), dispatch with no `isolation` " +
+          "argument so the worker starts on the reserved checkout directly. This denial does not " +
+          "consume the bounded dispatch action -- retry the identical dispatch without `isolation`.",
+      };
+    }
+
     const command = toolCall.toolName === "Bash" ? toolCall.command : undefined;
     if (invokedGateScriptBasenames(command).length === 0) {
       return { permissionDecision: "allow" };
@@ -650,6 +715,10 @@ function main() {
       const decision = decidePreToolUse(marker, {
         toolName: payload.tool_name,
         command: payload.tool_input?.command,
+        // Issue #737 (control #691): the Agent/Task tool's own `isolation` input parameter, read
+        // the same way `command` is read off a Bash call above -- only meaningful for a
+        // dispatch-tool call (SUBAGENT_DISPATCH_TOOL_NAMES), harmless to pass through otherwise.
+        isolation: typeof payload.tool_input?.isolation === "string" ? payload.tool_input.isolation : undefined,
         // Issue #678 Stage 1 correction, finding 3: present only for a hook event happening
         // inside a dispatched subagent's own context; see decidePreToolUse's own comment.
         agentId: typeof payload.agent_id === "string" ? payload.agent_id : undefined,
