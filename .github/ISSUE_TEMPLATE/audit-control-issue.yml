@@ -108,13 +108,17 @@ body:
         credit for prose elsewhere in the response that covers a topic without a matching
         numbered/marker line — an oversized checklist can produce a mechanically-incomplete
         response even when the substance was genuinely covered (issue #335, audit #334). When an
-        item names a `node --test <file...>` command, name only the actual `*.test.mjs` test
-        file(s) to run — never an implementation module. `node --test` executes a non-test `.mjs`
-        argument directly as a plain script (running its own top-level `main()`, if any) rather
-        than collecting tests from it, which can hang the command (e.g. a module whose `main()`
-        reads stdin) instead of running the intended suite (audit #739, control #691: checklist
-        item 8 named `tools/orchestration/action-envelope-hook.mjs`, the hook implementation,
-        instead of `tools/orchestration/action-envelope-hook.test.mjs`, its test file).
+        item names a `node --test <file...>` command, name only the target repository's actual
+        intended test entry point(s) — never an implementation module that merely happens to be
+        executable by Node. `node --test` executes a non-test argument directly as a plain script
+        (running its own top-level `main()`, if any) rather than collecting tests from it, which
+        can hang the command (e.g. a module whose `main()` reads stdin) instead of running the
+        intended suite. This is not a `*.test.mjs` filename-suffix requirement — a repository may
+        legitimately name its real test entry points `test/foo.mjs`, `foo.test.js`, `foo.spec.mjs`,
+        or another convention entirely; the requirement is that the named file is the actual test,
+        not the implementation it tests (audit #739, control #691: checklist item 8 named
+        `tools/orchestration/action-envelope-hook.mjs`, the hook implementation, instead of
+        `tools/orchestration/action-envelope-hook.test.mjs`, its test file).
   - type: textarea
     id: verification_checklist
     attributes:
