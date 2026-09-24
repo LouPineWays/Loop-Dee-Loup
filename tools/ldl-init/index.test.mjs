@@ -653,6 +653,18 @@ test("findHardDependencyCollisions: flags a skipped lifecycle-gate.mjs dependenc
   assert.match(collisions[0].reason, /next-review-transition-gate\.mjs/);
 });
 
+// Issue #737 Stage 1 review finding (P2, on PR #738): the analogous collision coverage for
+// action-envelope-hook.mjs's own new hard import of requiresPreBoundNonIsolatedDispatch from
+// action-envelope.mjs, mirroring the #729/lifecycle-gate.mjs coverage above.
+test("findHardDependencyCollisions: flags a skipped action-envelope.mjs dependency whose importer (action-envelope-hook.mjs) is about to be (re)installed", () => {
+  const toInstall = [{ destRel: "tools/orchestration/action-envelope-hook.mjs", content: Buffer.from("x") }];
+  const toSkip = [{ dest: "tools/orchestration/action-envelope.mjs", reason: "destination already exists and is not LDL-managed" }];
+  const collisions = findHardDependencyCollisions({ toInstall, toSkip });
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].dest, "tools/orchestration/action-envelope.mjs");
+  assert.match(collisions[0].reason, /action-envelope-hook\.mjs/);
+});
+
 test("HARD_MODULE_DEPENDENCIES: every declared importer/dependency pair is a real path this repository actually ships", () => {
   for (const { dest, dependsOnDest } of HARD_MODULE_DEPENDENCIES) {
     assert.ok(existsSync(join(REPO_ROOT, dest)), `${dest} does not exist in this repository`);

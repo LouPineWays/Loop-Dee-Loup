@@ -685,6 +685,14 @@ export const HARD_MODULE_DEPENDENCIES = [
   // importing it, so install/update would report success while the mandatory session-entry gate
   // then fails at ESM load time.
   { dest: "tools/orchestration/next-review-transition-gate.mjs", dependsOnDest: "tools/review-watch/lifecycle-gate.mjs" },
+  // Issue #737 Stage 1 review finding (P2, on PR #738): action-envelope-hook.mjs's new
+  // decidePreToolUse isolation-denial check hard-imports requiresPreBoundNonIsolatedDispatch from
+  // action-envelope.mjs. Without this edge, a consumer's own pre-existing unmanaged
+  // tools/orchestration/action-envelope.mjs would be preserved while the managed hook is
+  // (re)installed hard-importing it, so install/update would report success while the hook then
+  // fails immediately at import time (the named export does not exist on the preserved module),
+  // silently disabling the action-envelope hook's PreToolUse/PostToolUse enforcement.
+  { dest: "tools/orchestration/action-envelope-hook.mjs", dependsOnDest: "tools/orchestration/action-envelope.mjs" },
 ];
 
 // Pure. Given one install/update run's final toInstall/toSkip classification, returns one

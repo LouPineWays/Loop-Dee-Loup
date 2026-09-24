@@ -619,6 +619,37 @@ export function knownEnvelopeStates() {
   return Object.keys(ENVELOPES);
 }
 
+// Issue #737 (control #691): does a bounded marker's own `authorizedActions` name a worker
+// dispatch that requires the pre-reserved, exclusive PR-head `checkoutBinding` issue #703
+// introduced — i.e. one whose spawn must happen WITHOUT agent-tool `isolation`
+// (docs/operating-model.md § PR-head checkout preflight for Stage 1 correction: "the Claude
+// Code adapter dispatches the correction worker without isolation: 'worktree'" — live proof on
+// PR #710 showed an isolated sandbox's git operations cannot target the reserved path at all)?
+//
+// `dispatch-correction-worker` alone is ambiguous: the SAME action-kind string also names the
+// Stage 2 post-merge correction dispatch (`STAGE2_CORRECTION_REQUIRED`, no pre-spawn checkout at
+// all) and the Stage 1 closing-reference repair (`STAGE1_CORRECTION_REQUIRED` with
+// `correctionReason: "closing-reference"`, which — per `format-dispatch-prompt.mjs`'s own
+// closing-reference template — never reserves a pre-spawn checkoutBinding; a source-changing
+// closing-reference repair instead uses the legacy post-spawn `--reserve`/`EnterWorktree`
+// rebind, a distinct flow this issue does not touch). Both of those envelopes authorize
+// `dispatch-correction-worker` WITHOUT also authorizing `reserve-correction-checkout` in the
+// same sequence (see the `STAGE1_CORRECTION_REQUIRED`/`STAGE2_CORRECTION_REQUIRED` table rows
+// and the `correctionReason === "closing-reference"` narrowing branch in `getActionEnvelope`
+// above) — only the findings-bearing Stage 1 correction and the merge-conflict recovery worker
+// (`dispatch-conflict-recovery-worker`, `STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT`) ever pair
+// a worker dispatch with a prior `reserve-correction-checkout` step. That pairing is therefore
+// the deterministic discriminant: no new marker field, no re-derivation of `correctionReason`
+// from `state` alone (which the live marker does not otherwise carry) — just the envelope's own
+// already-declared authorized-action sequence.
+export function requiresPreBoundNonIsolatedDispatch(authorizedActions) {
+  if (!Array.isArray(authorizedActions)) return false;
+  const hasReservation = authorizedActions.includes("reserve-correction-checkout");
+  const hasPreBoundDispatch =
+    authorizedActions.includes("dispatch-correction-worker") || authorizedActions.includes("dispatch-conflict-recovery-worker");
+  return hasReservation && hasPreBoundDispatch;
+}
+
 // Stage 1 review finding on PR #647 (issue #646, P2): the verdict states whose
 // `getActionEnvelope` branch above derives `authorizedActions` from `context.nextCommand`
 // (`parseChainedCommands`) rather than a fixed table row. Exported as the single source of

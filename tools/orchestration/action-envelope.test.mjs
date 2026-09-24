@@ -5,6 +5,7 @@ import {
   classifyEnvelopeCompliance,
   knownEnvelopeStates,
   contextSensitiveEnvelopeStates,
+  requiresPreBoundNonIsolatedDispatch,
   ENVELOPE_MODES,
 } from "./action-envelope.mjs";
 
@@ -1047,4 +1048,42 @@ test("STAGE2_CORRECTION_PR_NEEDS_FINALIZATION: dispatching a fresh correction wo
   );
   assert.equal(result.status, "violation");
   assert.ok(result.reasons.some((r) => r.includes("dispatch-correction-worker")));
+});
+
+// -- requiresPreBoundNonIsolatedDispatch (issue #737, control #691) -------------------------
+
+test("requiresPreBoundNonIsolatedDispatch: true for the findings-bearing STAGE1_CORRECTION_REQUIRED envelope", () => {
+  const envelope = getActionEnvelope("STAGE1_CORRECTION_REQUIRED", { correctionReason: "findings" });
+  assert.deepEqual(envelope.authorizedActions, ["reserve-correction-checkout", "dispatch-correction-worker"]);
+  assert.equal(requiresPreBoundNonIsolatedDispatch(envelope.authorizedActions), true);
+});
+
+test("requiresPreBoundNonIsolatedDispatch: true for the merge-conflict recovery envelope (STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT)", () => {
+  const envelope = getActionEnvelope("STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT");
+  assert.deepEqual(envelope.authorizedActions, ["reserve-correction-checkout", "dispatch-conflict-recovery-worker"]);
+  assert.equal(requiresPreBoundNonIsolatedDispatch(envelope.authorizedActions), true);
+});
+
+test("requiresPreBoundNonIsolatedDispatch: false for the closing-reference STAGE1_CORRECTION_REQUIRED envelope -- same action-kind string, no pre-spawn reservation paired with it", () => {
+  const envelope = getActionEnvelope("STAGE1_CORRECTION_REQUIRED", { correctionReason: "closing-reference" });
+  assert.deepEqual(envelope.authorizedActions, ["dispatch-correction-worker"]);
+  assert.equal(requiresPreBoundNonIsolatedDispatch(envelope.authorizedActions), false);
+});
+
+test("requiresPreBoundNonIsolatedDispatch: false for STAGE2_CORRECTION_REQUIRED -- the same dispatch-correction-worker action-kind string, but no pre-spawn checkout at all", () => {
+  const envelope = getActionEnvelope("STAGE2_CORRECTION_REQUIRED");
+  assert.deepEqual(envelope.authorizedActions, ["dispatch-correction-worker"]);
+  assert.equal(requiresPreBoundNonIsolatedDispatch(envelope.authorizedActions), false);
+});
+
+test("requiresPreBoundNonIsolatedDispatch: false for every other bounded envelope, and for non-array/absent input", () => {
+  assert.equal(requiresPreBoundNonIsolatedDispatch(getActionEnvelope("READY_TO_DISPATCH").authorizedActions), false);
+  assert.equal(
+    requiresPreBoundNonIsolatedDispatch(getActionEnvelope("READY_TO_RUN_DISPATCH_MANIFEST").authorizedActions),
+    false,
+  );
+  assert.equal(requiresPreBoundNonIsolatedDispatch(getActionEnvelope("READY_TO_DISPATCH_UNITS").authorizedActions), false);
+  assert.equal(requiresPreBoundNonIsolatedDispatch(undefined), false);
+  assert.equal(requiresPreBoundNonIsolatedDispatch(null), false);
+  assert.equal(requiresPreBoundNonIsolatedDispatch("dispatch-correction-worker"), false);
 });

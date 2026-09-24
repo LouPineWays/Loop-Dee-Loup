@@ -962,3 +962,148 @@ test("#486 blocker/founder-interrupt no-action control: ordinary BLOCKED also st
   rmSync(dir, { recursive: true, force: true });
   delete process.env.LDL_ACTION_ENVELOPE_STATE_DIR;
 });
+
+// -- Issue #737 (control #691): pre-bound Stage 1 correction dispatch denies a conflicting ------
+// agent-tool `isolation` spawn before the subagent ever starts, without falsely consuming the
+// bounded dispatch action. Live reproduction: #398/#735/PR #736.
+
+test("decidePreToolUse: denies a findings-bearing STAGE1_CORRECTION_REQUIRED dispatch spawned with isolation: worktree", async () => {
+  const { decidePreToolUse } = await import("./action-envelope-hook.mjs");
+  const marker = {
+    state: "STAGE1_CORRECTION_REQUIRED",
+    mode: "bounded",
+    authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"],
+  };
+  const decision = decidePreToolUse(marker, { toolName: "Agent", isolation: "worktree" });
+  assert.equal(decision.permissionDecision, "deny");
+  assert.match(decision.permissionDecisionReason, /STAGE1_CORRECTION_REQUIRED/);
+  assert.match(decision.permissionDecisionReason, /isolation/);
+  assert.match(decision.permissionDecisionReason, /worktree/);
+});
+
+test("decidePreToolUse: denies isolation: remote identically, and the legacy 'Task' dispatch tool name", async () => {
+  const { decidePreToolUse } = await import("./action-envelope-hook.mjs");
+  const marker = {
+    state: "STAGE1_CORRECTION_REQUIRED",
+    mode: "bounded",
+    authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"],
+  };
+  assert.equal(decidePreToolUse(marker, { toolName: "Agent", isolation: "remote" }).permissionDecision, "deny");
+  assert.equal(decidePreToolUse(marker, { toolName: "Task", isolation: "worktree" }).permissionDecision, "deny");
+});
+
+test("decidePreToolUse: denies isolation on the merge-conflict recovery worker dispatch too (STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT)", async () => {
+  const { decidePreToolUse } = await import("./action-envelope-hook.mjs");
+  const marker = {
+    state: "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT",
+    mode: "bounded",
+    authorizedActions: ["reserve-correction-checkout", "dispatch-conflict-recovery-worker"],
+  };
+  const decision = decidePreToolUse(marker, { toolName: "Agent", isolation: "worktree" });
+  assert.equal(decision.permissionDecision, "deny");
+  assert.match(decision.permissionDecisionReason, /STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT/);
+});
+
+test("decidePreToolUse: a compliant dispatch (no isolation) for a pre-bound correction marker is still allowed", async () => {
+  const { decidePreToolUse } = await import("./action-envelope-hook.mjs");
+  const marker = {
+    state: "STAGE1_CORRECTION_REQUIRED",
+    mode: "bounded",
+    authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"],
+  };
+  assert.deepEqual(decidePreToolUse(marker, { toolName: "Agent" }), { permissionDecision: "allow" });
+  assert.deepEqual(decidePreToolUse(marker, { toolName: "Agent", isolation: "" }), { permissionDecision: "allow" });
+});
+
+test("decidePreToolUse: the isolation denial never applies to a marker whose dispatch does not require a pre-bound checkout", async () => {
+  const { decidePreToolUse } = await import("./action-envelope-hook.mjs");
+  // Stage 2 correction: dispatch-correction-worker with no reserve-correction-checkout pairing.
+  const stage2Marker = { state: "STAGE2_CORRECTION_REQUIRED", mode: "bounded", authorizedActions: ["dispatch-correction-worker"] };
+  assert.deepEqual(decidePreToolUse(stage2Marker, { toolName: "Agent", isolation: "worktree" }), { permissionDecision: "allow" });
+
+  // Stage 1 closing-reference: same action-kind string, but the envelope never pairs it with a
+  // reservation step (format-dispatch-prompt.mjs's closing-reference template never reserves a
+  // pre-spawn checkoutBinding at all).
+  const closingReferenceMarker = { state: "STAGE1_CORRECTION_REQUIRED", mode: "bounded", authorizedActions: ["dispatch-correction-worker"] };
+  assert.deepEqual(decidePreToolUse(closingReferenceMarker, { toolName: "Agent", isolation: "worktree" }), {
+    permissionDecision: "allow",
+  });
+
+  // An ordinary non-dispatch bounded envelope, or a non-dispatch-tool call, is unaffected.
+  const nonDispatchMarker = {
+    state: "READY_TO_RUN_DISPATCH_MANIFEST",
+    mode: "bounded",
+    authorizedActions: ["prepare-dispatch-manifest", "write-control-snapshot"],
+  };
+  assert.deepEqual(decidePreToolUse(nonDispatchMarker, { toolName: "Agent", isolation: "worktree" }), {
+    permissionDecision: "allow",
+  });
+  const correctionMarker = {
+    state: "STAGE1_CORRECTION_REQUIRED",
+    mode: "bounded",
+    authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"],
+  };
+  assert.deepEqual(decidePreToolUse(correctionMarker, { toolName: "Bash", command: "gh pr view 736", isolation: "worktree" }), {
+    permissionDecision: "allow",
+  });
+});
+
+test("#398/#735/PR #736 reproduction: a conflicting isolation spawn is denied before any subagent starts, the bounded marker survives untouched, and a corrected retry is then allowed and consumed normally", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-action-envelope-hook-test-"));
+  process.env.LDL_ACTION_ENVELOPE_STATE_DIR = dir;
+  const mod = await import(`./action-envelope-hook.mjs?isolate=${Date.now()}`);
+  const sessionId = "session-737-work-on-691";
+
+  // 1. next-review-transition-gate.mjs returns STAGE1_CORRECTION_REQUIRED (findings).
+  const stdout = JSON.stringify({
+    state: "STAGE1_CORRECTION_REQUIRED",
+    stopAfter: true,
+    correctionReason: "findings",
+    controlIssue: 691,
+    issue: 735,
+    pr: 736,
+    actionEnvelope: { mode: "bounded", authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"] },
+  });
+  const verdict = mod.detectBoundedVerdict("node tools/orchestration/next-review-transition-gate.mjs --control-issue 691", stdout);
+  assert.ok(verdict);
+  mod.writeMarker(sessionId, verdict);
+
+  // 2. The controller reserves the pre-spawn checkout -- allowed, unchanged.
+  assert.equal(
+    mod.decidePreToolUse(mod.readMarker(sessionId), {
+      toolName: "Bash",
+      command: "node tools/orchestration/pr-head-checkout-preflight.mjs --reserve-from-gate --execution-issue 735",
+    }).permissionDecision,
+    "allow",
+  );
+
+  // 3. AC1/AC2: the controller attempts to spawn the correction worker with agent-tool
+  //    isolation -- the exact #398/#735/PR #736 recurrence. This must be denied BEFORE any
+  //    subagent starts, so SubagentStart never fires for it.
+  const markerBeforeBadSpawn = mod.readMarker(sessionId);
+  const badSpawnDecision = mod.decidePreToolUse(markerBeforeBadSpawn, { toolName: "Agent", isolation: "worktree" });
+  assert.equal(badSpawnDecision.permissionDecision, "deny");
+
+  // 4. AC3: the denial does not mutate the marker -- the bounded envelope is untouched, so the
+  //    controller is not stranded (contrast the #631 shape, where a VALID dispatch legitimately
+  //    exhausts it via SubagentStart).
+  const markerAfterBadSpawn = mod.readMarker(sessionId);
+  assert.deepEqual(markerAfterBadSpawn, markerBeforeBadSpawn);
+  assert.equal(markerAfterBadSpawn.mode, "bounded");
+
+  // 5. AC4: the controller retries the identical dispatch without isolation -- allowed.
+  const goodSpawnDecision = mod.decidePreToolUse(mod.readMarker(sessionId), { toolName: "Agent" });
+  assert.equal(goodSpawnDecision.permissionDecision, "allow");
+
+  // 6. The valid spawn actually happens: SubagentStart fires and consumes the bounded dispatch
+  //    exactly as the pre-existing #631/#678 mechanism already does.
+  const markerBeforeGoodSpawn = mod.readMarker(sessionId);
+  assert.equal(mod.shouldConsumeBoundedDispatch(markerBeforeGoodSpawn), true);
+  mod.consumeBoundedDispatch(sessionId, markerBeforeGoodSpawn);
+  const markerAfterGoodSpawn = mod.readMarker(sessionId);
+  assert.equal(markerAfterGoodSpawn.mode, "none");
+  assert.equal(mod.decidePreToolUse(markerAfterGoodSpawn, { toolName: "Bash", command: "gh pr view 736" }).permissionDecision, "deny");
+
+  rmSync(dir, { recursive: true, force: true });
+  delete process.env.LDL_ACTION_ENVELOPE_STATE_DIR;
+});
