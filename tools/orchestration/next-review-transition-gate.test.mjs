@@ -822,6 +822,43 @@ test("resolvePostMergeVerdict: RESPONSE_UNUSABLE carries no nextCommand — it a
   assert.equal("nextCommand" in v, false, "unlike STAGE2_CLOSE_READY/STAGE2_REPORT_READY_TO_RECORD, this state must never carry an automatic next mutation");
 });
 
+// -- TRIGGER_REQUIRED -> STAGE2_TRIGGER_REQUIRED (issue #735, the live #398/#729/PR #733/Audit
+// #734 reproduction) ------------------------------------------------------------------------
+
+test("resolvePostMergeVerdict: TRIGGER_REQUIRED -> STAGE2_TRIGGER_REQUIRED, carrying the exact idempotent trigger.mjs nextCommand", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("TRIGGER_REQUIRED", { rawVerdict: "PENDING", reportEvidence: { hasTrigger: false } }) },
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: 734 },
+  );
+  assert.equal(v.state, "STAGE2_TRIGGER_REQUIRED");
+  assert.equal(v.stopAfter, true);
+  assert.equal(
+    v.nextCommand,
+    "node tools/review-watch/trigger.mjs --repo LouPineWays/Loop-Dee-Loup --kind issue --number 734",
+  );
+});
+
+test("resolvePostMergeVerdict: TRIGGER_REQUIRED never carries a finalize-audit-breakpoint.mjs step -- reaching this post-merge verdict already requires a settled Stage 2 reference, so control projection has, by construction, already happened", () => {
+  const v = resolvePostMergeVerdict(
+    { postAudit: postAudit("TRIGGER_REQUIRED", { rawVerdict: null }) },
+    { repo: "owner/repo", auditIssue: 160, controlIssue: 398 },
+  );
+  assert.equal(v.state, "STAGE2_TRIGGER_REQUIRED");
+  assert.doesNotMatch(v.nextCommand, /finalize-audit-breakpoint/);
+  assert.doesNotMatch(v.nextCommand, /write-control-snapshot/);
+});
+
+test("resolvePostMergeVerdict: TRIGGER_BLOCKED_UNVERIFIED -> AMBIGUOUS (issue #736 Stage 1 correction: a stale/closed/superseded/malformed candidate that failed checkPostAudit's own canonical-identity revalidation must never be treated as STAGE2_TRIGGER_REQUIRED, never an improvised recovery)", () => {
+  const v = resolvePostMergeVerdict({
+    postAudit: postAudit("TRIGGER_BLOCKED_UNVERIFIED", {
+      rawVerdict: "PENDING",
+      message: "audit issue owner/repo#160 is not OPEN (state: CLOSED)",
+    }),
+  });
+  assert.equal(v.state, "AMBIGUOUS");
+  assert.equal(v.stopAfter, true);
+});
+
 test("resolvePostMergeVerdict: PREMATURE_CLOSURE -> AMBIGUOUS (a recoverable-but-abnormal state this read-only gate does not resolve on its own)", () => {
   const v = resolvePostMergeVerdict({ postAudit: postAudit("PREMATURE_CLOSURE", { verdict: null, rawVerdict: null }) });
   assert.equal(v.state, "AMBIGUOUS");
@@ -972,6 +1009,38 @@ test("runNextReviewTransitionGate: direct --audit-issue mode resolves REPORT_REA
   assert.deepEqual(result.actionEnvelope, {
     mode: "bounded",
     authorizedActions: ["run-lifecycle-gate-record-verdict"],
+  });
+});
+
+test("runNextReviewTransitionGate: direct --audit-issue mode resolves TRIGGER_REQUIRED to STAGE2_TRIGGER_REQUIRED, exit 0, with the exact trigger.mjs nextCommand and a post-stage2-reviewer-trigger-only action envelope (issue #735, the live Audit #734 reproduction)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "LouPineWays/Loop-Dee-Loup", auditIssue: "734" },
+    {
+      checkPostAuditImpl: async (args) => {
+        assert.equal(args["audit-issue"], "734");
+        return {
+          exitCode: 0,
+          state: "TRIGGER_REQUIRED",
+          rawVerdict: "PENDING",
+          auditIssue: 734,
+          reportEvidence: { backed: false, hasGenuineResponse: false, hasUnusableGenuineResponse: false, hasTrigger: false },
+        };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_TRIGGER_REQUIRED");
+  assert.equal(result.stopAfter, true);
+  assert.equal(
+    result.nextCommand,
+    "node tools/review-watch/trigger.mjs --repo LouPineWays/Loop-Dee-Loup --kind issue --number 734",
+  );
+  // Issue #486: this verdict authorizes exactly one action -- posting the trigger -- and
+  // nothing else (no write-control-snapshot/finalize-audit-breakpoint re-run, and never a
+  // same-context re-resolution once the trigger has been posted).
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["post-stage2-reviewer-trigger"],
   });
 });
 

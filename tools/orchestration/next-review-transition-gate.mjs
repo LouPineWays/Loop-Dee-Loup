@@ -180,8 +180,22 @@
 //       promotes the already-established evidence into the durable field, then stops — a
 //       fresh gate invocation afterward resolves the now-recorded verdict through this same
 //       table exactly as if a human had set the field by hand)
-//     - lifecycle-gate post-audit OK with any other rawVerdict (no
-//       completed report backing a verdict yet)                            -> NO_ACTION_YET
+//     - lifecycle-gate post-audit TRIGGER_REQUIRED (issue #735, live #398/#729/PR #733/Audit
+//       #734 reproduction: a canonical, exact-merge, PENDING Audit Issue whose thread carries no
+//       valid Stage 2 reviewer trigger at all -- "prepared but never triggered", not "triggered
+//       and awaiting a response") -> STAGE2_TRIGGER_REQUIRED, carrying `nextCommand`: the exact
+//       idempotent `tools/review-watch/trigger.mjs --kind issue` invocation. Reaching this
+//       post-merge branch already requires a settled Stage 2 reference (control-Issue-mode's own
+//       "Stage 2" bullet, or a direct-reference --audit-issue), so the control projection issue
+//       #561 requires strictly before a reviewer trigger has, by construction, already happened --
+//       no finalize-audit-breakpoint.mjs re-run is needed or authorized here, unlike
+//       STAGE2_AUDIT_ALREADY_PREPARED's distinct pre-merge resume case above. Never fires once any
+//       trigger already exists on the thread (lifecycle-gate.mjs's own `hasTrigger`, reusing
+//       trigger.mjs's `findExistingTrigger`) -- that shape keeps resolving to the unmodified
+//       NO_ACTION_YET immediately below, exactly as before this fix, and issue #259's anti-
+//       retrigger authority is unaffected.
+//     - lifecycle-gate post-audit OK with any other rawVerdict (no completed report backing a
+//       verdict yet, and a valid Stage 2 trigger already exists on the thread) -> NO_ACTION_YET
 //     - lifecycle-gate post-audit RESPONSE_UNUSABLE (issue #447, live reproductions #446 and
 //       #380's first round: a genuine, provenance-valid bot response landed post-trigger, but
 //       none satisfies the completed-report contract — e.g. #446's terse genuine
@@ -825,6 +839,37 @@ export function resolvePostMergeVerdict({ postAudit }, context = {}) {
     return { state: "STAGE2_RESPONSE_UNUSABLE", stopAfter: true, ...context, postAudit };
   }
 
+  if (postAudit.state === "TRIGGER_REQUIRED") {
+    // Issue #735 (live #398/#729/PR #733/Audit #734 reproduction): lifecycle-gate.mjs's
+    // checkPostAudit now distinguishes "this canonical Audit Issue was never triggered at all"
+    // (this branch) from ordinary "triggered, correctly still waiting for a response" (the
+    // unmodified NO_ACTION_YET fallthrough in the generic OK branch below, reached only once
+    // postAudit.reportEvidence.hasTrigger is true). Before this fix both shapes reached the
+    // identical generic OK/PENDING result, so a canonical, exact-merge, PENDING Audit Issue with
+    // zero issue comments -- #734's exact live shape -- silently resolved to terminal
+    // NO_ACTION_YET even though independent review had never been requested.
+    //
+    // `context` here is always `{ repo, auditIssue, controlIssue? }` (resolvePostMerge's own
+    // composition) -- exactly what `tools/review-watch/trigger.mjs --kind issue` needs. Unlike
+    // STAGE2_AUDIT_ALREADY_PREPARED's pre-merge resume (which chains finalize-audit-breakpoint.mjs
+    // first because the control Issue's own Stage 2/Lifecycle projection has not happened yet),
+    // reaching this post-merge branch at all already requires a settled "Stage 2" reference on the
+    // control Issue (or a direct-reference `--audit-issue` invocation) -- the finalization/
+    // projection issue #561 requires strictly before a reviewer trigger has, by construction,
+    // already happened durably. There is nothing left to (re-)finalize or (re-)project here, so
+    // `nextCommand` names only the one remaining step: the idempotent trigger.mjs invocation
+    // (docs/bounded-review-cycle.md Stage 2 step 4). trigger.mjs's own dedup (`findExistingTrigger`)
+    // makes a retry of this exact command safe -- it never posts a second trigger once one exists,
+    // matching this Issue's own idempotence requirement across every interruption boundary.
+    return {
+      state: "STAGE2_TRIGGER_REQUIRED",
+      stopAfter: true,
+      ...context,
+      postAudit,
+      nextCommand: `node tools/review-watch/trigger.mjs --repo ${context.repo} --kind issue --number ${context.auditIssue}`,
+    };
+  }
+
   if (postAudit.state === "OK") {
     // Stage 1 review finding on PR #435: the motivating resume case -- the work issue is
     // already closed, but its backed-CLEAN audit was never consumed -- never reaches
@@ -925,6 +970,11 @@ function exitCodeFor(state) {
     case "STAGE2_AUDIT_ALREADY_PREPARED":
     case "STAGE2_CLOSE_READY":
     case "STAGE2_REPORT_READY_TO_RECORD":
+    // Issue #735: names a required, non-blocking resume action (post the missing Stage 2
+    // reviewer trigger on an already-prepared, already-projected canonical Audit Issue) -- same
+    // "authorizes proceeding" bucket as its STAGE2_REPORT_READY_TO_RECORD/
+    // STAGE2_AUDIT_ALREADY_PREPARED siblings, never an error or an outstanding correction.
+    case "STAGE2_TRIGGER_REQUIRED":
       return 0;
     case "STAGE1_CORRECTION_REQUIRED":
     case "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT":

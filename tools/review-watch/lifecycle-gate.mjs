@@ -243,12 +243,65 @@
 //                  the composed `STAGE2_RESPONSE_UNUSABLE` fail-closed transition this state
 //                  authorizes).
 //
+//   post-audit TRIGGER_REQUIRED — issue #735 (live #398/#729/PR #733/Audit #734 reproduction):
+//                  the prior packet proved canonical Stage 2 Audit Issue recovery (issue #729),
+//                  but a fresh `work on #398` still returned terminal `NO_ACTION_YET` for #734
+//                  once recovered, solely because its durable Verdict was PENDING -- even though
+//                  #734's own thread carried zero issue comments and no `@codex review` trigger
+//                  had ever been posted. `findStage2ReportEvidence`'s existing `backed: false,
+//                  hasGenuineResponse: false` result was, before this fix, identical whether the
+//                  thread had never been triggered at all or had been triggered and was
+//                  legitimately still awaiting a response -- both collapsed into the same generic
+//                  `OK`/`rawVerdict: "PENDING"` fallthrough. A PENDING dropdown value alone is
+//                  never evidence that independent review was requested.
+//
+//                  `findStage2ReportEvidence` now also reports `hasTrigger` (reusing
+//                  `trigger.mjs`'s own `findExistingTrigger` -- the same dedup authority
+//                  `tools/review-watch/trigger.mjs` and `next-review-transition-gate.mjs`'s
+//                  `STAGE2_AUDIT_ALREADY_PREPARED` reconciliation already trust, never a second,
+//                  competing `@codex review` detector). `checkPostAudit` reports the new
+//                  `TRIGGER_REQUIRED` state -- instead of falling through to the generic
+//                  OK/PENDING result -- exactly when no completed report and no unusable genuine
+//                  response exist (the same PENDING/malformed-Verdict precondition
+//                  REPORT_READY_TO_RECORD/RESPONSE_UNUSABLE already use) AND `hasTrigger` is
+//                  false. Once any trigger exists on the thread -- valid or not, complete
+//                  response or not -- `hasTrigger` is true and this state never fires again for
+//                  that thread; the unmodified generic OK/PENDING result (ordinary "still
+//                  waiting") applies exactly as before. This never authorizes a second trigger
+//                  once one already exists (issue #259's anti-retrigger authority is unaffected --
+//                  this state only ever fires for a thread with *zero* trigger comments), and it
+//                  never changes RESPONSE_UNUSABLE/REPORT_READY_TO_RECORD's own existing,
+//                  unmodified precedence (both are checked first; TRIGGER_REQUIRED only applies to
+//                  what would otherwise be the generic OK/PENDING fallthrough). See
+//                  `resolvePostMergeVerdict` in next-review-transition-gate.mjs for the composed
+//                  `STAGE2_TRIGGER_REQUIRED` transition this state authorizes -- posting exactly
+//                  one idempotent `tools/review-watch/trigger.mjs --kind issue` invocation, never a
+//                  second semantic Stage 2 preparation pass.
+//
+//   post-audit TRIGGER_BLOCKED_UNVERIFIED — issue #736 Stage 1 correction (accepted P1 finding on
+//                  the #735/PR #736 addition above): `TRIGGER_REQUIRED`'s own precondition
+//                  (`hasTrigger` false) is necessary but not sufficient to authorize the one
+//                  permitted reviewer trigger. `verifyAuditCanonicalForTrigger` re-checks,
+//                  immediately before authorizing, that the candidate Audit Issue is still OPEN,
+//                  still carries the complete canonical audit shape (`hasCanonicalAuditShape`),
+//                  and is still the sole matching candidate for its own recorded exact-merge/work
+//                  identity in a fresh `[Audit] in:title` search (`findMatchingOpenAuditIssues`,
+//                  the same matching semantics `next-review-transition-gate.mjs`'s
+//                  STAGE2_AUDIT_ALREADY_PREPARED reconciliation and `finalize-audit-breakpoint.mjs`'s
+//                  own `--revalidate-uniqueness true` re-check already share). A closed, stale,
+//                  superseded, or malformed candidate reports this state instead of
+//                  `TRIGGER_REQUIRED` — `next-review-transition-gate.mjs`'s `resolvePostMergeVerdict`
+//                  does not recognize this state and falls it through to the existing generic
+//                  `AMBIGUOUS` fail-closed stop, never an improvised recovery or a trigger posted
+//                  on unverified identity.
+//
 // Exit codes: 0 = MERGE_READY / MERGE_READY_NO_WORK_ISSUE / OK / READY_TO_CLOSE /
-// REPORT_READY_TO_RECORD / RECORDED / ALREADY_RECORDED / ALREADY_TERMINAL / CLOSE_READY / CLOSED /
-// SUPERSEDED_CLOSE_READY / SUPERSEDED_CLOSED / NOT_TERMINAL_YET (safe to proceed),
-// 2 = BLOCKED_CLOSING_REFERENCE / PREMATURE_CLOSURE / CONFLICTING_VERDICT / RESPONSE_UNUSABLE
-// (must not merge / must not treat as accepted / must not silently overwrite / must not be
-// treated as ordinary waiting — a genuine response landed and needs a bounded recovery decision),
+// REPORT_READY_TO_RECORD / TRIGGER_REQUIRED / RECORDED / ALREADY_RECORDED / ALREADY_TERMINAL /
+// CLOSE_READY / CLOSED / SUPERSEDED_CLOSE_READY / SUPERSEDED_CLOSED / NOT_TERMINAL_YET (safe to proceed),
+// 2 = BLOCKED_CLOSING_REFERENCE / PREMATURE_CLOSURE / CONFLICTING_VERDICT / RESPONSE_UNUSABLE /
+// TRIGGER_BLOCKED_UNVERIFIED (must not merge / must not treat as accepted / must not silently
+// overwrite / must not be treated as ordinary waiting / must not authorize a trigger on unverified
+// identity — each needs a bounded recovery decision),
 // 1 = operational error.
 //
 // Tests: node --test tools/review-watch/lifecycle-gate.test.mjs
@@ -724,6 +777,14 @@ async function findStage2ReportEvidence(
   const commentsPath = endpointsFor("issue", repo, auditIssue).find((e) => e.name === "issue-comments").path;
   const comments = await ghApiImpl(commentsPath);
   const trigger = findExistingTrigger(comments, {});
+  // Issue #735: `hasTrigger` is the one bit checkPostAudit needs to distinguish "prepared but
+  // never triggered" from "triggered and legitimately awaiting a response" -- both shapes
+  // otherwise return the identical `backed: false, hasGenuineResponse: false` result below,
+  // which is exactly what let a canonical PENDING Audit Issue with zero issue comments (the live
+  // #734 reproduction) resolve to the same generic OK/PENDING result as an ordinary in-flight
+  // review. Reuses trigger.mjs's own `findExistingTrigger` -- the same authority
+  // `next-review-transition-gate.mjs`'s STAGE2_AUDIT_ALREADY_PREPARED/trigger.mjs's own dedup
+  // already trust -- never a second, competing `@codex review` detector.
   if (!trigger) {
     return {
       backed: false,
@@ -733,6 +794,7 @@ async function findStage2ReportEvidence(
       hasUnusableGenuineResponse: false,
       genuineResponsesSeen: 0,
       genuineResponses: [],
+      hasTrigger: false,
       reason: "no @codex review trigger found on the audit issue thread",
     };
   }
@@ -793,6 +855,7 @@ async function findStage2ReportEvidence(
       hasUnusableGenuineResponse: substantiveGenuineReports.length > 0,
       genuineResponsesSeen: genuineReports.length,
       genuineResponses: substantiveGenuineReports.map((r) => ({ id: r.id, url: r.url, reasons: r.reasons })),
+      hasTrigger: true,
       reason:
         reports.length === 0
           ? "no post-trigger bot response found on the audit issue thread"
@@ -807,6 +870,7 @@ async function findStage2ReportEvidence(
     verdict: latest.verdict,
     responsesSeen: reports.length,
     hasGenuineResponse: true,
+    hasTrigger: true,
     genuineResponsesSeen: genuineReports.length,
     matchedCommentUrl: latest.url,
     legacyCompatible: latest.legacyCompatible,
@@ -907,11 +971,76 @@ function parseThinControlStage2Ref(body) {
   return refs.length === 1 ? refs[0] : null;
 }
 
-// `ghIssueViewImpl` and `ghApiImpl` are injected so tests can drive this end-to-end without
-// touching the real network or `gh` CLI.
+// Issue #736 Stage 1 correction (accepted P1 finding on PR #736, correcting issue #735's own
+// TRIGGER_REQUIRED addition): `checkPostAudit`'s no-trigger path must not authorize
+// `STAGE2_TRIGGER_REQUIRED` — and so consume the one permitted reviewer trigger
+// (docs/bounded-review-cycle.md Stage 2 step 10's anti-retrigger guarantee) — against a
+// candidate Audit Issue that is no longer OPEN, no longer carries the complete canonical audit
+// shape, or is no longer the sole matching candidate for its own recorded exact-merge/work
+// identity. Reuses `hasCanonicalAuditShape` and `findMatchingOpenAuditIssues` verbatim — the
+// exact same fail-closed "audit ready" definition `next-review-transition-gate.mjs`'s
+// STAGE2_AUDIT_ALREADY_PREPARED reconciliation and `finalize-audit-breakpoint.mjs`'s own
+// `--revalidate-uniqueness true` re-check already share — never a second, competing canonical-
+// audit definition of its own. `auditIssueData`/`mergeCommit` are the exact same already-fetched
+// read and already-parsed field `checkPostAudit` uses for every other decision on this candidate;
+// this only adds one fresh `[Audit] in:title` search on top, mirroring the exact TOCTOU-closing
+// pattern issue #729/#730 established for the pre-merge preparation path.
+//
+// A search miss (`matches.length === 0`) or a match resolving to a different issue number both
+// fail closed here rather than falling back to "trust this candidate's own already-verified
+// fields" — issue #735's non-goal explicitly forbids weakening exact merge/work identity checks,
+// and a stale search index is expected to resolve on a later retry once GitHub's search index
+// catches up, whereas silently trusting an unconfirmed candidate is not recoverable once a
+// trigger has already been posted.
+async function verifyAuditCanonicalForTrigger(
+  { repo, auditIssue, auditIssueData, mergeCommit, workIssueRef },
+  ghIssueListImpl,
+) {
+  if (auditIssueData.state !== "OPEN") {
+    return { ok: false, reason: `audit issue ${repo}#${auditIssue} is not OPEN (state: ${auditIssueData.state})` };
+  }
+  if (!hasCanonicalAuditShape(auditIssueData.body ?? "")) {
+    return {
+      ok: false,
+      reason: `audit issue ${repo}#${auditIssue} does not carry the complete canonical audit shape required before authorizing a reviewer trigger`,
+    };
+  }
+  if (!mergeCommit) {
+    return { ok: false, reason: `audit issue ${repo}#${auditIssue} carries no resolvable exact merge commit` };
+  }
+
+  let candidates;
+  try {
+    candidates = await ghIssueListImpl({ repo });
+  } catch (err) {
+    return { ok: false, reason: `gh api search failed while revalidating audit issue ${repo}#${auditIssue}: ${err.message}` };
+  }
+  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid: mergeCommit, executionIssue: workIssueRef });
+  const matchNumbers = matches.map((m) => Number(m.number));
+
+  if (matchNumbers.length !== 1 || matchNumbers[0] !== Number(auditIssue)) {
+    return {
+      ok: false,
+      reason:
+        matchNumbers.length === 0
+          ? `audit issue ${repo}#${auditIssue} did not resolve as the canonical OPEN Audit Issue for its own recorded exact-merge/work identity in a fresh search`
+          : `audit issue ${repo}#${auditIssue} is no longer the sole canonical OPEN Audit Issue for its own recorded exact-merge/work identity (found: ${matchNumbers.join(", ")})`,
+    };
+  }
+
+  return { ok: true };
+}
+
+// `ghIssueViewImpl`, `ghApiImpl`, and `ghIssueListImpl` are injected so tests can drive this
+// end-to-end without touching the real network or `gh` CLI.
 export async function checkPostAudit(
   args,
-  { ghIssueViewImpl = defaultGhIssueView, ghApiImpl = defaultGhApi, bot = DEFAULT_BOT } = {},
+  {
+    ghIssueViewImpl = defaultGhIssueView,
+    ghApiImpl = defaultGhApi,
+    ghIssueListImpl = defaultGhIssueList,
+    bot = DEFAULT_BOT,
+  } = {},
 ) {
   const { repo } = args;
   let auditIssue = args["audit-issue"];
@@ -1069,6 +1198,48 @@ export async function checkPostAudit(
             `reviewer (issue #259). A bounded recovery/founder-interrupt decision is required.`,
         };
       }
+      // Issue #735 (live #734 reproduction): neither a completed report nor even an unusable
+      // genuine response exists -- reportEvidence.hasTrigger is the deciding bit between "this
+      // thread was never triggered" (this branch) and true state A, "triggered, correctly still
+      // waiting for a response" (the unmodified generic OK/PENDING fallthrough just below, which
+      // this condition never reaches when hasTrigger is true). A canonical, exact-merge, PENDING
+      // Audit Issue with zero issue comments -- the live #734 shape, where the prior packet's
+      // control projection landed but the reviewer trigger (Stage 2 step 4) never did -- must not
+      // be indistinguishable from an ordinary in-flight review. This never fires once any trigger
+      // exists, valid or not (findExistingTrigger's own dedup semantics), so a controller can
+      // never re-trigger a thread that already has one merely by resolving this state repeatedly.
+      if (!reportEvidence.hasTrigger) {
+        // Issue #736 Stage 1 correction: never authorize the one permitted reviewer trigger
+        // against a candidate that has stopped being the canonical, OPEN, exact-merge/work-
+        // identity match for its own recorded fields since it was fetched above — see
+        // verifyAuditCanonicalForTrigger's own module comment.
+        const canonicalCheck = await verifyAuditCanonicalForTrigger(
+          { repo, auditIssue: Number(auditIssue), auditIssueData, mergeCommit, workIssueRef },
+          ghIssueListImpl,
+        );
+        if (!canonicalCheck.ok) {
+          return {
+            exitCode: 2,
+            state: "TRIGGER_BLOCKED_UNVERIFIED",
+            workIssue: null,
+            auditIssue: Number(auditIssue),
+            rawVerdict,
+            reportEvidence,
+            message:
+              `Audit issue ${repo}#${auditIssue} appears untriggered, but the reviewer trigger cannot be ` +
+              `authorized: ${canonicalCheck.reason}. This must fail closed rather than post a trigger against ` +
+              `unverified audit identity (issue #736). A bounded recovery/founder-interrupt decision is required.`,
+          };
+        }
+        return {
+          exitCode: 0,
+          state: "TRIGGER_REQUIRED",
+          workIssue: null,
+          auditIssue: Number(auditIssue),
+          rawVerdict,
+          reportEvidence,
+        };
+      }
     }
 
     return {
@@ -1218,6 +1389,38 @@ export async function checkPostAudit(
           `completed Stage 2 audit report under the current evidence contract (${pendingReportEvidence.reason}). ` +
           `This must not be treated as ordinary waiting, and it must not automatically retrigger or coach the ` +
           `reviewer (issue #259). A bounded recovery/founder-interrupt decision is required.`,
+      };
+    }
+    // Issue #735 (live #734 reproduction): same prepared-vs-triggered distinction as the
+    // no-work-issue branch above -- reused verbatim via `hasTrigger`, never a second detector.
+    if (!pendingReportEvidence.hasTrigger) {
+      // Issue #736 Stage 1 correction: same revalidation as the no-work-issue branch above --
+      // reused verbatim via verifyAuditCanonicalForTrigger, never a second, competing check.
+      const canonicalCheck = await verifyAuditCanonicalForTrigger(
+        { repo, auditIssue: Number(auditIssue), auditIssueData, mergeCommit, workIssueRef },
+        ghIssueListImpl,
+      );
+      if (!canonicalCheck.ok) {
+        return {
+          exitCode: 2,
+          state: "TRIGGER_BLOCKED_UNVERIFIED",
+          workIssue: workIssueNumber,
+          auditIssue: Number(auditIssue),
+          rawVerdict,
+          reportEvidence: pendingReportEvidence,
+          message:
+            `Audit issue ${repo}#${auditIssue} appears untriggered, but the reviewer trigger cannot be ` +
+            `authorized: ${canonicalCheck.reason}. This must fail closed rather than post a trigger against ` +
+            `unverified audit identity (issue #736). A bounded recovery/founder-interrupt decision is required.`,
+        };
+      }
+      return {
+        exitCode: 0,
+        state: "TRIGGER_REQUIRED",
+        workIssue: workIssueNumber,
+        auditIssue: Number(auditIssue),
+        rawVerdict,
+        reportEvidence: pendingReportEvidence,
       };
     }
   }
@@ -1373,6 +1576,7 @@ export async function checkRecordVerdict(
   {
     ghIssueViewImpl = defaultGhIssueView,
     ghApiImpl = defaultGhApi,
+    ghIssueListImpl = defaultGhIssueList,
     ghEditImpl = defaultGhEditAuditVerdict,
     ghCommentImpl = defaultGhRecordVerdictComment,
     bot = DEFAULT_BOT,
@@ -1386,7 +1590,7 @@ export async function checkRecordVerdict(
 
   let postAudit;
   try {
-    postAudit = await checkPostAuditImpl(args, { ghIssueViewImpl, ghApiImpl, bot });
+    postAudit = await checkPostAuditImpl(args, { ghIssueViewImpl, ghApiImpl, ghIssueListImpl, bot });
   } catch (err) {
     return { exitCode: 1, message: `checkPostAudit threw while evaluating ${repo}#${auditIssue}: ${err.message}` };
   }

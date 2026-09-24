@@ -216,6 +216,18 @@ const ENVELOPES = {
     mode: ENVELOPE_MODES.BOUNDED,
     authorizedActions: ["write-control-snapshot", "post-stage2-reviewer-trigger"],
   },
+  // Issue #735 (live #398/#729/PR #733/Audit #734 reproduction): next-review-transition-gate.mjs's
+  // own post-merge phase found a canonical, exact-merge, PENDING Audit Issue whose thread carries
+  // no valid Stage 2 reviewer trigger at all -- prepared but never triggered, distinct from
+  // STAGE2_AUDIT_ALREADY_PREPARED's pre-merge resume case (which still needs write-control-
+  // snapshot because the control Issue's own Stage 2/Lifecycle projection has not happened yet).
+  // Reaching this post-merge verdict already requires a settled Stage 2 reference, so that
+  // projection has, by construction, already happened -- only the one remaining action is
+  // authorized: post the idempotent trigger.mjs invocation this verdict's own `nextCommand` names.
+  STAGE2_TRIGGER_REQUIRED: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["post-stage2-reviewer-trigger"],
+  },
   // Stage 1 correction on PR #721 (Codex P1 finding): a merged PR whose control Issue's Stage 1
   // disposition was never durably settled -- named by next-review-transition-gate.mjs's own
   // STAGE2_PREPARATION_BLOCKED_ON_STAGE1 verdict. Authorizes exactly the one recovery command

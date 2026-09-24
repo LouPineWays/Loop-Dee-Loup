@@ -39,6 +39,7 @@ test("getActionEnvelope: every ready-dispatch-gate.mjs and next-review-transitio
     "STAGE2_CLOSE_READY",
     "STAGE2_REPORT_READY_TO_RECORD",
     "STAGE2_RESPONSE_UNUSABLE",
+    "STAGE2_TRIGGER_REQUIRED",
   ];
   const known = knownEnvelopeStates();
   for (const state of expected) assert.ok(known.includes(state), `missing envelope for ${state}`);
