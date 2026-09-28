@@ -75,6 +75,17 @@
 // other call site, including the ordinary preparation-worker-authored finalize call, which needs
 // no re-search since it already knows the Audit Issue it just created is the only one.
 //
+// Usage (issue #747 Stage 1 correction): `--stale-audit-issue <n>`, appended only by
+// next-review-transition-gate.mjs's own resolveMergedPrWithSettledStage2 nextCommands, authorizes
+// replacing an already-AUDIT control's existing Stage 2 pointer when — and only when — that
+// existing pointer exactly matches `<n>`, a predecessor Audit Issue this same call already
+// verified (by exact merge commit/work issue, never issue number or wording) does not audit the
+// current merge. The predecessor Audit Issue itself is never edited or closed by this script;
+// only the control's pointer to it is superseded. Omitted (the default) on every other call site,
+// which keeps the original strict already-recorded-audit-issue refusal unchanged:
+//   node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue 691 \
+//     --execution-issue 737 --pr 742 --audit-issue 743 --stale-audit-issue 739
+//
 // Exit codes: 0 (FINALIZED for the control-Issue flow, AUDIT_VERIFIED for the direct-reference
 // flow), 1 (operational error — missing/invalid args, unresolved repository identity, or an
 // underlying `gh` read that itself failed), 2 (AUDIT_BREAKPOINT_UNVERIFIED — a fail-closed
@@ -302,7 +313,23 @@ export function verifyAuditIssueStillUnique(candidates, { mergeCommitOid, execut
 // `latestBody` (the re-read taken immediately before compose/write) rather than trusting the
 // original pre-fetch body's already-passed checks, so an intervening edit is caught here
 // instead of surviving into the write.
-export function composeAuditFinalizedControlBody(body, { auditIssue, executionIssue, pr }) {
+//
+// `staleAuditIssue` (issue #747 Stage 1 correction, P1 finding "Allow finalization to replace
+// the stale Stage 2 pointer"): opt-in, set only by next-review-transition-gate.mjs's own
+// stale-predecessor-pointer recovery/preparation nextCommands
+// (resolveMergedPrWithSettledStage2), which independently verified — via the settled pointer's
+// own structured "Exact merge commit"/"Work issue" fields, never issue numbers or wording —
+// that the control's *currently recorded* Stage 2 pointer belongs to a predecessor PR/merge,
+// not to the current one this `--audit-issue` names. When the already-AUDIT control's existing
+// Stage 2 pointer exactly matches this caller-supplied `staleAuditIssue` (never any other
+// mismatch — an unrelated or unverified different pointer still refuses exactly as before),
+// this authorizes overwriting it with the current merge's own canonical audit. The predecessor
+// Audit Issue itself is never edited, closed, or retired here — only the control's pointer to
+// it is superseded, preserving it as historical provenance. Left `null` by every other caller
+// (the ordinary REVIEW->AUDIT finalize, and the #729 recovery/revalidation nextCommand for a
+// genuinely current pointer), which keeps the original strict "already-recorded audit issue"
+// refusal completely unchanged for every pointer that has not been proven stale.
+export function composeAuditFinalizedControlBody(body, { auditIssue, executionIssue, pr, staleAuditIssue = null }) {
   const executionCheck = verifyExecutionMatchesAudit(body, executionIssue);
   if (!executionCheck.ok) {
     return { ok: false, reason: `pre-write re-check: ${executionCheck.reason}` };
@@ -323,13 +350,17 @@ export function composeAuditFinalizedControlBody(body, { auditIssue, executionIs
   }
   if (currentLifecycle.trim() === "AUDIT") {
     const stage2Field = parseControlBullet(body, "Stage 2");
-    if (stage2Field === null || stage2Field.trim() !== `#${auditIssue}`) {
+    const alreadyMatches = stage2Field !== null && stage2Field.trim() === `#${auditIssue}`;
+    const authorizedStaleReplacement =
+      !alreadyMatches && staleAuditIssue != null && stage2Field !== null && stage2Field.trim() === `#${staleAuditIssue}`;
+    if (!alreadyMatches && !authorizedStaleReplacement) {
       return {
         ok: false,
         reason:
           `pre-write re-check: control Issue is already Lifecycle: AUDIT but its Stage 2 pointer is ` +
-          `${JSON.stringify(stage2Field)}, not the given --audit-issue #${auditIssue} — refusing to overwrite a ` +
-          "different already-recorded audit issue's breakpoint",
+          `${JSON.stringify(stage2Field)}, not the given --audit-issue #${auditIssue}` +
+          (staleAuditIssue != null ? ` or the given --stale-audit-issue #${staleAuditIssue}` : "") +
+          " — refusing to overwrite a different already-recorded audit issue's breakpoint",
       };
     }
   }
@@ -379,7 +410,7 @@ function unverified({ controlIssue, executionIssue, pr, auditIssue, reason }) {
 // is the only one, never pays for (or risks a spurious failure from) an extra "[Audit] in:title"
 // GitHub Search API query subject to brief indexing lag.
 export async function run(
-  { repo, controlIssue, executionIssue, pr, auditIssue, revalidateUniqueness = false },
+  { repo, controlIssue, executionIssue, pr, auditIssue, revalidateUniqueness = false, staleAuditIssue = null },
   {
     ghIssueViewImpl = defaultGhIssueView,
     ghPrViewImpl = defaultGhPrView,
@@ -398,6 +429,12 @@ export async function run(
     return {
       exitCode: 1,
       message: 'Missing/invalid required arg: --execution-issue must be a positive integer, or the literal "none".',
+    };
+  }
+  if (staleAuditIssue != null && (!isPositiveInteger(staleAuditIssue) || staleAuditIssue === auditIssue)) {
+    return {
+      exitCode: 1,
+      message: "Invalid optional arg: --stale-audit-issue must be a positive integer distinct from --audit-issue.",
     };
   }
 
@@ -509,7 +546,7 @@ export async function run(
     return unverified({ controlIssue, executionIssue, pr, auditIssue, reason: `pre-write control re-read failed: ${err.message}` });
   }
 
-  const composed = composeAuditFinalizedControlBody(latestBody, { auditIssue, executionIssue, pr });
+  const composed = composeAuditFinalizedControlBody(latestBody, { auditIssue, executionIssue, pr, staleAuditIssue });
   if (!composed.ok) {
     return unverified({ controlIssue, executionIssue, pr, auditIssue, reason: composed.reason });
   }
@@ -674,6 +711,11 @@ async function main() {
   // Issue #729 P2 correction (PR #730): opt-in TOCTOU revalidation, set only by
   // next-review-transition-gate.mjs's own STAGE2_AUDIT_ALREADY_PREPARED nextCommand.
   const revalidateUniqueness = args["revalidate-uniqueness"] === "true" || args["revalidate-uniqueness"] === "1";
+  // Issue #747 Stage 1 correction: opt-in stale-predecessor-pointer replacement, set only by
+  // next-review-transition-gate.mjs's own resolveMergedPrWithSettledStage2 nextCommands, which
+  // independently verified the control's currently recorded Stage 2 pointer belongs to a
+  // predecessor merge. See composeAuditFinalizedControlBody's own module comment above.
+  const staleAuditIssue = args["stale-audit-issue"] != null ? Number(args["stale-audit-issue"]) : null;
 
   // Stage 1 correction on PR #721: omitting --control-issue selects the direct-reference
   // verification continuation (runDirectReferenceVerification) instead of the split thin/thick
@@ -681,7 +723,7 @@ async function main() {
   // that mode.
   const result =
     controlIssue !== null
-      ? await run({ repo: resolvedRepo, controlIssue, executionIssue, pr, auditIssue, revalidateUniqueness })
+      ? await run({ repo: resolvedRepo, controlIssue, executionIssue, pr, auditIssue, revalidateUniqueness, staleAuditIssue })
       : await runDirectReferenceVerification({ repo: resolvedRepo, executionIssue, pr, auditIssue });
 
   if (result.exitCode === 1) {

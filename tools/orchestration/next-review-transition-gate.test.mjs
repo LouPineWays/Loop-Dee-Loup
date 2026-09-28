@@ -2351,8 +2351,23 @@ const CONTROL_BODY_691_MERGED_WITH_PREDECESSOR_STAGE2 = `## Current state
 - **Founder decision:** none
 `;
 
-test("runNextReviewTransitionGate: the exact #691 reproduction -- current merged PR #742 with retained predecessor Stage 2 #739 (PR #738's audit) never returns STAGE2_CORRECTION_REQUIRED for #739, and with no canonical audit yet for #742 reaches STAGE2_PREPARATION_REQUIRED instead", async () => {
+// Every #691-shaped mismatch case below independently re-validates Stage 1 authority (issue
+// #747 Stage 1 correction, P1 finding on PR #748) before ever recovering/preparing a replacement
+// audit -- CONTROL_BODY_691_MERGED_WITH_PREDECESSOR_STAGE2's own "Stage 1" bullet is a canonical
+// correction-satisfied disposition, so each case below stubs checkCorrectionDeltaImpl to confirm
+// it independently validates against the live merged head, exactly like the sibling merged-PR-
+// with-no-settled-Stage-2-pointer branch's own resume path.
+const CORRECTION_DELTA_ARGS_691 = {
+  repo: "o/r",
+  pr: 742,
+  reviewedHead: "55790ac3ec8dc37f11ccd09bcc023e79dc8586dc",
+  correctedHead: "a12bf7dc1a13118d39e30712d2e7096d107ac457",
+  gatedHead: "742head",
+};
+
+test("runNextReviewTransitionGate: the exact #691 reproduction -- current merged PR #742 with retained predecessor Stage 2 #739 (PR #738's audit) never returns STAGE2_CORRECTION_REQUIRED for #739, independently re-validates Stage 1 correction evidence, and with no canonical audit yet for #742 reaches STAGE2_PREPARATION_REQUIRED instead", async () => {
   let reconcileArgs = null;
+  let correctionDeltaCallArgs = null;
   const result = await runNextReviewTransitionGate(
     { repo: "o/r", controlIssue: "691" },
     {
@@ -2372,8 +2387,13 @@ test("runNextReviewTransitionGate: the exact #691 reproduction -- current merged
       checkPostAuditImpl: async () => {
         throw new Error("should never be called -- #739 audits the predecessor PR #738's merge, not #742");
       },
+      checkCorrectionDeltaImpl: async (args) => {
+        correctionDeltaCallArgs = args;
+        return { exitCode: 0, state: "CORRECTION_SATISFIED" };
+      },
     },
   );
+  assert.deepEqual(correctionDeltaCallArgs, CORRECTION_DELTA_ARGS_691);
   assert.deepEqual(reconcileArgs, { repo: "o/r", mergeCommitOid: MERGE_COMMIT_742, executionIssue: 737 });
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "STAGE2_PREPARATION_REQUIRED");
@@ -2381,9 +2401,10 @@ test("runNextReviewTransitionGate: the exact #691 reproduction -- current merged
   assert.equal(result.controlIssue, 691);
   assert.equal(result.pr, 742);
   assert.equal(result.issue, 737);
+  assert.equal(result.staleAuditIssue, 739);
 });
 
-test("runNextReviewTransitionGate: the #691 shape, but exactly one canonical Audit Issue already matches PR #742's exact merge -- recovered via existing #729 machinery, never a duplicate preparation dispatch", async () => {
+test("runNextReviewTransitionGate: the #691 shape, but exactly one canonical Audit Issue already matches PR #742's exact merge -- recovered via existing #729 machinery, never a duplicate preparation dispatch, and authorized to replace the verified-stale #739 pointer", async () => {
   const result = await runNextReviewTransitionGate(
     { repo: "o/r", controlIssue: "691" },
     {
@@ -2397,6 +2418,7 @@ test("runNextReviewTransitionGate: the #691 shape, but exactly one canonical Aud
       checkPostAuditImpl: async () => {
         throw new Error("should never be called -- the already-prepared recovery path handles this, not checkPostAudit");
       },
+      checkCorrectionDeltaImpl: async () => ({ exitCode: 0, state: "CORRECTION_SATISFIED" }),
     },
   );
   assert.equal(result.exitCode, 0);
@@ -2405,9 +2427,10 @@ test("runNextReviewTransitionGate: the #691 shape, but exactly one canonical Aud
   assert.equal(result.pr, 742);
   assert.equal(result.issue, 737);
   assert.equal(result.auditIssue, 750);
+  assert.equal(result.staleAuditIssue, 739);
   assert.match(
     result.nextCommand,
-    /finalize-audit-breakpoint\.mjs --control-issue 691 --execution-issue 737 --pr 742 --audit-issue 750 --revalidate-uniqueness true && node tools\/review-watch\/trigger\.mjs --repo o\/r --kind issue --number 750/,
+    /finalize-audit-breakpoint\.mjs --control-issue 691 --execution-issue 737 --pr 742 --audit-issue 750 --stale-audit-issue 739 --revalidate-uniqueness true && node tools\/review-watch\/trigger\.mjs --repo o\/r --kind issue --number 750/,
   );
 });
 
@@ -2427,6 +2450,7 @@ test("runNextReviewTransitionGate: the #691 shape with more than one durably mat
         matches: [750, 751],
         message: "more than one OPEN Audit Issue durably matches merge commit ... : #750, #751",
       }),
+      checkCorrectionDeltaImpl: async () => ({ exitCode: 0, state: "CORRECTION_SATISFIED" }),
     },
   );
   assert.equal(result.exitCode, 4);
@@ -2448,10 +2472,86 @@ test("runNextReviewTransitionGate: the #691 shape, but the retained Stage 2 poin
       checkPostAuditImpl: async () => {
         throw new Error("should never be called -- #739's body carries no identity evidence at all");
       },
+      checkCorrectionDeltaImpl: async () => ({ exitCode: 0, state: "CORRECTION_SATISFIED" }),
     },
   );
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "STAGE2_PREPARATION_REQUIRED");
+  assert.equal(result.staleAuditIssue, 739);
+});
+
+// Issue #747 Stage 1 correction (P1 finding on PR #748): a mismatched/stale predecessor Stage 2
+// pointer must not become a bypass around Stage 1 -- a merged PR whose control state still
+// carries an unsettled Stage 1 disposition fails closed to STAGE2_PREPARATION_BLOCKED_ON_STAGE1,
+// never silently recovering/preparing a replacement audit.
+test("runNextReviewTransitionGate: the #691 shape, but the control Issue's Stage 1 disposition is still the stranded 'requested' shape -- fails closed to STAGE2_PREPARATION_BLOCKED_ON_STAGE1, never recovering/preparing a replacement audit for the verified-stale #739 pointer", async () => {
+  const body = CONTROL_BODY_691_MERGED_WITH_PREDECESSOR_STAGE2.replace(
+    "- **Stage 1:** correction-satisfied at a12bf7dc1a13118d39e30712d2e7096d107ac457 (reviewed 55790ac3ec8dc37f11ccd09bcc023e79dc8586dc)",
+    "- **Stage 1:** requested",
+  );
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "691" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number === "691") return { body, state: "OPEN" };
+        if (number === 739) return { body: auditIssueBody({ workIssue: 737, mergeCommit: MERGE_COMMIT_738 }), state: "OPEN" };
+        throw new Error(`unexpected ghIssueViewImpl call for #${number}`);
+      },
+      ghPrStateImpl: async () => ({ headRefOid: "742head", state: "MERGED", mergeCommit: { oid: MERGE_COMMIT_742 } }),
+      reconcileExistingStage2AuditIssueImpl: async () => {
+        throw new Error("should never be called -- Stage 1 is unverified, not a recovery/preparation case");
+      },
+      checkPostAuditImpl: async () => {
+        throw new Error("should never be called -- #739 audits the predecessor PR #738's merge, not #742");
+      },
+      checkCorrectionDeltaImpl: async () => {
+        throw new Error("should never be called -- no correction-satisfied bullet is present to validate");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE2_PREPARATION_BLOCKED_ON_STAGE1");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.controlIssue, 691);
+  assert.equal(result.pr, 742);
+  assert.equal(result.issue, 737);
+  assert.match(result.reason, /not a canonical satisfied\/exempt or correction-satisfied disposition/);
+  assert.match(
+    result.nextCommand,
+    /finalize-stage1-satisfied-breakpoint\.mjs --control-issue 691 --execution-issue 737 --pr 742 --recover true/,
+  );
+});
+
+// Issue #747 Stage 1 correction (P2 finding on PR #748): an absent/explicit "none" Execution
+// state is a legitimate no-work-issue representation elsewhere in this lifecycle and must
+// survive stale-pointer reconciliation/preparation too, never forced to fabricate an execution
+// Issue merely to satisfy this branch.
+test("runNextReviewTransitionGate: the #691 shape with no work Issue at all (Execution: none) survives the verified-stale-pointer path -- reconciles/prepares with executionIssue 'none' rather than failing closed as malformed", async () => {
+  const body = CONTROL_BODY_691_MERGED_WITH_PREDECESSOR_STAGE2.replace("- **Execution:** #737", "- **Execution:** none");
+  let reconcileArgs = null;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "691" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number === "691") return { body, state: "OPEN" };
+        if (number === 739) return { body: auditIssueBody({ workIssue: 737, mergeCommit: MERGE_COMMIT_738 }), state: "OPEN" };
+        throw new Error(`unexpected ghIssueViewImpl call for #${number}`);
+      },
+      ghPrStateImpl: async () => ({ headRefOid: "742head", state: "MERGED", mergeCommit: { oid: MERGE_COMMIT_742 } }),
+      reconcileExistingStage2AuditIssueImpl: async (args) => {
+        reconcileArgs = args;
+        return { exitCode: 0, state: "NONE_FOUND" };
+      },
+      checkCorrectionDeltaImpl: async () => ({ exitCode: 0, state: "CORRECTION_SATISFIED" }),
+    },
+  );
+  assert.deepEqual(reconcileArgs, { repo: "o/r", mergeCommitOid: MERGE_COMMIT_742, executionIssue: "none" });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_PREPARATION_REQUIRED");
+  assert.equal(result.controlIssue, 691);
+  assert.equal(result.pr, 742);
+  assert.equal(result.issue, "none");
+  assert.equal(result.staleAuditIssue, 739);
 });
 
 test("runNextReviewTransitionGate: a settled Stage 2 pointer whose own structured identity genuinely matches the current merged PR continues through ordinary post-merge Stage 2 verdict handling unchanged, never spending the broader reconciliation search", async () => {
@@ -2483,7 +2583,11 @@ test("runNextReviewTransitionGate: a settled Stage 2 pointer whose own structure
 });
 
 test("runNextReviewTransitionGate: the #691 shape with a malformed Execution reference fails closed to AMBIGUOUS before ever reading the retained Stage 2 pointer's own identity", async () => {
-  const body = CONTROL_BODY_691_MERGED_WITH_PREDECESSOR_STAGE2.replace("- **Execution:** #737", "- **Execution:** none");
+  // #737 and #738 (two distinct pointers) is genuinely malformed -- distinct from the
+  // legitimate absent/"none" no-work-issue representation, which now resolves to the "none"
+  // sentinel instead of failing closed (issue #747 Stage 1 correction, P2 finding on PR #748;
+  // see the dedicated "Execution: none" test above).
+  const body = CONTROL_BODY_691_MERGED_WITH_PREDECESSOR_STAGE2.replace("- **Execution:** #737", "- **Execution:** #737 #738");
   const result = await runNextReviewTransitionGate(
     { repo: "o/r", controlIssue: "691" },
     {
