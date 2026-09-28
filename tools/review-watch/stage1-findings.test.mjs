@@ -152,3 +152,37 @@ test("isCleanReviewResponse: does not treat an explicit textual commit citation 
   assert.equal(isCleanReviewResponse(body), false);
   assert.equal(isFindingsBearingResponse(body), true);
 });
+
+// Issue #755: PR #754's real Codex clean response, as poll.mjs's 200-character body_excerpt
+// hands it to the classifier.
+const PR754_BODY =
+  "Codex Review: Didn't find any major issues. :rocket:\n\n**Reviewed commit:** `131c24aa7b`\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br>\n\n[Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you open a PR.]";
+const PR754_EXCERPT = PR754_BODY.slice(0, 200);
+const PR754_PREFIX = "Codex Review: Didn't find any major issues. :rocket:\n\n**Reviewed commit:** `131c24aa7b`\n\n";
+
+test("isCleanReviewResponse: the exact PR #754 200-character excerpt is clean (issue #755)", () => {
+  assert.equal(PR754_EXCERPT.length, 200);
+  assert.equal(isCleanReviewResponse(PR754_EXCERPT), true);
+  assert.equal(isFindingsBearingResponse(PR754_EXCERPT), false);
+  assert.equal(isCleanReviewResponse(PR754_BODY), true);
+});
+
+test("isCleanReviewResponse: clean preamble with only a reviewed-commit line is clean; envelope pieces are individually optional (issue #755)", () => {
+  assert.equal(isCleanReviewResponse("Codex Review: Didn't find any major issues. :rocket:"), true);
+  assert.equal(isCleanReviewResponse("Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `131c24aa7b`"), true);
+});
+
+test("isCleanReviewResponse: clean preamble + envelope + substantive finding stays findings-bearing (issue #755 negative controls)", () => {
+  assert.equal(isCleanReviewResponse(PR754_PREFIX + "However, credentials are logged."), false);
+  assert.equal(isCleanReviewResponse("Codex Review: Didn't find any major issues. However, credentials are logged."), false);
+  assert.equal(isCleanReviewResponse("Codex Review: Didn't find any major issues. :rocket: Credentials are logged in plaintext."), false);
+  assert.equal(
+    isCleanReviewResponse(PR754_PREFIX + "<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br>\nhelp</details>\nP1: credentials are logged."),
+    false,
+  );
+  assert.equal(isCleanReviewResponse("Codex Review: Didn't find any major issues.\n\nCredentials are logged.\n\n**Reviewed commit:** `131c24aa7b`"), false);
+});
+
+test("isFormalReviewEndpoint: a textual reviewed-commit line does not change endpoint provenance (issue #755)", () => {
+  assert.equal(isFormalReviewEndpoint("issue-comments"), false);
+});

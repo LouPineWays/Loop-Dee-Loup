@@ -93,7 +93,20 @@ const CLEAN_REVIEW_PATTERN = /^Codex Review: Didn't find any major issues\./;
 // check ever ran — the two independent classifiers must keep the same known-clean-suffix set.
 const CLEAN_PREAMBLE_TRAILING_PATTERN = /^(?:\s*(?:nice work|can't wait for the next one)[!.]?)?\s*$/i;
 
-const FORMAL_REVIEW_ENDPOINTS = new Set(["pull-comments", "pull-reviews"]);
+// Issue #755 (live reproduction: PR #754, comment #5880707370): Codex appends a standard,
+// non-semantic response envelope after the clean preamble -- an optional rocket emoji, a
+// "**Reviewed commit:** `<sha>`" line, and a "<details> <summary>About Codex in GitHub
+// </summary>" help block -- and poll.mjs's 200-character body_excerpt usually truncates
+// somewhere inside that help block. This is content classification only: a textual reviewed-
+// commit line never becomes formal review provenance (isFormalReviewEndpoint still looks only
+// at the endpoint). Deliberately narrow: each envelope piece is an exact observed shape, in
+// fixed order; the help block is the opener plus text that may not contain a "</details>"
+// followed by further prose (only whitespace may follow a closing tag); any other trailing
+// prose before or after those pieces still fails closed as findings-bearing.
+const CLEAN_ENVELOPE_PATTERN =
+  /^(?:\s*(?:nice work|can't wait for the next one)[!.]?)?(?:\s*(?::rocket:|\u{1F680}))?(?:\s*\*\*Reviewed commit:\*\*\s*`[0-9a-f]{7,40}`)?(?:\s*<details>\s*<summary>\s*(?:ℹ️?\s*)?About Codex in GitHub\s*<\/summary>(?:(?!<\/details>)[\s\S])*(?:<\/details>)?)?\s*$/iu;
+
+const FORMAL_REVIEW_ENDPOINTS =new Set(["pull-comments", "pull-reviews"]);
 
 // Pure. Whether `endpointName` (poll.mjs's `endpointsFor` naming: "pull-comments",
 // "pull-reviews", "issue-comments") is a formal GitHub PR review artifact — an inline review
@@ -158,7 +171,7 @@ export function isCleanReviewResponse(bodyExcerpt) {
     // severity marker or not — must still be rejected rather than hidden behind that same
     // prefix. Only the narrow CLEAN_PREAMBLE_TRAILING_PATTERN allowlist may follow it.
     const trailing = stripped.slice(cleanPreambleMatch[0].length);
-    return CLEAN_PREAMBLE_TRAILING_PATTERN.test(trailing);
+    return CLEAN_PREAMBLE_TRAILING_PATTERN.test(trailing) || CLEAN_ENVELOPE_PATTERN.test(trailing);
   }
   const isKnownCleanShape = (text) =>
     NO_ISSUES_PATTERN.test(text) || LGTM_PATTERN.test(text) || LOOKS_GOOD_PATTERN.test(text);
