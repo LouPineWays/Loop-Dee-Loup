@@ -1287,11 +1287,38 @@ async function resolvePostMerge(
           };
           return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
         }
+        // Stage 1 review finding on this PR (P1): `reconciliation` selected this correction PR
+        // because it links to the predecessor audit's own reported `verdict.workIssue`. The
+        // control body was just re-read fresh above, and its current "Execution" bullet may since
+        // have moved on to a different work Issue -- silently handing that possibly-unrelated
+        // Issue to recovery could return STAGE2_PREPARATION_REQUIRED or recover an audit for this
+        // PR while declaring the wrong Issue as the audited work. Fail closed on that
+        // contradiction rather than routing it.
+        if (executionRef.issue !== verdict.workIssue) {
+          const failedVerdict = {
+            state: "AMBIGUOUS",
+            stopAfter: true,
+            ...context,
+            postAudit,
+            reason:
+              `predecessor audit for execution-linked correction PR #${pr.number} reports work Issue ` +
+              `#${verdict.workIssue}, but control Issue #${context.controlIssue}'s current Execution bullet ` +
+              `now points at ${JSON.stringify(executionRef.issue)} -- refusing to route this contradictory ` +
+              "durable state into Stage 2 preparation/recovery",
+          };
+          return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
+        }
         return resolveStalePointerCorrectionRecovery(
           {
             repo,
             body: controlBody,
-            auditIssue,
+            // Stage 1 review finding on this PR (P1): pass the canonical resolved audit identity
+            // (`context.auditIssue`, already redirected by checkPostAudit when applicable at the
+            // top of resolvePostMerge) rather than the raw original input -- otherwise a redirect
+            // leaves this call's own `staleAuditIssue` naming the control Issue itself, which
+            // `finalize-audit-breakpoint.mjs --stale-audit-issue` can never match against the
+            // control's actual Stage 2 pointer.
+            auditIssue: context.auditIssue,
             prIssue: Number(pr.number),
             controlIssueNumber: context.controlIssue,
             mergeCommitOid,
@@ -1484,7 +1511,16 @@ async function resolveStalePointerCorrectionRecovery(
   // bullet to already carry one of the two affirmative shapes the pre-merge phase authorizes
   // merge from before ever recovering/preparing a replacement audit.
   const stage1Bullet = parseControlBullet(body, "Stage 1");
-  const hasAffirmativeDisposition = parseAffirmativeStage1Disposition(stage1Bullet) !== null;
+  // Stage 1 review finding on this PR (P1): an ordinary "satisfied/exempt at <sha>" disposition
+  // only ever proves Stage 1 authority for the head it names. Mirrors this file's own established
+  // pre-merge convention (`stage1DispositionSatisfiedAtHead` above) -- require the disposition's
+  // own SHA to match the live merged PR head (`headRefOid`) before trusting it here too; a
+  // disposition left over from a predecessor/earlier head must not silently authorize recovery
+  // for a different, later merged head.
+  const hasAffirmativeDisposition = stage1DispositionMatchesHead(
+    parseAffirmativeStage1Disposition(stage1Bullet),
+    headRefOid,
+  );
   const parsedCorrectionSatisfied = parseCorrectionSatisfiedDisposition(stage1Bullet);
   const hasCorrectionSatisfiedDisposition = parsedCorrectionSatisfied !== null;
   if (!hasAffirmativeDisposition && !hasCorrectionSatisfiedDisposition) {
