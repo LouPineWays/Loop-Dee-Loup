@@ -1120,7 +1120,17 @@ export function composeStage2CorrectionFinalizeCommand({ repo, controlIssue, wor
   );
 }
 
-async function resolvePostMerge({ repo, auditIssue, controlIssue }, { checkPostAuditImpl, reconcileStage2CorrectionPrImpl = reconcileStage2CorrectionPr }) {
+async function resolvePostMerge(
+  { repo, auditIssue, controlIssue },
+  {
+    checkPostAuditImpl,
+    reconcileStage2CorrectionPrImpl = reconcileStage2CorrectionPr,
+    ghPrStateImpl = defaultGhPrState,
+    ghIssueViewImpl = defaultGhIssueView,
+    reconcileExistingStage2AuditIssueImpl = reconcileExistingStage2AuditIssue,
+    checkCorrectionDeltaImpl = checkCorrectionDelta,
+  },
+) {
   let postAudit;
   try {
     postAudit = await checkPostAuditImpl({ repo, "audit-issue": auditIssue });
@@ -1185,6 +1195,111 @@ async function resolvePostMerge({ repo, auditIssue, controlIssue }, { checkPostA
           reason: `found an open execution-linked correction PR #${pr?.number} for ${repo}#${verdict.workIssue}, but it carries no usable headRefOid -- refusing to compose a finalize command against an unverified head`,
         };
         return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
+      }
+      // Issue #750 (the #691/#742/#739 recurrence): `reconciliation`'s own PR search can be
+      // stale by the time a controller actually runs the `nextCommand` this branch is about to
+      // compose -- the correction PR it found open a moment ago may have already merged (a
+      // genuine TOCTOU race between this reconciliation read and the composed command's later
+      // execution, or between two concurrent sessions). A merged correction PR is never
+      // "needs its initial PR/Stage-1 breakpoint finalized" -- composing a fresh Stage 1
+      // trigger + finalize-pr-breakpoint.mjs command against it is exactly the trap that
+      // produced `PR_BREAKPOINT_UNVERIFIED` for already-merged PR #742 (its one allowed Stage 1
+      // round was triggered at reviewed head 55790ac..., while the accepted correction produced
+      // final head a12bf7d...). One more direct, authoritative live read of this exact PR number
+      // (never trusting the list search alone -- this file's own established convention, see
+      // e.g. reconcileExistingStage2AuditIssue's callers) closes that window before ever
+      // composing the finalize command.
+      let livePrState;
+      try {
+        livePrState = await ghPrStateImpl({ repo, number: Number(pr.number) });
+      } catch (err) {
+        const failedVerdict = {
+          state: "AMBIGUOUS",
+          stopAfter: true,
+          ...context,
+          postAudit,
+          reason:
+            `operational failure independently re-verifying live state for execution-linked correction PR ` +
+            `#${pr.number} before authorizing its open-PR finalization path: ${err.message}`,
+        };
+        return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
+      }
+      if (livePrState?.state === "MERGED") {
+        // The correction PR already merged. Never finalize/re-trigger it as if it were still
+        // pending its first Stage 1 breakpoint. When a control Issue is known, route it through
+        // the same independent correction-satisfied revalidation + exact-merge Stage 2
+        // preparation/recovery machinery (resolveStalePointerCorrectionRecovery, factored out of
+        // resolveMergedPrWithSettledStage2, issue #747/#748/#750) a fresh `--control-issue`
+        // evaluation of that same control Issue would already reach on its own. This never calls
+        // back into resolvePostMerge/resolveMergedPrWithSettledStage2 -- both of those have their
+        // own tolerant fallback paths that loop back here, and this call has already independently,
+        // freshly re-verified the merge itself moments ago, so there is no remaining tolerance
+        // case left to retry. `auditIssue` remains exactly the predecessor pointer it already
+        // was; this call never edits or retires it (a preserved non-goal).
+        if (typeof context.controlIssue !== "number") {
+          const failedVerdict = {
+            state: "AMBIGUOUS",
+            stopAfter: true,
+            ...context,
+            postAudit,
+            reason:
+              `execution-linked correction PR #${pr.number} for ${repo}#${verdict.workIssue} has already merged ` +
+              `(merge commit ${livePrState.mergeCommit?.oid ?? "<unknown>"}), but no control Issue is known in this ` +
+              `direct --audit-issue invocation to independently revalidate its correction-satisfied evidence and ` +
+              `route it into Stage 2 preparation -- re-run next-review-transition-gate.mjs --control-issue <N> ` +
+              "against this correction PR's governing control Issue instead of retrying this --audit-issue " +
+              "invocation, which can never resolve a merged correction PR on its own.",
+          };
+          return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
+        }
+        const mergeCommitOid = livePrState.mergeCommit?.oid;
+        if (typeof mergeCommitOid !== "string" || !mergeCommitOid.trim()) {
+          const failedVerdict = {
+            state: "AMBIGUOUS",
+            stopAfter: true,
+            ...context,
+            postAudit,
+            reason:
+              `execution-linked correction PR #${pr.number} for ${repo}#${verdict.workIssue} reports live state ` +
+              "MERGED but carries no usable merge commit oid -- refusing to route Stage 2 preparation/recovery " +
+              "against an unverified merge identity",
+          };
+          return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
+        }
+        let controlBody;
+        try {
+          const controlData = await ghIssueViewImpl({ repo, number: context.controlIssue });
+          controlBody = controlData?.body ?? "";
+        } catch (err) {
+          return { exitCode: 1, message: `gh issue view failed for ${repo}#${context.controlIssue}: ${err.message}` };
+        }
+        const executionField = readExecutionBulletField(controlBody);
+        const executionRef = resolveExecutionPointerOrNone(executionField);
+        if (!executionRef.ok) {
+          const failedVerdict = {
+            state: "AMBIGUOUS",
+            stopAfter: true,
+            ...context,
+            postAudit,
+            reason:
+              `Execution reference required to route merged execution-linked correction PR #${pr.number} into ` +
+              `Stage 2 preparation/recovery is malformed: ${executionRef.reason}`,
+          };
+          return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
+        }
+        return resolveStalePointerCorrectionRecovery(
+          {
+            repo,
+            body: controlBody,
+            auditIssue,
+            prIssue: Number(pr.number),
+            controlIssueNumber: context.controlIssue,
+            mergeCommitOid,
+            headRefOid: livePrState.headRefOid,
+            executionRef,
+          },
+          { checkCorrectionDeltaImpl, reconcileExistingStage2AuditIssueImpl },
+        );
       }
       const crossedVerdict = {
         state: "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
@@ -1272,14 +1387,24 @@ function resolveExecutionPointerOrNone(executionField) {
 //      correction retaining its predecessor audit is never forced to fabricate one.
 async function resolveMergedPrWithSettledStage2(
   { repo, body, auditIssue, prIssue, controlIssueNumber, mergeCommitOid, headRefOid },
-  { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl, checkCorrectionDeltaImpl },
+  {
+    ghIssueViewImpl,
+    reconcileExistingStage2AuditIssueImpl,
+    checkPostAuditImpl,
+    reconcileStage2CorrectionPrImpl,
+    checkCorrectionDeltaImpl,
+    ghPrStateImpl = defaultGhPrState,
+  },
 ) {
   // No merge commit at all (an unexpected `gh`/test-double response shape): there is no evidence
   // to verify identity one way or the other. Trust the settled pointer exactly as before this
   // fix rather than inventing a new failure mode over a field this gate has never required
   // before -- mirrors the merged-PR-with-no-Stage-2-pointer branch's own identical tolerance.
   if (typeof mergeCommitOid !== "string" || !mergeCommitOid.trim()) {
-    return resolvePostMerge({ repo, auditIssue, controlIssue: controlIssueNumber }, { checkPostAuditImpl, reconcileStage2CorrectionPrImpl });
+    return resolvePostMerge(
+      { repo, auditIssue, controlIssue: controlIssueNumber },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl },
+    );
   }
 
   // The gated work/Execution Issue is required both for the identity comparison below and for
@@ -1325,9 +1450,33 @@ async function resolveMergedPrWithSettledStage2(
   if (isGenuineMatch) {
     // Exactly the pre-#747 behavior: the settled Stage 2 reference genuinely audits this PR's
     // own merge, so it owns the transition unchanged.
-    return resolvePostMerge({ repo, auditIssue, controlIssue: controlIssueNumber }, { checkPostAuditImpl, reconcileStage2CorrectionPrImpl });
+    return resolvePostMerge(
+      { repo, auditIssue, controlIssue: controlIssueNumber },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl },
+    );
   }
 
+  return resolveStalePointerCorrectionRecovery(
+    { repo, body, auditIssue, prIssue, controlIssueNumber, mergeCommitOid, headRefOid, executionRef },
+    { checkCorrectionDeltaImpl, reconcileExistingStage2AuditIssueImpl },
+  );
+}
+
+// Issue #750 (extracted from resolveMergedPrWithSettledStage2, which continues to use this for
+// its own "settled Stage 2 pointer proven stale/mismatched" case): independently revalidates
+// Stage 1 authority for a merged PR whose retained/candidate Stage 2 pointer does not (or
+// cannot be assumed to) audit this exact merge, then recovers/requires the canonical Stage 2
+// Audit Issue for the CURRENT merge -- never resuming through the stale pointer. Deliberately
+// self-contained (no call back into resolvePostMerge or resolveMergedPrWithSettledStage2):
+// every caller here has already independently, freshly verified `mergeCommitOid` itself moments
+// before calling in, so there is no remaining tolerance case that would need to loop back for a
+// second attempt -- looping back was exactly the infinite-recursion hazard a pathological/
+// self-referential `auditIssue` (one whose own body coincidentally reports the same merge
+// commit this call already knows is not genuinely current) could otherwise trigger.
+async function resolveStalePointerCorrectionRecovery(
+  { repo, body, auditIssue, prIssue, controlIssueNumber, mergeCommitOid, headRefOid, executionRef },
+  { checkCorrectionDeltaImpl, reconcileExistingStage2AuditIssueImpl },
+) {
   // P1 finding on PR #748: the settled pointer is now proven stale/unparseable, but that alone
   // is not proof this merge's own Stage 1 authority was ever satisfied. Mirrors the sibling
   // merged-PR-with-no-settled-Stage-2-pointer branch's own STAGE2_PREPARATION_BLOCKED_ON_STAGE1
@@ -1665,7 +1814,10 @@ async function runNextReviewTransitionGateCore(
   // Direct-reference mode: skips the control-Issue read entirely. Checked before
   // --control-issue so an explicit direct reference always wins if both happen to be given.
   if (args.auditIssue) {
-    return resolvePostMerge({ repo, auditIssue: args.auditIssue, controlIssue: null }, { checkPostAuditImpl, reconcileStage2CorrectionPrImpl });
+    return resolvePostMerge(
+      { repo, auditIssue: args.auditIssue, controlIssue: null },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl },
+    );
   }
   if (args.pr) {
     if (!args.head) {
@@ -1792,7 +1944,7 @@ async function runNextReviewTransitionGateCore(
           mergeCommitOid: prState.mergeCommit?.oid,
           headRefOid: prState.headRefOid,
         },
-        { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl, checkCorrectionDeltaImpl },
+        { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl, checkCorrectionDeltaImpl, ghPrStateImpl },
       );
     }
     if (prState.state === "OPEN") {
@@ -1826,7 +1978,10 @@ async function runNextReviewTransitionGateCore(
   if (auditRef.kind === "issue") {
     // No settled "PR" reference at all ("none", or the bullet is simply absent): the settled
     // Stage 2 reference remains the only active post-review pointer, exactly as before #537.
-    return resolvePostMerge({ repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber }, { checkPostAuditImpl, reconcileStage2CorrectionPrImpl });
+    return resolvePostMerge(
+      { repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl },
+    );
   }
 
   if (prRef.kind === "issue") {
