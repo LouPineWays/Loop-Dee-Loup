@@ -2554,6 +2554,355 @@ test("runNextReviewTransitionGate: the #691 shape with no work Issue at all (Exe
   assert.equal(result.staleAuditIssue, 739);
 });
 
+// -- Issue #750 (control #539): the fresh #691/#742/#739 recurrence observed AFTER #747/#748
+// landed. That fix covers the coexisting-PR-and-Stage-2 branch (control body already carries a
+// settled "PR" bullet), but #691's live regression hit the SIBLING branch: the control body's
+// own "PR" bullet had not yet been durably recorded (a correction worker updates it alongside
+// "Stage 1" but the brief window before that write, or any other reason resolvePostMerge is
+// reached with only a settled "Stage 2" reference, is enough) so `resolvePostMerge(auditIssue:
+// 739, controlIssue: 691)` ran directly, found #739 still genuinely NOT CLEAN/open, and
+// `reconcileStage2CorrectionPr` matched the workIssue-737-linked correction PR #742 -- which its
+// own OPEN-PR search had found open a moment earlier, but which has since merged (a genuine
+// TOCTOU race between that search and this evaluation, or between two concurrent sessions).
+// Composing a fresh Stage 1 trigger + finalize-pr-breakpoint.mjs command against an already-
+// merged PR is exactly the `PR_BREAKPOINT_UNVERIFIED` trap this closes: PR #742's one allowed
+// Stage 1 round was triggered at reviewed head 55790ac..., while its accepted correction produced
+// final head a12bf7d... -- finalize-pr-breakpoint.mjs's own stage1-gate.mjs evidence model has no
+// notion of that correction-satisfied delta at all, so it always fails closed for a
+// correction-satisfied PR regardless of whether it has since merged. ----------------------------
+
+const CONTROL_BODY_691_NO_PR_BULLET_YET = CONTROL_BODY_691_MERGED_WITH_PREDECESSOR_STAGE2.replace("- **PR:** #742\n", "");
+
+const CORRECTION_DELTA_ARGS_691_LIVE_HEAD = {
+  repo: "o/r",
+  pr: 742,
+  reviewedHead: "55790ac3ec8dc37f11ccd09bcc023e79dc8586dc",
+  correctedHead: "a12bf7dc1a13118d39e30712d2e7096d107ac457",
+  gatedHead: "a12bf7dc1a13118d39e30712d2e7096d107ac457",
+};
+
+test("runNextReviewTransitionGate: the exact #691/#742/#739 recurrence -- reconcileStage2CorrectionPr's own OPEN-PR search finds correction PR #742, but an independent live re-check proves it has already merged; must route into Stage 2 preparation, never Stage 1 retrigger/finalize-pr-breakpoint.mjs", async () => {
+  let livePrStateQueriedFor = null;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "691" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number === 691 || number === "691") return { body: CONTROL_BODY_691_NO_PR_BULLET_YET, state: "OPEN" };
+        if (number === 739) return { body: auditIssueBody({ workIssue: 737, mergeCommit: MERGE_COMMIT_738 }), state: "OPEN" };
+        throw new Error(`unexpected ghIssueViewImpl call for #${number}`);
+      },
+      checkPostAuditImpl: async (args) => {
+        assert.equal(args["audit-issue"], 739);
+        return { exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 737 };
+      },
+      reconcileStage2CorrectionPrImpl: async ({ repo, workIssue }) => {
+        assert.equal(repo, "o/r");
+        assert.equal(workIssue, 737);
+        // The reconciliation search's own snapshot still shows the PR open -- it was, at the
+        // moment that search ran.
+        return { crossed: true, pr: { number: 742, headRefOid: "a12bf7dc1a13118d39e30712d2e7096d107ac457", state: "OPEN" } };
+      },
+      ghPrStateImpl: async ({ number }) => {
+        livePrStateQueriedFor = number;
+        assert.equal(number, 742);
+        // The independent, freshly-issued re-check proves it has since merged.
+        return {
+          headRefOid: "a12bf7dc1a13118d39e30712d2e7096d107ac457",
+          state: "MERGED",
+          mergeCommit: { oid: MERGE_COMMIT_742 },
+        };
+      },
+      reconcileExistingStage2AuditIssueImpl: async (args) => {
+        assert.deepEqual(args, { repo: "o/r", mergeCommitOid: MERGE_COMMIT_742, executionIssue: 737 });
+        return { exitCode: 0, state: "NONE_FOUND" };
+      },
+      checkCorrectionDeltaImpl: async (args) => {
+        assert.deepEqual(args, CORRECTION_DELTA_ARGS_691_LIVE_HEAD);
+        return { exitCode: 0, state: "CORRECTION_SATISFIED" };
+      },
+    },
+  );
+  assert.equal(livePrStateQueriedFor, 742);
+  assert.notEqual(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_PREPARATION_REQUIRED");
+  assert.equal(result.controlIssue, 691);
+  assert.equal(result.pr, 742);
+  assert.equal(result.issue, 737);
+  assert.equal(result.staleAuditIssue, 739);
+});
+
+test("runNextReviewTransitionGate: the same #691/#742/#739 recurrence via direct --audit-issue mode (no thin control Issue at all) fails closed to AMBIGUOUS instead of finalizing a merged PR -- there is no reverse index from a bare Audit Issue to its governing control Issue to revalidate correction-satisfied evidence against", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", auditIssue: "739" },
+    {
+      checkPostAuditImpl: async (args) => {
+        assert.equal(args["audit-issue"], "739");
+        return { exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 737 };
+      },
+      reconcileStage2CorrectionPrImpl: async () => ({
+        crossed: true,
+        pr: { number: 742, headRefOid: "a12bf7dc1a13118d39e30712d2e7096d107ac457", state: "OPEN" },
+      }),
+      ghPrStateImpl: async ({ number }) => {
+        assert.equal(number, 742);
+        return {
+          headRefOid: "a12bf7dc1a13118d39e30712d2e7096d107ac457",
+          state: "MERGED",
+          mergeCommit: { oid: MERGE_COMMIT_742 },
+        };
+      },
+    },
+  );
+  assert.notEqual(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /already merged/);
+  assert.match(result.reason, /--control-issue/);
+});
+
+test("runNextReviewTransitionGate: the #691/#742/#739 shape, but the independent live re-check reports the correction PR is genuinely still OPEN -- the ordinary STAGE2_CORRECTION_PR_NEEDS_FINALIZATION path remains available, unaffected by the new re-verification", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "691" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number === 691 || number === "691") return { body: CONTROL_BODY_691_NO_PR_BULLET_YET, state: "OPEN" };
+        throw new Error(`unexpected ghIssueViewImpl call for #${number}`);
+      },
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 737 }),
+      reconcileStage2CorrectionPrImpl: async ({ workIssue }) => {
+        assert.equal(workIssue, 737);
+        return { crossed: true, pr: { number: 742, headRefOid: "correctionhead", state: "OPEN" } };
+      },
+      ghPrStateImpl: async ({ number }) => {
+        assert.equal(number, 742);
+        return { headRefOid: "correctionhead", state: "OPEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.equal(result.pr, 742);
+  assert.equal(result.head, "correctionhead");
+});
+
+test("runNextReviewTransitionGate: an operational failure independently re-verifying the reconciled correction PR's live state fails closed to AMBIGUOUS, never falling back to the open-PR finalization path on unverified evidence", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "691" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number === 691 || number === "691") return { body: CONTROL_BODY_691_NO_PR_BULLET_YET, state: "OPEN" };
+        throw new Error(`unexpected ghIssueViewImpl call for #${number}`);
+      },
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 737 }),
+      reconcileStage2CorrectionPrImpl: async ({ workIssue }) => {
+        assert.equal(workIssue, 737);
+        return { crossed: true, pr: { number: 742, headRefOid: "correctionhead", state: "OPEN" } };
+      },
+      ghPrStateImpl: async () => {
+        throw new Error("gh pr view failed transiently");
+      },
+    },
+  );
+  assert.notEqual(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /gh pr view failed transiently/);
+});
+
+test("runNextReviewTransitionGate: the correction PR reports live state MERGED but no usable merge commit oid -- fails closed to AMBIGUOUS rather than looping back into a second reconciliation attempt", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "691" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number === 691 || number === "691") return { body: CONTROL_BODY_691_NO_PR_BULLET_YET, state: "OPEN" };
+        throw new Error(`unexpected ghIssueViewImpl call for #${number}`);
+      },
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 737 }),
+      reconcileStage2CorrectionPrImpl: async ({ workIssue }) => {
+        assert.equal(workIssue, 737);
+        return { crossed: true, pr: { number: 742, headRefOid: "correctionhead", state: "OPEN" } };
+      },
+      ghPrStateImpl: async () => ({ headRefOid: "correctionhead", state: "MERGED" }),
+    },
+  );
+  assert.notEqual(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /no usable merge commit oid/);
+});
+
+// -- Stage 1 review findings on this PR (#751): three P1 findings in the merged-correction-PR
+// branch just above. -------------------------------------------------------------------------
+
+test("runNextReviewTransitionGate: a checkPostAudit redirect through direct --audit-issue mode carries the RESOLVED Audit Issue into the merged-correction-PR recovery's own staleAuditIssue, never the original thin-control input (Stage 1 review finding on PR #751)", async () => {
+  const CONTROL_BODY_457_REDIRECT = `## Current state
+
+- **Lifecycle:** AUDIT
+- **Execution:** #737
+- **Route:** implementation worker
+- **Stage 1:** correction-satisfied at a12bf7dc1a13118d39e30712d2e7096d107ac457 (reviewed 55790ac3ec8dc37f11ccd09bcc023e79dc8586dc)
+- **Stage 2:** #548
+- **Blocker:** none
+- **Founder decision:** none
+`;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", auditIssue: "457" },
+    {
+      checkPostAuditImpl: async (args) => {
+        assert.equal(args["audit-issue"], "457");
+        // Redirected: the real Audit Issue is #548, distinct from thin-control input #457.
+        return { exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 737, auditIssue: 548 };
+      },
+      reconcileStage2CorrectionPrImpl: async ({ workIssue }) => {
+        assert.equal(workIssue, 737);
+        return { crossed: true, pr: { number: 742, headRefOid: "a12bf7dc1a13118d39e30712d2e7096d107ac457", state: "OPEN" } };
+      },
+      ghPrStateImpl: async ({ number }) => {
+        assert.equal(number, 742);
+        return {
+          headRefOid: "a12bf7dc1a13118d39e30712d2e7096d107ac457",
+          state: "MERGED",
+          mergeCommit: { oid: MERGE_COMMIT_742 },
+        };
+      },
+      ghIssueViewImpl: async ({ number }) => {
+        // The redirect makes the original input (#457) the effective control identity.
+        if (number === 457) return { body: CONTROL_BODY_457_REDIRECT, state: "OPEN" };
+        throw new Error(`unexpected ghIssueViewImpl call for #${number}`);
+      },
+      checkCorrectionDeltaImpl: async (args) => {
+        assert.deepEqual(args, {
+          repo: "o/r",
+          pr: 742,
+          reviewedHead: "55790ac3ec8dc37f11ccd09bcc023e79dc8586dc",
+          correctedHead: "a12bf7dc1a13118d39e30712d2e7096d107ac457",
+          gatedHead: "a12bf7dc1a13118d39e30712d2e7096d107ac457",
+        });
+        return { exitCode: 0, state: "CORRECTION_SATISFIED" };
+      },
+      reconcileExistingStage2AuditIssueImpl: async (args) => {
+        assert.deepEqual(args, { repo: "o/r", mergeCommitOid: MERGE_COMMIT_742, executionIssue: 737 });
+        return { exitCode: 0, state: "NONE_FOUND" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_PREPARATION_REQUIRED");
+  assert.equal(result.controlIssue, 457);
+  assert.equal(
+    result.staleAuditIssue,
+    548,
+    "must carry the resolved Audit Issue #548, not the original thin-control input #457",
+  );
+});
+
+test("runNextReviewTransitionGate: the #691 shape, but the control body's current Execution bullet now points at a different work Issue than the predecessor audit reports -- fails closed to AMBIGUOUS rather than routing that contradictory durable state into Stage 2 preparation/recovery (Stage 1 review finding on PR #751)", async () => {
+  const body = CONTROL_BODY_691_NO_PR_BULLET_YET.replace("- **Execution:** #737\n", "- **Execution:** #999\n");
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "691" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number === 691 || number === "691") return { body, state: "OPEN" };
+        throw new Error(`unexpected ghIssueViewImpl call for #${number}`);
+      },
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 737 }),
+      reconcileStage2CorrectionPrImpl: async ({ workIssue }) => {
+        assert.equal(workIssue, 737);
+        return { crossed: true, pr: { number: 742, headRefOid: "a12bf7dc1a13118d39e30712d2e7096d107ac457", state: "OPEN" } };
+      },
+      ghPrStateImpl: async () => ({
+        headRefOid: "a12bf7dc1a13118d39e30712d2e7096d107ac457",
+        state: "MERGED",
+        mergeCommit: { oid: MERGE_COMMIT_742 },
+      }),
+      reconcileExistingStage2AuditIssueImpl: async () => {
+        throw new Error("should never be called -- a work-Issue mismatch must fail closed before any recovery search");
+      },
+      checkCorrectionDeltaImpl: async () => {
+        throw new Error("should never be called -- a work-Issue mismatch must fail closed before correction-evidence revalidation");
+      },
+    },
+  );
+  assert.notEqual(result.state, "STAGE2_PREPARATION_REQUIRED");
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /work Issue #737/);
+  assert.match(result.reason, /999/);
+});
+
+test("runNextReviewTransitionGate: the #691 shape, but the control body's ordinary 'satisfied at <sha>' Stage 1 disposition names a sha that does not match the actual merged PR head -- fails closed to STAGE2_PREPARATION_BLOCKED_ON_STAGE1 rather than trusting a stale disposition (Stage 1 review finding on PR #751)", async () => {
+  const body = CONTROL_BODY_691_NO_PR_BULLET_YET.replace(
+    "- **Stage 1:** correction-satisfied at a12bf7dc1a13118d39e30712d2e7096d107ac457 (reviewed 55790ac3ec8dc37f11ccd09bcc023e79dc8586dc)\n",
+    "- **Stage 1:** satisfied at deadbeef00000000000000000000000000000000\n",
+  );
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "691" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number === 691 || number === "691") return { body, state: "OPEN" };
+        throw new Error(`unexpected ghIssueViewImpl call for #${number}`);
+      },
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 737 }),
+      reconcileStage2CorrectionPrImpl: async ({ workIssue }) => {
+        assert.equal(workIssue, 737);
+        return { crossed: true, pr: { number: 742, headRefOid: "a12bf7dc1a13118d39e30712d2e7096d107ac457", state: "OPEN" } };
+      },
+      ghPrStateImpl: async () => ({
+        headRefOid: "a12bf7dc1a13118d39e30712d2e7096d107ac457",
+        state: "MERGED",
+        mergeCommit: { oid: MERGE_COMMIT_742 },
+      }),
+      reconcileExistingStage2AuditIssueImpl: async () => {
+        throw new Error("should never be called -- unverified Stage 1 authority must block before recovery search");
+      },
+      checkCorrectionDeltaImpl: async () => {
+        throw new Error("should never be called -- the bullet is an ordinary disposition shape, not correction-satisfied");
+      },
+    },
+  );
+  assert.notEqual(result.state, "STAGE2_PREPARATION_REQUIRED");
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE2_PREPARATION_BLOCKED_ON_STAGE1");
+  assert.match(result.nextCommand, /finalize-stage1-satisfied-breakpoint\.mjs/);
+});
+
+test("runNextReviewTransitionGate: the #691 shape with an ordinary 'satisfied at <sha>' Stage 1 disposition whose sha matches the actual merged PR head proceeds through Stage 2 preparation/recovery exactly like a correction-satisfied disposition (Stage 1 review finding on PR #751, positive control)", async () => {
+  const body = CONTROL_BODY_691_NO_PR_BULLET_YET.replace(
+    "- **Stage 1:** correction-satisfied at a12bf7dc1a13118d39e30712d2e7096d107ac457 (reviewed 55790ac3ec8dc37f11ccd09bcc023e79dc8586dc)\n",
+    "- **Stage 1:** satisfied at a12bf7dc1a13118d39e30712d2e7096d107ac457\n",
+  );
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "691" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number === 691 || number === "691") return { body, state: "OPEN" };
+        throw new Error(`unexpected ghIssueViewImpl call for #${number}`);
+      },
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 737 }),
+      reconcileStage2CorrectionPrImpl: async ({ workIssue }) => {
+        assert.equal(workIssue, 737);
+        return { crossed: true, pr: { number: 742, headRefOid: "a12bf7dc1a13118d39e30712d2e7096d107ac457", state: "OPEN" } };
+      },
+      ghPrStateImpl: async () => ({
+        headRefOid: "a12bf7dc1a13118d39e30712d2e7096d107ac457",
+        state: "MERGED",
+        mergeCommit: { oid: MERGE_COMMIT_742 },
+      }),
+      reconcileExistingStage2AuditIssueImpl: async (args) => {
+        assert.deepEqual(args, { repo: "o/r", mergeCommitOid: MERGE_COMMIT_742, executionIssue: 737 });
+        return { exitCode: 0, state: "NONE_FOUND" };
+      },
+      checkCorrectionDeltaImpl: async () => {
+        throw new Error("should never be called -- an ordinary affirmative disposition needs no correction-evidence re-derivation");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "STAGE2_PREPARATION_REQUIRED");
+  assert.equal(result.staleAuditIssue, 739);
+});
+
 test("runNextReviewTransitionGate: a settled Stage 2 pointer whose own structured identity genuinely matches the current merged PR continues through ordinary post-merge Stage 2 verdict handling unchanged, never spending the broader reconciliation search", async () => {
   let reconcileCalls = 0;
   const result = await runNextReviewTransitionGate(
@@ -3177,7 +3526,16 @@ test("runNextReviewTransitionGate: the exact #487/#643/#644 shape -- an already-
     { repo: "o/r", controlIssue: "322" },
     {
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
-      ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      // CONTROL_BODY_POST_MERGE's own "PR: #376" is checked first (reports MERGED, driving this
+      // scenario into resolvePostMerge via the no-merge-commit tolerance branch, exactly as
+      // before). Issue #750: the reconciled correction PR #644 found below is then independently
+      // re-verified live too (never trusting the reconciliation search's own possibly-stale
+      // `pr.state`) before ever authorizing the open-PR finalization path -- it must report
+      // genuinely still OPEN for that path to remain available.
+      ghPrStateImpl: async ({ number }) => {
+        if (number === 644) return { headRefOid: "correctionhead", state: "OPEN" };
+        return { headRefOid: "mergedhead", state: "MERGED" };
+      },
       checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 375 }),
       reconcileStage2CorrectionPrImpl: async ({ repo, workIssue }) => {
         assert.equal(repo, "o/r");
@@ -3216,6 +3574,12 @@ test("runNextReviewTransitionGate: direct-reference mode (--audit-issue only, no
         crossed: true,
         pr: { number: 644, headRefOid: "correctionhead", state: "OPEN" },
       }),
+      // Issue #750: independent live-state re-verification runs here too, even with no thin
+      // control Issue in play.
+      ghPrStateImpl: async ({ number }) => {
+        assert.equal(number, 644);
+        return { headRefOid: "correctionhead", state: "OPEN" };
+      },
     },
   );
   assert.equal(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
