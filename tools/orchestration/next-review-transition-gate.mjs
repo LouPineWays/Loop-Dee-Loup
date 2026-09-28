@@ -1328,6 +1328,28 @@ async function resolvePostMerge(
           { checkCorrectionDeltaImpl, reconcileExistingStage2AuditIssueImpl },
         );
       }
+      // Stage 2 audit finding on this PR (#753, P1): the branch above only special-cases
+      // `livePrState.state === "MERGED"`; everything else previously fell through unconditionally
+      // to the open-PR finalization path below. `CLOSED` is a valid, distinct GitHub PR state --
+      // a correction PR closed without merging between reconciliation's search and this direct
+      // live read is not "genuinely still open" and must never be authorized into a fresh Stage 1
+      // trigger/finalize-pr-breakpoint.mjs command. The required invariant is an explicit
+      // allowlist, not a MERGED/else split: OPEN proceeds here, MERGED already returned above,
+      // and anything else (CLOSED, blank, or otherwise unrecognized) fails closed.
+      if (livePrState?.state !== "OPEN") {
+        const failedVerdict = {
+          state: "AMBIGUOUS",
+          stopAfter: true,
+          ...context,
+          postAudit,
+          reason:
+            `execution-linked correction PR #${pr.number} for ${repo}#${verdict.workIssue} reports live state ` +
+            `${JSON.stringify(livePrState?.state ?? null)}, which is neither OPEN nor MERGED -- refusing to treat ` +
+            "a closed-without-merge or unrecognized PR state as though it were genuinely still open before " +
+            "composing a Stage 1 trigger/finalize-pr-breakpoint.mjs command",
+        };
+        return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
+      }
       const crossedVerdict = {
         state: "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
         stopAfter: true,
