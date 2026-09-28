@@ -557,6 +557,43 @@ test("composeAuditFinalizedControlBody: already-AUDIT body with the matching Sta
   assert.match(result.body, /- \*\*Stage 2:\*\* #559/);
 });
 
+// Issue #747 Stage 1 correction (P1 finding on PR #748, "Allow finalization to replace the
+// stale Stage 2 pointer"): next-review-transition-gate.mjs's resolveMergedPrWithSettledStage2
+// independently verifies (by exact merge commit/work issue, never issue number or wording) that
+// an already-AUDIT control's recorded Stage 2 pointer belongs to a predecessor PR/merge -- this
+// authorizes replacing exactly that verified-stale pointer, and only that one.
+test("composeAuditFinalizedControlBody: staleAuditIssue matching the already-AUDIT body's existing Stage 2 pointer authorizes replacing it with the current merge's own audit", () => {
+  const staleBody = ALREADY_AUDIT_BODY.replace("Stage 2:** #559", "Stage 2:** #739");
+  const result = composeAuditFinalizedControlBody(staleBody, { auditIssue: 743, executionIssue: 440, pr: 558, staleAuditIssue: 739 });
+  assert.equal(result.ok, true);
+  assert.match(result.body, /- \*\*Stage 2:\*\* #743/);
+  assert.match(result.body, /- \*\*Lifecycle:\*\* AUDIT/);
+});
+
+test("composeAuditFinalizedControlBody: staleAuditIssue that does not match the already-AUDIT body's existing Stage 2 pointer is still refused -- never weakens ordinary conflict rejection for a pointer not proven stale", () => {
+  const differentAuditBody = ALREADY_AUDIT_BODY.replace("Stage 2:** #559", "Stage 2:** #12345");
+  const result = composeAuditFinalizedControlBody(differentAuditBody, {
+    auditIssue: 559,
+    executionIssue: 440,
+    pr: 558,
+    staleAuditIssue: 739,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /already Lifecycle: AUDIT but its Stage 2 pointer is "#12345"/);
+  assert.match(result.reason, /or the given --stale-audit-issue #739/);
+});
+
+test("composeAuditFinalizedControlBody: an already-matching Stage 2 pointer is unaffected by an irrelevant staleAuditIssue argument", () => {
+  const result = composeAuditFinalizedControlBody(ALREADY_AUDIT_BODY, {
+    auditIssue: 559,
+    executionIssue: 440,
+    pr: 558,
+    staleAuditIssue: 739,
+  });
+  assert.equal(result.ok, true);
+  assert.match(result.body, /- \*\*Stage 2:\*\* #559/);
+});
+
 // -- run(): end-to-end -----------------------------------------------------------------
 
 test("run(): the happy path — merged PR, matching audit issue, write verified -> FINALIZED", async () => {
@@ -587,6 +624,48 @@ test("run(): the happy path — merged PR, matching audit issue, write verified 
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "FINALIZED");
   assert.equal(result.message, "FINALIZED 445 558 559");
+});
+
+// -- run(): staleAuditIssue (Issue #747 Stage 1 correction, P1 finding on PR #748) ----------
+
+test("run(): staleAuditIssue matching an already-AUDIT control's existing Stage 2 pointer authorizes replacing it with the current merge's own audit -> FINALIZED", async () => {
+  const staleControlBody = ALREADY_AUDIT_BODY.replace("Stage 2:** #559", "Stage 2:** #739");
+  let bodies = [staleControlBody, staleControlBody];
+  let writtenBody = null;
+  const result = await run(
+    { repo: "o/r", controlIssue: 445, executionIssue: 440, pr: 558, auditIssue: 559, staleAuditIssue: 739 },
+    {
+      ghIssueViewImpl: async () => {
+        if (writtenBody !== null) return writtenBody;
+        return bodies.length > 1 ? bodies.shift() : bodies[0];
+      },
+      ghPrViewImpl: async () => MERGED_PR_VIEW,
+      ghAuditIssueViewImpl: async ({ auditIssue }) => {
+        assert.equal(auditIssue, 559);
+        return MATCHING_AUDIT_VIEW;
+      },
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        writtenBody = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "FINALIZED");
+  assert.match(writtenBody, /- \*\*Stage 2:\*\* #559/);
+});
+
+test("run(): rejects an invalid staleAuditIssue (equal to --audit-issue) without ever reading the control Issue", async () => {
+  const result = await run(
+    { repo: "o/r", controlIssue: 445, executionIssue: 440, pr: 558, auditIssue: 559, staleAuditIssue: 559 },
+    {
+      ghIssueViewImpl: async () => {
+        throw new Error("should never be called -- invalid args fail closed before any gh read");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /--stale-audit-issue must be a positive integer distinct from --audit-issue/);
 });
 
 // -- run(): revalidateUniqueness (Issue #729 P2 -- TOCTOU gap, opt-in) ----------------------

@@ -294,6 +294,8 @@ import {
   checkPostAudit,
   findMatchingOpenAuditIssues,
   defaultGhIssueList as defaultGhAuditIssueSearchList,
+  parseMergeCommitRef,
+  parseWorkIssueRef,
 } from "../review-watch/lifecycle-gate.mjs";
 import { isCleanStage1Response } from "../review-watch/consumer-sync-gate.mjs";
 import { isFindingsBearingResponse, isFormalReviewEndpoint } from "../review-watch/stage1-findings.mjs";
@@ -1206,6 +1208,270 @@ async function resolvePostMerge({ repo, auditIssue, controlIssue }, { checkPostA
   return { exitCode: exitCodeFor(verdict.state), ...verdict };
 }
 
+// Pure. Resolves a `readExecutionBulletField` result to either a positive-integer execution
+// Issue or the literal "none" sentinel -- distinct from `parseExecutionPointer`, which requires
+// an actual "#N" pointer and treats an absent/explicit "none" bullet as malformed. Issue #747
+// Stage 1 correction (P2 finding on PR #748): `resolveMergedPrWithSettledStage2` below hands its
+// resolved issue straight to `finalize-audit-breakpoint.mjs`/`reconcileExistingStage2AuditIssue`,
+// both of which already treat "none" as the documented no-work-issue representation (mirroring
+// lifecycle-gate.mjs's own `--issue none` convention, issue #190) -- so an absent/"none"
+// Execution bullet must resolve here the same way, never be rejected as malformed merely because
+// it names no "#N" pointer. Scoped to that one caller: every other Execution-pointer resolution
+// in this file still requires an actual pointer via `parseExecutionPointer` directly, since none
+// of those call sites feed a "none"-aware downstream.
+function resolveExecutionPointerOrNone(executionField) {
+  if (executionField.conflict) {
+    return { ok: false, reason: describeExecutionConflict(executionField) };
+  }
+  if (executionField.value === null || isNoneSentinel(executionField.value)) {
+    return { ok: true, issue: "none" };
+  }
+  return parseExecutionPointer(executionField.value);
+}
+
+// Issue #747 (control #539, the #691/#742/#739 reproduction): control-Issue mode's coexisting-
+// PR-and-Stage-2 branch above found the relevant PR MERGED. Before #747, that alone was enough
+// to hand the transition to whatever Issue the settled "Stage 2" bullet named (exactly #537's
+// established behavior) -- but a settled pointer that merely *parses* as a valid Issue reference
+// is not proof it is the audit *for this merge*. #691's live shape: correction PR #742 merged,
+// but the control Issue's retained "Stage 2: #739" bullet still names the NOT CLEAN audit of the
+// predecessor PR #738 -- provenance only, never a live post-merge pointer for #742.
+//
+// This verifies the settled pointer's own structured "Exact merge commit"/"Work issue" fields
+// (the same fields `findMatchingOpenAuditIssues`/`hasCanonicalAuditShape` already treat as the
+// sole identity authority -- never issue numbers, timestamps, or wording) against the PR that
+// actually just merged. A genuine match hands the transition to resolvePostMerge completely
+// unchanged (the pre-#747 behavior). A mismatch (or a pointer whose own body doesn't parse as an
+// identity-bearing audit at all) never edits or retires the predecessor pointer -- it instead
+// routes the *current* merged PR through the exact same deterministic recovery-or-prepare
+// machinery (issue #729's `reconcileExistingStage2AuditIssue`) the merged-PR-with-no-settled-
+// Stage-2-pointer branch below already uses for this evidence shape, so a fresh canonical audit
+// already prepared for this merge is recovered rather than duplicated, and only a genuinely
+// unprepared merge falls through to STAGE2_PREPARATION_REQUIRED.
+//
+// Stage 1 correction on PR #748 (three accepted findings, applied as one consolidated pass --
+// see this PR's "Stage 1 guidance" comment): a verified-stale predecessor pointer may hand the
+// transition to the current merge's own recovery/preparation path only if the rest of the
+// post-merge contract still holds:
+//   1. Stage 1 eligibility is still mandatory -- the same affirmative/correction-satisfied
+//      disposition (independently re-validated against the actual merged head for a
+//      correction-satisfied bullet, exactly like the sibling merged-PR-with-no-settled-Stage-2
+//      branch below) is required before recovery/preparation proceeds, so a stale predecessor
+//      pointer can never become a bypass around Stage 1.
+//   2. The replacement audit pointer must be committable -- STAGE2_AUDIT_ALREADY_PREPARED's
+//      `nextCommand` now also names `--stale-audit-issue <auditIssue>`, which authorizes
+//      `finalize-audit-breakpoint.mjs` to overwrite an already-AUDIT control's Stage 2 pointer
+//      only when it still exactly names this verified-stale predecessor (never any other
+//      mismatch). STAGE2_PREPARATION_REQUIRED likewise carries `staleAuditIssue` so the eventual
+//      finalize call the controller composes after the dispatched preparation worker returns can
+//      pass the same authorization; the predecessor Audit Issue itself is never edited or closed.
+//   3. An absent/explicit "none" Execution state remains valid through this path -- the
+//      Execution field is resolved to either a positive issue number or the literal "none"
+//      sentinel (mirroring finalize-audit-breakpoint.mjs's own `--execution-issue none`
+//      convention) rather than requiring an actual "#N" pointer, so a merged no-work-issue
+//      correction retaining its predecessor audit is never forced to fabricate one.
+async function resolveMergedPrWithSettledStage2(
+  { repo, body, auditIssue, prIssue, controlIssueNumber, mergeCommitOid, headRefOid },
+  { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl, checkCorrectionDeltaImpl },
+) {
+  // No merge commit at all (an unexpected `gh`/test-double response shape): there is no evidence
+  // to verify identity one way or the other. Trust the settled pointer exactly as before this
+  // fix rather than inventing a new failure mode over a field this gate has never required
+  // before -- mirrors the merged-PR-with-no-Stage-2-pointer branch's own identical tolerance.
+  if (typeof mergeCommitOid !== "string" || !mergeCommitOid.trim()) {
+    return resolvePostMerge({ repo, auditIssue, controlIssue: controlIssueNumber }, { checkPostAuditImpl, reconcileStage2CorrectionPrImpl });
+  }
+
+  // The gated work/Execution Issue is required both for the identity comparison below and for
+  // composing a STAGE2_PREPARATION_REQUIRED/STAGE2_AUDIT_ALREADY_PREPARED verdict if the settled
+  // pointer turns out not to match -- resolved from the control body already in hand, no extra
+  // read. An absent/explicit "none" Execution state is a legitimate no-work-issue representation
+  // elsewhere in this lifecycle (finalize-audit-breakpoint.mjs's own `--execution-issue none`)
+  // and must remain valid here too (P2 finding on PR #748) -- resolveExecutionPointerOrNone
+  // normalizes it to the "none" sentinel instead of requiring an actual "#N" pointer. A genuinely
+  // conflicting or multi-valued Execution field still fails closed exactly as before.
+  const executionField = readExecutionBulletField(body);
+  const executionRef = resolveExecutionPointerOrNone(executionField);
+  if (!executionRef.ok) {
+    return {
+      exitCode: 4,
+      state: "AMBIGUOUS",
+      stopAfter: true,
+      repo,
+      controlIssue: controlIssueNumber,
+      reason:
+        `Execution reference required to verify the settled "Stage 2" pointer's identity against the current ` +
+        `merged PR #${prIssue} is malformed: ${executionRef.reason}`,
+    };
+  }
+
+  let auditData;
+  try {
+    auditData = await ghIssueViewImpl({ repo, number: auditIssue });
+  } catch (err) {
+    return {
+      exitCode: 1,
+      message: `gh issue view failed for ${repo}#${auditIssue} while verifying its identity against merged PR #${prIssue}: ${err.message}`,
+    };
+  }
+  const auditBody = auditData.body ?? "";
+  const candidateMergeCommit = parseMergeCommitRef(auditBody);
+  const candidateWorkIssue = parseWorkIssueRef(auditBody);
+  const isGenuineMatch =
+    typeof candidateMergeCommit === "string" &&
+    candidateMergeCommit.toLowerCase() === mergeCommitOid.toLowerCase() &&
+    candidateWorkIssue === executionRef.issue;
+
+  if (isGenuineMatch) {
+    // Exactly the pre-#747 behavior: the settled Stage 2 reference genuinely audits this PR's
+    // own merge, so it owns the transition unchanged.
+    return resolvePostMerge({ repo, auditIssue, controlIssue: controlIssueNumber }, { checkPostAuditImpl, reconcileStage2CorrectionPrImpl });
+  }
+
+  // P1 finding on PR #748: the settled pointer is now proven stale/unparseable, but that alone
+  // is not proof this merge's own Stage 1 authority was ever satisfied. Mirrors the sibling
+  // merged-PR-with-no-settled-Stage-2-pointer branch's own STAGE2_PREPARATION_BLOCKED_ON_STAGE1
+  // guard below (Stage 1 correction on PR #721/#724): require the control Issue's own "Stage 1"
+  // bullet to already carry one of the two affirmative shapes the pre-merge phase authorizes
+  // merge from before ever recovering/preparing a replacement audit.
+  const stage1Bullet = parseControlBullet(body, "Stage 1");
+  const hasAffirmativeDisposition = parseAffirmativeStage1Disposition(stage1Bullet) !== null;
+  const parsedCorrectionSatisfied = parseCorrectionSatisfiedDisposition(stage1Bullet);
+  const hasCorrectionSatisfiedDisposition = parsedCorrectionSatisfied !== null;
+  if (!hasAffirmativeDisposition && !hasCorrectionSatisfiedDisposition) {
+    return {
+      exitCode: 3,
+      state: "STAGE2_PREPARATION_BLOCKED_ON_STAGE1",
+      stopAfter: true,
+      repo,
+      controlIssue: controlIssueNumber,
+      pr: prIssue,
+      issue: executionRef.issue,
+      reason:
+        `control Issue #${controlIssueNumber}'s "Stage 1" bullet (${JSON.stringify(stage1Bullet)}) is not a ` +
+        `canonical satisfied/exempt or correction-satisfied disposition, but PR #${prIssue} is already MERGED ` +
+        `and its retained "Stage 2" pointer #${auditIssue} does not audit this merge -- Stage 2 recovery/` +
+        "preparation must not resume on unverified Stage 1 authority",
+      nextCommand:
+        `node tools/orchestration/finalize-stage1-satisfied-breakpoint.mjs --control-issue ${controlIssueNumber} ` +
+        `--execution-issue ${executionRef.issue} --pr ${prIssue} --recover true`,
+    };
+  }
+  // A canonical "correction-satisfied at <corrected> (reviewed <reviewed>)" bullet proves only
+  // that it parses -- independently re-derive the full evidence invariant the pre-merge phase
+  // already enforces (checkCorrectionDeltaImpl), exactly as the sibling branch does. Skipped
+  // entirely when an ordinary satisfied/exempt disposition is already present.
+  if (!hasAffirmativeDisposition) {
+    let correctionDelta;
+    try {
+      correctionDelta = await checkCorrectionDeltaImpl({
+        repo,
+        pr: prIssue,
+        reviewedHead: parsedCorrectionSatisfied.reviewedHead,
+        correctedHead: parsedCorrectionSatisfied.correctedHead,
+        gatedHead: headRefOid,
+      });
+    } catch (err) {
+      correctionDelta = { exitCode: 1, message: `stage1-correction-gate threw: ${err.message}` };
+    }
+    if (!hasTrustworthyExitCode(correctionDelta) || correctionDelta.exitCode === 1) {
+      return {
+        exitCode: 4,
+        state: "AMBIGUOUS",
+        stopAfter: true,
+        repo,
+        controlIssue: controlIssueNumber,
+        reason:
+          "tools/review-watch/stage1-correction-gate.mjs's checkCorrectionDelta returned output without a " +
+          "trustworthy exitCode (or reported an operational error) while independently validating the stale-" +
+          `Stage-2-pointer resume correction-satisfied disposition for PR #${prIssue}: ` +
+          `${correctionDelta && correctionDelta.message}`,
+      };
+    }
+    if (correctionDelta.state !== "CORRECTION_SATISFIED") {
+      return {
+        exitCode: 3,
+        state: "STAGE2_PREPARATION_BLOCKED_ON_STAGE1",
+        stopAfter: true,
+        repo,
+        controlIssue: controlIssueNumber,
+        pr: prIssue,
+        issue: executionRef.issue,
+        reason:
+          `control Issue #${controlIssueNumber}'s "Stage 1" bullet (${JSON.stringify(stage1Bullet)}) names a ` +
+          "correction-satisfied disposition, but its correction evidence did not independently validate " +
+          `against merged PR #${prIssue}'s actual head ${headRefOid} (checkCorrectionDelta reported ` +
+          `${correctionDelta.state}${correctionDelta.reason ? `: ${correctionDelta.reason}` : ""}) -- Stage 2 ` +
+          "recovery/preparation must not resume on unverified Stage 1 authority",
+        nextCommand:
+          `node tools/orchestration/finalize-stage1-satisfied-breakpoint.mjs --control-issue ${controlIssueNumber} ` +
+          `--execution-issue ${executionRef.issue} --pr ${prIssue} --recover true`,
+      };
+    }
+  }
+
+  // The settled "Stage 2" pointer names a different merge/work identity than the PR that just
+  // merged (or its body carries no parseable identity at all) -- it is provenance only. Never
+  // edit or retire it here (a non-goal); instead search for the canonical Stage 2 Audit Issue
+  // that already matches *this* merge, exactly as the merged-PR-with-no-settled-Stage-2-pointer
+  // branch below already does for the same evidence shape.
+  let reconciled;
+  try {
+    reconciled = await reconcileExistingStage2AuditIssueImpl({ repo, mergeCommitOid, executionIssue: executionRef.issue });
+  } catch (err) {
+    reconciled = { exitCode: 1, message: `reconcileExistingStage2AuditIssue threw: ${err.message}` };
+  }
+  // A genuinely conflicting result (more than one durable match) fails closed to AMBIGUOUS --
+  // never guessed past. An operational search failure is tolerated exactly as issue #729
+  // documents for the sibling branch: it only means this acceleration is unavailable right now,
+  // never a reason to trust the mismatched pointer or block the whole transition.
+  if (reconciled && reconciled.exitCode === 0 && reconciled.state === "AMBIGUOUS_MATCHES") {
+    return {
+      exitCode: 4,
+      state: "AMBIGUOUS",
+      stopAfter: true,
+      repo,
+      controlIssue: controlIssueNumber,
+      reason: reconciled.message,
+    };
+  }
+  if (reconciled && reconciled.exitCode === 0 && reconciled.state === "FOUND") {
+    return {
+      exitCode: 0,
+      state: "STAGE2_AUDIT_ALREADY_PREPARED",
+      stopAfter: true,
+      repo,
+      controlIssue: controlIssueNumber,
+      pr: prIssue,
+      issue: executionRef.issue,
+      auditIssue: reconciled.auditIssue,
+      staleAuditIssue: auditIssue,
+      nextCommand:
+        `node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue ${controlIssueNumber} ` +
+        `--execution-issue ${executionRef.issue} --pr ${prIssue} --audit-issue ${reconciled.auditIssue} ` +
+        `--stale-audit-issue ${auditIssue} --revalidate-uniqueness true && ` +
+        `node tools/review-watch/trigger.mjs --repo ${repo} --kind issue --number ${reconciled.auditIssue}`,
+    };
+  }
+
+  // NONE_FOUND (or the tolerated operational-failure fallback above): the current merged PR has
+  // no canonical Stage 2 audit yet. Require Stage 2 preparation for it -- never resume through
+  // the mismatched predecessor pointer. `staleAuditIssue` travels with this verdict so the
+  // controller's own eventual `finalize-audit-breakpoint.mjs` call (once the dispatched
+  // preparation worker reports the freshly created Audit Issue number) can authorize replacing
+  // this same verified-stale predecessor pointer.
+  return {
+    exitCode: 0,
+    state: "STAGE2_PREPARATION_REQUIRED",
+    stopAfter: true,
+    repo,
+    controlIssue: controlIssueNumber,
+    pr: prIssue,
+    issue: executionRef.issue,
+    staleAuditIssue: auditIssue,
+  };
+}
+
 // Control-Issue mode's shared pre-merge composition step: resolves the gated work/execution
 // Issue from the control Issue body's own "Execution" bullet *before* resolving `head` (a
 // malformed Execution reference must fail closed without ever spending a live PR-head read --
@@ -1512,9 +1778,22 @@ async function runNextReviewTransitionGateCore(
       return { exitCode: 1, message: `gh pr view failed for ${repo}#${prRef.issue}: ${err.message}` };
     }
     if (prState.state === "MERGED") {
-      // The relevant PR is merged: the settled Stage 2 reference owns the transition, exactly
-      // as it did before #537.
-      return resolvePostMerge({ repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber }, { checkPostAuditImpl, reconcileStage2CorrectionPrImpl });
+      // Issue #747 (the #691/#742/#739 reproduction): the relevant PR is merged, but a settled
+      // "Stage 2" reference that merely *parses* is not proof it audits *this* merge -- #537 only
+      // ever established that a settled pointer exists, never that it is current. Verify its
+      // identity against the PR that actually just merged before trusting it.
+      return resolveMergedPrWithSettledStage2(
+        {
+          repo,
+          body,
+          auditIssue: auditRef.issue,
+          prIssue: prRef.issue,
+          controlIssueNumber,
+          mergeCommitOid: prState.mergeCommit?.oid,
+          headRefOid: prState.headRefOid,
+        },
+        { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl, checkCorrectionDeltaImpl },
+      );
     }
     if (prState.state === "OPEN") {
       // The PR is still open: the pre-merge PR/Stage 1 phase owns the transition even though a
