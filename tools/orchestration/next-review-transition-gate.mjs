@@ -294,6 +294,8 @@ import {
   checkPostAudit,
   findMatchingOpenAuditIssues,
   defaultGhIssueList as defaultGhAuditIssueSearchList,
+  parseMergeCommitRef,
+  parseWorkIssueRef,
 } from "../review-watch/lifecycle-gate.mjs";
 import { isCleanStage1Response } from "../review-watch/consumer-sync-gate.mjs";
 import { isFindingsBearingResponse, isFormalReviewEndpoint } from "../review-watch/stage1-findings.mjs";
@@ -1206,6 +1208,139 @@ async function resolvePostMerge({ repo, auditIssue, controlIssue }, { checkPostA
   return { exitCode: exitCodeFor(verdict.state), ...verdict };
 }
 
+// Issue #747 (control #539, the #691/#742/#739 reproduction): control-Issue mode's coexisting-
+// PR-and-Stage-2 branch above found the relevant PR MERGED. Before #747, that alone was enough
+// to hand the transition to whatever Issue the settled "Stage 2" bullet named (exactly #537's
+// established behavior) -- but a settled pointer that merely *parses* as a valid Issue reference
+// is not proof it is the audit *for this merge*. #691's live shape: correction PR #742 merged,
+// but the control Issue's retained "Stage 2: #739" bullet still names the NOT CLEAN audit of the
+// predecessor PR #738 -- provenance only, never a live post-merge pointer for #742.
+//
+// This verifies the settled pointer's own structured "Exact merge commit"/"Work issue" fields
+// (the same fields `findMatchingOpenAuditIssues`/`hasCanonicalAuditShape` already treat as the
+// sole identity authority -- never issue numbers, timestamps, or wording) against the PR that
+// actually just merged. A genuine match hands the transition to resolvePostMerge completely
+// unchanged (the pre-#747 behavior). A mismatch (or a pointer whose own body doesn't parse as an
+// identity-bearing audit at all) never edits or retires the predecessor pointer -- it instead
+// routes the *current* merged PR through the exact same deterministic recovery-or-prepare
+// machinery (issue #729's `reconcileExistingStage2AuditIssue`) the merged-PR-with-no-settled-
+// Stage-2-pointer branch below already uses for this evidence shape, so a fresh canonical audit
+// already prepared for this merge is recovered rather than duplicated, and only a genuinely
+// unprepared merge falls through to STAGE2_PREPARATION_REQUIRED.
+async function resolveMergedPrWithSettledStage2(
+  { repo, body, auditIssue, prIssue, controlIssueNumber, mergeCommitOid },
+  { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl },
+) {
+  // No merge commit at all (an unexpected `gh`/test-double response shape): there is no evidence
+  // to verify identity one way or the other. Trust the settled pointer exactly as before this
+  // fix rather than inventing a new failure mode over a field this gate has never required
+  // before -- mirrors the merged-PR-with-no-Stage-2-pointer branch's own identical tolerance.
+  if (typeof mergeCommitOid !== "string" || !mergeCommitOid.trim()) {
+    return resolvePostMerge({ repo, auditIssue, controlIssue: controlIssueNumber }, { checkPostAuditImpl, reconcileStage2CorrectionPrImpl });
+  }
+
+  // The gated work/Execution Issue is required both for the identity comparison below and for
+  // composing a STAGE2_PREPARATION_REQUIRED/STAGE2_AUDIT_ALREADY_PREPARED verdict if the settled
+  // pointer turns out not to match -- resolved from the control body already in hand, no extra
+  // read. A malformed Execution reference fails closed exactly as it does on every other path
+  // that needs it.
+  const executionField = readExecutionBulletField(body);
+  const executionRef = executionField.conflict
+    ? { ok: false, reason: describeExecutionConflict(executionField) }
+    : parseExecutionPointer(executionField.value);
+  if (!executionRef.ok) {
+    return {
+      exitCode: 4,
+      state: "AMBIGUOUS",
+      stopAfter: true,
+      repo,
+      controlIssue: controlIssueNumber,
+      reason:
+        `Execution reference required to verify the settled "Stage 2" pointer's identity against the current ` +
+        `merged PR #${prIssue} is malformed: ${executionRef.reason}`,
+    };
+  }
+
+  let auditData;
+  try {
+    auditData = await ghIssueViewImpl({ repo, number: auditIssue });
+  } catch (err) {
+    return {
+      exitCode: 1,
+      message: `gh issue view failed for ${repo}#${auditIssue} while verifying its identity against merged PR #${prIssue}: ${err.message}`,
+    };
+  }
+  const auditBody = auditData.body ?? "";
+  const candidateMergeCommit = parseMergeCommitRef(auditBody);
+  const candidateWorkIssue = parseWorkIssueRef(auditBody);
+  const isGenuineMatch =
+    typeof candidateMergeCommit === "string" &&
+    candidateMergeCommit.toLowerCase() === mergeCommitOid.toLowerCase() &&
+    candidateWorkIssue === executionRef.issue;
+
+  if (isGenuineMatch) {
+    // Exactly the pre-#747 behavior: the settled Stage 2 reference genuinely audits this PR's
+    // own merge, so it owns the transition unchanged.
+    return resolvePostMerge({ repo, auditIssue, controlIssue: controlIssueNumber }, { checkPostAuditImpl, reconcileStage2CorrectionPrImpl });
+  }
+
+  // The settled "Stage 2" pointer names a different merge/work identity than the PR that just
+  // merged (or its body carries no parseable identity at all) -- it is provenance only. Never
+  // edit or retire it here (a non-goal); instead search for the canonical Stage 2 Audit Issue
+  // that already matches *this* merge, exactly as the merged-PR-with-no-settled-Stage-2-pointer
+  // branch below already does for the same evidence shape.
+  let reconciled;
+  try {
+    reconciled = await reconcileExistingStage2AuditIssueImpl({ repo, mergeCommitOid, executionIssue: executionRef.issue });
+  } catch (err) {
+    reconciled = { exitCode: 1, message: `reconcileExistingStage2AuditIssue threw: ${err.message}` };
+  }
+  // A genuinely conflicting result (more than one durable match) fails closed to AMBIGUOUS --
+  // never guessed past. An operational search failure is tolerated exactly as issue #729
+  // documents for the sibling branch: it only means this acceleration is unavailable right now,
+  // never a reason to trust the mismatched pointer or block the whole transition.
+  if (reconciled && reconciled.exitCode === 0 && reconciled.state === "AMBIGUOUS_MATCHES") {
+    return {
+      exitCode: 4,
+      state: "AMBIGUOUS",
+      stopAfter: true,
+      repo,
+      controlIssue: controlIssueNumber,
+      reason: reconciled.message,
+    };
+  }
+  if (reconciled && reconciled.exitCode === 0 && reconciled.state === "FOUND") {
+    return {
+      exitCode: 0,
+      state: "STAGE2_AUDIT_ALREADY_PREPARED",
+      stopAfter: true,
+      repo,
+      controlIssue: controlIssueNumber,
+      pr: prIssue,
+      issue: executionRef.issue,
+      auditIssue: reconciled.auditIssue,
+      nextCommand:
+        `node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue ${controlIssueNumber} ` +
+        `--execution-issue ${executionRef.issue} --pr ${prIssue} --audit-issue ${reconciled.auditIssue} ` +
+        `--revalidate-uniqueness true && ` +
+        `node tools/review-watch/trigger.mjs --repo ${repo} --kind issue --number ${reconciled.auditIssue}`,
+    };
+  }
+
+  // NONE_FOUND (or the tolerated operational-failure fallback above): the current merged PR has
+  // no canonical Stage 2 audit yet. Require Stage 2 preparation for it -- never resume through
+  // the mismatched predecessor pointer.
+  return {
+    exitCode: 0,
+    state: "STAGE2_PREPARATION_REQUIRED",
+    stopAfter: true,
+    repo,
+    controlIssue: controlIssueNumber,
+    pr: prIssue,
+    issue: executionRef.issue,
+  };
+}
+
 // Control-Issue mode's shared pre-merge composition step: resolves the gated work/execution
 // Issue from the control Issue body's own "Execution" bullet *before* resolving `head` (a
 // malformed Execution reference must fail closed without ever spending a live PR-head read --
@@ -1512,9 +1647,14 @@ async function runNextReviewTransitionGateCore(
       return { exitCode: 1, message: `gh pr view failed for ${repo}#${prRef.issue}: ${err.message}` };
     }
     if (prState.state === "MERGED") {
-      // The relevant PR is merged: the settled Stage 2 reference owns the transition, exactly
-      // as it did before #537.
-      return resolvePostMerge({ repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber }, { checkPostAuditImpl, reconcileStage2CorrectionPrImpl });
+      // Issue #747 (the #691/#742/#739 reproduction): the relevant PR is merged, but a settled
+      // "Stage 2" reference that merely *parses* is not proof it audits *this* merge -- #537 only
+      // ever established that a settled pointer exists, never that it is current. Verify its
+      // identity against the PR that actually just merged before trusting it.
+      return resolveMergedPrWithSettledStage2(
+        { repo, body, auditIssue: auditRef.issue, prIssue: prRef.issue, controlIssueNumber, mergeCommitOid: prState.mergeCommit?.oid },
+        { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl },
+      );
     }
     if (prState.state === "OPEN") {
       // The PR is still open: the pre-merge PR/Stage 1 phase owns the transition even though a
