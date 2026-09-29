@@ -197,3 +197,49 @@ test("isCleanReviewResponse: text inside the details help block must be the stan
 test("isFormalReviewEndpoint: a textual reviewed-commit line does not change endpoint provenance (issue #755)", () => {
   assert.equal(isFormalReviewEndpoint("issue-comments"), false);
 });
+
+// Issue #774: byte-faithful raw GitHub comment bodies (fixtures fetched verbatim from the live
+// issue comments; not hand-normalized -- the provider markup is "<br/>", not "<br>").
+import { readFileSync } from "node:fs";
+const liveFixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
+const LIVE = {
+  754: liveFixture("live-clean-pr754-comment5880707370.txt"),
+  771: liveFixture("live-clean-pr771-comment5898391587.txt"),
+  773: liveFixture("live-clean-pr773-comment5899085988.txt"),
+};
+const PR771_EXCERPT_LIVE =
+  "Codex Review: Didn't find any major issues. Hooray!\n\n**Reviewed commit:** `300afe4053`\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests\n";
+const PR773_EXCERPT_LIVE =
+  "Codex Review: Didn't find any major issues. :rocket:\n\n**Reviewed commit:** `f62700d751`\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull request\n";
+
+test("issue #774: live fixtures contain the literal <br/> form and their first 200 chars match the issue's byte-faithful inputs", () => {
+  for (const n of [754, 771, 773]) assert.ok(LIVE[n].includes("<br/>"), `PR #${n}`);
+  assert.equal(LIVE[771].slice(0, 200) + "\n", PR771_EXCERPT_LIVE.slice(0, 200) + "\n");
+  assert.equal(LIVE[773].slice(0, 200) + "\n", PR773_EXCERPT_LIVE.slice(0, 200) + "\n");
+});
+
+test("issue #774: raw live PR #754/#771/#773 bodies and their exact 200-char excerpts are clean", () => {
+  for (const n of [754, 771, 773]) {
+    assert.equal(isCleanReviewResponse(LIVE[n]), true, `full #${n}`);
+    assert.equal(isCleanReviewResponse(LIVE[n].slice(0, 200)), true, `excerpt #${n}`);
+    assert.equal(isFindingsBearingResponse(LIVE[n].slice(0, 200)), false);
+  }
+});
+
+test("issue #774: acknowledgement variants remain clean, including Hooray!", () => {
+  for (const ack of ["Hooray!", "Nice work!", "Can't wait for the next one!", ":rocket:"]) {
+    assert.equal(isCleanReviewResponse(`Codex Review: Didn't find any major issues. ${ack}`), true, ack);
+  }
+});
+
+test("issue #774: a deliberately normalized <br> equivalent remains clean (labeled normalized; not a substitute for the raw fixture)", () => {
+  assert.equal(isCleanReviewResponse(LIVE[771].replace("<br/>", "<br>")), true);
+});
+
+test("issue #774: negative controls stay findings-bearing", () => {
+  assert.equal(isCleanReviewResponse("Codex Review: Didn't find any major issues. Hooray! However, credentials are logged."), false);
+  assert.equal(isCleanReviewResponse(LIVE[771] + "\nP1: credentials are logged."), false);
+  assert.equal(isCleanReviewResponse(LIVE[771].replace("<br/>\n", "<br/>\nP1: credentials are logged.\n")), false);
+  assert.equal(isCleanReviewResponse(LIVE[771].replace("<br/>", "<br/> P1: leak")), false);
+  assert.equal(isCleanReviewResponse(LIVE[771].replace("Hooray!", "Hooray! Credentials are logged.")), false);
+});

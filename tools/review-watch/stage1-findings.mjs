@@ -91,7 +91,7 @@ const CLEAN_REVIEW_PATTERN = /^Codex Review: Didn't find any major issues\./;
 // (FINDINGS_LACK_FORMAL_REVIEW), blocking the plain issue-comments-only surface
 // consumer-sync-gate.mjs's whole automated flow depends on before its own downstream clean
 // check ever ran — the two independent classifiers must keep the same known-clean-suffix set.
-const CLEAN_PREAMBLE_TRAILING_PATTERN = /^(?:\s*(?:nice work|can't wait for the next one)[!.]?)?\s*$/i;
+const CLEAN_PREAMBLE_TRAILING_PATTERN = /^(?:\s*(?:nice work|hooray|can't wait for the next one)[!.]?)?\s*$/i;
 
 // Issue #755 (live reproduction: PR #754, comment #5880707370): Codex appends a standard,
 // non-semantic response envelope after the clean preamble -- an optional rocket emoji, a
@@ -104,7 +104,7 @@ const CLEAN_PREAMBLE_TRAILING_PATTERN = /^(?:\s*(?:nice work|can't wait for the 
 // followed by further prose (only whitespace may follow a closing tag); any other trailing
 // prose before or after those pieces still fails closed as findings-bearing.
 const CLEAN_ENVELOPE_PATTERN =
-  /^(?:\s*(?:nice work|can't wait for the next one)[!.]?)?(?:\s*(?::rocket:|\u{1F680}))?(?:\s*\*\*Reviewed commit:\*\*\s*`[0-9a-f]{7,40}`)?(?:\s*<details>\s*<summary>\s*(?:ℹ️?\s*)?About Codex in GitHub\s*<\/summary>((?:(?!<\/details>)[\s\S])*)(<\/details>)?)?\s*$/iu;
+  /^(?:\s*(?:nice work|hooray|can't wait for the next one)[!.]?)?(?:\s*(?::rocket:|\u{1F680}))?(?:\s*\*\*Reviewed commit:\*\*\s*`[0-9a-f]{7,40}`)?(?:\s*<details>\s*<summary>\s*(?:ℹ️?\s*)?About Codex in GitHub\s*<\/summary>((?:(?!<\/details>)[\s\S])*)(<\/details>)?)?\s*$/iu;
 
 // PR #756 Stage 1 review finding (P1): the help block body is NOT opaque. It must be the
 // standard provider help text (whitespace-normalized) or a truncated prefix of it (poll.mjs's
@@ -119,7 +119,10 @@ const STANDARD_HELP_BODY = [
   "If Codex has suggestions, it will comment; otherwise it will react with \u{1F44D}.",
   'Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".',
 ].join(" ");
-const normalizeHelp = (t) => t.replace(/\s+/g, " ").trim();
+// Issue #774: the live provider help block uses the self-closed void tag "<br/>" (PR #754/#771/
+// #773 raw comment bodies), while the standard text above was authored with "<br>". Only that
+// one void tag is normalized (HTML-equivalent); no other help-block content is loosened.
+const normalizeHelp = (t) => t.replace(/<br\s*\/?>/gi, "<br>").replace(/\s+/g, " ").trim();
 
 function isCleanEnvelope(trailing) {
   const m = CLEAN_ENVELOPE_PATTERN.exec(trailing);

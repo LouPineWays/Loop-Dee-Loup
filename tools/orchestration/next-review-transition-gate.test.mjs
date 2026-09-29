@@ -3669,3 +3669,20 @@ test("runNextReviewTransitionGate: a reconciled correction PR with no usable hea
   assert.match(result.reason, /644/);
   assert.match(result.reason, /headRefOid/);
 });
+
+// Issue #774: byte-faithful raw live clean responses (PR #771, #773) compose with MERGE_READY
+// to the normal clean pre-merge transition, not AMBIGUOUS.
+import { readFileSync } from "node:fs";
+for (const [pr, file] of [
+  [771, "live-clean-pr771-comment5898391587.txt"],
+  [773, "live-clean-pr773-comment5899085988.txt"],
+]) {
+  test(`resolvePreMergeVerdict: raw live PR #${pr} clean response (<br/>) + MERGE_READY -> STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2 (issue #774)`, () => {
+    const raw = readFileSync(new URL(`../review-watch/fixtures/${file}`, import.meta.url), "utf8");
+    const v = resolvePreMergeVerdict({
+      stage1: stage1("RESPONSE_RECEIVED", { matches: [{ body_excerpt: raw.slice(0, 200) }] }),
+      mergeReady: mergeReady("MERGE_READY"),
+    });
+    assert.equal(v.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+  });
+}

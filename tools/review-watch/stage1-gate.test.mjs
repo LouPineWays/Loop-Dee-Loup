@@ -1608,3 +1608,27 @@ test("run: FINDINGS_LACK_FORMAL_REVIEW — a genuine unbound findings-bearing ma
   assert.equal(result.state, "PENDING");
   assert.equal(result.unboundGenuineMatches.length, 1);
 });
+
+test("run: 7g. RESPONSE_RECEIVED — raw live PR #771/#773 clean issue comments (<br/>, first 200 chars as poll.mjs excerpts them) resolve normally (issue #774)", async () => {
+  const { readFileSync } = await import("node:fs");
+  for (const file of ["live-clean-pr771-comment5898391587.txt", "live-clean-pr773-comment5899085988.txt"]) {
+    const body = readFileSync(new URL(`./fixtures/${file}`, import.meta.url), "utf8");
+    const result = await run(
+      { repo: "owner/repo", number: 50, head: "abc123" },
+      {
+        ghPrViewImpl: async () => "no exemption",
+        ghApiImpl: async (path) => {
+          if (path.includes("/issues/")) {
+            return [
+              { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
+              { id: 2, user: { login: "chatgpt-codex-connector[bot]" }, body, created_at: "2026-08-23T13:05:00Z" },
+            ];
+          }
+          return [];
+        },
+      },
+    );
+    assert.equal(result.exitCode, 0, file);
+    assert.equal(result.state, "RESPONSE_RECEIVED", file);
+  }
+});
