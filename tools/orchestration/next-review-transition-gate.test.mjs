@@ -3669,3 +3669,13 @@ test("runNextReviewTransitionGate: a reconciled correction PR with no usable hea
   assert.match(result.reason, /644/);
   assert.match(result.reason, /headRefOid/);
 });
+
+test("resolvePreMergeVerdict: PR #771's 'Hooray!' clean response excerpt + MERGE_READY -> normal pre-merge transition, not AMBIGUOUS (issue #772)", () => {
+  const body =
+    "Codex Review: Didn't find any major issues. Hooray!\n\n**Reviewed commit:** `300afe4053`\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you";
+  const v = resolvePreMergeVerdict({
+    stage1: stage1("RESPONSE_RECEIVED", { matches: [{ body_excerpt: body.slice(0, 200) }] }),
+    mergeReady: mergeReady("MERGE_READY"),
+  });
+  assert.equal(v.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});

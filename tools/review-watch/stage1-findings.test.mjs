@@ -197,3 +197,31 @@ test("isCleanReviewResponse: text inside the details help block must be the stan
 test("isFormalReviewEndpoint: a textual reviewed-commit line does not change endpoint provenance (issue #755)", () => {
   assert.equal(isFormalReviewEndpoint("issue-comments"), false);
 });
+
+// Issue #772: PR #771's real Codex clean response (comment #5898391587) varied the clean
+// acknowledgement to "Hooray!" and used the standard reviewed-commit/details envelope.
+const PR771_BODY =
+  "Codex Review: Didn't find any major issues. Hooray!\n\n**Reviewed commit:** `300afe4053`\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with 👍.\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n</details>";
+const PR771_EXCERPT = PR771_BODY.slice(0, 200);
+
+test("isCleanReviewResponse: the exact PR #771 200-character excerpt is clean (issue #772)", () => {
+  assert.equal(PR771_EXCERPT.length, 200);
+  assert.equal(isCleanReviewResponse(PR771_EXCERPT), true);
+  assert.equal(isFindingsBearingResponse(PR771_EXCERPT), false);
+  assert.equal(isCleanReviewResponse(PR771_BODY), true);
+});
+
+test("isCleanReviewResponse: 'Hooray!' bare and prior harmless suffixes with envelope stay clean (issue #772)", () => {
+  assert.equal(isCleanReviewResponse("Codex Review: Didn't find any major issues. Hooray!"), true);
+  assert.equal(isCleanReviewResponse("Codex Review: Didn't find any major issues. Nice work!\n\n**Reviewed commit:** `300afe4053`"), true);
+  assert.equal(isCleanReviewResponse("Codex Review: Didn't find any major issues. Can't wait for the next one!"), true);
+  assert.equal(isCleanReviewResponse(PR754_EXCERPT), true);
+});
+
+test("isCleanReviewResponse: 'Hooray!' does not admit substantive trailing or embedded findings (issue #772 negative controls)", () => {
+  assert.equal(isCleanReviewResponse("Codex Review: Didn't find any major issues. Hooray! However, credentials are logged."), false);
+  assert.equal(isCleanReviewResponse("Codex Review: Didn't find any major issues. However, credentials are logged."), false);
+  assert.equal(isCleanReviewResponse("Codex Review: Didn't find any major issues. Hooray!\n\n**Reviewed commit:** `300afe4053`\n\nCredentials are logged."), false);
+  assert.equal(isCleanReviewResponse(PR771_BODY + "\nP1: credentials are logged."), false);
+  assert.equal(isFormalReviewEndpoint("issue-comments"), false);
+});

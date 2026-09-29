@@ -1608,3 +1608,26 @@ test("run: FINDINGS_LACK_FORMAL_REVIEW — a genuine unbound findings-bearing ma
   assert.equal(result.state, "PENDING");
   assert.equal(result.unboundGenuineMatches.length, 1);
 });
+
+test("run: 7g. RESPONSE_RECEIVED — PR #771's real 'Hooray!' clean response as a plain issue comment with no formal review objects resolves normally (issue #772)", async () => {
+  const body =
+    "Codex Review: Didn't find any major issues. Hooray!\n\n**Reviewed commit:** `300afe4053`\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you";
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
+            { id: 2, user: { login: "chatgpt-codex-connector[bot]" }, body, created_at: "2026-08-23T13:05:00Z" },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "RESPONSE_RECEIVED");
+  assert.equal(result.matches[0].endpoint, "issue-comments");
+});
