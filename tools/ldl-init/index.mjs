@@ -693,6 +693,16 @@ export const HARD_MODULE_DEPENDENCIES = [
   // fails immediately at import time (the named export does not exist on the preserved module),
   // silently disabling the action-envelope hook's PreToolUse/PostToolUse enforcement.
   { dest: "tools/orchestration/action-envelope-hook.mjs", dependsOnDest: "tools/orchestration/action-envelope.mjs" },
+  // Issue #740 Stage 1 review finding (P2, on PR #760): verify-audit-ready.mjs hard-imports named
+  // exports from finalize-audit-breakpoint.mjs, lifecycle-gate.mjs, and ready-dispatch-gate.mjs,
+  // and the Stage 2 preparation prompt format-dispatch-prompt.mjs renders operationally requires
+  // that verifier to be the managed implementation. Without these edges an unmanaged, preserved
+  // dependency (or verifier) lets install/update report success while the verifier fails at
+  // import time or is an incompatible file.
+  { dest: "tools/orchestration/verify-audit-ready.mjs", dependsOnDest: "tools/orchestration/finalize-audit-breakpoint.mjs" },
+  { dest: "tools/orchestration/verify-audit-ready.mjs", dependsOnDest: "tools/review-watch/lifecycle-gate.mjs" },
+  { dest: "tools/orchestration/verify-audit-ready.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
+  { dest: "tools/orchestration/format-dispatch-prompt.mjs", dependsOnDest: "tools/orchestration/verify-audit-ready.mjs" },
 ];
 
 // Pure. Given one install/update run's final toInstall/toSkip classification, returns one

@@ -23,12 +23,8 @@
 // Reuses finalize-audit-breakpoint.mjs's verifyPrMerged/verifyAuditIssueMatches/
 // verifyAuditIssueStillUnique so there is exactly one definition of "matches this merge".
 import { execFileSync } from "node:child_process";
-import {
-  verifyPrMerged,
-  verifyAuditIssueMatches,
-  verifyAuditIssueStillUnique,
-} from "./finalize-audit-breakpoint.mjs";
-import { defaultGhIssueList, parseFormField } from "../review-watch/lifecycle-gate.mjs";
+import { verifyPrMerged, verifyAuditIssueMatches } from "./finalize-audit-breakpoint.mjs";
+import { defaultGhIssueList, findMatchingOpenAuditIssues, parseFormField } from "../review-watch/lifecycle-gate.mjs";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 
 function isPositiveInteger(value) {
@@ -45,6 +41,24 @@ function defaultGhAuditIssueView({ repo, auditIssue }) {
   const args = ["issue", "view", String(auditIssue), "--json", "body,state"];
   if (repo) args.push("--repo", repo);
   return JSON.parse(execFileSync("gh", args, { encoding: "utf8" }));
+}
+
+// Pure. The "Merged PR" field must reference exactly one PR: a bare `#N` (same repository by
+// construction) or a github.com pull URL whose owner/repo equals `repo` (case-insensitive).
+function checkMergedPrIdentity(prField, { repo, pr }) {
+  const text = String(prField ?? "");
+  const refs = [];
+  const re = /https?:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)|(?:^|[^\w/])#(\d+)/g;
+  for (const m of text.matchAll(re)) {
+    refs.push(m[2] ? { repo: m[1], number: Number(m[2]) } : { repo: null, number: Number(m[3]) });
+  }
+  const fail = {
+    ok: false,
+    reason: `Audit Issue's "Merged PR" field is ${JSON.stringify(prField)}, expected exactly PR #${pr}${repo ? ` in ${repo}` : ""}`,
+  };
+  if (refs.length !== 1 || refs[0].number !== pr) return fail;
+  if (refs[0].repo && repo && refs[0].repo.toLowerCase() !== String(repo).toLowerCase()) return fail;
+  return { ok: true };
 }
 
 function failed(reason) {
@@ -88,10 +102,8 @@ export async function run(
   }
   // The shared matcher checks merge commit + work issue; the Merged PR field must also name this PR.
   const prField = parseFormField(auditView?.body ?? "", "Merged PR");
-  const prRefs = [...String(prField ?? "").matchAll(/(?:\/pull\/|#)(\d+)/g)].map((m) => Number(m[1]));
-  if (prRefs.length !== 1 || prRefs[0] !== pr) {
-    return failed(`Audit Issue's "Merged PR" field is ${JSON.stringify(prField)}, expected exactly PR #${pr}`);
-  }
+  const prIdentity = checkMergedPrIdentity(prField, { repo, pr });
+  if (!prIdentity.ok) return failed(prIdentity.reason);
   const match = verifyAuditIssueMatches(auditView, { mergeCommitOid: merged.mergeCommitOid, executionIssue });
   if (!match.ok) return failed(match.reason);
 
@@ -101,8 +113,20 @@ export async function run(
   } catch (err) {
     return failed(`could not list Audit Issue candidates for the uniqueness check: ${err.message}`);
   }
-  const unique = verifyAuditIssueStillUnique(candidates, { mergeCommitOid: merged.mergeCommitOid, executionIssue, auditIssue });
-  if (!unique.ok) return failed(unique.reason);
+  // The persisted issue was just directly re-read and validated above, so its own existence is
+  // not re-proved through the eventually consistent Search index (a freshly created issue may not
+  // be indexed yet). Search only detects OTHER matching canonical candidates, which still fail
+  // closed as ambiguous; the given audit issue itself may be absent from the results.
+  const others = findMatchingOpenAuditIssues(candidates, { mergeCommitOid: merged.mergeCommitOid, executionIssue })
+    .map((m) => Number(m.number))
+    .filter((n) => n !== auditIssue)
+    .sort((x, y) => x - y);
+  if (others.length > 0) {
+    return failed(
+      `another OPEN canonical Audit Issue also matches merge commit ${merged.mergeCommitOid} and work issue ` +
+        `${JSON.stringify(executionIssue)}: ${others.map((n) => `#${n}`).join(", ")} - ambiguous, refusing AUDIT_READY #${auditIssue}`,
+    );
+  }
 
   return { exitCode: 0, state: "AUDIT_READY", auditIssue, message: `AUDIT_READY #${auditIssue}` };
 }

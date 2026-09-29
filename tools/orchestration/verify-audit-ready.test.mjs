@@ -92,10 +92,31 @@ test("retry with a wrong-identity duplicate open: ambiguity or wrong candidate f
     { number: 739, title: "[Audit] a", body: good, state: "OPEN", createdAt: "2026-09-23T00:00:00Z" },
     { number: 750, title: "[Audit] b", body: good, state: "OPEN", createdAt: "2026-09-24T00:00:00Z" },
   ] }));
-  assert.match(dup.message, /^AUDIT_PREPARATION_FAILED .*more than one/);
+  assert.match(dup.message, /^AUDIT_PREPARATION_FAILED .*also matches/);
 });
 
 test("invalid args are operational errors", async () => {
   assert.equal((await run({ repo: "o/r", pr: null }, deps(""))).exitCode, 1);
   assert.equal((await run({ repo: "o/r", pr: 1, executionIssue: 2 }, deps(""))).exitCode, 1);
+});
+
+test("a Merged PR URL from a different repository with the same PR number is rejected", async () => {
+  const other = auditBody().replace("github.com/o/r/pull/738", "github.com/x/y/pull/738");
+  const r = await run(args, deps(other, { list: [] }));
+  assert.equal(r.exitCode, 2);
+  assert.match(r.message, /^AUDIT_PREPARATION_FAILED .*Merged PR/);
+  // Same repo, different case, and a bare #N both still pass.
+  assert.equal((await run(args, deps(auditBody().replace("o/r", "O/R")))).exitCode, 0);
+  assert.equal((await run(args, deps(auditBody().replace("https://github.com/o/r/pull/738", "#738")))).exitCode, 0);
+});
+
+test("a freshly created valid Audit Issue succeeds even when Search has not indexed it yet", async () => {
+  const r = await run(args, deps(auditBody(), { list: [] }));
+  assert.equal(r.message, "AUDIT_READY #739");
+});
+
+test("a Search failure still fails closed", async () => {
+  const d = deps(auditBody());
+  const r = await run(args, { ...d, ghIssueListImpl: async () => { throw new Error("boom"); } });
+  assert.match(r.message, /^AUDIT_PREPARATION_FAILED /);
 });
