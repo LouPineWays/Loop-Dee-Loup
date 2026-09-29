@@ -23,6 +23,7 @@
 // Reuses finalize-audit-breakpoint.mjs's verifyPrMerged/verifyAuditIssueMatches/
 // verifyAuditIssueStillUnique so there is exactly one definition of "matches this merge".
 import { execFileSync } from "node:child_process";
+import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 import { verifyPrMerged, verifyAuditIssueMatches } from "./finalize-audit-breakpoint.mjs";
 import { defaultGhIssueList, findMatchingOpenAuditIssues, parseFormField } from "../review-watch/lifecycle-gate.mjs";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
@@ -32,15 +33,11 @@ function isPositiveInteger(value) {
 }
 
 function defaultGhPrView({ repo, pr }) {
-  const args = ["pr", "view", String(pr), "--json", "state,mergeCommit"];
-  if (repo) args.push("--repo", repo);
-  return JSON.parse(execFileSync("gh", args, { encoding: "utf8" }));
+  return readGithubPr({ repo, number: pr, fields: ["state", "mergeCommit"] });
 }
 
 function defaultGhAuditIssueView({ repo, auditIssue }) {
-  const args = ["issue", "view", String(auditIssue), "--json", "body,state"];
-  if (repo) args.push("--repo", repo);
-  return JSON.parse(execFileSync("gh", args, { encoding: "utf8" }));
+  return readGithubIssue({ repo, number: auditIssue, fields: ["body", "state"] });
 }
 
 // Pure. The "Merged PR" field must reference exactly one PR: a bare `#N` (same repository by

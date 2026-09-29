@@ -109,6 +109,7 @@
 // Tests: node --test tools/review-watch/stage1-gate.test.mjs
 
 import { execFileSync } from "node:child_process";
+import { readGithubIssue, readGithubPr } from "../orchestration/github-read.mjs";
 import { endpointsFor, findAllMatches, matchBelongsToHead } from "./poll.mjs";
 import { findExistingTrigger, findTriggerRounds } from "./trigger.mjs";
 import { isGenuineResponse } from "./genuine-response.mjs";
@@ -397,10 +398,7 @@ function defaultGhPrFiles({ repo, number }) {
 }
 
 function defaultGhPrView({ repo, number }) {
-  const raw = execFileSync("gh", ["pr", "view", String(number), "--repo", repo, "--json", "body"], {
-    encoding: "utf8",
-  });
-  return JSON.parse(raw).body ?? "";
+  return readGithubPr({ repo, number, fields: ["body"] }).body;
 }
 
 async function main() {

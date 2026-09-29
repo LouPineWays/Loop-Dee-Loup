@@ -164,6 +164,7 @@
 // Tests: node --test tools/orchestration/finalize-stage1-satisfied-breakpoint.test.mjs
 
 import { execFileSync } from "node:child_process";
+import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 import {
   resolveRepoIdentity,
   parseControlBullet,
@@ -715,17 +716,11 @@ export async function run(
 }
 
 function defaultGhIssueView({ repo, controlIssue }) {
-  const args = ["issue", "view", String(controlIssue), "--json", "body"];
-  if (repo) args.push("--repo", repo);
-  const raw = execFileSync("gh", args, { encoding: "utf8" });
-  return JSON.parse(raw).body ?? "";
+  return readGithubIssue({ repo, number: controlIssue, fields: ["body"] }).body;
 }
 
 function defaultGhPrView({ repo, pr }) {
-  const args = ["pr", "view", String(pr), "--json", "headRefName,headRefOid,body,state,mergedAt"];
-  if (repo) args.push("--repo", repo);
-  const raw = execFileSync("gh", args, { encoding: "utf8" });
-  return JSON.parse(raw);
+  return readGithubPr({ repo, number: pr, fields: ["headRefName","headRefOid","body","state","mergedAt"] });
 }
 
 function parseArgs(argv) {

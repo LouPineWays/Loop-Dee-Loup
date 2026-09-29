@@ -188,6 +188,7 @@
 // Tests: node --test tools/orchestration/ready-dispatch-gate.test.mjs
 
 import { execFileSync } from "node:child_process";
+import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 // Deliberate, documented exception to this file's usual practice of not importing
 // tools/review-watch internals (issue #407 unit 407-B, Shared Contract item 8) — the same
 // exception next-review-transition-gate.mjs's own module comment already documents for its
@@ -1335,10 +1336,7 @@ export function resolveRepoIdentity({ gitRemoteUrlImpl = defaultGitRemoteUrl } =
 }
 
 function defaultGhIssueView({ repo, number }) {
-  const raw = execFileSync("gh", ["issue", "view", String(number), "--repo", repo, "--json", "body,state"], {
-    encoding: "utf8",
-  });
-  return JSON.parse(raw);
+  return readGithubIssue({ repo, number, fields: ["body", "state"] });
 }
 
 function defaultGhCommentView({ repo, commentId }) {

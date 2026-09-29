@@ -96,6 +96,7 @@
 // Tests: node --test tools/orchestration/finalize-audit-breakpoint.test.mjs
 
 import { execFileSync } from "node:child_process";
+import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 import {
   resolveRepoIdentity,
   parseControlBullet,
@@ -659,24 +660,15 @@ export async function runDirectReferenceVerification(
 }
 
 function defaultGhIssueView({ repo, controlIssue }) {
-  const args = ["issue", "view", String(controlIssue), "--json", "body"];
-  if (repo) args.push("--repo", repo);
-  const raw = execFileSync("gh", args, { encoding: "utf8" });
-  return JSON.parse(raw).body ?? "";
+  return readGithubIssue({ repo, number: controlIssue, fields: ["body"] }).body;
 }
 
 function defaultGhPrView({ repo, pr }) {
-  const args = ["pr", "view", String(pr), "--json", "state,mergeCommit"];
-  if (repo) args.push("--repo", repo);
-  const raw = execFileSync("gh", args, { encoding: "utf8" });
-  return JSON.parse(raw);
+  return readGithubPr({ repo, number: pr, fields: ["state","mergeCommit"] });
 }
 
 function defaultGhAuditIssueView({ repo, auditIssue }) {
-  const args = ["issue", "view", String(auditIssue), "--json", "body,state"];
-  if (repo) args.push("--repo", repo);
-  const raw = execFileSync("gh", args, { encoding: "utf8" });
-  return JSON.parse(raw);
+  return readGithubIssue({ repo, number: auditIssue, fields: ["body", "state"] });
 }
 
 function parseArgs(argv) {

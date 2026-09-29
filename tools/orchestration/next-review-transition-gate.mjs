@@ -276,6 +276,7 @@
 // Tests: node --test tools/orchestration/next-review-transition-gate.test.mjs
 
 import { execFileSync } from "node:child_process";
+import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 import {
   parseControlBullet,
   parseExecutionPointer,
@@ -1727,17 +1728,11 @@ async function resolvePreMergeFromControlBody(
 }
 
 function defaultGhIssueView({ repo, number }) {
-  const raw = execFileSync("gh", ["issue", "view", String(number), "--repo", repo, "--json", "body,state"], {
-    encoding: "utf8",
-  });
-  return JSON.parse(raw);
+  return readGithubIssue({ repo, number, fields: ["body", "state"] });
 }
 
 function defaultGhPrHead({ repo, number }) {
-  const raw = execFileSync("gh", ["pr", "view", String(number), "--repo", repo, "--json", "headRefOid"], {
-    encoding: "utf8",
-  });
-  return JSON.parse(raw).headRefOid;
+  return readGithubPr({ repo, number, fields: ["headRefOid"] }).headRefOid;
 }
 
 // Issue #665 (the live #639/#638/PR #640 reproduction): `checkMergeReady` (lifecycle-gate.mjs)
@@ -1750,10 +1745,7 @@ function defaultGhPrHead({ repo, number }) {
 // only, per this issue's own explicit scope -- so no other pre-merge path pays for this extra
 // `gh` call or changes behavior at all.
 function defaultGhPrMergeable({ repo, number }) {
-  const raw = execFileSync("gh", ["pr", "view", String(number), "--repo", repo, "--json", "mergeable"], {
-    encoding: "utf8",
-  });
-  return { exitCode: 0, mergeable: JSON.parse(raw).mergeable };
+  return { exitCode: 0, mergeable: readGithubPr({ repo, number, fields: ["mergeable"] }).mergeable };
 }
 
 // Issue #537: control-Issue mode's own live-PR-state read, used only when a settled "PR" and a
@@ -1771,10 +1763,7 @@ function defaultGhPrMergeable({ repo, number }) {
 // double that doesn't supply it) reads as `undefined`, which that reconciliation treats as "skip
 // reconciliation, fall through to STAGE2_PREPARATION_REQUIRED unchanged" -- never a crash.
 function defaultGhPrState({ repo, number }) {
-  const raw = execFileSync("gh", ["pr", "view", String(number), "--repo", repo, "--json", "headRefOid,state,mergeCommit"], {
-    encoding: "utf8",
-  });
-  return JSON.parse(raw);
+  return readGithubPr({ repo, number, fields: ["headRefOid", "state", "mergeCommit"] });
 }
 
 // Issue #729 (control #398, the #723/#727 liveness seam): a prior Stage 2 preparation worker may

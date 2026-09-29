@@ -307,6 +307,7 @@
 // Tests: node --test tools/review-watch/lifecycle-gate.test.mjs
 
 import { execFileSync } from "node:child_process";
+import { readGithubIssue, readGithubPr } from "../orchestration/github-read.mjs";
 import { endpointsFor, findAllMatches } from "./poll.mjs";
 import { findExistingTrigger, findCommentById } from "./trigger.mjs";
 import {
@@ -2832,10 +2833,7 @@ function defaultGhIssueView({ repo, number }) {
   // extra field for merge-ready/post-audit, and what checkCloseAudit needs to compare this
   // audit issue's own creation time against a candidate successor's (Shared Contract item 6:
   // "created after," never issue-number comparison).
-  const raw = execFileSync("gh", ["issue", "view", String(number), "--repo", repo, "--json", "body,state,createdAt"], {
-    encoding: "utf8",
-  });
-  return JSON.parse(raw);
+  return readGithubIssue({ repo, number, fields: ["body", "state", "createdAt"] });
 }
 
 function defaultGhApi(path) {

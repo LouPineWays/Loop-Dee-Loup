@@ -149,6 +149,7 @@
 // Tests: node --test tools/orchestration/pr-head-checkout-preflight.test.mjs
 
 import { execFileSync } from "node:child_process";
+import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -461,10 +462,7 @@ export function defaultGitImpl() {
 }
 
 function defaultGhPrView({ repo, pr }) {
-  const args = ["pr", "view", String(pr), "--json", "headRefName,headRefOid"];
-  if (repo) args.push("--repo", repo);
-  const raw = execFileSync("gh", args, { encoding: "utf8" });
-  return JSON.parse(raw);
+  return readGithubPr({ repo, number: pr, fields: ["headRefName", "headRefOid"] });
 }
 
 function sanitizeForPath(value) {
