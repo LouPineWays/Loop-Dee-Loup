@@ -76,9 +76,11 @@ import {
   isAuditShapedBody,
   isKnownLifecycleValue,
   isRouteCompatibleWithLifecycle,
+  isBlockingLifecycleValue,
+  isRouteBearingLifecycleValue,
 } from "./ready-dispatch-gate.mjs";
 import { parseStage2Verdict } from "../review-watch/lifecycle-gate.mjs";
-import { extractBlockedByIssueNumbers, hasUnrecognizedBlockerWording } from "./blocker-grammar.mjs";
+import { evaluateBlockerAuthoring } from "./blocker-grammar.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 
 function defaultGhIssueView({ repo, number }) {
@@ -130,88 +132,61 @@ export function isPrerequisiteSatisfied({ state, body } = {}) {
 // exactly the control shape it was built to also cover. `upsertControlBullet`'s own write side
 // already updates that same heading in place when no ad hoc bullet coexists with it (see its
 // `HEADING_FIELD_LABELS` table), so only the read side needed this fallback.
+//
+// Issue #768: the actual classification (recognized-clause parsing, fail-closed
+// unrecognized-wording detection, and resume-state validation) now lives in
+// `blocker-grammar.mjs`'s own `evaluateBlockerAuthoring` -- the single-authority primitive
+// `control-field-validator.mjs`'s write-side `validateBlockerAuthoringField` also consumes, so
+// a Blocker field can never be durably written in a shape this read-time evaluator would then
+// reject as AMBIGUOUS_BLOCKER. This function is now only the thin read-time adapter: it parses
+// the three raw field values off `body` (its own established bullet-then-heading-fallback
+// convention) and maps `evaluateBlockerAuthoring`'s kinds onto its own established
+// ALREADY_UNBLOCKED/AMBIGUOUS_BLOCKER/RECONCILABLE contract -- byte-for-byte the same contract
+// and reasons every existing caller and test already depends on.
 export function evaluateBlockerCondition(body) {
   const blockerRaw = parseControlBullet(body, "Blocker") ?? parseHeadingField(body, "Current blocker");
-  // Shared Contract design decision point 8 (Verification case 7): a missing bullet/heading or
-  // an already-"none" value means there is nothing to reconcile -- a safe, idempotent no-op.
-  if (blockerRaw === null || isNoneSentinel(blockerRaw)) {
-    return { kind: "ALREADY_UNBLOCKED" };
-  }
-
-  // Stage 1 finding 3: `hasUnrecognizedBlockerWording` is the fail-closed detector
-  // `blocker-grammar.mjs` already exports for exactly this purpose -- checked BEFORE
-  // extraction, not only via extraction's own "found nothing" case below, so a field naming an
-  // issue reference outside the recognized clause (e.g. "Blocked by #407. Also waiting on
-  // #408.") is treated as wholly ambiguous rather than partially resolved against only the
-  // issue(s) the clause happened to capture. Without this check, that exact shape fetched only
-  // #407 and cleared the entire blocker once it closed, even while #408 -- named elsewhere in
-  // the same field but outside the recognized clause -- remained open.
-  if (hasUnrecognizedBlockerWording(blockerRaw)) {
-    return {
-      kind: "AMBIGUOUS_BLOCKER",
-      reason:
-        `"Blocker" field ${JSON.stringify(blockerRaw)} contains issue reference(s) outside the recognized ` +
-        `"Blocked by #N[, #N...]." clause -- refusing to partially resolve a mixed recognized/unrecognized blocker`,
-    };
-  }
-
-  const blockedByIssues = extractBlockedByIssueNumbers(blockerRaw);
-  // Design decision point 3 (Verification case 5): a Blocker field that does not match the
-  // recognized "Blocked by #N[, #N...]." clause at all -- including the real historical
-  // #440 free-prose shape -- is never guessed at. (In practice this is now also caught by
-  // hasUnrecognizedBlockerWording above whenever the field names any "#N" at all; this check
-  // remains as the fail-closed backstop for a non-none field naming no issue number whatsoever.)
-  if (blockedByIssues.length === 0) {
-    return {
-      kind: "AMBIGUOUS_BLOCKER",
-      reason: `"Blocker" field ${JSON.stringify(blockerRaw)} does not match the recognized "Blocked by #N[, #N...]." clause`,
-    };
-  }
-
   const blockedLifecycleRaw = parseControlBullet(body, "Blocked lifecycle");
   const blockedRouteRaw = parseControlBullet(body, "Blocked route");
-  // Design decision point 4 (Verification case 6): both companion fields must be present
-  // and non-empty before this control can be mechanically reconciled -- their absence is
-  // itself an AMBIGUOUS_BLOCKER result, never a guess at the correct resume state.
-  if (!blockedLifecycleRaw || !blockedLifecycleRaw.trim() || !blockedRouteRaw || !blockedRouteRaw.trim()) {
-    return {
-      kind: "AMBIGUOUS_BLOCKER",
-      reason:
-        '"Blocked lifecycle" and "Blocked route" must both be present and non-empty before this control can be ' +
-        `mechanically reconciled (Blocked lifecycle: ${JSON.stringify(blockedLifecycleRaw)}, Blocked route: ${JSON.stringify(blockedRouteRaw)})`,
-    };
-  }
-  const blockedLifecycle = blockedLifecycleRaw.trim();
-  const blockedRoute = blockedRouteRaw.trim();
+  const currentRouteRaw = parseControlBullet(body, "Route");
 
-  // Stage 1 finding 4: before this, both companion fields were considered valid solely because
-  // they were nonempty, so a typo such as "Blocked lifecycle: READY_FOR_PALN" was persisted as
-  // the live Lifecycle and still produced UNBLOCKED -- the next ready-dispatch-gate.mjs
-  // invocation would then treat that unknown value as ordinary NOT_READY fallthrough rather
-  // than resuming the intended stage. Validate the saved Lifecycle vocabulary...
-  if (!isKnownLifecycleValue(blockedLifecycle)) {
-    return {
-      kind: "AMBIGUOUS_BLOCKER",
-      reason:
-        `"Blocked lifecycle" value ${JSON.stringify(blockedLifecycle)} is not a recognized Lifecycle value -- ` +
-        "refusing to persist an unknown resume state",
-    };
-  }
-  // ...and Route/Lifecycle compatibility (e.g. READY_FOR_PLAN always requires Route "planning
-  // worker" -- the same rule evaluateReadyDispatchGate itself enforces on every read) before
-  // mutation. The literal sentinel "unchanged" is exempt: it writes nothing to Route at all
-  // (buildUnblockedControlBody below skips it entirely), so there is no value here to validate
-  // for compatibility.
-  if (blockedRoute.toLowerCase() !== "unchanged" && !isRouteCompatibleWithLifecycle(blockedLifecycle, blockedRoute)) {
-    return {
-      kind: "AMBIGUOUS_BLOCKER",
-      reason:
-        `"Blocked lifecycle" is ${JSON.stringify(blockedLifecycle)} but "Blocked route" is ${JSON.stringify(blockedRoute)}, ` +
-        "which is not a compatible Route for that Lifecycle",
-    };
-  }
+  const evaluation = evaluateBlockerAuthoring(
+    { blockerRaw, blockedLifecycleRaw, blockedRouteRaw, currentRouteRaw },
+    { isNoneSentinel, isKnownLifecycleValue, isRouteCompatibleWithLifecycle, isBlockingLifecycleValue, isRouteBearingLifecycleValue },
+  );
 
-  return { kind: "RECONCILABLE", blockedByIssues, blockedLifecycle, blockedRoute };
+  switch (evaluation.kind) {
+    case "NONE":
+      // Shared Contract design decision point 8 (Verification case 7): a missing bullet/heading
+      // or an already-"none" value means there is nothing to reconcile -- a safe, idempotent
+      // no-op.
+      return { kind: "ALREADY_UNBLOCKED" };
+    case "FREE_FORM":
+      // Design decision point 3 (Verification case 5): a non-empty Blocker field naming no
+      // issue number whatsoever -- including the real historical #440 free-prose shape -- is
+      // never guessed at.
+      return {
+        kind: "AMBIGUOUS_BLOCKER",
+        reason: `"Blocker" field ${JSON.stringify(blockerRaw)} does not match the recognized "Blocked by #N[, #N...]." clause`,
+      };
+    case "UNRECOGNIZED_WORDING":
+    case "MISSING_RESUME_STATE":
+    case "INVALID_RESUME_STATE":
+      return { kind: "AMBIGUOUS_BLOCKER", reason: evaluation.reason };
+    case "RECONCILABLE":
+      return {
+        kind: "RECONCILABLE",
+        blockedByIssues: evaluation.blockedByIssues,
+        blockedLifecycle: evaluation.blockedLifecycle,
+        blockedRoute: evaluation.blockedRoute,
+      };
+    default:
+      // Unreachable given evaluateBlockerAuthoring's own exhaustive return contract -- fail
+      // closed rather than silently treating an unrecognized future kind as reconcilable.
+      return {
+        kind: "AMBIGUOUS_BLOCKER",
+        reason: `evaluateBlockerAuthoring returned an unrecognized kind ${JSON.stringify(evaluation.kind)}`,
+      };
+  }
 }
 
 // Fetches and classifies every named prerequisite fresh -- a real network round trip per
@@ -240,6 +215,18 @@ async function fetchPrerequisiteStatus(blockedByIssues, { repo, ghIssueViewImpl 
 // naming exactly the prerequisites that were satisfied; Lifecycle -> the recorded "Blocked
 // lifecycle" value; Route -> the recorded "Blocked route" value, skipped entirely when it
 // reads the literal sentinel "unchanged" (case-insensitive).
+//
+// Issue #768 Stage 1 finding: the two companion fields ("Blocked lifecycle"/"Blocked route")
+// used to survive verbatim once the control unblocked. A later block episode that authored only
+// a fresh canonical "Blocker: Blocked by #N." bullet -- without also authoring new companion
+// values -- then had its resume state silently supplied by whatever the *previous* episode left
+// behind, since `evaluateBlockerAuthoring`'s own presence/non-empty check cannot distinguish
+// "freshly authored for this block" from "stale leftover from the last one." Clearing both
+// companions to the "none" sentinel here closes that gap without inventing a second state
+// model: `evaluateBlockerAuthoring` already treats "none" as a non-empty-but-unrecognized
+// Lifecycle value (`isKnownLifecycleValue("none")` is false), so any later block episode that
+// omits fresh companion values fails closed as INVALID_RESUME_STATE instead of silently
+// inheriting the resolved episode's own resume state.
 export function buildUnblockedControlBody(body, { blockedByIssues, blockedLifecycle, blockedRoute }) {
   const note = `none — ${blockedByIssues.map((n) => `#${n}`).join(", ")} closed`;
   let next = body ?? "";
@@ -248,6 +235,8 @@ export function buildUnblockedControlBody(body, { blockedByIssues, blockedLifecy
   if (blockedRoute.trim().toLowerCase() !== "unchanged") {
     next = upsertControlBullet(next, "Route", blockedRoute);
   }
+  next = upsertControlBullet(next, "Blocked lifecycle", "none");
+  next = upsertControlBullet(next, "Blocked route", "none");
   return next;
 }
 
