@@ -12,6 +12,7 @@ import {
   validateControlField,
   validateControlSnapshot,
   validateLifecycleStateCoherence,
+  validateBlockerAuthoringField,
   findExactDuplicateBulletValues,
   DEFAULT_CONTROL_FIELD_SPECS,
 } from "./control-field-validator.mjs";
@@ -308,10 +309,123 @@ test("validateControlSnapshot: rejects duplicate 'Blocker'/'Founder decision' bu
   assert.match(result.errors[0], /"Blocker" reference is ambiguous/);
 });
 
-test("validateControlSnapshot: a single well-formed 'Blocked by ...' Blocker bullet alongside 'Founder decision: none' both validate (no pointer-cardinality false positive)", () => {
-  const body = ["- **Lifecycle:** BLOCKED", "- **Execution:** #440", "- **Blocker:** Blocked by #407, #408, #436.", "- **Founder decision:** none"].join("\n");
+test("validateControlSnapshot: a single well-formed 'Blocked by ...' Blocker bullet with valid saved resume state, alongside 'Founder decision: none', both validate (no pointer-cardinality false positive)", () => {
+  const body = [
+    "- **Lifecycle:** BLOCKED",
+    "- **Execution:** #440",
+    "- **Blocker:** Blocked by #407, #408, #436.",
+    "- **Blocked lifecycle:** REVIEW",
+    "- **Blocked route:** unchanged",
+    "- **Founder decision:** none",
+  ].join("\n");
   const result = validateControlSnapshot(body);
   assert.equal(result.ok, true);
+});
+
+// -- validateBlockerAuthoringField / issue #768 -- the write-side reconcilable-blocker-
+// authoring invariant, and the #726 live recurrence check the acceptance criteria name --------
+
+test("validateBlockerAuthoringField: an absent Blocker field is valid", () => {
+  assert.deepEqual(validateBlockerAuthoringField("- **Lifecycle:** READY"), { ok: true, label: "Blocker" });
+});
+
+test("validateBlockerAuthoringField: the 'none' sentinel is valid", () => {
+  assert.deepEqual(validateBlockerAuthoringField("- **Blocker:** none"), { ok: true, label: "Blocker" });
+});
+
+test("validateBlockerAuthoringField: a genuine free-form/manual/external blocker (no issue number at all) is valid and not forced into reconciliation semantics", () => {
+  const body = "- **Blocker:** Waiting on founder input to decide the pricing model.";
+  assert.deepEqual(validateBlockerAuthoringField(body), { ok: true, label: "Blocker" });
+});
+
+test("validateBlockerAuthoringField: Check 1 (positive) -- a canonical single prerequisite with valid saved resume state is valid", () => {
+  const body = ["- **Blocker:** Blocked by #764.", "- **Blocked lifecycle:** REVIEW", "- **Blocked route:** unchanged"].join("\n");
+  assert.deepEqual(validateBlockerAuthoringField(body), { ok: true, label: "Blocker" });
+});
+
+test("validateBlockerAuthoringField: Check 2 (positive) -- multiple canonical prerequisites with valid saved resume state are valid", () => {
+  const body = ["- **Blocker:** Blocked by #407, #408, #436.", "- **Blocked lifecycle:** REVIEW", "- **Blocked route:** unchanged"].join("\n");
+  assert.deepEqual(validateBlockerAuthoringField(body), { ok: true, label: "Blocker" });
+});
+
+test("validateBlockerAuthoringField: Check 3 (negative) -- an issue reference outside the recognized clause is rejected, not partially interpreted", () => {
+  const body = ["- **Blocker:** Blocked by #407. Also see #999 for background.", "- **Blocked lifecycle:** REVIEW", "- **Blocked route:** unchanged"].join("\n");
+  const result = validateBlockerAuthoringField(body);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /outside the recognized/);
+});
+
+test("validateBlockerAuthoringField: Check 3 (negative) -- the real live #726 recurrence shape (issue reference, no recognized clause) is rejected at the write boundary", () => {
+  const body = "- **Blocker:** #764 under governing control #577 — findings-bearing correction completion can still escape without verified durable correction-satisfied state.";
+  const result = validateBlockerAuthoringField(body);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /"Blocker" field/);
+});
+
+test("validateBlockerAuthoringField: Check 4 (negative) -- a canonical clause with missing 'Blocked lifecycle'/'Blocked route' cannot be durably emitted", () => {
+  const result = validateBlockerAuthoringField("- **Blocker:** Blocked by #764.");
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /must both be present and non-empty/);
+});
+
+test("validateBlockerAuthoringField: Check 4 (negative) -- a canonical clause with an invalid saved 'Blocked lifecycle' value cannot be durably emitted", () => {
+  const body = ["- **Blocker:** Blocked by #764.", "- **Blocked lifecycle:** READY_FOR_PALN", "- **Blocked route:** unchanged"].join("\n");
+  const result = validateBlockerAuthoringField(body);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /not a recognized Lifecycle value/);
+});
+
+test("validateBlockerAuthoringField: Check 4 (negative) -- a canonical clause with a 'Blocked route' incompatible with 'Blocked lifecycle' cannot be durably emitted", () => {
+  const body = ["- **Blocker:** Blocked by #764.", "- **Blocked lifecycle:** READY_FOR_PLAN", "- **Blocked route:** not planning worker"].join("\n");
+  const result = validateBlockerAuthoringField(body);
+  assert.equal(result.ok, false);
+});
+
+test("validateBlockerAuthoringField: Check 5 (negative) -- a genuine free-form external/manual blocker stays representable and is never guessed into dependency semantics", () => {
+  const body = "- **Blocker:** External vendor API key rotation is pending; no repository-tracked Issue owns it.";
+  assert.deepEqual(validateBlockerAuthoringField(body), { ok: true, label: "Blocker" });
+});
+
+test("validateBlockerAuthoringField: Check 6 (template regression) -- a template-shaped '### Current blocker' heading follows the same contract as the bullet form", () => {
+  const bodyMissingResume = "### Current blocker\n\nBlocked by #764.\n";
+  const missing = validateBlockerAuthoringField(bodyMissingResume);
+  assert.equal(missing.ok, false);
+  assert.match(missing.reason, /must both be present and non-empty/);
+
+  const bodyValid = ["### Current blocker", "", "Blocked by #764.", "", "- **Blocked lifecycle:** REVIEW", "- **Blocked route:** unchanged"].join("\n");
+  assert.deepEqual(validateBlockerAuthoringField(bodyValid), { ok: true, label: "Blocker" });
+});
+
+test("validateControlSnapshot: refuses to persist the real live #726 recurrence Blocker shape", () => {
+  const body = [
+    "### State",
+    "",
+    "BLOCKED_FAILURE",
+    "",
+    "### Current blocker",
+    "",
+    "#764 under governing control #577 — findings-bearing correction completion can still escape without verified durable correction-satisfied state.",
+  ].join("\n");
+  const result = validateControlSnapshot(body);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => e.includes("outside the recognized")));
+});
+
+test("validateControlSnapshot: accepts the corrected canonical #726 recovery shape (Blocked by #764 with valid saved resume state)", () => {
+  const body = [
+    "### State",
+    "",
+    "BLOCKED_FAILURE",
+    "",
+    "- **Execution:** #725",
+    "- **Route:** none",
+    "- **PR:** #763",
+    "- **Blocker:** Blocked by #764.",
+    "- **Blocked lifecycle:** REVIEW",
+    "- **Blocked route:** unchanged",
+  ].join("\n");
+  const result = validateControlSnapshot(body);
+  assert.deepEqual(result, { ok: true });
 });
 
 // -- validateLifecycleStateCoherence / #581's #577 regression ----------------------------

@@ -88,3 +88,106 @@ export function formatBlockedBy(issueNumbers) {
   if (!Array.isArray(issueNumbers) || issueNumbers.length === 0) return "none.";
   return `Blocked by ${issueNumbers.map((n) => `#${n}`).join(", ")}.`;
 }
+
+// Pure. Single-authority classification of one control's raw "Blocker"/"Current blocker"
+// field text (plus its two companion "Blocked lifecycle"/"Blocked route" fields) into the
+// exact shape the rest of this repository's blocker machinery needs -- issue #768, the
+// write-side half of the invariant `reconcile-control-blocker.mjs` already enforces at read
+// time. Built as one pure function here (rather than re-derived independently in
+// `reconcile-control-blocker.mjs`'s own read-time evaluator and a second write-time
+// validator) so both call sites can never drift on what counts as a well-formed
+// mechanically-reconcilable blocker declaration.
+//
+// `classifiers` is dependency-injected (never imported) so this module keeps its own
+// documented "no dependency on GitHub state or any other tools/orchestration module"
+// invariant intact -- callers already import `isNoneSentinel`/`isKnownLifecycleValue`/
+// `isRouteCompatibleWithLifecycle` from `ready-dispatch-gate.mjs` for their own purposes and
+// pass them straight through.
+//
+// Returns one of:
+//   { kind: "NONE" }                    -- absent field, or the explicit "none" sentinel.
+//   { kind: "FREE_FORM" }                -- non-empty field naming no "#N" token anywhere --
+//                                           a genuine free-form/manual/external blocker. Never
+//                                           mechanically reconcilable, and that is by design,
+//                                           not a defect: it stays representable exactly as
+//                                           written and simply never advances past
+//                                           AMBIGUOUS_BLOCKER at reconciliation time.
+//   { kind: "UNRECOGNIZED_WORDING", reason }
+//                                        -- names an issue reference outside the recognized
+//                                           "Blocked by #N[, #N...]." clause -- a mixed
+//                                           recognized/unrecognized shape this grammar
+//                                           deliberately never partially interprets.
+//   { kind: "MISSING_RESUME_STATE", reason, blockedByIssues }
+//                                        -- the recognized clause names at least one
+//                                           prerequisite, but "Blocked lifecycle"/"Blocked
+//                                           route" are missing or empty.
+//   { kind: "INVALID_RESUME_STATE", reason, blockedByIssues }
+//                                        -- both companion fields are present, but the saved
+//                                           Lifecycle value is not recognized, or the saved
+//                                           Route is not compatible with it.
+//   { kind: "RECONCILABLE", blockedByIssues, blockedLifecycle, blockedRoute }
+//                                        -- fully well-formed: a genuine, currently-open
+//                                           mechanically-reconcilable Issue-prerequisite
+//                                           declaration with valid saved resume state.
+//
+// `UNRECOGNIZED_WORDING`, `MISSING_RESUME_STATE`, and `INVALID_RESUME_STATE` are the three
+// ways an *explicit Issue-prerequisite blocker* (one naming at least one "#N" token) can be
+// malformed; `NONE` and `FREE_FORM` are the two ways a control can validly carry no such
+// declaration at all. A caller deciding whether to durably persist a proposed body treats
+// only the first three as rejections -- see control-field-validator.mjs's
+// `validateBlockerAuthoringField`, the write-side consumer this was built for.
+export function evaluateBlockerAuthoring(
+  { blockerRaw, blockedLifecycleRaw, blockedRouteRaw },
+  { isNoneSentinel, isKnownLifecycleValue, isRouteCompatibleWithLifecycle },
+) {
+  if (blockerRaw === null || blockerRaw === undefined || isNoneSentinel(blockerRaw)) {
+    return { kind: "NONE" };
+  }
+
+  if (hasUnrecognizedBlockerWording(blockerRaw)) {
+    return {
+      kind: "UNRECOGNIZED_WORDING",
+      reason:
+        `"Blocker" field ${JSON.stringify(blockerRaw)} contains issue reference(s) outside the recognized ` +
+        `"Blocked by #N[, #N...]." clause -- refusing to partially resolve a mixed recognized/unrecognized blocker`,
+    };
+  }
+
+  const blockedByIssues = extractBlockedByIssueNumbers(blockerRaw);
+  if (blockedByIssues.length === 0) {
+    return { kind: "FREE_FORM" };
+  }
+
+  if (!blockedLifecycleRaw || !blockedLifecycleRaw.trim() || !blockedRouteRaw || !blockedRouteRaw.trim()) {
+    return {
+      kind: "MISSING_RESUME_STATE",
+      blockedByIssues,
+      reason:
+        '"Blocked lifecycle" and "Blocked route" must both be present and non-empty before this control can be ' +
+        `mechanically reconciled (Blocked lifecycle: ${JSON.stringify(blockedLifecycleRaw)}, Blocked route: ${JSON.stringify(blockedRouteRaw)})`,
+    };
+  }
+  const blockedLifecycle = blockedLifecycleRaw.trim();
+  const blockedRoute = blockedRouteRaw.trim();
+
+  if (!isKnownLifecycleValue(blockedLifecycle)) {
+    return {
+      kind: "INVALID_RESUME_STATE",
+      blockedByIssues,
+      reason:
+        `"Blocked lifecycle" value ${JSON.stringify(blockedLifecycle)} is not a recognized Lifecycle value -- ` +
+        "refusing to persist an unknown resume state",
+    };
+  }
+  if (blockedRoute.toLowerCase() !== "unchanged" && !isRouteCompatibleWithLifecycle(blockedLifecycle, blockedRoute)) {
+    return {
+      kind: "INVALID_RESUME_STATE",
+      blockedByIssues,
+      reason:
+        `"Blocked lifecycle" is ${JSON.stringify(blockedLifecycle)} but "Blocked route" is ${JSON.stringify(blockedRoute)}, ` +
+        "which is not a compatible Route for that Lifecycle",
+    };
+  }
+
+  return { kind: "RECONCILABLE", blockedByIssues, blockedLifecycle, blockedRoute };
+}

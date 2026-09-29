@@ -95,7 +95,20 @@ body:
     id: blocker
     attributes:
       label: Current blocker
-      description: Write None, or the current blocking condition — a failed gate, an external dependency, or a founder decision — regardless of whether it needs founder action.
+      description: >-
+        Write None, or the current blocking condition — a failed gate, an external dependency,
+        or a founder decision — regardless of whether it needs founder action. If the blocker is
+        one or more currently-open GitHub Issues that will mechanically release this control once
+        they reach their required terminal condition, write it as the exact recognized clause
+        `Blocked by #N[, #N...].` and also add `- **Blocked lifecycle:** <value>` and
+        `- **Blocked route:** <value-or-unchanged>` bullet lines recording the state to resume —
+        `tools/orchestration/reconcile-control-blocker.mjs` can then clear the block and restore
+        that state automatically once every named Issue closes (or, for an audit Issue, closes
+        CLEAN); `tools/orchestration/write-control-snapshot.mjs` refuses to persist a Blocker
+        field that names an Issue reference without this exact shape. Do not name an Issue
+        reference in this field any other way — a genuine free-form/manual/external blocker with
+        no Issue reference at all remains valid as ordinary prose and is never mechanically
+        reconciled.
       value: "None"
     validations:
       required: true

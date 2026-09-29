@@ -55,11 +55,14 @@ import {
   parseHeadingField,
   parseExecutionPointer,
   isNoneSentinel,
+  isKnownLifecycleValue,
+  isRouteCompatibleWithLifecycle,
   findNearDuplicateBulletLabels,
   readExecutionBulletField,
   describeExecutionConflict,
   extractBoldBulletLabels,
 } from "./ready-dispatch-gate.mjs";
+import { evaluateBlockerAuthoring } from "./blocker-grammar.mjs";
 
 // Pure. Extracts { kind, number } for every full GitHub issue/PR URL reference inside `value`
 // — kind is "pull" for a "/pull/N" path segment, "issue" for a "/issues/N" one. A bare "#N"
@@ -201,6 +204,45 @@ export function validateLifecycleStateCoherence(body) {
   };
 }
 
+// Pure. Issue #768: the write-side half of the reconcilable-blocker-authoring invariant
+// `reconcile-control-blocker.mjs`'s own `evaluateBlockerCondition` already enforces at read
+// time. The #726 live recurrence proved a control can be durably authored with a Blocker field
+// that names an explicit Issue prerequisite (e.g. "#764 under governing control #577 — ...")
+// without the canonical "Blocked by #N[, #N...]." grammar or a saved resume Lifecycle/Route —
+// leaving it structurally unreconcilable forever, discoverable only as a future
+// AMBIGUOUS_BLOCKER surprise at reconciliation time rather than refused at the point it became
+// durable.
+//
+// This reuses `blocker-grammar.mjs`'s own single-authority `evaluateBlockerAuthoring` — never a
+// second, independently-drifting interpretation of the grammar — so a body this validator
+// accepts can never later surprise `reconcile-control-blocker.mjs` with an AMBIGUOUS_BLOCKER it
+// did not already know about. Only the three malformed-explicit-prerequisite kinds
+// (`UNRECOGNIZED_WORDING`, `MISSING_RESUME_STATE`, `INVALID_RESUME_STATE`) are refused; `NONE`
+// and `FREE_FORM` — the two ways a control validly carries no mechanically-reconcilable
+// declaration at all, including a genuine free-form/manual/external blocker that mentions no
+// issue number — are always accepted here, exactly as `Blocker`'s own `pointerCheck: false`
+// spec above already leaves them unconstrained. `RECONCILABLE` is, by construction, a fully
+// well-formed declaration and is also always accepted.
+export function validateBlockerAuthoringField(body) {
+  const blockerRaw = parseControlBullet(body, "Blocker") ?? parseHeadingField(body, "Current blocker");
+  const blockedLifecycleRaw = parseControlBullet(body, "Blocked lifecycle");
+  const blockedRouteRaw = parseControlBullet(body, "Blocked route");
+
+  const evaluation = evaluateBlockerAuthoring(
+    { blockerRaw, blockedLifecycleRaw, blockedRouteRaw },
+    { isNoneSentinel, isKnownLifecycleValue, isRouteCompatibleWithLifecycle },
+  );
+
+  if (
+    evaluation.kind === "UNRECOGNIZED_WORDING" ||
+    evaluation.kind === "MISSING_RESUME_STATE" ||
+    evaluation.kind === "INVALID_RESUME_STATE"
+  ) {
+    return { ok: false, label: "Blocker", reason: evaluation.reason };
+  }
+  return { ok: true, label: "Blocker" };
+}
+
 // Pure. Validates one field spec against a proposed control-Issue body. Returns
 // { ok: true, label, ... } or { ok: false, label, reason }.
 export function validateControlField(body, spec) {
@@ -261,6 +303,8 @@ export function validateControlSnapshot(body, { fields = DEFAULT_CONTROL_FIELD_S
   const errors = [];
   const coherence = validateLifecycleStateCoherence(body);
   if (!coherence.ok) errors.push(coherence.reason);
+  const blockerAuthoring = validateBlockerAuthoringField(body);
+  if (!blockerAuthoring.ok) errors.push(blockerAuthoring.reason);
   for (const spec of fields) {
     const result = validateControlField(body, spec);
     if (!result.ok) errors.push(result.reason);
