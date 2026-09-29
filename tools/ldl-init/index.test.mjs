@@ -1505,3 +1505,15 @@ test("HARD_MODULE_DEPENDENCIES: covers verify-audit-ready.mjs's imports and the 
   assert.equal(collisions.length, 1);
   assert.equal(collisions[0].dest, v);
 });
+
+test("HARD_MODULE_DEPENDENCIES: covers stage1-gate.mjs -> stage1-clean-reaction.mjs (#776)", () => {
+  const dest = "tools/review-watch/stage1-gate.mjs";
+  const dep = "tools/review-watch/stage1-clean-reaction.mjs";
+  assert.ok(HARD_MODULE_DEPENDENCIES.some((e) => e.dest === dest && e.dependsOnDest === dep));
+  const collisions = findHardDependencyCollisions({
+    toInstall: [{ destRel: dest, content: Buffer.from("x") }],
+    toSkip: [{ dest: dep, reason: "unmanaged" }],
+  });
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].dest, dep);
+});

@@ -703,6 +703,11 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/verify-audit-ready.mjs", dependsOnDest: "tools/review-watch/lifecycle-gate.mjs" },
   { dest: "tools/orchestration/verify-audit-ready.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
   { dest: "tools/orchestration/format-dispatch-prompt.mjs", dependsOnDest: "tools/orchestration/verify-audit-ready.mjs" },
+  // Issue #776 Stage 1 review finding (P2, on PR #777): stage1-gate.mjs hard-imports
+  // findQualifyingCleanReaction/hasExplicitFindingsSignal from stage1-clean-reaction.mjs. Without
+  // this edge, a consumer's unmanaged stage1-clean-reaction.mjs would be preserved while the
+  // managed gate is replaced, so update would report success while the gate fails at import time.
+  { dest: "tools/review-watch/stage1-gate.mjs", dependsOnDest: "tools/review-watch/stage1-clean-reaction.mjs" },
 ];
 
 // Pure. Given one install/update run's final toInstall/toSkip classification, returns one

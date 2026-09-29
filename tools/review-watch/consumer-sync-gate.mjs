@@ -303,6 +303,12 @@ export function isCleanStage1Response(stage1) {
     if (FINDINGS_PREAMBLE_PATTERN.test(body)) return true;
     return CLEAN_REVIEW_PATTERN.test(body) && isFindingsBearingResponse(body);
   });
+  // Issue #776: stage1-gate.mjs's `cleanReaction` (a qualifying post-trigger Codex `+1` PR
+  // reaction, already checked there for actor/type/trigger/head binding) is structured clean
+  // evidence that replaces prose enumeration; it still never overrides a findings match.
+  // Prose is deliberately not re-classified here (that is exactly the enumeration this
+  // replaces); only the provider's fixed formal findings heading is contradictory evidence.
+  if (stage1.cleanReaction) return !matches.some((m) => FINDINGS_PREAMBLE_PATTERN.test(stripOuterWhitespace(m.body_excerpt)));
   return hasCleanMatch && !hasFindingsMatch;
 }
 

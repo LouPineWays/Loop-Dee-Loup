@@ -734,6 +734,38 @@ test("run(): --recover true — the exact #582/#583 shape (PR already merged, co
   assert.match(writeCalls[0], /- \*\*Lifecycle:\*\* AUDIT/);
 });
 
+test("run(): --recover true refuses a clean reaction whose genuine response only arrived after merge (PR #777 finding)", async () => {
+  const reactionResult = () => ({
+    exitCode: 0,
+    state: "RESPONSE_RECEIVED",
+    matches: [{ body_excerpt: "Hooray!", created_at: "2026-09-10T12:30:00Z" }],
+    unboundGenuineMatches: [],
+    cleanReaction: { id: 1, login: "bot", content: "+1", created_at: PRE_MERGE_RESPONSE_AT },
+  });
+  const run1 = (stage1) => {
+    let currentBody = AUDIT_LIFECYCLE_BODY;
+    return run(
+      { repo: "owner/repo", controlIssue: 587, executionIssue: 586, pr: 590, recover: true },
+      {
+        ghIssueViewImpl: async () => currentBody,
+        ghPrViewImpl: makePrViewStub(MERGED_LINKED_PR_VIEW),
+        stage1GateRunImpl: async () => stage1,
+        writeControlSnapshotImpl: async ({ proposedBody }) => {
+          currentBody = proposedBody;
+          return { exitCode: 0, state: "WRITTEN" };
+        },
+      },
+    );
+  };
+  const late = await run1(reactionResult());
+  assert.notEqual(late.exitCode, 0);
+  assert.equal(late.state, "STAGE1_SATISFIED_BREAKPOINT_UNVERIFIED");
+  const ok = reactionResult();
+  ok.matches[0].created_at = PRE_MERGE_RESPONSE_AT;
+  const good = await run1(ok);
+  assert.equal(good.exitCode, 0);
+});
+
 test("run(): --recover true also accepts an EXEMPT disposition", async () => {
   let currentBody = AUDIT_LIFECYCLE_BODY;
   const result = await run(
