@@ -1313,3 +1313,13 @@ test("CLI: an unknown --kind fails closed with exit 2", async () => {
   assert.equal(result.status, 2);
   assert.match(result.stderr, /unknown --kind/);
 });
+
+// Issue #740: the merge commit and the pre-merge CI head are distinct identities; the worker is
+// pointed at the deterministic verifier for both the merge-commit source and the AUDIT_READY line.
+test("formatStage2PreparationWorkerDispatchPrompt sources the merge commit and AUDIT_READY from verify-audit-ready.mjs and keeps the CI head separate", () => {
+  const prompt = formatStage2PreparationWorkerDispatchPrompt({ controlIssue: 322, issue: 375, pr: 376 });
+  assert.match(prompt, /verify-audit-ready\.mjs --pr 376/);
+  assert.match(prompt, /--execution-issue 375 --audit-issue <n>/);
+  assert.match(prompt, /never the pre-merge CI head/);
+  assert.match(prompt, /stage2-control-plane-ci-head\.mjs --control-issue 322/);
+});
