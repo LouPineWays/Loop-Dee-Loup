@@ -167,7 +167,19 @@ The dispatched worker:
    finalize/trigger follow-up ran, must not produce a second one for the same merge), then
    creates the canonical Stage 2 Audit Issue per Stage 2 step 2 below, deriving a change-specific
    verification checklist from the actual diff and acceptance criteria — never generic prose;
-4. verifies the created issue by direct read (Stage 2 step 3 below);
+4. verifies the created issue by direct read (Stage 2 step 3 below) by running
+   `node tools/orchestration/verify-audit-ready.mjs --pr <PR> --execution-issue <N|none> --audit-issue <n>`
+   (issue #740, the live #691/#737/PR #738/Audit #739 reproduction: a worker wrote the pre-merge
+   corrected/CI head into "Exact merge commit" and reported `AUDIT_READY` unverified). The merge
+   commit written into the Audit Issue is only the output of
+   `node tools/orchestration/verify-audit-ready.mjs --pr <PR>` (`MERGE_COMMIT <sha>`, read from
+   GitHub's own `mergeCommit`); the pre-merge head from `stage2-control-plane-ci-head.mjs` is
+   used only for the control-plane CI checklist item and is never a merge commit. The second
+   invocation re-reads the persisted issue and checks it is OPEN, canonically complete, names this
+   PR in "Merged PR", this work issue, the PR's actual merge commit, and is the sole matching OPEN
+   canonical Audit Issue; only its stdout line (`AUDIT_READY #<n>` or
+   `AUDIT_PREPARATION_FAILED <reason>`) may be reported. It never posts a reviewer trigger, so a
+   wrong-identity candidate is never triggered;
 5. does not trigger `@codex review`, does not write to any control Issue, and does not perform
    the audit itself — Stage 2 remains a fresh, independent context (Stage 2 step 2), and this
    worker having just read the diff and Stage 1 disposition to prepare the checklist is exactly

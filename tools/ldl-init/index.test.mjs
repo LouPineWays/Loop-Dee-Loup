@@ -1490,3 +1490,18 @@ test("run: a fresh install of tools/ldl-sync surfaces the PR-creation-permission
   assert.deepEqual(parsed.warnings, [SYNC_PR_PERMISSION_WARNING]);
 });
 
+
+test("HARD_MODULE_DEPENDENCIES: covers verify-audit-ready.mjs's imports and the formatter -> verifier runtime dependency (#740)", () => {
+  const has = (dest, dependsOnDest) => HARD_MODULE_DEPENDENCIES.some((e) => e.dest === dest && e.dependsOnDest === dependsOnDest);
+  const v = "tools/orchestration/verify-audit-ready.mjs";
+  assert.ok(has(v, "tools/orchestration/finalize-audit-breakpoint.mjs"));
+  assert.ok(has(v, "tools/review-watch/lifecycle-gate.mjs"));
+  assert.ok(has(v, "tools/orchestration/ready-dispatch-gate.mjs"));
+  assert.ok(has("tools/orchestration/format-dispatch-prompt.mjs", v));
+  const collisions = findHardDependencyCollisions({
+    toInstall: [{ destRel: "tools/orchestration/format-dispatch-prompt.mjs", content: Buffer.from("x") }],
+    toSkip: [{ dest: v, reason: "unmanaged" }],
+  });
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].dest, v);
+});

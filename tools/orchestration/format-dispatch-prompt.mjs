@@ -587,12 +587,12 @@ export function formatStage2PreparationWorkerDispatchPrompt({ controlIssue = nul
       : `direct inspection (no control Issue/head)`;
   return (
     `Stage 2 preparation worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
-    `Read PR #${pr}${executionReadClause} from GitHub for diff, Stage 1 disposition, and ` +
-    `authority (not restated). Resolve the merge commit and control-plane CI head via ` +
-    `${ciHeadClause}. Reuse a matching open Audit Issue if one exists; else create one per ` +
-    `docs/bounded-review-cycle.md Stage 2 and docs/stage2-audit-contract.md. Verify by direct ` +
-    `read. Do not trigger @codex review, write to any control Issue, or audit it yourself. Stop; ` +
-    `report one line: "AUDIT_READY #<n>" or "AUDIT_PREPARATION_FAILED <reason>".`
+    `Read PR #${pr}${executionReadClause} from GitHub. Exact merge commit = ONLY ` +
+    `the output of node tools/orchestration/verify-audit-ready.mjs --pr ${pr}, never the pre-merge CI head ` +
+    `(${ciHeadClause}; CI checklist only). Reuse a matching open Audit Issue if one exists; else create per ` +
+    `docs/bounded-review-cycle.md Stage 2. Then run it with --execution-issue ${hasExecutionIssue ? issue : "none"} ` +
+    `--audit-issue <n>; report only its line, "AUDIT_READY #<n>" or "AUDIT_PREPARATION_FAILED <reason>". ` +
+    `Do not trigger @codex review, write to any control Issue, or audit it yourself.`
   );
 }
 
