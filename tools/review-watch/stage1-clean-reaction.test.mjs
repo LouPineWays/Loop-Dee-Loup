@@ -119,6 +119,13 @@ test("explicit findings heading + clean reaction fails closed with a diagnosable
   assert.ok(result.cleanReactionConflict);
 });
 
+test("plain severity-labelled finding + clean reaction fails closed with a diagnosable conflict (PR #777 finding)", async () => {
+  const result = await runWith([reaction()], { prose: "P1: credentials are logged in the retry path." });
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "FINDINGS_LACK_FORMAL_REVIEW");
+  assert.ok(result.cleanReactionConflict);
+});
+
 test("non-genuine provider failure with a reaction stays non-genuine (PENDING)", async () => {
   const result = await runWith([reaction()], { prose: "BLOCKED - Codex could not review this PR." });
   assert.equal(result.exitCode, 2);
@@ -140,4 +147,10 @@ test("findQualifyingCleanReaction: pure checks", () => {
   assert.ok(findQualifyingCleanReaction([reaction({ created_at: "2026-09-29T10:01:00Z" })], args));
   assert.equal(findQualifyingCleanReaction(null, args), null);
   assert.equal(hasExplicitFindingsSignal("Codex Review: Didn't find any major issues."), false);
+});
+
+test("hasExplicitFindingsSignal: recognizes plain and badge severity labels, not clean prose", () => {
+  assert.equal(hasExplicitFindingsSignal("P1: credentials are logged"), true);
+  assert.equal(hasExplicitFindingsSignal("**P2** Badge - fix this"), true);
+  assert.equal(hasExplicitFindingsSignal("Hooray! Another round soon, please!"), false);
 });

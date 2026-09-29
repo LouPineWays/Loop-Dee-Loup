@@ -45,11 +45,15 @@ export function findQualifyingCleanReaction(reactions, { bot, sinceMs, head, rou
   return { id: r.id, login: r.user.login, content: r.content, created_at: r.created_at };
 }
 
-// Pure. The one explicit, provider-fixed findings signal cheap enough to detect in a bounded
-// excerpt: Codex's own findings heading ("### 💡 Codex Review" + "Here are some automated
-// review suggestions"). Its coexistence with a clean reaction is contradictory evidence and
-// must fail closed rather than be guessed at.
+// Pure. Explicit findings signals cheap enough to detect in a bounded excerpt: Codex's own
+// findings heading ("### 💡 Codex Review" + "Here are some automated review suggestions"), or a
+// severity label ("P0"-"P3", plain or badge/bold-wrapped) marking a plain-comment finding.
+// Their coexistence with a clean reaction is contradictory evidence and must fail closed
+// rather than be guessed at.
 const FINDINGS_HEADING_PATTERN = /^###\s*💡\s*Codex Review\b/u;
+const FINDINGS_INTRO_PATTERN = /Here are some automated review suggestions/i;
+const SEVERITY_LABEL_PATTERN = /(?:^|[^A-Za-z0-9])P[0-3](?![A-Za-z0-9])/;
 export function hasExplicitFindingsSignal(bodyExcerpt) {
-  return FINDINGS_HEADING_PATTERN.test((bodyExcerpt ?? "").trim());
+  const text = (bodyExcerpt ?? "").trim();
+  return FINDINGS_HEADING_PATTERN.test(text) || FINDINGS_INTRO_PATTERN.test(text) || SEVERITY_LABEL_PATTERN.test(text);
 }
