@@ -464,7 +464,10 @@ async function deriveRecoveredStage1Head({ repo, pr, prView, existingStage1 }, {
     // -- a generic acknowledgement can land before merge while the real clean-pass reply that
     // made the round clean arrives only after, and `isCleanStage1Response` above already
     // confirmed at least one qualifying match exists, so this filter is never empty here.
-    const qualifyingCleanPassMatches = (stage1Result.matches ?? []).filter((m) => isCleanPassMatch(m));
+    // Issue #776: a structured `cleanReaction` is itself the qualifying clean evidence.
+    const qualifyingCleanPassMatches = stage1Result.cleanReaction
+      ? [stage1Result.cleanReaction]
+      : (stage1Result.matches ?? []).filter((m) => isCleanPassMatch(m));
     const responseMs = earliestMatchTimestampMs(qualifyingCleanPassMatches);
     if (responseMs === null) {
       return {
