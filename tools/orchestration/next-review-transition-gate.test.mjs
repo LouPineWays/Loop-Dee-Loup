@@ -2732,6 +2732,58 @@ test("runNextReviewTransitionGate: the correction PR reports live state MERGED b
   assert.match(result.reason, /no usable merge commit oid/);
 });
 
+// -- Stage 2 audit finding on PR #751 (issue #753, P1): the live re-check above only
+// special-cased MERGED; CLOSED and any other unrecognized state previously fell through
+// unconditionally to the open-PR finalization path. -------------------------------------------
+
+test("runNextReviewTransitionGate: the correction PR reports live state CLOSED (closed without merging) -- fails closed to AMBIGUOUS rather than inheriting the open-PR finalization path (Stage 2 audit finding on PR #751, issue #753)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "691" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number === 691 || number === "691") return { body: CONTROL_BODY_691_NO_PR_BULLET_YET, state: "OPEN" };
+        throw new Error(`unexpected ghIssueViewImpl call for #${number}`);
+      },
+      checkPostAuditImpl: async ({ "audit-issue": workIssue }) => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 737 }),
+      reconcileStage2CorrectionPrImpl: async ({ workIssue }) => {
+        assert.equal(workIssue, 737);
+        return { crossed: true, pr: { number: 742, headRefOid: "correctionhead", state: "OPEN" } };
+      },
+      ghPrStateImpl: async ({ number }) => {
+        assert.equal(number, 742);
+        return { headRefOid: "correctionhead", state: "CLOSED" };
+      },
+    },
+  );
+  assert.notEqual(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /CLOSED/);
+  assert.match(result.reason, /neither OPEN nor MERGED/);
+});
+
+test("runNextReviewTransitionGate: the correction PR reports an unrecognized/blank live state -- fails closed to AMBIGUOUS rather than inheriting the open-PR finalization path (Stage 2 audit finding on PR #751, issue #753)", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "691" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number === 691 || number === "691") return { body: CONTROL_BODY_691_NO_PR_BULLET_YET, state: "OPEN" };
+        throw new Error(`unexpected ghIssueViewImpl call for #${number}`);
+      },
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 737 }),
+      reconcileStage2CorrectionPrImpl: async ({ workIssue }) => {
+        assert.equal(workIssue, 737);
+        return { crossed: true, pr: { number: 742, headRefOid: "correctionhead", state: "OPEN" } };
+      },
+      ghPrStateImpl: async () => ({ headRefOid: "correctionhead", state: undefined }),
+    },
+  );
+  assert.notEqual(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /neither OPEN nor MERGED/);
+});
+
 // -- Stage 1 review findings on this PR (#751): three P1 findings in the merged-correction-PR
 // branch just above. -------------------------------------------------------------------------
 
