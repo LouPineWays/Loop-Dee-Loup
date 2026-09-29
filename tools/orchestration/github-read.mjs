@@ -58,6 +58,11 @@ export function readGithubIssue({ repo, number, fields = ["body", "state"], exec
   const path = restPath("issues", repo, number);
   const payload = callRest(path, execFileImpl);
   requireNumber(payload, number, path);
+  // REST /issues/{n} also serves pull requests as issue-shaped objects; `gh issue view` would
+  // not, so reject the PR marker rather than let a PR body be read as authoritative Issue state.
+  if (payload.pull_request !== undefined && payload.pull_request !== null) {
+    throw new Error(`GitHub REST response for ${path} is a pull request, not an Issue`);
+  }
   const out = {};
   for (const field of fields) {
     if (field === "body") {
@@ -88,12 +93,18 @@ export function readGithubPr({ repo, number, fields, execFileImpl = execFileSync
   requireNumber(payload, number, path);
   const bad = (what) => new Error(`GitHub REST response for ${path} has a malformed or missing ${what}`);
   const out = {};
+  const requireMergedAt = () => {
+    const m = payload.merged_at;
+    if (m !== null && (typeof m !== "string" || m === "")) throw bad('"merged_at" field');
+    if (payload.state === "open" && m !== null) throw bad('"merged_at" field (inconsistent with open state)');
+    return m;
+  };
   for (const field of fields) {
     if (field === "body") {
       out.body = requireStringOrNull(payload, "body", path);
     } else if (field === "state") {
       if (payload.state !== "open" && payload.state !== "closed") throw bad('"state" field');
-      out.state = payload.merged_at ? "MERGED" : payload.state.toUpperCase();
+      out.state = requireMergedAt() ? "MERGED" : payload.state.toUpperCase();
     } else if (field === "headRefName") {
       if (typeof payload.head?.ref !== "string" || payload.head.ref === "") throw bad('"head.ref" field');
       out.headRefName = payload.head.ref;
@@ -101,8 +112,7 @@ export function readGithubPr({ repo, number, fields, execFileImpl = execFileSync
       if (typeof payload.head?.sha !== "string" || payload.head.sha === "") throw bad('"head.sha" field');
       out.headRefOid = payload.head.sha;
     } else if (field === "mergedAt") {
-      if (payload.merged_at !== null && typeof payload.merged_at !== "string") throw bad('"merged_at" field');
-      out.mergedAt = payload.merged_at ?? null;
+      out.mergedAt = requireMergedAt();
     } else if (field === "mergeable") {
       // GraphQL reports MERGEABLE / CONFLICTING / UNKNOWN; REST reports true / false / null.
       if (payload.mergeable === true) out.mergeable = "MERGEABLE";
@@ -110,7 +120,7 @@ export function readGithubPr({ repo, number, fields, execFileImpl = execFileSync
       else if (payload.mergeable === null) out.mergeable = "UNKNOWN";
       else throw bad('"mergeable" field');
     } else if (field === "mergeCommit") {
-      if (payload.merged_at) {
+      if (requireMergedAt()) {
         if (typeof payload.merge_commit_sha !== "string" || payload.merge_commit_sha === "") {
           throw bad('"merge_commit_sha" field');
         }

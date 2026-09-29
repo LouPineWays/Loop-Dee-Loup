@@ -134,3 +134,16 @@ test("no production orchestration/review-watch script reads Issues or PR fields 
     }
   }
 });
+
+test("readGithubIssue rejects a pull request payload (pull_request marker)", () => {
+  const exec = () => JSON.stringify({ number: 5, state: "open", body: "x", pull_request: { url: "u" } });
+  assert.throws(() => readGithubIssue({ repo: "o/r", number: 5, execFileImpl: exec }), /pull request/);
+});
+
+test("readGithubPr validates merged_at and rejects open+merged inconsistency", () => {
+  const mk = (extra) => () => JSON.stringify({ number: 5, state: "closed", ...extra });
+  assert.throws(() => readGithubPr({ repo: "o/r", number: 5, fields: ["state"], execFileImpl: mk({}) }), /merged_at/);
+  assert.throws(() => readGithubPr({ repo: "o/r", number: 5, fields: ["state"], execFileImpl: mk({ merged_at: true }) }), /merged_at/);
+  assert.throws(() => readGithubPr({ repo: "o/r", number: 5, fields: ["state"], execFileImpl: () => JSON.stringify({ number: 5, state: "open", merged_at: "2026-01-01T00:00:00Z" }) }), /merged_at/);
+  assert.equal(readGithubPr({ repo: "o/r", number: 5, fields: ["state"], execFileImpl: mk({ merged_at: null }) }).state, "CLOSED");
+});
