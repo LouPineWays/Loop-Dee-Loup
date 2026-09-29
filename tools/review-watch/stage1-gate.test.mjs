@@ -1510,7 +1510,7 @@ test("run: 7c. FINDINGS_LACK_FORMAL_REVIEW — the fixed clean-pass preamble wit
 
 test("run: 7d. RESPONSE_RECEIVED — PR #754's real clean response (clean preamble + reviewed-commit line + Codex details/help envelope) as a plain issue comment with no formal review objects resolves normally, without formal-review provenance (issue #755)", async () => {
   const body =
-    "Codex Review: Didn't find any major issues. :rocket:\n\n**Reviewed commit:** `131c24aa7b`\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br>\n\n[Your team has set up Codex to review pull requests in this repo.]";
+    "Codex Review: Didn't find any major issues. :rocket:\n\n**Reviewed commit:** `131c24aa7b`\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you";
   const result = await run(
     { repo: "owner/repo", number: 50, head: "abc123" },
     {
@@ -1534,6 +1534,28 @@ test("run: 7d. RESPONSE_RECEIVED — PR #754's real clean response (clean preamb
 test("run: 7e. FINDINGS_LACK_FORMAL_REVIEW — the same envelope followed by a substantive unlabeled finding still fails closed (issue #755)", async () => {
   const body =
     "Codex Review: Didn't find any major issues. :rocket:\n\n**Reviewed commit:** `131c24aa7b`\n\nHowever, credentials are logged.";
+  const result = await run(
+    { repo: "owner/repo", number: 50, head: "abc123" },
+    {
+      ghPrViewImpl: async () => "no exemption",
+      ghApiImpl: async (path) => {
+        if (path.includes("/issues/")) {
+          return [
+            { id: 1, body: triggerCommentBody("abc123"), created_at: "2026-08-23T13:00:00Z" },
+            { id: 2, user: { login: "chatgpt-codex-connector[bot]" }, body, created_at: "2026-08-23T13:05:00Z" },
+          ];
+        }
+        return [];
+      },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "FINDINGS_LACK_FORMAL_REVIEW");
+});
+
+test("run: 7f. FINDINGS_LACK_FORMAL_REVIEW — a finding inside the details help block still fails closed (PR #756 Stage 1 P1)", async () => {
+  const body =
+    "Codex Review: Didn't find any major issues. :rocket:\n\n**Reviewed commit:** `131c24aa7b`\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br>\n\nP1: credentials are logged.</details>";
   const result = await run(
     { repo: "owner/repo", number: 50, head: "abc123" },
     {
