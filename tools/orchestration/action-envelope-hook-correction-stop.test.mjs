@@ -53,17 +53,18 @@ test("decideSubagentStop: no postcondition -> allow (unrelated workers unaffecte
 
 test("decideSubagentStop: verified -> allow; escaped (finalizer omitted) -> block, then bounded fail-closed stop", async () => {
   const { decideSubagentStop, MAX_CORRECTION_STOP_BLOCKS } = await import("./action-envelope-hook.mjs");
-  const completion = { pr: 763, controlIssue: 726, executionIssue: 725, reviewedHead: "r", blocks: 0 };
-  assert.deepEqual(decideSubagentStop({ correctionCompletion: completion }, { verifyImpl: () => ({ ok: true }) }), {
+  const completion = { pr: 763, controlIssue: 726, executionIssue: 725, reviewedHead: "r", blocks: 0, workerAgentId: "w1" };
+  const agentId = "w1";
+  assert.deepEqual(decideSubagentStop({ correctionCompletion: completion }, { verifyImpl: () => ({ ok: true }), agentId }), {
     action: "allow",
     verified: true,
   });
   const bad = () => ({ ok: false, detail: "Stage 1 is requested" });
-  const first = decideSubagentStop({ correctionCompletion: completion }, { verifyImpl: bad });
+  const first = decideSubagentStop({ correctionCompletion: completion }, { verifyImpl: bad, agentId });
   assert.equal(first.action, "block");
   assert.match(first.reason, /^CORRECTION_BREAKPOINT_UNVERIFIED 763/);
   assert.match(first.reason, /finalize-correction-breakpoint\.mjs --control-issue 726 --execution-issue 725 --pr 763/);
-  const spent = decideSubagentStop({ correctionCompletion: { ...completion, blocks: MAX_CORRECTION_STOP_BLOCKS } }, { verifyImpl: bad });
+  const spent = decideSubagentStop({ correctionCompletion: { ...completion, blocks: MAX_CORRECTION_STOP_BLOCKS } }, { verifyImpl: bad, agentId });
   assert.equal(spent.action, "stop");
   assert.match(spent.reason, /^CORRECTION_BREAKPOINT_UNVERIFIED 763/);
 });
@@ -100,7 +101,7 @@ test("hook process: SubagentStop with an unverifiable postcondition blocks; with
         state: "STAGE1_CORRECTION_REQUIRED",
         mode: "none",
         authorizedActions: [],
-        correctionCompletion: { pr: 763, controlIssue: 726, executionIssue: 725, reviewedHead: "r", blocks: 0 },
+        correctionCompletion: { pr: 763, controlIssue: 726, executionIssue: 725, reviewedHead: "r", blocks: 0, workerAgentId: "w1" },
       }),
     );
     const run = (sid) =>

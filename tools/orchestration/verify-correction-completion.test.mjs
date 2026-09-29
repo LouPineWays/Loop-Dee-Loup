@@ -97,6 +97,38 @@ test("head moving during verification is UNVERIFIED", async () => {
   assert.equal(r.exitCode, 2);
 });
 
+// Stage 1 correction (PR #765): a control mutation between the initial verification and the
+// final freshness check must fail closed (both mutable authorities re-read).
+const GOOD = body(`correction-satisfied at ${CORRECTED} (reviewed ${REVIEWED})`);
+
+test("concurrent control mutation between initial verification and final re-read is UNVERIFIED", async () => {
+  let n = 0;
+  const r = await verifyCorrectionCompletion(args, deps({ ghIssueViewImpl: async () => (++n >= 2 ? body("requested") : GOOD) }));
+  assert.equal(r.exitCode, 2);
+  assert.match(r.reason, /final freshness check/);
+});
+
+test("control relinked to another Execution between reads is UNVERIFIED", async () => {
+  let n = 0;
+  const relinked = GOOD.replace("#725", "#999");
+  const r = await verifyCorrectionCompletion(args, deps({ ghIssueViewImpl: async () => (++n >= 2 ? relinked : GOOD) }));
+  assert.equal(r.exitCode, 2);
+});
+
+test("final control re-read failure is UNVERIFIED", async () => {
+  let n = 0;
+  const r = await verifyCorrectionCompletion(
+    args,
+    deps({
+      ghIssueViewImpl: async () => {
+        if (++n >= 2) throw new Error("gh down");
+        return GOOD;
+      },
+    }),
+  );
+  assert.equal(r.exitCode, 2);
+});
+
 test("missing identity is an operational error (exit 1), not a verdict", async () => {
   assert.equal((await verifyCorrectionCompletion({ ...args, controlIssue: null }, deps())).exitCode, 1);
   assert.equal((await verifyCorrectionCompletion({ ...args, reviewedHead: "" }, deps())).exitCode, 1);

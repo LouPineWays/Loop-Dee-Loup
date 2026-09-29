@@ -40,6 +40,23 @@ function isPositiveInteger(v) {
   return typeof v === "number" && Number.isInteger(v) && v > 0;
 }
 
+// One consistent PR-view + control-body snapshot: the live head is still `liveHead`, the control
+// Execution/PR/lifecycle linkage holds, and the canonical correction-satisfied disposition is
+// present for exactly (liveHead, reviewed). Run for the initial read and again for the final one.
+function checkSnapshot(prView, body, { liveHead, reviewed, controlIssue, executionIssue, pr }) {
+  const headCheck = verifyPrHeadIsCurrent(prView, liveHead);
+  if (!headCheck.ok) return headCheck;
+  const executionCheck = verifyExecutionMatches(body, executionIssue);
+  if (!executionCheck.ok) return executionCheck;
+  const linkage = verifyPrLinkage(prView, executionIssue);
+  if (!linkage.ok) return linkage;
+  const composed = composeCorrectionControlBody(body, { pr, correctedHead: liveHead, reviewedHead: reviewed });
+  if (!composed.ok) return composed;
+  const durable = verifyFinalizedCorrectionBody(body, { correctedHead: liveHead, reviewedHead: reviewed });
+  if (!durable.ok) return { ok: false, reason: `control #${controlIssue} lacks the canonical correction-satisfied disposition: ${durable.reason}` };
+  return { ok: true };
+}
+
 function unverified(pr, reason) {
   return { exitCode: 2, state: "CORRECTION_BREAKPOINT_UNVERIFIED", pr, reason, message: `CORRECTION_BREAKPOINT_UNVERIFIED ${pr}` };
 }
@@ -69,16 +86,8 @@ export async function verifyCorrectionCompletion(
   if (liveHead.toLowerCase() === reviewed.toLowerCase()) {
     return unverified(pr, `PR head is still the reviewed head ${reviewed}; no correction was pushed.`);
   }
-  const headCheck = verifyPrHeadIsCurrent(prView, liveHead);
-  if (!headCheck.ok) return unverified(pr, headCheck.reason);
-  const executionCheck = verifyExecutionMatches(body, executionIssue);
-  if (!executionCheck.ok) return unverified(pr, executionCheck.reason);
-  const linkage = verifyPrLinkage(prView, executionIssue);
-  if (!linkage.ok) return unverified(pr, linkage.reason);
-  const composed = composeCorrectionControlBody(body, { pr, correctedHead: liveHead, reviewedHead: reviewed });
-  if (!composed.ok) return unverified(pr, composed.reason);
-  const durable = verifyFinalizedCorrectionBody(body, { correctedHead: liveHead, reviewedHead: reviewed });
-  if (!durable.ok) return unverified(pr, `control #${controlIssue} lacks the canonical correction-satisfied disposition: ${durable.reason}`);
+  const snapshot = checkSnapshot(prView, body, { liveHead, reviewed, controlIssue, executionIssue, pr });
+  if (!snapshot.ok) return unverified(pr, snapshot.reason);
 
   let delta;
   try {
@@ -89,15 +98,18 @@ export async function verifyCorrectionCompletion(
   if (!delta || delta.exitCode === 1 || delta.state !== "CORRECTION_SATISFIED") {
     return unverified(pr, delta?.reason ?? delta?.message ?? "checkCorrectionDelta did not report CORRECTION_SATISFIED.");
   }
-  // The PR head can move during the reads above; a head that moved is not the head recorded.
+  // Both mutable authorities (PR head and control snapshot) can move during the reads above: a
+  // success is only ever based on a final fresh read of BOTH, re-running the full durable checks.
   let latest;
+  let latestBody;
   try {
     latest = await ghPrViewImpl({ repo, pr });
+    latestBody = await ghIssueViewImpl({ repo, controlIssue });
   } catch (err) {
-    return unverified(pr, `final PR re-read failed: ${err.message}`);
+    return unverified(pr, `final durable re-read failed: ${err.message}`);
   }
-  const fresh = verifyPrHeadIsCurrent(latest, liveHead);
-  if (!fresh.ok) return unverified(pr, fresh.reason);
+  const finalSnapshot = checkSnapshot(latest, latestBody, { liveHead, reviewed, controlIssue, executionIssue, pr });
+  if (!finalSnapshot.ok) return unverified(pr, `final freshness check: ${finalSnapshot.reason}`);
 
   return { exitCode: 0, state: "CORRECTION_COMPLETE_VERIFIED", pr, correctedHead: liveHead, reviewedHead: reviewed, message: `CORRECTION_COMPLETE_VERIFIED ${pr}` };
 }
