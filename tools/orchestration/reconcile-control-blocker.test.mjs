@@ -465,6 +465,54 @@ Blocked by #407, #408.
   assert.match(calls[0].body, /### Current blocker\n\nnone — #407, #408 closed/);
 });
 
+// Stage 2 audit #770 finding (issue #768 correction): the live #726 recovery ran before the
+// companion-clearing fix existed and therefore left `Blocked lifecycle: REVIEW` /
+// `Blocked route: unchanged` in the persisted body. This pins the end-to-end contract through
+// the real `checkReconcileControlBlocker` -> `checkWriteControlSnapshot` path on a body shaped
+// exactly like #726 (template `### Current blocker` heading, `Route: none`, a non-route-bearing
+// `REVIEW` resume, and the `unchanged` sentinel): the persisted post-reconciliation body must
+// carry `none` / `none`, never the resolved episode's own resume state.
+test("checkReconcileControlBlocker: a #726-shaped REVIEW/unchanged reconciliation persists both companions as none (Stage 2 audit #770)", async () => {
+  const shapedBody = `### State
+
+BLOCKED_FAILURE
+
+### Current state
+
+- **Execution:** #725
+- **Route:** none
+- **PR:** #763
+- **Stage 1:** requested
+
+- **Blocked lifecycle:** REVIEW
+- **Blocked route:** unchanged
+
+### Current blocker
+
+Blocked by #764.
+
+### Founder interrupt
+
+None
+`;
+  const calls = [];
+  const result = await checkReconcileControlBlocker(
+    { repo: "owner/repo", "control-issue": 726 },
+    {
+      ghIssueViewImpl: async ({ number }) => (Number(number) === 726 ? { state: "OPEN", body: shapedBody } : { state: "CLOSED", body: "" }),
+      ghEditImpl: (a) => calls.push(a),
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "UNBLOCKED");
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].body, /- \*\*Blocked lifecycle:\*\* none/);
+  assert.match(calls[0].body, /- \*\*Blocked route:\*\* none/);
+  assert.doesNotMatch(calls[0].body, /Blocked lifecycle:\*\* REVIEW/);
+  assert.doesNotMatch(calls[0].body, /Blocked route:\*\* unchanged/);
+  assert.match(calls[0].body, /### Current blocker\n\nnone — #764 closed/);
+});
+
 // Finding 6: the write must be composed from a freshly re-read control body immediately before
 // the effect, not the body read at the start of this invocation -- a concurrent edit that
 // resolves the blocker in the interim must never be silently overwritten by a stale UNBLOCKED
