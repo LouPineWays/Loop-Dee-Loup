@@ -218,6 +218,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pathToFileURL } from "node:url";
+import { execFileSync } from "node:child_process";
 import { requiresPreBoundNonIsolatedDispatch } from "./action-envelope.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -460,10 +461,42 @@ export function writeMarker(
     // verdict shape, which is exactly the "wave size 1" default those helpers already apply.
     dispatchReadyUnitIds: Array.isArray(verdict.dispatchReadyUnitIds) ? verdict.dispatchReadyUnitIds : [],
     dispatchStartsConsumed: 0,
+    ...correctionCompletionField(verdict),
     ts: new Date().toISOString(),
   };
   writeFileImpl(markerPath(sessionId), JSON.stringify(marker), "utf8");
   return marker;
+}
+
+// Issue #764 (control #577, the #726/#725/PR #763 recurrence): a findings-bearing Stage 1
+// correction dispatch (`STAGE1_CORRECTION_REQUIRED`, correctionReason !== "closing-reference")
+// against a thin control Issue carries a completion postcondition the dispatched worker cannot
+// skip: verify-correction-completion.mjs must pass before that worker may stop. Only a verdict
+// with the full identity the verifier needs (positive pr/controlIssue/issue and the reviewed
+// `head` the gate saw) gets one; the closing-reference class and the direct-reference/no-control
+// case deliberately get none, so they stay unaffected.
+export function correctionCompletionField(verdict) {
+  const pos = (v) => typeof v === "number" && Number.isInteger(v) && v > 0;
+  if (
+    verdict?.state !== "STAGE1_CORRECTION_REQUIRED" ||
+    verdict.correctionReason === "closing-reference" ||
+    !pos(verdict.pr) ||
+    !pos(verdict.controlIssue) ||
+    !pos(verdict.issue) ||
+    typeof verdict.head !== "string" ||
+    !verdict.head
+  ) {
+    return {};
+  }
+  return {
+    correctionCompletion: {
+      pr: verdict.pr,
+      controlIssue: verdict.controlIssue,
+      executionIssue: verdict.issue,
+      reviewedHead: verdict.head,
+      blocks: 0,
+    },
+  };
 }
 
 // Issue #678: does this bounded marker's own authorizedActions name a worker dispatch as one
@@ -497,6 +530,7 @@ export function consumeBoundedDispatch(
     state: marker.state,
     mode: "none",
     authorizedActions: [],
+    ...(marker.correctionCompletion ? { correctionCompletion: marker.correctionCompletion } : {}),
     reason:
       `bounded dispatch action consumed via SubagentStart for verdict "${marker.state}" ` +
       "(issue #678); further operational tool calls in this controller context are not authorized.",
@@ -640,6 +674,67 @@ export function extractFailureOutput(payload) {
   return "";
 }
 
+// Issue #764: how many times SubagentStop may block the correction worker from stopping (forcing
+// it to run finalize-correction-breakpoint.mjs) before the hook stops trying and instead ends the
+// worker with an explicit fail-closed stopReason -- bounded so an unfixable postcondition can
+// never loop forever.
+export const MAX_CORRECTION_STOP_BLOCKS = 2;
+
+const VERIFY_CORRECTION_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "verify-correction-completion.mjs");
+
+// Runs the read-only verifier. Any nonzero exit (unverified, operational error, timeout) is a
+// fail-closed `{ ok: false }`; a missing verifier script (partial install) fails open.
+export function defaultVerifyCorrectionCompletion(completion, { execFileImpl = execFileSync, existsImpl = existsSync } = {}) {
+  if (!existsImpl(VERIFY_CORRECTION_SCRIPT)) return { ok: true, skipped: true };
+  try {
+    execFileImpl(
+      process.execPath,
+      [
+        VERIFY_CORRECTION_SCRIPT,
+        "--control-issue", String(completion.controlIssue),
+        "--execution-issue", String(completion.executionIssue),
+        "--pr", String(completion.pr),
+        "--reviewed-head", completion.reviewedHead,
+      ],
+      { encoding: "utf8", timeout: 120000, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    return { ok: true };
+  } catch (err) {
+    const detail = String(err?.stderr || err?.stdout || err?.message || "").trim().split(/\r?\n/).pop();
+    return { ok: false, detail };
+  }
+}
+
+// Pure-ish (verify injected). SubagentStop decision for a controller session whose marker carries
+// a correctionCompletion postcondition: { action: "allow" } when none applies or it verifies;
+// { action: "block", reason } while the worker may still be told to finalize; { action: "stop",
+// reason } once MAX_CORRECTION_STOP_BLOCKS blocks were spent and it is still unverified.
+export function decideSubagentStop(marker, { verifyImpl = defaultVerifyCorrectionCompletion } = {}) {
+  const completion = marker?.correctionCompletion;
+  if (!completion) return { action: "allow" };
+  const result = verifyImpl(completion);
+  if (result.ok) return { action: "allow", verified: true };
+  const blocks = typeof completion.blocks === "number" ? completion.blocks : 0;
+  const detail = result.detail ? ` (${result.detail})` : "";
+  if (blocks < MAX_CORRECTION_STOP_BLOCKS) {
+    return {
+      action: "block",
+      blocks: blocks + 1,
+      reason:
+        `CORRECTION_BREAKPOINT_UNVERIFIED ${completion.pr}: control #${completion.controlIssue} does not durably carry the ` +
+        `correction-satisfied disposition for PR #${completion.pr}'s current head${detail}. Do not stop or report success. Run ` +
+        `node tools/orchestration/finalize-correction-breakpoint.mjs --control-issue ${completion.controlIssue} ` +
+        `--execution-issue ${completion.executionIssue} --pr ${completion.pr} --reviewed-head ${completion.reviewedHead} ` +
+        "--corrected-head <the PR's current pushed head>, then --release-binding; if it still fails, report that reference verbatim.",
+    };
+  }
+  return {
+    action: "stop",
+    blocks,
+    reason: `CORRECTION_BREAKPOINT_UNVERIFIED ${completion.pr}: correction completion never verified after ${blocks} attempt(s)${detail}. Not a successful correction.`,
+  };
+}
+
 function readStdinJson() {
   try {
     const raw = readFileSync(0, "utf8");
@@ -706,6 +801,42 @@ function main() {
       // Issue #678 Stage 1 correction, finding 2: routes through the counting wrapper so a
       // multi-unit dispatch-unit-wave is not exhausted by its first worker's start alone.
       recordSubagentDispatchStart(sessionId, marker);
+      process.exit(0);
+      return;
+    }
+
+    // Issue #764: mechanical (below worker compliance) enforcement of the findings-correction
+    // completion postcondition -- see decideSubagentStop above.
+    if (payload?.hook_event_name === "SubagentStop" && sessionId) {
+      const marker = readMarker(sessionId);
+      const decision = decideSubagentStop(marker);
+      if (decision.action === "allow") {
+        if (decision.verified) {
+          const { correctionCompletion: _done, ...rest } = marker;
+          try {
+            writeFileSync(markerPath(sessionId), JSON.stringify(rest), "utf8");
+          } catch {
+            // best effort -- a stale postcondition only re-verifies (idempotent) on the next stop
+          }
+        }
+      } else {
+        try {
+          writeFileSync(
+            markerPath(sessionId),
+            JSON.stringify({ ...marker, correctionCompletion: { ...marker.correctionCompletion, blocks: decision.blocks } }),
+            "utf8",
+          );
+        } catch {
+          // best effort
+        }
+        process.stdout.write(
+          JSON.stringify(
+            decision.action === "block"
+              ? { decision: "block", reason: decision.reason }
+              : { continue: false, stopReason: decision.reason },
+          ),
+        );
+      }
       process.exit(0);
       return;
     }
