@@ -32,6 +32,27 @@ const BLOCKED_BY_CLAUSE = /blocked by\s+(.*?)(?:\.\s|\.$|$)/is;
 const ISSUE_TOKEN = /#(\d+)/g;
 const ISSUE_TOKEN_EXISTS = /#\d+/;
 
+// The one complete canonical serialization this grammar accepts as fully well-formed --
+// mirrors formatBlockedBy's own output exactly: the field must, in its entirety (once
+// trimmed), read "Blocked by #N[, #N...]." with nothing before "Blocked by" and nothing after
+// the final ".". Issue #768 Stage 1 finding: `hasUnrecognizedBlockerWording`'s own
+// clause-then-remainder check only ever flags a *stray issue token* outside the matched
+// clause -- it does not itself require the matched clause to be the canonical join-by-comma
+// shape, and it does not require "blocked by" to appear at the very start of the field. Both
+// gaps let non-canonical shapes slip through as if they were the documented grammar: "Blocked
+// by #407 or #408." captures both numbers via the same all-must-close semantics the canonical
+// comma-joined form uses, silently discarding the field's own stated "or" alternative; "Not
+// blocked by #407." matches "blocked by #407" as a substring and leaves only "Not " outside
+// the clause, which carries no issue token for the remainder check to flag, silently
+// discarding the field's own stated negation. Requiring the whole field to match this single
+// anchored pattern closes both: neither shape is anchored at position 0, and neither uses only
+// ", " to join its issue tokens.
+const CANONICAL_BLOCKED_BY_FIELD = /^blocked by\s+#\d+(?:\s*,\s*#\d+)*\.$/i;
+
+function isCanonicalBlockedByField(text) {
+  return CANONICAL_BLOCKED_BY_FIELD.test(String(text ?? "").trim());
+}
+
 // Pure. Extracts the list of issue numbers a control Issue's own "Blocker" field names as
 // current prerequisites -- only issue numbers appearing inside a "blocked by ..." clause,
 // stopping at the first following period (or end of field). Returns an empty array when no
@@ -101,8 +122,13 @@ export function formatBlockedBy(issueNumbers) {
 // `classifiers` is dependency-injected (never imported) so this module keeps its own
 // documented "no dependency on GitHub state or any other tools/orchestration module"
 // invariant intact -- callers already import `isNoneSentinel`/`isKnownLifecycleValue`/
-// `isRouteCompatibleWithLifecycle` from `ready-dispatch-gate.mjs` for their own purposes and
-// pass them straight through.
+// `isRouteCompatibleWithLifecycle`/`isBlockingLifecycleValue`/`isRouteBearingLifecycleValue`
+// from `ready-dispatch-gate.mjs` for their own purposes and pass them straight through.
+//
+// `currentRouteRaw` (optional) is the control body's own present "- **Route:**" bullet value --
+// the Route that will actually remain in place when "Blocked route" reads the "unchanged"
+// sentinel. It is only consulted for that one case; a non-"unchanged" "Blocked route" never
+// reads it.
 //
 // Returns one of:
 //   { kind: "NONE" }                    -- absent field, or the explicit "none" sentinel.
@@ -137,8 +163,8 @@ export function formatBlockedBy(issueNumbers) {
 // only the first three as rejections -- see control-field-validator.mjs's
 // `validateBlockerAuthoringField`, the write-side consumer this was built for.
 export function evaluateBlockerAuthoring(
-  { blockerRaw, blockedLifecycleRaw, blockedRouteRaw },
-  { isNoneSentinel, isKnownLifecycleValue, isRouteCompatibleWithLifecycle },
+  { blockerRaw, blockedLifecycleRaw, blockedRouteRaw, currentRouteRaw },
+  { isNoneSentinel, isKnownLifecycleValue, isRouteCompatibleWithLifecycle, isBlockingLifecycleValue, isRouteBearingLifecycleValue },
 ) {
   if (blockerRaw === null || blockerRaw === undefined || isNoneSentinel(blockerRaw)) {
     return { kind: "NONE" };
@@ -156,6 +182,20 @@ export function evaluateBlockerAuthoring(
   const blockedByIssues = extractBlockedByIssueNumbers(blockerRaw);
   if (blockedByIssues.length === 0) {
     return { kind: "FREE_FORM" };
+  }
+
+  // Issue #768 Stage 1 finding: a nonempty extraction used to be treated as canonical without
+  // validating the rest of the clause -- "Blocked by #407 or #408." and "Not blocked by #407."
+  // both extracted a plausible-looking issue list while silently discarding the field's own
+  // stated OR/negation semantics. Require the whole field to match the one documented
+  // serialization before treating it as anything but unrecognized wording.
+  if (!isCanonicalBlockedByField(blockerRaw)) {
+    return {
+      kind: "UNRECOGNIZED_WORDING",
+      reason:
+        `"Blocker" field ${JSON.stringify(blockerRaw)} contains issue reference(s) but does not match the canonical ` +
+        `"Blocked by #N[, #N...]." serialization -- refusing to guess at non-canonical join/negation wording`,
+    };
   }
 
   if (!blockedLifecycleRaw || !blockedLifecycleRaw.trim() || !blockedRouteRaw || !blockedRouteRaw.trim()) {
@@ -179,13 +219,58 @@ export function evaluateBlockerAuthoring(
         "refusing to persist an unknown resume state",
     };
   }
-  if (blockedRoute.toLowerCase() !== "unchanged" && !isRouteCompatibleWithLifecycle(blockedLifecycle, blockedRoute)) {
+
+  // Issue #768 Stage 1 finding: `isKnownLifecycleValue` recognizes BLOCKED/BLOCKED_FAILURE/
+  // BLOCKED_EXTERNAL too, so a saved resume Lifecycle could itself be a blocking value --
+  // reconciliation would then restore a Lifecycle the very next dispatch-gate invocation stops
+  // on again, defeating the release this declaration promises.
+  if (isBlockingLifecycleValue(blockedLifecycle)) {
     return {
       kind: "INVALID_RESUME_STATE",
       blockedByIssues,
       reason:
-        `"Blocked lifecycle" is ${JSON.stringify(blockedLifecycle)} but "Blocked route" is ${JSON.stringify(blockedRoute)}, ` +
-        "which is not a compatible Route for that Lifecycle",
+        `"Blocked lifecycle" value ${JSON.stringify(blockedLifecycle)} is itself a blocking lifecycle -- resuming into ` +
+        "it would immediately re-block instead of releasing this control",
+    };
+  }
+
+  const isUnchangedRoute = blockedRoute.toLowerCase() === "unchanged";
+  // The Route that will actually be in effect once this control resumes: the saved "Blocked
+  // route" value itself, or -- when it reads the "unchanged" sentinel -- whatever the control's
+  // own current "- **Route:**" field presently holds, since "unchanged" means that field is
+  // never touched by the reconciling write.
+  const effectiveRoute = isUnchangedRoute ? currentRouteRaw : blockedRoute;
+  const effectiveRouteTrimmed = typeof effectiveRoute === "string" ? effectiveRoute.trim() : "";
+  const effectiveRouteUnsettled = effectiveRouteTrimmed === "" || isNoneSentinel(effectiveRouteTrimmed);
+
+  // Issue #768 Stage 1 finding: `isRouteCompatibleWithLifecycle` only ever constrains
+  // READY_FOR_PLAN, so an unsettled ("none"/empty) Route was accepted as compatible with every
+  // other Lifecycle -- including the route-bearing ones (READY and #397's pre-PR pipeline
+  // values) that a fresh `ready-dispatch-gate.mjs` invocation would then reject as NOT_READY
+  // ("Route is not settled") the moment this control resumed. The "unchanged" exemption made
+  // this worse: it passed even when the control's own current Route was already unsettled,
+  // since nothing validated what would actually remain. Only route-bearing resume Lifecycles
+  // require a settled Route at all -- ordinary post-PR mid-cycle resumes (REVIEW, EXECUTING,
+  // ...) never consult Route, and requiring one there would reject the real #726 recovery shape
+  // (Lifecycle: REVIEW resumed with Route: none).
+  if (isRouteBearingLifecycleValue(blockedLifecycle) && effectiveRouteUnsettled) {
+    return {
+      kind: "INVALID_RESUME_STATE",
+      blockedByIssues,
+      reason: isUnchangedRoute
+        ? `"Blocked lifecycle" is ${JSON.stringify(blockedLifecycle)}, which requires a settled Route on resume, but ` +
+          `"Blocked route: unchanged" would leave the control's current Route (${JSON.stringify(currentRouteRaw ?? null)}) unset/none`
+        : `"Blocked lifecycle" is ${JSON.stringify(blockedLifecycle)}, which requires a settled Route on resume, but ` +
+          `"Blocked route" is ${JSON.stringify(blockedRoute)}`,
+    };
+  }
+  if (!effectiveRouteUnsettled && !isRouteCompatibleWithLifecycle(blockedLifecycle, effectiveRouteTrimmed)) {
+    return {
+      kind: "INVALID_RESUME_STATE",
+      blockedByIssues,
+      reason:
+        `"Blocked lifecycle" is ${JSON.stringify(blockedLifecycle)} but the resuming Route resolves to ` +
+        `${JSON.stringify(effectiveRouteTrimmed)}, which is not a compatible Route for that Lifecycle`,
     };
   }
 

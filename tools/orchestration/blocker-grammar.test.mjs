@@ -22,7 +22,15 @@ const isKnownLifecycleValue = (value) =>
   ["READY", "READY_FOR_PLAN", "EXECUTING", "REVIEW", "AUDIT", "CORRECTION", "BLOCKED", "BLOCKED_FAILURE"].includes(String(value).toUpperCase());
 const isRouteCompatibleWithLifecycle = (lifecycle, route) =>
   String(lifecycle).toUpperCase() !== "READY_FOR_PLAN" || String(route).trim().toLowerCase() === "planning worker";
-const classifiers = { isNoneSentinel, isKnownLifecycleValue, isRouteCompatibleWithLifecycle };
+const isBlockingLifecycleValue = (value) => ["BLOCKED", "BLOCKED_FAILURE", "BLOCKED_EXTERNAL"].includes(String(value).toUpperCase());
+const isRouteBearingLifecycleValue = (value) => ["READY", "READY_FOR_PLAN"].includes(String(value).toUpperCase());
+const classifiers = {
+  isNoneSentinel,
+  isKnownLifecycleValue,
+  isRouteCompatibleWithLifecycle,
+  isBlockingLifecycleValue,
+  isRouteBearingLifecycleValue,
+};
 
 // -- extractBlockedByIssueNumbers -----------------------------------------------------------
 
@@ -188,7 +196,94 @@ test("evaluateBlockerAuthoring: multiple well-formed prerequisites with valid sa
   assert.deepEqual(result, { kind: "RECONCILABLE", blockedByIssues: [407, 408, 436], blockedLifecycle: "REVIEW", blockedRoute: "unchanged" });
 });
 
-test("evaluateBlockerAuthoring: the literal 'unchanged' Blocked route sentinel is exempt from compatibility checking", () => {
-  const result = evaluateBlockerAuthoring({ blockerRaw: "Blocked by #764.", blockedLifecycleRaw: "READY_FOR_PLAN", blockedRouteRaw: "unchanged" }, classifiers);
-  assert.equal(result.kind, "RECONCILABLE");
+test("evaluateBlockerAuthoring: 'unchanged' is accepted only when the control's current Route is itself settled and compatible", () => {
+  const result = evaluateBlockerAuthoring(
+    { blockerRaw: "Blocked by #764.", blockedLifecycleRaw: "READY_FOR_PLAN", blockedRouteRaw: "unchanged", currentRouteRaw: "planning worker" },
+    classifiers,
+  );
+  assert.deepEqual(result, { kind: "RECONCILABLE", blockedByIssues: [764], blockedLifecycle: "READY_FOR_PLAN", blockedRoute: "unchanged" });
+});
+
+test("evaluateBlockerAuthoring: 'unchanged' is not exempt from route-bearing settledness -- a current Route of 'none' is rejected (Stage 1 finding)", () => {
+  const result = evaluateBlockerAuthoring(
+    { blockerRaw: "Blocked by #764.", blockedLifecycleRaw: "READY_FOR_PLAN", blockedRouteRaw: "unchanged", currentRouteRaw: "none" },
+    classifiers,
+  );
+  assert.equal(result.kind, "INVALID_RESUME_STATE");
+  assert.match(result.reason, /requires a settled Route on resume/);
+});
+
+test("evaluateBlockerAuthoring: 'unchanged' is rejected when the control's current Route is entirely absent (undefined)", () => {
+  const result = evaluateBlockerAuthoring(
+    { blockerRaw: "Blocked by #764.", blockedLifecycleRaw: "READY", blockedRouteRaw: "unchanged", currentRouteRaw: undefined },
+    classifiers,
+  );
+  assert.equal(result.kind, "INVALID_RESUME_STATE");
+});
+
+test("evaluateBlockerAuthoring: a route-bearing resume Lifecycle (READY) with an unsettled 'none' Blocked route is rejected, not silently compatible (Stage 1 finding)", () => {
+  const result = evaluateBlockerAuthoring(
+    { blockerRaw: "Blocked by #764.", blockedLifecycleRaw: "READY", blockedRouteRaw: "none" },
+    classifiers,
+  );
+  assert.equal(result.kind, "INVALID_RESUME_STATE");
+  assert.match(result.reason, /requires a settled Route on resume/);
+});
+
+test("evaluateBlockerAuthoring: a non-route-bearing resume Lifecycle (REVIEW) never requires a settled Route -- the real #726 recovery shape", () => {
+  const result = evaluateBlockerAuthoring(
+    { blockerRaw: "Blocked by #764.", blockedLifecycleRaw: "REVIEW", blockedRouteRaw: "unchanged", currentRouteRaw: "none" },
+    classifiers,
+  );
+  assert.deepEqual(result, { kind: "RECONCILABLE", blockedByIssues: [764], blockedLifecycle: "REVIEW", blockedRoute: "unchanged" });
+});
+
+test("evaluateBlockerAuthoring: a saved 'Blocked lifecycle' that is itself a blocking value is rejected (Stage 1 finding)", () => {
+  const result = evaluateBlockerAuthoring(
+    { blockerRaw: "Blocked by #764.", blockedLifecycleRaw: "BLOCKED", blockedRouteRaw: "unchanged" },
+    classifiers,
+  );
+  assert.equal(result.kind, "INVALID_RESUME_STATE");
+  assert.match(result.reason, /itself a blocking lifecycle/);
+});
+
+test("evaluateBlockerAuthoring: BLOCKED_EXTERNAL as a saved 'Blocked lifecycle' is also rejected", () => {
+  const result = evaluateBlockerAuthoring(
+    { blockerRaw: "Blocked by #764.", blockedLifecycleRaw: "BLOCKED_EXTERNAL", blockedRouteRaw: "unchanged" },
+    classifiers,
+  );
+  assert.equal(result.kind, "INVALID_RESUME_STATE");
+});
+
+// -- Canonical clause syntax enforcement (Stage 1 finding on PR #769, issue #768) -----------
+
+test("evaluateBlockerAuthoring: 'Blocked by #407 or #408.' does not match the canonical serialization and is rejected rather than silently treated as an all-must-close set", () => {
+  const result = evaluateBlockerAuthoring(
+    { blockerRaw: "Blocked by #407 or #408.", blockedLifecycleRaw: "REVIEW", blockedRouteRaw: "unchanged" },
+    classifiers,
+  );
+  assert.equal(result.kind, "UNRECOGNIZED_WORDING");
+  assert.match(result.reason, /canonical/);
+});
+
+test("evaluateBlockerAuthoring: 'Not blocked by #407.' does not match the canonical serialization and is rejected rather than silently treated as a prerequisite", () => {
+  const result = evaluateBlockerAuthoring(
+    { blockerRaw: "Not blocked by #407.", blockedLifecycleRaw: "REVIEW", blockedRouteRaw: "unchanged" },
+    classifiers,
+  );
+  assert.equal(result.kind, "UNRECOGNIZED_WORDING");
+  assert.match(result.reason, /canonical/);
+});
+
+test("evaluateBlockerAuthoring: the canonical formatter output is always accepted as canonical, single and multiple prerequisites", () => {
+  const single = evaluateBlockerAuthoring(
+    { blockerRaw: formatBlockedBy([764]), blockedLifecycleRaw: "REVIEW", blockedRouteRaw: "unchanged" },
+    classifiers,
+  );
+  assert.equal(single.kind, "RECONCILABLE");
+  const multiple = evaluateBlockerAuthoring(
+    { blockerRaw: formatBlockedBy([407, 408, 436]), blockedLifecycleRaw: "REVIEW", blockedRouteRaw: "unchanged" },
+    classifiers,
+  );
+  assert.equal(multiple.kind, "RECONCILABLE");
 });

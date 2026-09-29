@@ -13,6 +13,7 @@ import {
   validateControlSnapshot,
   validateLifecycleStateCoherence,
   validateBlockerAuthoringField,
+  validateBlockerRepresentationCoherence,
   findExactDuplicateBulletValues,
   DEFAULT_CONTROL_FIELD_SPECS,
 } from "./control-field-validator.mjs";
@@ -426,6 +427,138 @@ test("validateControlSnapshot: accepts the corrected canonical #726 recovery sha
   ].join("\n");
   const result = validateControlSnapshot(body);
   assert.deepEqual(result, { ok: true });
+});
+
+// -- validateBlockerRepresentationCoherence / write-side Blocker-vs-heading contradiction
+// (Stage 1 finding on PR #769, issue #768) ---------------------------------------------------
+
+test("validateBlockerRepresentationCoherence: a body with neither representation is not a conflict", () => {
+  assert.deepEqual(validateBlockerRepresentationCoherence("Some legacy unsplit Issue body."), { ok: true });
+});
+
+test("validateBlockerRepresentationCoherence: a legacy bullet-only body is not a conflict", () => {
+  assert.deepEqual(validateBlockerRepresentationCoherence("- **Blocker:** none\n"), { ok: true });
+});
+
+test("validateBlockerRepresentationCoherence: a template heading-only body is not a conflict", () => {
+  const body = "### Current blocker\n\nBlocked by #764.\n";
+  assert.deepEqual(validateBlockerRepresentationCoherence(body), { ok: true });
+});
+
+test("validateBlockerRepresentationCoherence: a hybrid body where both representations agree is not a conflict", () => {
+  const body = "### Current blocker\n\nnone\n\n### Current state\n\n- **Blocker:** none\n";
+  assert.deepEqual(validateBlockerRepresentationCoherence(body), { ok: true });
+});
+
+test("validateBlockerRepresentationCoherence: rejects the exact reported contradiction -- bullet 'none' masking an active template heading prerequisite", () => {
+  const body = ["- **Blocker:** none", "", "### Current blocker", "", "Blocked by #764."].join("\n");
+  const result = validateBlockerRepresentationCoherence(body);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /"Blocker".*"Current blocker".*contradictory/s);
+});
+
+test("validateControlSnapshot: refuses a proposed body where '- **Blocker:** none' masks an active '### Current blocker' prerequisite (Stage 1 finding)", () => {
+  const body = ["- **Blocker:** none", "- **Execution:** #440", "### Current blocker", "", "Blocked by #764."].join("\n");
+  const result = validateControlSnapshot(body);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => /contradictory/.test(e)));
+});
+
+// -- Duplicate 'Blocked lifecycle'/'Blocked route' resume-state bullets (Stage 1 finding) ---
+
+test("validateBlockerAuthoringField: rejects a duplicate 'Blocked lifecycle' bullet instead of silently selecting the last occurrence", () => {
+  const body = [
+    "- **Blocker:** Blocked by #764.",
+    "- **Blocked lifecycle:** REVIEW",
+    "- **Blocked lifecycle:** CORRECTION",
+    "- **Blocked route:** unchanged",
+  ].join("\n");
+  const result = validateBlockerAuthoringField(body);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /"Blocked lifecycle" reference is ambiguous/);
+});
+
+test("validateBlockerAuthoringField: rejects a duplicate 'Blocked route' bullet instead of silently selecting the last occurrence", () => {
+  const body = [
+    "- **Blocker:** Blocked by #764.",
+    "- **Blocked lifecycle:** REVIEW",
+    "- **Blocked route:** unchanged",
+    "- **Blocked route:** implementation worker",
+  ].join("\n");
+  const result = validateBlockerAuthoringField(body);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /"Blocked route" reference is ambiguous/);
+});
+
+// -- Self-prerequisite rejection (Stage 1 finding) -------------------------------------------
+
+test("validateBlockerAuthoringField: a control naming itself as its own prerequisite is rejected when the control identity is known", () => {
+  const body = ["- **Blocker:** Blocked by #726.", "- **Blocked lifecycle:** REVIEW", "- **Blocked route:** unchanged"].join("\n");
+  const result = validateBlockerAuthoringField(body, 726);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /own prerequisite/);
+});
+
+test("validateBlockerAuthoringField: the same body is otherwise valid when the control identity differs", () => {
+  const body = ["- **Blocker:** Blocked by #726.", "- **Blocked lifecycle:** REVIEW", "- **Blocked route:** unchanged"].join("\n");
+  const result = validateBlockerAuthoringField(body, 999);
+  assert.deepEqual(result, { ok: true, label: "Blocker" });
+});
+
+test("validateBlockerAuthoringField: without a known control identity, self-reference is not checked (backward compatible default)", () => {
+  const body = ["- **Blocker:** Blocked by #726.", "- **Blocked lifecycle:** REVIEW", "- **Blocked route:** unchanged"].join("\n");
+  assert.deepEqual(validateBlockerAuthoringField(body), { ok: true, label: "Blocker" });
+});
+
+test("validateControlSnapshot: threads the control identity through to reject a genuine self-reference", () => {
+  const body = ["- **Blocker:** Blocked by #726.", "- **Blocked lifecycle:** REVIEW", "- **Blocked route:** unchanged"].join("\n");
+  const result = validateControlSnapshot(body, { controlIssue: 726 });
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => /own prerequisite/.test(e)));
+});
+
+// -- Route-bearing resume-state settledness (Stage 1 finding) --------------------------------
+
+test("validateBlockerAuthoringField: a route-bearing resume Lifecycle (READY) cannot persist with an unset 'none' Blocked route", () => {
+  const body = ["- **Blocker:** Blocked by #764.", "- **Blocked lifecycle:** READY", "- **Blocked route:** none"].join("\n");
+  const result = validateBlockerAuthoringField(body);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /requires a settled Route on resume/);
+});
+
+test("validateBlockerAuthoringField: 'unchanged' for a route-bearing resume Lifecycle is only valid when the control's current Route is itself settled", () => {
+  const unsettled = ["- **Route:** none", "- **Blocker:** Blocked by #764.", "- **Blocked lifecycle:** READY_FOR_PLAN", "- **Blocked route:** unchanged"].join(
+    "\n",
+  );
+  const unsettledResult = validateBlockerAuthoringField(unsettled);
+  assert.equal(unsettledResult.ok, false);
+
+  const settled = [
+    "- **Route:** planning worker",
+    "- **Blocker:** Blocked by #764.",
+    "- **Blocked lifecycle:** READY_FOR_PLAN",
+    "- **Blocked route:** unchanged",
+  ].join("\n");
+  assert.deepEqual(validateBlockerAuthoringField(settled), { ok: true, label: "Blocker" });
+});
+
+test("validateBlockerAuthoringField: a saved 'Blocked lifecycle' that is itself a blocking value cannot be durably emitted", () => {
+  const body = ["- **Blocker:** Blocked by #764.", "- **Blocked lifecycle:** BLOCKED_FAILURE", "- **Blocked route:** unchanged"].join("\n");
+  const result = validateBlockerAuthoringField(body);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /itself a blocking lifecycle/);
+});
+
+test("validateBlockerAuthoringField: non-canonical clause syntax ('or'/negation) is rejected even when resume state is otherwise well-formed", () => {
+  const orClause = ["- **Blocker:** Blocked by #407 or #408.", "- **Blocked lifecycle:** REVIEW", "- **Blocked route:** unchanged"].join("\n");
+  const orResult = validateBlockerAuthoringField(orClause);
+  assert.equal(orResult.ok, false);
+  assert.match(orResult.reason, /canonical/);
+
+  const negation = ["- **Blocker:** Not blocked by #407.", "- **Blocked lifecycle:** REVIEW", "- **Blocked route:** unchanged"].join("\n");
+  const negationResult = validateBlockerAuthoringField(negation);
+  assert.equal(negationResult.ok, false);
+  assert.match(negationResult.reason, /canonical/);
 });
 
 // -- validateLifecycleStateCoherence / #581's #577 regression ----------------------------

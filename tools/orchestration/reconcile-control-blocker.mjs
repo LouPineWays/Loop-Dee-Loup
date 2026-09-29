@@ -76,6 +76,8 @@ import {
   isAuditShapedBody,
   isKnownLifecycleValue,
   isRouteCompatibleWithLifecycle,
+  isBlockingLifecycleValue,
+  isRouteBearingLifecycleValue,
 } from "./ready-dispatch-gate.mjs";
 import { parseStage2Verdict } from "../review-watch/lifecycle-gate.mjs";
 import { evaluateBlockerAuthoring } from "./blocker-grammar.mjs";
@@ -145,10 +147,11 @@ export function evaluateBlockerCondition(body) {
   const blockerRaw = parseControlBullet(body, "Blocker") ?? parseHeadingField(body, "Current blocker");
   const blockedLifecycleRaw = parseControlBullet(body, "Blocked lifecycle");
   const blockedRouteRaw = parseControlBullet(body, "Blocked route");
+  const currentRouteRaw = parseControlBullet(body, "Route");
 
   const evaluation = evaluateBlockerAuthoring(
-    { blockerRaw, blockedLifecycleRaw, blockedRouteRaw },
-    { isNoneSentinel, isKnownLifecycleValue, isRouteCompatibleWithLifecycle },
+    { blockerRaw, blockedLifecycleRaw, blockedRouteRaw, currentRouteRaw },
+    { isNoneSentinel, isKnownLifecycleValue, isRouteCompatibleWithLifecycle, isBlockingLifecycleValue, isRouteBearingLifecycleValue },
   );
 
   switch (evaluation.kind) {
@@ -212,6 +215,18 @@ async function fetchPrerequisiteStatus(blockedByIssues, { repo, ghIssueViewImpl 
 // naming exactly the prerequisites that were satisfied; Lifecycle -> the recorded "Blocked
 // lifecycle" value; Route -> the recorded "Blocked route" value, skipped entirely when it
 // reads the literal sentinel "unchanged" (case-insensitive).
+//
+// Issue #768 Stage 1 finding: the two companion fields ("Blocked lifecycle"/"Blocked route")
+// used to survive verbatim once the control unblocked. A later block episode that authored only
+// a fresh canonical "Blocker: Blocked by #N." bullet -- without also authoring new companion
+// values -- then had its resume state silently supplied by whatever the *previous* episode left
+// behind, since `evaluateBlockerAuthoring`'s own presence/non-empty check cannot distinguish
+// "freshly authored for this block" from "stale leftover from the last one." Clearing both
+// companions to the "none" sentinel here closes that gap without inventing a second state
+// model: `evaluateBlockerAuthoring` already treats "none" as a non-empty-but-unrecognized
+// Lifecycle value (`isKnownLifecycleValue("none")` is false), so any later block episode that
+// omits fresh companion values fails closed as INVALID_RESUME_STATE instead of silently
+// inheriting the resolved episode's own resume state.
 export function buildUnblockedControlBody(body, { blockedByIssues, blockedLifecycle, blockedRoute }) {
   const note = `none — ${blockedByIssues.map((n) => `#${n}`).join(", ")} closed`;
   let next = body ?? "";
@@ -220,6 +235,8 @@ export function buildUnblockedControlBody(body, { blockedByIssues, blockedLifecy
   if (blockedRoute.trim().toLowerCase() !== "unchanged") {
     next = upsertControlBullet(next, "Route", blockedRoute);
   }
+  next = upsertControlBullet(next, "Blocked lifecycle", "none");
+  next = upsertControlBullet(next, "Blocked route", "none");
   return next;
 }
 

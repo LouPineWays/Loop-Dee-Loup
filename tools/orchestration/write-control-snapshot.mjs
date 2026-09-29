@@ -59,7 +59,7 @@ export function checkWriteControlSnapshot({ repo, controlIssue, proposedBody }, 
     return { exitCode: 1, message: "Missing required proposed body (--body-file produced no content)." };
   }
 
-  const validation = validateControlSnapshot(proposedBody);
+  const validation = validateControlSnapshot(proposedBody, { controlIssue: Number(controlIssue) });
   if (!validation.ok) {
     return {
       exitCode: 2,

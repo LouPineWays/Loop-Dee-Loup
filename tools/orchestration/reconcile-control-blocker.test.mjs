@@ -8,7 +8,12 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { checkReconcileControlBlocker, isPrerequisiteSatisfied, buildUnblockedControlBody } from "./reconcile-control-blocker.mjs";
+import {
+  checkReconcileControlBlocker,
+  isPrerequisiteSatisfied,
+  buildUnblockedControlBody,
+  evaluateBlockerCondition,
+} from "./reconcile-control-blocker.mjs";
 
 // Standard fixture: a control Issue shaped like #440's real reproduction, but authored with
 // the new "Blocked by ..." grammar (design decision point 3) plus the two new companion
@@ -87,6 +92,33 @@ test("buildUnblockedControlBody: rewrites Blocker/Lifecycle/Route to the reconci
 test("buildUnblockedControlBody: 'Blocked route: unchanged' leaves the existing Route field untouched", () => {
   const next = buildUnblockedControlBody(BLOCKED_BODY, { blockedByIssues: [407], blockedLifecycle: "READY_FOR_PLAN", blockedRoute: "unchanged" });
   assert.match(next, /- \*\*Route:\*\* none/, "the original 'none' Route value from BLOCKED_BODY must be preserved verbatim");
+});
+
+// Stage 1 finding on PR #769 (issue #768): the two resume-state companion fields must not
+// survive an unblock verbatim, or a later block episode that authors only a fresh canonical
+// "Blocker: Blocked by #N." bullet without also authoring new companion values would silently
+// inherit this resolved episode's own resume state instead of failing closed.
+test("buildUnblockedControlBody: clears the 'Blocked lifecycle'/'Blocked route' companions so a later block cannot inherit stale resume state", () => {
+  const next = buildUnblockedControlBody(BLOCKED_BODY, { blockedByIssues: [407, 408, 436], blockedLifecycle: "READY_FOR_PLAN", blockedRoute: "planning worker" });
+  assert.match(next, /- \*\*Blocked lifecycle:\*\* none/);
+  assert.match(next, /- \*\*Blocked route:\*\* none/);
+});
+
+test("evaluateBlockerCondition: a stale 'none' companion left by a prior unblock fails closed for a fresh block declaration, rather than silently reusing it", () => {
+  // Simulates the body shape a real reconciliation cycle now produces: the prior episode's
+  // companions were cleared to "none", and a later session authored a fresh Blocker bullet
+  // without also authoring fresh companion values.
+  const staleBody = [
+    "- **Execution:** #440",
+    "- **Lifecycle:** REVIEW",
+    "- **Route:** implementation worker",
+    "- **Blocker:** Blocked by #900.",
+    "- **Blocked lifecycle:** none",
+    "- **Blocked route:** none",
+    "- **Founder decision:** none",
+  ].join("\n");
+  const result = evaluateBlockerCondition(staleBody);
+  assert.equal(result.kind, "AMBIGUOUS_BLOCKER");
 });
 
 // -- checkReconcileControlBlocker -------------------------------------------------------------
@@ -378,6 +410,27 @@ test("checkReconcileControlBlocker: AMBIGUOUS_BLOCKER — a 'Blocked route' inco
   assert.equal(result.exitCode, 4);
   assert.equal(result.state, "AMBIGUOUS_BLOCKER");
   assert.match(result.reason, /not a compatible Route/);
+});
+
+// Stage 1 finding on PR #769 (issue #768): "Blocked route: unchanged" must not be exempt from
+// route-bearing settledness -- resuming into READY_FOR_PLAN while the control's own current
+// Route is already "none" must fail closed rather than silently reconcile into an unsettled
+// dispatch state the very next ready-dispatch-gate.mjs invocation would reject as NOT_READY.
+test("checkReconcileControlBlocker: AMBIGUOUS_BLOCKER — 'Blocked route: unchanged' resolving to the control's own unsettled current Route is refused (Stage 1 finding)", async () => {
+  const unsettledRouteBody = BLOCKED_BODY.replace("- **Blocked route:** planning worker", "- **Blocked route:** unchanged");
+  // BLOCKED_BODY's own current "- **Route:** none" is already unsettled, so "unchanged" here
+  // would resolve to that same unsettled value.
+  const result = await checkReconcileControlBlocker(
+    { repo: "owner/repo", "control-issue": 440 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        Number(number) === 440 ? { state: "OPEN", body: unsettledRouteBody } : assert.fail("must not fetch prerequisites when resume state is invalid"),
+      ghEditImpl: () => assert.fail("must not persist an unsettled resumed Route"),
+    },
+  );
+  assert.equal(result.exitCode, 4);
+  assert.equal(result.state, "AMBIGUOUS_BLOCKER");
+  assert.match(result.reason, /requires a settled Route on resume/);
 });
 
 // Finding 5: a template-shaped control ("### Current blocker" heading, no ad hoc "- **Blocker:**"
