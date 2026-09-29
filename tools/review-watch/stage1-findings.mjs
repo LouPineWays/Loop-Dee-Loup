@@ -93,7 +93,43 @@ const CLEAN_REVIEW_PATTERN = /^Codex Review: Didn't find any major issues\./;
 // check ever ran — the two independent classifiers must keep the same known-clean-suffix set.
 const CLEAN_PREAMBLE_TRAILING_PATTERN = /^(?:\s*(?:nice work|can't wait for the next one)[!.]?)?\s*$/i;
 
-const FORMAL_REVIEW_ENDPOINTS = new Set(["pull-comments", "pull-reviews"]);
+// Issue #755 (live reproduction: PR #754, comment #5880707370): Codex appends a standard,
+// non-semantic response envelope after the clean preamble -- an optional rocket emoji, a
+// "**Reviewed commit:** `<sha>`" line, and a "<details> <summary>About Codex in GitHub
+// </summary>" help block -- and poll.mjs's 200-character body_excerpt usually truncates
+// somewhere inside that help block. This is content classification only: a textual reviewed-
+// commit line never becomes formal review provenance (isFormalReviewEndpoint still looks only
+// at the endpoint). Deliberately narrow: each envelope piece is an exact observed shape, in
+// fixed order; the help block is the opener plus text that may not contain a "</details>"
+// followed by further prose (only whitespace may follow a closing tag); any other trailing
+// prose before or after those pieces still fails closed as findings-bearing.
+const CLEAN_ENVELOPE_PATTERN =
+  /^(?:\s*(?:nice work|can't wait for the next one)[!.]?)?(?:\s*(?::rocket:|\u{1F680}))?(?:\s*\*\*Reviewed commit:\*\*\s*`[0-9a-f]{7,40}`)?(?:\s*<details>\s*<summary>\s*(?:ℹ️?\s*)?About Codex in GitHub\s*<\/summary>((?:(?!<\/details>)[\s\S])*)(<\/details>)?)?\s*$/iu;
+
+// PR #756 Stage 1 review finding (P1): the help block body is NOT opaque. It must be the
+// standard provider help text (whitespace-normalized) or a truncated prefix of it (poll.mjs's
+// 200-character excerpt ends mid-block); once the closing tag is present it must be the whole
+// standard text. Any other text inside the details block stays findings-bearing.
+const STANDARD_HELP_BODY = [
+  "<br>",
+  "[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you",
+  "- Open a pull request for review",
+  "- Mark a draft as ready",
+  '- Comment "@codex review".',
+  "If Codex has suggestions, it will comment; otherwise it will react with \u{1F44D}.",
+  'Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".',
+].join(" ");
+const normalizeHelp = (t) => t.replace(/\s+/g, " ").trim();
+
+function isCleanEnvelope(trailing) {
+  const m = CLEAN_ENVELOPE_PATTERN.exec(trailing);
+  if (!m) return false;
+  if (m[1] === undefined) return true;
+  const body = normalizeHelp(m[1]);
+  return m[2] ? body === STANDARD_HELP_BODY : STANDARD_HELP_BODY.startsWith(body);
+}
+
+const FORMAL_REVIEW_ENDPOINTS =new Set(["pull-comments", "pull-reviews"]);
 
 // Pure. Whether `endpointName` (poll.mjs's `endpointsFor` naming: "pull-comments",
 // "pull-reviews", "issue-comments") is a formal GitHub PR review artifact — an inline review
@@ -158,7 +194,7 @@ export function isCleanReviewResponse(bodyExcerpt) {
     // severity marker or not — must still be rejected rather than hidden behind that same
     // prefix. Only the narrow CLEAN_PREAMBLE_TRAILING_PATTERN allowlist may follow it.
     const trailing = stripped.slice(cleanPreambleMatch[0].length);
-    return CLEAN_PREAMBLE_TRAILING_PATTERN.test(trailing);
+    return CLEAN_PREAMBLE_TRAILING_PATTERN.test(trailing) || isCleanEnvelope(trailing);
   }
   const isKnownCleanShape = (text) =>
     NO_ISSUES_PATTERN.test(text) || LGTM_PATTERN.test(text) || LOOKS_GOOD_PATTERN.test(text);
