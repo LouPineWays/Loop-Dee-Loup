@@ -18,7 +18,7 @@ import {
   checkCloseWorkIssue,
   checkMergeReady,
   checkPostAudit,
-  checkRecordVerdict,
+  checkRecordVerdict as checkRecordVerdictRaw,
   checkPreAuditPendingState,
   assessMalformedPreTriggerVerdict,
   findClosingKeywordMatch,
@@ -41,6 +41,10 @@ import {
   validateAuditVerdictRewrite,
 } from "./lifecycle-gate.mjs";
 import { triggerCommentBody } from "./trigger.mjs";
+
+// Hermetic default: edit-history lookups (issue #794) must never reach the real `gh` CLI.
+const checkRecordVerdict = (args, opts = {}) =>
+  checkRecordVerdictRaw(args, { ghEditedAtImpl: async () => null, ...opts });
 
 const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 function readFixture(name) {
