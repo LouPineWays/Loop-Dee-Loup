@@ -210,3 +210,18 @@ test("action envelope: the handoff pipeline commands are allowed but a lifecycle
   assert.equal(bash("node tools/orchestration/session-entry-gate.mjs --control-issue 398"), "deny");
   assert.equal(bash("node tools/orchestration/next-review-transition-gate.mjs --control-issue 398"), "deny");
 });
+
+test("reserve --from-handoff rejects a malformed --control-issue instead of disabling the identity cross-check", () => {
+  const t = tmp();
+  try {
+    seed(t.dir, { ...GATE, checkoutBinding: BINDING });
+    for (const bad of ["398x", "0", "-5", "abc", ""]) {
+      const r = run(PREFLIGHT, ["--reserve-from-gate", "--from-handoff", "--repo", "o/r", "--control-issue", bad], t.dir);
+      assert.notEqual(r.status, 0, `--control-issue ${JSON.stringify(bad)} must fail closed`);
+      assert.equal(r.stdout, "");
+      assert.match(r.stderr, /control-issue/);
+    }
+  } finally {
+    t.cleanup();
+  }
+});

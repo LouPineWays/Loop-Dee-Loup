@@ -1109,7 +1109,18 @@ async function main() {
     // missing/stale/malformed/wrong-control-issue.
     const fromHandoff = Boolean(args["from-handoff"]);
     if (fromHandoff) {
-      const handoff = readVerdictHandoff({ controlIssue: toIntOrNull(args["control-issue"]) });
+      // A supplied but non-positive-integer --control-issue is an operational error, never an
+      // omitted flag: silently disabling the identity cross-check would fail open.
+      let crossCheck = null;
+      if (args["control-issue"] !== undefined) {
+        crossCheck = toIntOrNull(args["control-issue"]);
+        if (crossCheck === null || crossCheck <= 0) {
+          console.error(`pr-head-checkout-preflight.mjs: --control-issue must be a positive integer, got ${JSON.stringify(args["control-issue"])}`);
+          process.exit(1);
+          return;
+        }
+      }
+      const handoff = readVerdictHandoff({ controlIssue: crossCheck });
       if (!handoff.ok) {
         console.error(`pr-head-checkout-preflight.mjs: ${handoff.reason}`);
         process.exit(1);
@@ -1134,7 +1145,22 @@ async function main() {
     const { exitCode, output } = await reserveFromGate(gate, { repo: resolvedRepo });
     // Persist the enriched output (verdict + checkoutBinding, or the terminal
     // CHECKOUT_BINDING_UNVERIFIED verdict) so the formatter consumes exactly this reservation.
-    if (fromHandoff) persistVerdictHandoff(output);
+    if (fromHandoff && !persistVerdictHandoff(output)) {
+      // The enriched handoff could not be persisted: no later formatter can consume this
+      // reservation, so release it rather than report a successful handoff.
+      const token = output && output.checkoutBinding && output.checkoutBinding.token;
+      if (token) {
+        try {
+          const released = await releaseBinding({ token });
+          if (released.exitCode !== 0) console.error(`pr-head-checkout-preflight.mjs: reservation ${token} release failed: ${released.verdict}`);
+        } catch (err) {
+          console.error(`pr-head-checkout-preflight.mjs: reservation ${token} release threw: ${err.message}`);
+        }
+      }
+      console.error("pr-head-checkout-preflight.mjs: could not persist the enriched verdict handoff; reservation released");
+      process.exit(1);
+      return;
+    }
     console.log(JSON.stringify(output));
     process.exit(exitCode);
     return;
