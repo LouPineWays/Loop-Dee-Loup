@@ -220,7 +220,7 @@ export function verifyPrMerged(prView) {
 // flow or recovered by next-review-transition-gate.mjs's own reconciliation search — a
 // legitimately created Audit Issue from the required template always satisfies this, since every
 // one of its fields is `required: true`.
-export function verifyAuditIssueMatches(auditView, { mergeCommitOid, executionIssue }) {
+export function verifyAuditIssueMatches(auditView, { mergeCommitOid, executionIssue }, { requirePendingState = true } = {}) {
   if (!auditView || auditView.state !== "OPEN") {
     return {
       ok: false,
@@ -239,7 +239,7 @@ export function verifyAuditIssueMatches(auditView, { mergeCommitOid, executionIs
   }
   // Issue #788 (live #787 reproduction): identity-correct is not enough -- a not-yet-triggered
   // audit must also carry the template's pending initial Findings/Verdict/Next state.
-  const pending = checkPreAuditPendingState(body);
+  const pending = requirePendingState ? checkPreAuditPendingState(body) : { ok: true };
   if (!pending.ok) {
     return {
       ok: false,
@@ -512,7 +512,17 @@ export async function run(
       reason: `gh issue view failed for Audit Issue #${auditIssue}: ${err.message}`,
     });
   }
-  const auditMatchCheck = verifyAuditIssueMatches(auditView, { mergeCommitOid: mergedCheck.mergeCommitOid, executionIssue });
+  // Issue #788 (Stage 1 P2): the pre-audit pending-state requirement applies only before the
+  // audit has crossed the finalization boundary. A control Issue already Lifecycle: AUDIT whose
+  // Stage 2 pointer names this audit is an idempotent rerun; the audit may since have a legitimately
+  // recorded CLEAN/NOT CLEAN verdict with unchanged Findings/Next placeholders.
+  const alreadyFinalized =
+    currentLifecycle.trim() === "AUDIT" && (parseControlBullet(body, "Stage 2") ?? "").trim() === `#${auditIssue}`;
+  const auditMatchCheck = verifyAuditIssueMatches(
+    auditView,
+    { mergeCommitOid: mergedCheck.mergeCommitOid, executionIssue },
+    { requirePendingState: !alreadyFinalized },
+  );
   if (!auditMatchCheck.ok) {
     return unverified({ controlIssue, executionIssue, pr, auditIssue, reason: auditMatchCheck.reason });
   }

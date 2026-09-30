@@ -3103,6 +3103,10 @@ function renderedCanonicalAuditBody({
     "### Verdict",
     "",
     verdict,
+    "",
+    "### Next authorized action",
+    "",
+    "Pending audit.",
   ].join("\n");
 }
 
@@ -4057,31 +4061,35 @@ test("checkCloseWorkIssue: exits 1 when gh issue view fails", async () => {
 });
 
 // -- Issue #788 (live #571/#761/PR #786/Audit #787 reproduction) --------------------------------
-// A prematurely authored `Verdict: NOT CLEAN` on a still-pending audit (Findings/Next pending, no
-// record-verdict marker comment) is preparation-time malformed state, not a settled verdict.
+// The pre-audit pending-state invariant applies to every pre-trigger recognition surface
+// (finalization read-back, existing-issue reconciliation, trigger authorization). Post-response
+// verdict handling is unchanged: no comment-text provenance, conflicting verdicts fail closed.
 
 function pendingShapedAuditBody(verdict) {
   return (
-    `### Work issue\n\n#151\n\n### Exact merge commit\n\n${MERGE_COMMIT}\n\n` +
-    `### Findings\n\nPending — awaiting Stage 2 audit response.\n\n### Verdict\n\n${verdict}\n\n` +
-    `### Next authorized action\n\nPending audit.\n`
-  );
-}
+    `### Work issue
 
-function withRecordedMarker(inner) {
-  return async (path) => {
-    const base = await inner(path);
-    if (!path.includes("/issues/")) return base;
-    return [
-      ...base,
-      {
-        id: 999999,
-        body: "Recorded by `tools/review-watch/lifecycle-gate.mjs record-verdict`: this audit issue's durable `Verdict` field is now set.",
-        created_at: "2026-08-20T00:10:00Z",
-        user: { login: "someone" },
-      },
-    ];
-  };
+#151
+
+### Exact merge commit
+
+${MERGE_COMMIT}
+
+` +
+    `### Findings
+
+Pending — awaiting Stage 2 audit response.
+
+### Verdict
+
+${verdict}
+
+` +
+    `### Next authorized action
+
+Pending audit.
+`
+  );
 }
 
 test("checkPreAuditPendingState: canonical pending accepted; premature NOT CLEAN/CLEAN or non-pending Findings/Next rejected", () => {
@@ -4092,83 +4100,42 @@ test("checkPreAuditPendingState: canonical pending accepted; premature NOT CLEAN
     assert.match(r.errors.join(" "), /Verdict/);
   }
   assert.equal(checkPreAuditPendingState(pendingShapedAuditBody("PENDING").replace("Pending audit.", "None")).ok, false);
-  assert.equal(checkPreAuditPendingState("### Verdict\n\nPENDING\n").ok, false, "missing Findings/Next is not the canonical initial state");
+  assert.equal(checkPreAuditPendingState(["### Verdict", "", "PENDING", ""].join("\n")).ok, false, "missing Findings/Next is not the canonical initial state");
 });
 
-test("checkPostAudit (#787 shape): premature unrecorded NOT CLEAN + genuine completed CLEAN report -> REPORT_READY_TO_RECORD, not correction", async () => {
+test("findMatchingOpenAuditIssues: requirePendingState rejects the #787 shape but default (post-boundary) matching keeps it", () => {
+  const ident = { mergeCommitOid: MERGE_COMMIT, executionIssue: 440 };
+  const good = { number: 1, state: "OPEN", body: renderedCanonicalAuditBody() };
+  const bad = { number: 2, state: "OPEN", body: renderedCanonicalAuditBody({ verdict: "NOT CLEAN" }) };
+  assert.deepEqual(findMatchingOpenAuditIssues([good, bad], ident, { requirePendingState: true }).map((m) => m.number), [1]);
+  assert.deepEqual(findMatchingOpenAuditIssues([good, bad], ident).map((m) => m.number), [1, 2]);
+});
+
+test("checkPostAudit: untriggered #787-shaped audit (premature NOT CLEAN, no comments) never reaches TRIGGER_REQUIRED", async () => {
+  const body = renderedCanonicalAuditBody({ workIssue: 440, verdict: "NOT CLEAN" });
   const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) => (number === 160 ? { body, state: "OPEN" } : { body: "", state: "OPEN" }),
+      ghApiImpl: async () => [],
+      ghIssueListImpl: async () => [{ number: 160, title: "[Audit] x", body, state: "OPEN", createdAt: "2026-08-20T00:00:00Z" }],
+    },
+  );
+  assert.notEqual(result.state, "TRIGGER_REQUIRED");
+});
+
+test("checkRecordVerdict: a persisted NOT CLEAN conflicting with a CLEAN report stays fail-closed regardless of comments, never overwritten", async () => {
+  const editCalls = [];
+  const result = await checkRecordVerdict(
     { repo: "owner/repo", "audit-issue": 160 },
     {
       ghIssueViewImpl: async ({ number }) =>
         number === 160 ? { body: pendingShapedAuditBody("NOT CLEAN"), state: "OPEN" } : { body: "", state: "OPEN" },
       ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
-    },
-  );
-  assert.equal(result.state, "REPORT_READY_TO_RECORD");
-  assert.equal(result.reportEvidence.verdict, "CLEAN");
-});
-
-test("checkRecordVerdict (#787 recovery): premature NOT CLEAN is promoted to the report's CLEAN verdict without a manual edit", async () => {
-  const editCalls = [];
-  const commentCalls = [];
-  const result = await checkRecordVerdict(
-    { repo: "owner/repo", "audit-issue": 160 },
-    {
-      ghIssueViewImpl: async ({ number }) =>
-        number === 160 ? { body: pendingShapedAuditBody("NOT CLEAN"), state: "OPEN" } : { body: "", state: "OPEN" },
-      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
-      ghEditImpl: async (a) => editCalls.push(a),
-      ghCommentImpl: async (a) => commentCalls.push(a),
-    },
-  );
-  assert.equal(result.state, "RECORDED");
-  assert.equal(editCalls.length, 1);
-  assert.equal(parseStage2Verdict(editCalls[0].body), "CLEAN");
-  assert.equal(commentCalls.length, 1, "the marker comment is posted so the verdict is now a legitimately recorded one");
-});
-
-test("checkRecordVerdict (#787 recovery): premature NOT CLEAN with a matching NOT CLEAN report still records (marker posted) instead of looping as ALREADY_RECORDED", async () => {
-  const editCalls = [];
-  const commentCalls = [];
-  const result = await checkRecordVerdict(
-    { repo: "owner/repo", "audit-issue": 160 },
-    {
-      ghIssueViewImpl: async ({ number }) =>
-        number === 160 ? { body: pendingShapedAuditBody("NOT CLEAN"), state: "OPEN" } : { body: "", state: "OPEN" },
-      ghApiImpl: withCompletedAuditReport({ verdict: "NOT CLEAN" }),
-      ghEditImpl: async (a) => editCalls.push(a),
-      ghCommentImpl: async (a) => commentCalls.push(a),
-    },
-  );
-  assert.equal(result.state, "RECORDED");
-  assert.equal(commentCalls.length, 1);
-});
-
-test("checkPostAudit: a legitimately recorded NOT CLEAN (marker comment present) after a completed NOT CLEAN report stays a settled NOT CLEAN -> correction path", async () => {
-  const result = await checkPostAudit(
-    { repo: "owner/repo", "audit-issue": 160 },
-    {
-      ghIssueViewImpl: async ({ number }) =>
-        number === 160 ? { body: pendingShapedAuditBody("NOT CLEAN"), state: "OPEN" } : { body: "", state: "OPEN" },
-      ghApiImpl: withRecordedMarker(withCompletedAuditReport({ verdict: "NOT CLEAN" })),
-    },
-  );
-  assert.equal(result.state, "OK");
-  assert.equal(result.rawVerdict, "NOT CLEAN");
-});
-
-test("checkRecordVerdict: a marker-backed recorded NOT CLEAN conflicting with a later CLEAN report stays fail-closed, never overwritten", async () => {
-  const editCalls = [];
-  const result = await checkRecordVerdict(
-    { repo: "owner/repo", "audit-issue": 160 },
-    {
-      ghIssueViewImpl: async ({ number }) =>
-        number === 160 ? { body: pendingShapedAuditBody("NOT CLEAN"), state: "OPEN" } : { body: "", state: "OPEN" },
-      ghApiImpl: withRecordedMarker(withCompletedAuditReport({ verdict: "CLEAN" })),
       ghEditImpl: async (a) => editCalls.push(a),
       ghCommentImpl: async () => {},
     },
   );
-  assert.equal(result.state, "OK", "a settled recorded verdict is not REPORT_READY_TO_RECORD; nothing is promoted over it");
   assert.equal(editCalls.length, 0);
+  assert.notEqual(result.state, "RECORDED");
 });

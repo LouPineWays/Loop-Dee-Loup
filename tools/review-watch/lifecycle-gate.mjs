@@ -1015,7 +1015,12 @@ async function verifyAuditCanonicalForTrigger(
   } catch (err) {
     return { ok: false, reason: `gh api search failed while revalidating audit issue ${repo}#${auditIssue}: ${err.message}` };
   }
-  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid: mergeCommit, executionIssue: workIssueRef });
+  // Issue #788: an untriggered candidate must also carry the canonical pending state.
+  const matches = findMatchingOpenAuditIssues(
+    candidates,
+    { mergeCommitOid: mergeCommit, executionIssue: workIssueRef },
+    { requirePendingState: true },
+  );
   const matchNumbers = matches.map((m) => Number(m.number));
 
   if (matchNumbers.length !== 1 || matchNumbers[0] !== Number(auditIssue)) {
@@ -1122,12 +1127,7 @@ export async function checkPostAudit(
   const noWorkIssue = workIssueRef === "none";
   const workIssueNumber = noWorkIssue ? null : workIssueRef;
 
-  let rawVerdict;
-  try {
-    ({ rawVerdict } = await resolveEffectiveRawVerdict(auditIssueData.body ?? "", { repo, auditIssue }, ghApiImpl));
-  } catch (err) {
-    return { exitCode: 1, message: `gh api call failed while resolving the durable Verdict on ${repo}#${auditIssue}: ${err.message}` };
-  }
+  const rawVerdict = parseStage2Verdict(auditIssueData.body ?? "");
   const mergeCommit = parseMergeCommitRef(auditIssueData.body ?? "");
   const reviewedHeadCommit = parseReviewedHeadCommitRef(auditIssueData.body ?? "");
   const requestedChecklist = parseVerificationChecklistRef(auditIssueData.body ?? "");
@@ -1630,12 +1630,7 @@ export async function checkRecordVerdict(
   } catch (err) {
     return { exitCode: 1, message: `gh issue view failed for ${repo}#${auditIssue}: ${err.message}` };
   }
-  let currentRawVerdict;
-  try {
-    ({ rawVerdict: currentRawVerdict } = await resolveEffectiveRawVerdict(auditIssueData.body ?? "", { repo, auditIssue }, ghApiImpl));
-  } catch (err) {
-    return { exitCode: 1, message: `gh api call failed while resolving the durable Verdict on ${repo}#${auditIssue}: ${err.message}` };
-  }
+  const currentRawVerdict = parseStage2Verdict(auditIssueData.body ?? "");
 
   // Stage 1 review finding on this PR: the fresh issue-body read alone does not close the race
   // Codex identified, because postAudit.reportEvidence can already be stale by the time this
@@ -1723,12 +1718,7 @@ export async function checkRecordVerdict(
   } catch (err) {
     return { exitCode: 1, message: `gh issue view failed for ${repo}#${auditIssue}: ${err.message}` };
   }
-  let finalRawVerdict;
-  try {
-    ({ rawVerdict: finalRawVerdict } = await resolveEffectiveRawVerdict(finalAuditIssueData.body ?? "", { repo, auditIssue }, ghApiImpl));
-  } catch (err) {
-    return { exitCode: 1, message: `gh api call failed while resolving the durable Verdict on ${repo}#${auditIssue}: ${err.message}` };
-  }
+  const finalRawVerdict = parseStage2Verdict(finalAuditIssueData.body ?? "");
 
   // Stage 1 review finding on this PR (#491): reparsing only the verdict from
   // `finalAuditIssueData` is not enough on its own. A concurrent edit could change the
@@ -2063,8 +2053,12 @@ export function hasCanonicalAuditShape(body) {
 // pending; hasCanonicalAuditShape only checks the six upstream identity fields, so the malformed
 // candidate reached AUDIT_READY, was triggered, and a later zero-finding CLEAN report was routed to
 // STAGE2_CORRECTION_REQUIRED because the durable verdict was never PENDING. Used only at the
-// pre-trigger boundary (verifyAuditIssueMatches); never applied to a post-response audit, whose
-// verdict is legitimately CLEAN/NOT CLEAN.
+// pre-trigger surfaces only (verifyAuditIssueMatches before finalization, existing-issue
+// reconciliation, and trigger authorization); never applied once an audit has crossed the
+// finalization/trigger boundary, whose verdict is legitimately CLEAN/NOT CLEAN. record-verdict edits
+// only the Verdict field, so a recorded verdict is body-indistinguishable from preparation-time
+// corruption after the fact; no comment-text provenance is used, and a persisted conflicting verdict
+// stays fail-closed (CONFLICTING_VERDICT) with recovery by replacement/supersession.
 export function checkPreAuditPendingState(body) {
   const text = body ?? "";
   const isPending = (value) => value !== null && /^pending\b/i.test(value);
@@ -2076,32 +2070,6 @@ export function checkPreAuditPendingState(body) {
   const next = parseFormFieldBlock(text, "Next authorized action");
   if (!isPending(next)) errors.push(`"Next authorized action" is ${JSON.stringify(next)}, expected the pending placeholder`);
   return errors.length === 0 ? { ok: true } : { ok: false, errors };
-}
-
-// Issue #788 recovery. record-verdict is the only repository mechanism that legitimately promotes
-// a verdict onto an Audit Issue, and it always posts a comment beginning with this marker. A
-// NOT CLEAN durable verdict whose Findings/Next fields still read pending AND whose thread carries
-// no such marker comment was therefore never recorded by the lifecycle -- it is preparation-time
-// malformed state (the #787 shape), not a settled verdict. It is then read as unsettled (null), so
-// the existing #439 REPORT_READY_TO_RECORD / record-verdict path promotes the genuine report's own
-// verdict (which posts the marker). Only NOT CLEAN is normalized: a legacy CLEAN keeps its existing
-// closure semantics unchanged, and a marker-backed verdict stays a real recorded verdict whose
-// conflict with a later report remains fail-closed.
-const RECORD_VERDICT_COMMENT_MARKER = "Recorded by `tools/review-watch/lifecycle-gate.mjs record-verdict`";
-
-export async function resolveEffectiveRawVerdict(body, { repo, auditIssue }, ghApiImpl) {
-  const rawVerdict = parseStage2Verdict(body ?? "");
-  if (rawVerdict !== "NOT CLEAN") return { rawVerdict, prematureVerdict: null };
-  const findings = parseFormFieldBlock(body ?? "", "Findings");
-  const next = parseFormFieldBlock(body ?? "", "Next authorized action");
-  if (!/^pending\b/i.test(findings ?? "") || !/^pending\b/i.test(next ?? "")) {
-    return { rawVerdict, prematureVerdict: null };
-  }
-  const commentsPath = endpointsFor("issue", repo, auditIssue).find((e) => e.name === "issue-comments").path;
-  const comments = await ghApiImpl(commentsPath);
-  const recorded = (Array.isArray(comments) ? comments : []).some((c) => String(c?.body ?? "").includes(RECORD_VERDICT_COMMENT_MARKER));
-  if (recorded) return { rawVerdict, prematureVerdict: null };
-  return { rawVerdict: null, prematureVerdict: "NOT CLEAN" };
 }
 
 // Pure. Given a list of `[Audit] in:title` search candidates (the `{ number, title, body, state,
@@ -2126,11 +2094,12 @@ export async function resolveEffectiveRawVerdict(body, { repo, auditIssue }, ghA
 // revalidation (Stage 1 review finding P2 on PR #730, the TOCTOU gap) share the exact same
 // matching semantics rather than each maintaining a second, competing definition of "audit
 // ready" that could silently drift apart.
-export function findMatchingOpenAuditIssues(candidates, { mergeCommitOid, executionIssue }) {
+export function findMatchingOpenAuditIssues(candidates, { mergeCommitOid, executionIssue }, { requirePendingState = false } = {}) {
   const expectedWorkIssue = executionIssue === "none" ? "none" : executionIssue;
   return (candidates ?? []).filter((candidate) => {
     if (candidate.state !== "OPEN") return false;
     if (!hasCanonicalAuditShape(candidate.body ?? "")) return false;
+    if (requirePendingState && !checkPreAuditPendingState(candidate.body ?? "").ok) return false;
     const candidateMergeCommit = parseMergeCommitRef(candidate.body ?? "");
     if (!candidateMergeCommit || candidateMergeCommit.toLowerCase() !== String(mergeCommitOid).toLowerCase()) return false;
     return parseWorkIssueRef(candidate.body ?? "") === expectedWorkIssue;

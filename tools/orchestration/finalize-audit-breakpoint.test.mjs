@@ -1096,3 +1096,42 @@ test("verifyAuditIssueMatches (#788): rejects the #787 shape - pending Findings/
     true,
   );
 });
+
+// Issue #788 Stage 1 P2: the pre-audit pending-state requirement must not break an idempotent rerun
+// once the audit has crossed the finalization boundary and later recorded a verdict (record-verdict
+// edits only the Verdict field, so Findings/Next placeholders stay unchanged).
+test("run() (#788): idempotent rerun against an already-AUDIT control whose audit later recorded CLEAN/NOT CLEAN stays FINALIZED", async () => {
+  for (const verdict of ["CLEAN", "NOT CLEAN"]) {
+    const view = { ...MATCHING_AUDIT_VIEW, body: MATCHING_AUDIT_VIEW.body.replace("\nPENDING\n", `\n${verdict}\n`) };
+    assert.notEqual(view.body, MATCHING_AUDIT_VIEW.body);
+    const result = await run(
+      { repo: "o/r", controlIssue: 445, executionIssue: 440, pr: 558, auditIssue: 559 },
+      {
+        ghIssueViewImpl: async () => ALREADY_AUDIT_BODY,
+        ghPrViewImpl: async () => MERGED_PR_VIEW,
+        ghAuditIssueViewImpl: async () => view,
+        writeControlSnapshotImpl: async ({ proposedBody }) => ({ exitCode: 0, state: "WRITTEN", proposedBody }),
+      },
+    );
+    assert.equal(result.state, "FINALIZED", verdict);
+  }
+});
+
+test("run() (#788): first finalization (control still REVIEW) of the #787 shape is still rejected and never writes", async () => {
+  const view = { ...MATCHING_AUDIT_VIEW, body: MATCHING_AUDIT_VIEW.body.replace("\nPENDING\n", "\nNOT CLEAN\n") };
+  let wrote = false;
+  const result = await run(
+    { repo: "o/r", controlIssue: 445, executionIssue: 440, pr: 558, auditIssue: 559 },
+    {
+      ghIssueViewImpl: async () => REVIEW_BODY,
+      ghPrViewImpl: async () => MERGED_PR_VIEW,
+      ghAuditIssueViewImpl: async () => view,
+      writeControlSnapshotImpl: async () => {
+        wrote = true;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.state, "AUDIT_BREAKPOINT_UNVERIFIED");
+  assert.equal(wrote, false);
+});

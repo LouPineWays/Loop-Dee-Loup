@@ -1742,7 +1742,7 @@ test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 referenc
 // canonical-complete, so this fixture now includes all six required template fields by default and
 // takes independent `omitMergedPr`/`omitAuditScope`/`omitVerificationChecklist` flags to reproduce
 // a candidate missing exactly one of them.
-function auditIssueBody({ workIssue, mergeCommit, incomplete = false, omitMergedPr = false, omitAuditScope = false, omitVerificationChecklist = false }) {
+function auditIssueBody({ workIssue, mergeCommit, incomplete = false, omitMergedPr = false, omitAuditScope = false, omitVerificationChecklist = false, verdict = "PENDING" }) {
   const fields = [];
   if (!omitMergedPr) {
     fields.push("### Merged PR", "", "https://github.com/o/r/pull/376", "");
@@ -1757,6 +1757,9 @@ function auditIssueBody({ workIssue, mergeCommit, incomplete = false, omitMerged
   if (!omitVerificationChecklist) {
     fields.push("### Verification checklist", "", "1. Confirm the change works as described.", "");
   }
+  // Issue #788: a genuinely prepared, untriggered Audit Issue carries the template's pending state.
+  fields.push("### Findings", "", "Pending — awaiting Stage 2 audit response.", "", "### Verdict", "", verdict, "");
+  fields.push("### Next authorized action", "", "Pending audit.", "");
   return fields.join("\n");
 }
 
@@ -3668,4 +3671,20 @@ test("runNextReviewTransitionGate: a reconciled correction PR with no usable hea
   assert.equal(result.state, "AMBIGUOUS");
   assert.match(result.reason, /644/);
   assert.match(result.reason, /headRefOid/);
+});
+
+test("reconcileExistingStage2AuditIssue (#788): a #787-shaped candidate (premature NOT CLEAN) is not 'already prepared' -> NONE_FOUND", async () => {
+  const bad = auditIssueBody({ workIssue: "#375", mergeCommit: MERGE_COMMIT_723, verdict: "NOT CLEAN" });
+  const good = auditIssueBody({ workIssue: "#375", mergeCommit: MERGE_COMMIT_723 });
+  const none = await reconcileExistingStage2AuditIssue(
+    { repo: "o/r", mergeCommitOid: MERGE_COMMIT_723, executionIssue: 375 },
+    { ghIssueListImpl: async () => [{ number: 727, state: "OPEN", body: bad }] },
+  );
+  assert.equal(none.state, "NONE_FOUND");
+  const found = await reconcileExistingStage2AuditIssue(
+    { repo: "o/r", mergeCommitOid: MERGE_COMMIT_723, executionIssue: 375 },
+    { ghIssueListImpl: async () => [{ number: 727, state: "OPEN", body: bad }, { number: 728, state: "OPEN", body: good }] },
+  );
+  assert.equal(found.state, "FOUND");
+  assert.equal(found.auditIssue, 728);
 });
