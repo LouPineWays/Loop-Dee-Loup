@@ -8,7 +8,8 @@
 // repository qualification, form-field anchoring, CLEAN-verdict provenance, nonnumeric
 // --issue, and partial recovery failure).
 
-import test from "node:test";
+import { ghSpawnAttempts } from "./no-gh-guard.mjs";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -41,6 +42,10 @@ import {
   validateAuditVerdictRewrite,
 } from "./lifecycle-gate.mjs";
 import { triggerCommentBody } from "./trigger.mjs";
+
+after(() => {
+  assert.deepEqual(ghSpawnAttempts(), [], "unit suite must make zero real gh invocations");
+});
 
 // Hermetic default: edit-history lookups (issue #794) must never reach the real `gh` CLI.
 const checkRecordVerdict = (args, opts = {}) =>
@@ -3006,6 +3011,7 @@ test("checkCloseAudit: a comment-post failure after a successful close still rep
     {
       ghIssueViewImpl,
       ghApiImpl: withCompletedAuditReport(),
+      ghIssueListImpl: async () => [],
       ghCloseImpl: async () => {},
       ghCommentImpl: async () => {
         throw new Error("transient network error");
