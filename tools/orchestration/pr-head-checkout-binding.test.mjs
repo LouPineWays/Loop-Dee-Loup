@@ -35,6 +35,7 @@ import {
   verifyBinding,
   releaseBinding,
   reserveFromGate,
+  reserveAndPersistHandoff,
   parseBindingLockReason,
   formatBindingLockReason,
   SELF_SCRIPT_PATH,
@@ -596,4 +597,59 @@ test("reserveFromGate: STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT fails closed t
   assert.equal(out.output.stopAfter, true);
   assert.deepEqual(out.output.actionEnvelope, getActionEnvelope("CHECKOUT_BINDING_UNVERIFIED"));
   assert.equal(out.output.actionEnvelope.mode, "none");
+});
+
+// Issue #761 (Stage 2 audit #785 finding): a fresh reservation whose enriched handoff cannot be
+// persisted must be released completely, never left as a locked worktree no formatter can consume.
+test("reserveAndPersistHandoff: persistence failure after a fresh reservation releases it (nonzero, no handoff, no worktree, no lock)", async (t) => {
+  const fx = makeFixture(t);
+  const gate = { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, pr: PR, issue: 689, controlIssue: 514, correctionReason: "findings" };
+  const before = worktreeCount(fx.primary);
+  let reservedPath = null;
+  let persisted = null;
+  const out = await reserveAndPersistHandoff(
+    gate,
+    { repo: "o/r", cwd: fx.primary, fromHandoff: true },
+    {
+      ghPrViewImpl: fx.ghPrViewImpl,
+      tokenImpl: () => "tokfail1",
+      persist: (o) => {
+        // The reservation genuinely exists (locked worktree on disk) when persistence is attempted.
+        reservedPath = o.checkoutBinding.path;
+        assert.ok(existsSync(reservedPath));
+        assert.ok(lockReasonOf(fx.primary, reservedPath));
+        persisted = o;
+        return false;
+      },
+    },
+  );
+  assert.equal(out.persistFailed, true);
+  assert.notEqual(out.exitCode, 0);
+  assert.ok(persisted, "persist was attempted after the fresh reservation");
+  // Cleanup observed, not just an error message: worktree removed, lock gone, count restored.
+  assert.equal(existsSync(reservedPath), false);
+  assert.equal(worktreeCount(fx.primary), before);
+  assert.equal(git(fx.primary, "worktree", "list", "--porcelain").includes("tokfail1"), false);
+});
+
+test("reserveAndPersistHandoff: successful persistence keeps the reservation; non-handoff mode never persists", async (t) => {
+  const fx = makeFixture(t);
+  const gate = { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, pr: PR, issue: 689, controlIssue: 514, correctionReason: "findings" };
+  let calls = 0;
+  const ok = await reserveAndPersistHandoff(
+    gate,
+    { repo: "o/r", cwd: fx.primary, fromHandoff: true },
+    { ghPrViewImpl: fx.ghPrViewImpl, tokenImpl: () => "tokokay1", persist: () => (calls++, true) },
+  );
+  assert.equal(ok.persistFailed, false);
+  assert.equal(ok.exitCode, 0);
+  assert.equal(calls, 1);
+  assert.ok(existsSync(ok.output.checkoutBinding.path));
+  const stdin = await reserveAndPersistHandoff(
+    gate,
+    { repo: "o/r", cwd: fx.primary },
+    { ghPrViewImpl: fx.ghPrViewImpl, tokenImpl: () => "tokokay2", persist: () => (calls++, false) },
+  );
+  assert.equal(stdin.persistFailed, false);
+  assert.equal(calls, 1);
 });

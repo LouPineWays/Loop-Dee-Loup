@@ -895,6 +895,31 @@ export async function reserveFromGate(gate, { repo, cwd } = {}, deps = {}) {
   return { exitCode: 0, output: { ...gate, checkoutBinding: { path, token, sha, branch, mode, verdict, scriptPath } } };
 }
 
+// Issue #761: reserve, then (in `--from-handoff` mode) persist the enriched output (verdict +
+// `checkoutBinding`, or the terminal CHECKOUT_BINDING_UNVERIFIED verdict) so the formatter
+// consumes exactly this reservation. If the enriched handoff cannot be persisted, no later
+// formatter can consume a fresh reservation, so it is released rather than reported as a
+// successful handoff (`persistFailed: true`; the caller exits nonzero). Extracted from `main` so
+// the cleanup path is deterministically testable against real git with an injected persist.
+export async function reserveAndPersistHandoff(gate, { repo, cwd, fromHandoff = false } = {}, deps = {}) {
+  const { persist = persistVerdictHandoff, release = releaseBinding, ...reserveDeps } = deps;
+  const { exitCode, output } = await reserveFromGate(gate, { repo, cwd }, reserveDeps);
+  if (fromHandoff && !persist(output)) {
+    const token = output && output.checkoutBinding && output.checkoutBinding.token;
+    if (token) {
+      try {
+        const released = await release({ token, cwd });
+        if (released.exitCode !== 0) console.error(`pr-head-checkout-preflight.mjs: reservation ${token} release failed: ${released.verdict}`);
+      } catch (err) {
+        console.error(`pr-head-checkout-preflight.mjs: reservation ${token} release threw: ${err.message}`);
+      }
+    }
+    console.error("pr-head-checkout-preflight.mjs: could not persist the enriched verdict handoff; reservation released");
+    return { exitCode: 1, output, persistFailed: true };
+  }
+  return { exitCode, output, persistFailed: false };
+}
+
 // ---------------------------------------------------------------------------------------------
 // CLI-facing run(): resolves live state, classifies, and performs exactly the one safe
 // mutation ("reuse and reconcile" or "create") each success verdict authorizes.
@@ -1142,22 +1167,8 @@ async function main() {
         return;
       }
     }
-    const { exitCode, output } = await reserveFromGate(gate, { repo: resolvedRepo });
-    // Persist the enriched output (verdict + checkoutBinding, or the terminal
-    // CHECKOUT_BINDING_UNVERIFIED verdict) so the formatter consumes exactly this reservation.
-    if (fromHandoff && !persistVerdictHandoff(output)) {
-      // The enriched handoff could not be persisted: no later formatter can consume this
-      // reservation, so release it rather than report a successful handoff.
-      const token = output && output.checkoutBinding && output.checkoutBinding.token;
-      if (token) {
-        try {
-          const released = await releaseBinding({ token });
-          if (released.exitCode !== 0) console.error(`pr-head-checkout-preflight.mjs: reservation ${token} release failed: ${released.verdict}`);
-        } catch (err) {
-          console.error(`pr-head-checkout-preflight.mjs: reservation ${token} release threw: ${err.message}`);
-        }
-      }
-      console.error("pr-head-checkout-preflight.mjs: could not persist the enriched verdict handoff; reservation released");
+    const { exitCode, output, persistFailed } = await reserveAndPersistHandoff(gate, { repo: resolvedRepo, fromHandoff });
+    if (persistFailed) {
       process.exit(1);
       return;
     }
