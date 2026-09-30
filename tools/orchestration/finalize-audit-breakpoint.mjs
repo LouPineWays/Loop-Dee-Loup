@@ -110,6 +110,7 @@ import {
   parseMergeCommitRef,
   parseWorkIssueRef,
   hasCanonicalAuditShape,
+  checkPreAuditPendingState,
   findMatchingOpenAuditIssues,
   defaultGhIssueList,
 } from "../review-watch/lifecycle-gate.mjs";
@@ -234,6 +235,19 @@ export function verifyAuditIssueMatches(auditView, { mergeCommitOid, executionIs
         "Audit Issue does not have the complete canonical Stage 2 audit-control-issue shape (missing one or more " +
         'of Merged PR / Work issue / Exact merge commit / "Stage 1 inline review disposition" / Audit scope / ' +
         "Verification checklist) — an incomplete issue must never authorize control projection or a reviewer trigger",
+    };
+  }
+  // Issue #788 (live #787 reproduction): identity-correct is not enough -- a not-yet-triggered
+  // audit must also carry the template's pending initial Findings/Verdict/Next state.
+  const pending = checkPreAuditPendingState(body);
+  if (!pending.ok) {
+    return {
+      ok: false,
+      reason:
+        `Audit Issue's pre-audit mutable state is not the canonical pending initial state (${pending.errors.join("; ")}) - ` +
+        'restore Findings to "Pending — awaiting Stage 2 audit response.", Verdict to "PENDING", and Next authorized ' +
+        'action to "Pending audit." on the still-untriggered issue; a candidate with a premature verdict must never ' +
+        "authorize control projection or a reviewer trigger",
     };
   }
   const auditMergeCommit = parseMergeCommitRef(body);

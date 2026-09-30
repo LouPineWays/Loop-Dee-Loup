@@ -1122,7 +1122,12 @@ export async function checkPostAudit(
   const noWorkIssue = workIssueRef === "none";
   const workIssueNumber = noWorkIssue ? null : workIssueRef;
 
-  const rawVerdict = parseStage2Verdict(auditIssueData.body ?? "");
+  let rawVerdict;
+  try {
+    ({ rawVerdict } = await resolveEffectiveRawVerdict(auditIssueData.body ?? "", { repo, auditIssue }, ghApiImpl));
+  } catch (err) {
+    return { exitCode: 1, message: `gh api call failed while resolving the durable Verdict on ${repo}#${auditIssue}: ${err.message}` };
+  }
   const mergeCommit = parseMergeCommitRef(auditIssueData.body ?? "");
   const reviewedHeadCommit = parseReviewedHeadCommitRef(auditIssueData.body ?? "");
   const requestedChecklist = parseVerificationChecklistRef(auditIssueData.body ?? "");
@@ -1625,7 +1630,12 @@ export async function checkRecordVerdict(
   } catch (err) {
     return { exitCode: 1, message: `gh issue view failed for ${repo}#${auditIssue}: ${err.message}` };
   }
-  const currentRawVerdict = parseStage2Verdict(auditIssueData.body ?? "");
+  let currentRawVerdict;
+  try {
+    ({ rawVerdict: currentRawVerdict } = await resolveEffectiveRawVerdict(auditIssueData.body ?? "", { repo, auditIssue }, ghApiImpl));
+  } catch (err) {
+    return { exitCode: 1, message: `gh api call failed while resolving the durable Verdict on ${repo}#${auditIssue}: ${err.message}` };
+  }
 
   // Stage 1 review finding on this PR: the fresh issue-body read alone does not close the race
   // Codex identified, because postAudit.reportEvidence can already be stale by the time this
@@ -1713,7 +1723,12 @@ export async function checkRecordVerdict(
   } catch (err) {
     return { exitCode: 1, message: `gh issue view failed for ${repo}#${auditIssue}: ${err.message}` };
   }
-  const finalRawVerdict = parseStage2Verdict(finalAuditIssueData.body ?? "");
+  let finalRawVerdict;
+  try {
+    ({ rawVerdict: finalRawVerdict } = await resolveEffectiveRawVerdict(finalAuditIssueData.body ?? "", { repo, auditIssue }, ghApiImpl));
+  } catch (err) {
+    return { exitCode: 1, message: `gh api call failed while resolving the durable Verdict on ${repo}#${auditIssue}: ${err.message}` };
+  }
 
   // Stage 1 review finding on this PR (#491): reparsing only the verdict from
   // `finalAuditIssueData` is not enough on its own. A concurrent edit could change the
@@ -2038,6 +2053,55 @@ export function hasCanonicalAuditShape(body) {
     parseFormFieldBlock(text, "Audit scope") !== null &&
     parseFormFieldBlock(text, "Verification checklist") !== null
   );
+}
+
+// Pure. Issue #788 (live #571/#761/PR #786/Audit #787 reproduction): the semantic *initial* state of
+// the audit-control-issue template's parser-sensitive mutable fields. A freshly prepared Audit Issue
+// must render "Findings" pending, "Verdict" exactly PENDING (the dropdown's `default: 0`), and
+// "Next authorized action" pending -- exactly what the template defaults to. #787's preparation
+// worker hand-authored the body with a premature `Verdict: NOT CLEAN` while Findings/Next still read
+// pending; hasCanonicalAuditShape only checks the six upstream identity fields, so the malformed
+// candidate reached AUDIT_READY, was triggered, and a later zero-finding CLEAN report was routed to
+// STAGE2_CORRECTION_REQUIRED because the durable verdict was never PENDING. Used only at the
+// pre-trigger boundary (verifyAuditIssueMatches); never applied to a post-response audit, whose
+// verdict is legitimately CLEAN/NOT CLEAN.
+export function checkPreAuditPendingState(body) {
+  const text = body ?? "";
+  const isPending = (value) => value !== null && /^pending\b/i.test(value);
+  const errors = [];
+  const findings = parseFormFieldBlock(text, "Findings");
+  if (!isPending(findings)) errors.push(`"Findings" is ${JSON.stringify(findings)}, expected the pending placeholder`);
+  const verdict = parseFormField(text, "Verdict");
+  if (verdict !== "PENDING") errors.push(`"Verdict" is ${JSON.stringify(verdict)}, expected "PENDING"`);
+  const next = parseFormFieldBlock(text, "Next authorized action");
+  if (!isPending(next)) errors.push(`"Next authorized action" is ${JSON.stringify(next)}, expected the pending placeholder`);
+  return errors.length === 0 ? { ok: true } : { ok: false, errors };
+}
+
+// Issue #788 recovery. record-verdict is the only repository mechanism that legitimately promotes
+// a verdict onto an Audit Issue, and it always posts a comment beginning with this marker. A
+// NOT CLEAN durable verdict whose Findings/Next fields still read pending AND whose thread carries
+// no such marker comment was therefore never recorded by the lifecycle -- it is preparation-time
+// malformed state (the #787 shape), not a settled verdict. It is then read as unsettled (null), so
+// the existing #439 REPORT_READY_TO_RECORD / record-verdict path promotes the genuine report's own
+// verdict (which posts the marker). Only NOT CLEAN is normalized: a legacy CLEAN keeps its existing
+// closure semantics unchanged, and a marker-backed verdict stays a real recorded verdict whose
+// conflict with a later report remains fail-closed.
+const RECORD_VERDICT_COMMENT_MARKER = "Recorded by `tools/review-watch/lifecycle-gate.mjs record-verdict`";
+
+export async function resolveEffectiveRawVerdict(body, { repo, auditIssue }, ghApiImpl) {
+  const rawVerdict = parseStage2Verdict(body ?? "");
+  if (rawVerdict !== "NOT CLEAN") return { rawVerdict, prematureVerdict: null };
+  const findings = parseFormFieldBlock(body ?? "", "Findings");
+  const next = parseFormFieldBlock(body ?? "", "Next authorized action");
+  if (!/^pending\b/i.test(findings ?? "") || !/^pending\b/i.test(next ?? "")) {
+    return { rawVerdict, prematureVerdict: null };
+  }
+  const commentsPath = endpointsFor("issue", repo, auditIssue).find((e) => e.name === "issue-comments").path;
+  const comments = await ghApiImpl(commentsPath);
+  const recorded = (Array.isArray(comments) ? comments : []).some((c) => String(c?.body ?? "").includes(RECORD_VERDICT_COMMENT_MARKER));
+  if (recorded) return { rawVerdict, prematureVerdict: null };
+  return { rawVerdict: null, prematureVerdict: "NOT CLEAN" };
 }
 
 // Pure. Given a list of `[Audit] in:title` search candidates (the `{ number, title, body, state,

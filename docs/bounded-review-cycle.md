@@ -127,6 +127,19 @@ This recovery is scoped narrowly to the observed correction-satisfied path — i
 
 ## Stage 2 preparation worker
 
+Issue #788 (live #571/#761/PR #786/Audit #787): a not-yet-triggered Audit Issue must carry the
+template's pending initial state — `Findings` pending, `Verdict: PENDING`, `Next authorized
+action` pending — never a copied predecessor verdict (a correction audit's own "responding to a prior
+NOT CLEAN verdict" prose is disposition text, not a Verdict value). `verify-audit-ready.mjs` and
+`finalize-audit-breakpoint.mjs` reject a candidate whose pre-audit state is contradictory
+(`checkPreAuditPendingState`, `lifecycle-gate.mjs`), so it can never reach `AUDIT_READY`, control
+projection, or the reviewer trigger; restore the three fields on the still-untriggered issue and
+re-verify. Recovery for an already-triggered audit of that shape (#787): `checkPostAudit`/`record-verdict`
+read a durable `NOT CLEAN` whose Findings/Next are still pending and whose thread has no
+`record-verdict` marker comment as unsettled, so a genuine completed report deterministically reaches
+`STAGE2_REPORT_READY_TO_RECORD` (#439) instead of `STAGE2_CORRECTION_REQUIRED`; a marker-backed recorded
+verdict that conflicts with a later report stays fail-closed.
+
 Issue #718: the top-level controller must stay a compact lifecycle switchboard even at the
 merge → Stage 2 boundary. Deterministic control work (re-running the authoritative gate, merging
 an already-authorized PR, recording the exact merge identity, projecting compact control state,
