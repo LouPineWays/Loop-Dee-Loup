@@ -708,6 +708,13 @@ export const HARD_MODULE_DEPENDENCIES = [
   // this edge, a consumer's unmanaged stage1-clean-reaction.mjs would be preserved while the
   // managed gate is replaced, so update would report success while the gate fails at import time.
   { dest: "tools/review-watch/stage1-gate.mjs", dependsOnDest: "tools/review-watch/stage1-clean-reaction.mjs" },
+  // Issue #779 Stage 1 review finding (P2, on PR #782): all three managed gate entrypoints
+  // hard-import enforce/checkControlPlaneFreshness from control-plane-freshness.mjs. Without
+  // these edges an unmanaged, preserved control-plane-freshness.mjs would let install/update
+  // report success while the gates fail at ESM load time.
+  { dest: "tools/orchestration/ready-dispatch-gate.mjs", dependsOnDest: "tools/orchestration/control-plane-freshness.mjs" },
+  { dest: "tools/orchestration/next-review-transition-gate.mjs", dependsOnDest: "tools/orchestration/control-plane-freshness.mjs" },
+  { dest: "tools/orchestration/session-entry-gate.mjs", dependsOnDest: "tools/orchestration/control-plane-freshness.mjs" },
 ];
 
 // Pure. Given one install/update run's final toInstall/toSkip classification, returns one

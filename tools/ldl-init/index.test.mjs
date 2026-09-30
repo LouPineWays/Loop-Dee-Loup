@@ -1517,3 +1517,20 @@ test("HARD_MODULE_DEPENDENCIES: covers stage1-gate.mjs -> stage1-clean-reaction.
   assert.equal(collisions.length, 1);
   assert.equal(collisions[0].dest, dep);
 });
+
+test("HARD_MODULE_DEPENDENCIES: covers all three gate importers of control-plane-freshness.mjs (#779)", () => {
+  const dep = "tools/orchestration/control-plane-freshness.mjs";
+  for (const dest of [
+    "tools/orchestration/ready-dispatch-gate.mjs",
+    "tools/orchestration/next-review-transition-gate.mjs",
+    "tools/orchestration/session-entry-gate.mjs",
+  ]) {
+    assert.ok(HARD_MODULE_DEPENDENCIES.some((e) => e.dest === dest && e.dependsOnDest === dep), dest);
+    const collisions = findHardDependencyCollisions({
+      toInstall: [{ destRel: dest, content: Buffer.from("x") }],
+      toSkip: [{ dest: dep, reason: "unmanaged" }],
+    });
+    assert.equal(collisions.length, 1);
+    assert.equal(collisions[0].dest, dep);
+  }
+});

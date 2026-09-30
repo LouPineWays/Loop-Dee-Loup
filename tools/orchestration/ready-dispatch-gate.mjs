@@ -187,6 +187,7 @@
 //
 // Tests: node --test tools/orchestration/ready-dispatch-gate.test.mjs
 
+import { enforceControlPlaneFreshness } from "./control-plane-freshness.mjs";
 import { execFileSync } from "node:child_process";
 // Deliberate, documented exception to this file's usual practice of not importing
 // tools/review-watch internals (issue #407 unit 407-B, Shared Contract item 8) — the same
@@ -2247,8 +2248,11 @@ async function main() {
   // new one, so a run that errors out below never leaves an old side-channel entry behind for
   // a later, unrelated command to mistakenly consume.
   clearLastGateVerdict();
+  // Issue #779: refuse to interpret lifecycle state with a stale controller checkout.
+  const controlPlaneWitness = enforceControlPlaneFreshness();
   const args = parseArgs(process.argv.slice(2));
   const result = await checkReadyDispatch({ repo: args.repo, controlIssue: args["control-issue"] });
+  if (controlPlaneWitness) result.controlPlaneWitness = controlPlaneWitness;
   if (result.exitCode === 1) {
     console.error(result.message);
     process.exit(1);
