@@ -128,8 +128,8 @@ This recovery is scoped narrowly to the observed correction-satisfied path — i
 ## Stage 2 preparation worker
 
 Issue #788 (live #571/#761/PR #786/Audit #787): a not-yet-triggered Audit Issue must carry the
-template's pending initial state — `Findings` pending, `Verdict: PENDING`, `Next authorized
-action` pending — never a copied predecessor verdict (a correction audit's own "responding to a prior
+template's pending initial state — `Findings` exactly `Pending — awaiting Stage 2 audit response.`, `Verdict: PENDING`, `Next authorized
+action` exactly `Pending audit.` (complete-field equality, never a "Pending" prefix match) — never a copied predecessor verdict (a correction audit's own "responding to a prior
 NOT CLEAN verdict" prose is disposition text, not a Verdict value). Every pre-trigger recognition surface requires that pending state: `verify-audit-ready.mjs` and
 `finalize-audit-breakpoint.mjs` (first finalization) reject a candidate whose pre-audit state is contradictory
 (`checkPreAuditPendingState`, `lifecycle-gate.mjs`); existing-issue reconciliation

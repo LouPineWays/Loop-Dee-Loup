@@ -2059,16 +2059,21 @@ export function hasCanonicalAuditShape(body) {
 // only the Verdict field, so a recorded verdict is body-indistinguishable from preparation-time
 // corruption after the fact; no comment-text provenance is used, and a persisted conflicting verdict
 // stays fail-closed (CONFLICTING_VERDICT) with recovery by replacement/supersession.
+const PRE_AUDIT_PENDING_FINDINGS = "Pending — awaiting Stage 2 audit response.";
+const PRE_AUDIT_PENDING_NEXT = "Pending audit.";
 export function checkPreAuditPendingState(body) {
   const text = body ?? "";
-  const isPending = (value) => value !== null && /^pending\b/i.test(value);
+  // Full-field equality against the template's canonical initial values (whitespace-normalized), not a
+  // "starts with Pending" prefix match: Stage 2 audit #790 showed a prefix match lets contradictory
+  // trailing text or alternate "Pending ..." values pass.
+  const isPending = (value, canonical) => value !== null && value.replace(/\s+/g, " ").trim() === canonical;
   const errors = [];
   const findings = parseFormFieldBlock(text, "Findings");
-  if (!isPending(findings)) errors.push(`"Findings" is ${JSON.stringify(findings)}, expected the pending placeholder`);
+  if (!isPending(findings, PRE_AUDIT_PENDING_FINDINGS)) errors.push(`"Findings" is ${JSON.stringify(findings)}, expected ${JSON.stringify(PRE_AUDIT_PENDING_FINDINGS)}`);
   const verdict = parseFormField(text, "Verdict");
   if (verdict !== "PENDING") errors.push(`"Verdict" is ${JSON.stringify(verdict)}, expected "PENDING"`);
   const next = parseFormFieldBlock(text, "Next authorized action");
-  if (!isPending(next)) errors.push(`"Next authorized action" is ${JSON.stringify(next)}, expected the pending placeholder`);
+  if (!isPending(next, PRE_AUDIT_PENDING_NEXT)) errors.push(`"Next authorized action" is ${JSON.stringify(next)}, expected ${JSON.stringify(PRE_AUDIT_PENDING_NEXT)}`);
   return errors.length === 0 ? { ok: true } : { ok: false, errors };
 }
 

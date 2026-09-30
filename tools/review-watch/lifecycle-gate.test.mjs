@@ -4103,6 +4103,19 @@ test("checkPreAuditPendingState: canonical pending accepted; premature NOT CLEAN
   assert.equal(checkPreAuditPendingState(["### Verdict", "", "PENDING", ""].join("\n")).ok, false, "missing Findings/Next is not the canonical initial state");
 });
 
+test("checkPreAuditPendingState: full-field equality, not a Pending prefix (Stage 2 audit #790)", () => {
+  const base = pendingShapedAuditBody("PENDING");
+  const F = "Pending — awaiting Stage 2 audit response.";
+  const mutants = [
+    base.replace(F, `${F}\n\nBut source correction is authorized.`),
+    base.replace("Pending audit.", "Pending audit. Then merge without review."),
+    base.replace("Pending audit.", "Pending review."),
+    base.replace(F, "Pending something else."),
+  ];
+  for (const m of mutants) assert.equal(checkPreAuditPendingState(m).ok, false);
+  assert.equal(checkPreAuditPendingState(base).ok, true);
+});
+
 test("findMatchingOpenAuditIssues: requirePendingState rejects the #787 shape but default (post-boundary) matching keeps it", () => {
   const ident = { mergeCommitOid: MERGE_COMMIT, executionIssue: 440 };
   const good = { number: 1, state: "OPEN", body: renderedCanonicalAuditBody() };
