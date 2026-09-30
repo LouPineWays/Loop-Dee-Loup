@@ -1534,3 +1534,14 @@ test("HARD_MODULE_DEPENDENCIES: covers all three gate importers of control-plane
     assert.equal(collisions[0].dest, dep);
   }
 });
+
+test("HARD_MODULE_DEPENDENCIES: covers the three importers of verdict-handoff.mjs (#761)", () => {
+  const dep = "tools/orchestration/verdict-handoff.mjs";
+  for (const dest of [
+    "tools/orchestration/action-envelope-hook.mjs",
+    "tools/orchestration/pr-head-checkout-preflight.mjs",
+    "tools/orchestration/format-dispatch-prompt.mjs",
+  ]) {
+    assert.ok(HARD_MODULE_DEPENDENCIES.some((e) => e.dest === dest && e.dependsOnDest === dep), dest);
+  }
+});
