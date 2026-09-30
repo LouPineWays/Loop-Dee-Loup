@@ -18,8 +18,9 @@ import {
   checkCloseWorkIssue,
   checkMergeReady,
   checkPostAudit,
-  checkRecordVerdict,
+  checkRecordVerdict as checkRecordVerdictRaw,
   checkPreAuditPendingState,
+  assessMalformedPreTriggerVerdict,
   findClosingKeywordMatch,
   findMatchingOpenAuditIssues,
   hasCanonicalAuditShape,
@@ -40,6 +41,10 @@ import {
   validateAuditVerdictRewrite,
 } from "./lifecycle-gate.mjs";
 import { triggerCommentBody } from "./trigger.mjs";
+
+// Hermetic default: edit-history lookups (issue #794) must never reach the real `gh` CLI.
+const checkRecordVerdict = (args, opts = {}) =>
+  checkRecordVerdictRaw(args, { ghEditedAtImpl: async () => null, ...opts });
 
 const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 function readFixture(name) {
@@ -4151,4 +4156,120 @@ test("checkRecordVerdict: a persisted NOT CLEAN conflicting with a CLEAN report 
   );
   assert.equal(editCalls.length, 0);
   assert.notEqual(result.state, "RECORDED");
+});
+
+// -- Issue #794: already-triggered malformed preparation-time NOT CLEAN (live #787 recurrence) ----------
+
+const I794_CREATED = "2026-08-19T23:50:00Z"; // before completedAuditThread's default 00:00:00Z trigger
+function i794View({ workIssue = 440, verdict = "NOT CLEAN" } = {}) {
+  return async ({ number }) =>
+    number === 160
+      ? { body: renderedCanonicalAuditBody({ workIssue, verdict }), state: "OPEN", createdAt: I794_CREATED }
+      : { body: "", state: "OPEN" };
+}
+
+test("assessMalformedPreTriggerVerdict: proven only for NOT CLEAN + canonical pending fields + body last modified strictly before the trigger", () => {
+  const body = renderedCanonicalAuditBody({ verdict: "NOT CLEAN" });
+  const base = { body, createdAt: I794_CREATED, lastEditedAt: null, triggerCreatedAt: "2026-08-20T00:00:00Z" };
+  assert.equal(assessMalformedPreTriggerVerdict(base).proven, true);
+  assert.equal(assessMalformedPreTriggerVerdict({ ...base, lastEditedAt: "2026-08-19T23:59:59Z" }).proven, true);
+  assert.equal(assessMalformedPreTriggerVerdict({ ...base, lastEditedAt: "2026-08-20T00:00:00Z" }).proven, false, "edit at the trigger instant is not provably earlier");
+  assert.equal(assessMalformedPreTriggerVerdict({ ...base, lastEditedAt: "2026-08-20T00:06:00Z" }).proven, false);
+  assert.equal(assessMalformedPreTriggerVerdict({ ...base, createdAt: null }).proven, false);
+  assert.equal(assessMalformedPreTriggerVerdict({ ...base, triggerCreatedAt: null }).proven, false);
+  assert.equal(assessMalformedPreTriggerVerdict({ ...base, body: renderedCanonicalAuditBody({ verdict: "CLEAN" }) }).proven, false);
+  assert.equal(assessMalformedPreTriggerVerdict({ ...base, body: renderedCanonicalAuditBody({ verdict: "PENDING" }) }).proven, false);
+  assert.equal(
+    assessMalformedPreTriggerVerdict({ ...base, body: body.replace("Pending — awaiting Stage 2 audit response.", "P1: real finding text") }).proven,
+    false,
+    "non-pending Findings means content was authored; never proven",
+  );
+});
+
+for (const workIssue of [440, "none"]) {
+  test(`checkPostAudit: #787 shape (work issue ${workIssue}) — pre-trigger NOT CLEAN + completed CLEAN report routes to REPORT_READY_TO_RECORD, not OK/NOT CLEAN (issue #794)`, async () => {
+    const result = await checkPostAudit(
+      { repo: "owner/repo", "audit-issue": 160 },
+      { ghIssueViewImpl: i794View({ workIssue }), ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }), ghEditedAtImpl: async () => null },
+    );
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.state, "REPORT_READY_TO_RECORD");
+    assert.equal(result.reportEvidence.verdict, "CLEAN");
+    assert.equal(result.malformedPreTriggerVerdict.proven, true);
+  });
+}
+
+test("checkPostAudit: NOT CLEAN body edited after the trigger stays a recorded verdict -> OK/NOT CLEAN (issue #794 negative)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    { ghIssueViewImpl: i794View(), ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }), ghEditedAtImpl: async () => "2026-08-20T00:06:00Z" },
+  );
+  assert.equal(result.state, "OK");
+  assert.equal(result.rawVerdict, "NOT CLEAN");
+});
+
+test("checkPostAudit: unreadable edit history fails closed to the existing NOT CLEAN behavior (issue #794)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    { ghIssueViewImpl: i794View(), ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }), ghEditedAtImpl: async () => { throw new Error("boom"); } },
+  );
+  assert.equal(result.state, "OK");
+  assert.equal(result.rawVerdict, "NOT CLEAN");
+});
+
+test("checkPostAudit: pre-trigger NOT CLEAN body with a completed NOT CLEAN report is unchanged -> OK (issue #794 legitimate NOT CLEAN control)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    { ghIssueViewImpl: i794View(), ghApiImpl: withCompletedAuditReport({ verdict: "NOT CLEAN" }), ghEditedAtImpl: async () => null },
+  );
+  assert.equal(result.state, "OK");
+  assert.equal(result.rawVerdict, "NOT CLEAN");
+});
+
+test("checkPostAudit: canonical PENDING + completed NOT CLEAN report still REPORT_READY_TO_RECORD (issue #794 control)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    { ghIssueViewImpl: i794View({ verdict: "PENDING" }), ghApiImpl: withCompletedAuditReport({ verdict: "NOT CLEAN" }), ghEditedAtImpl: async () => null },
+  );
+  assert.equal(result.state, "REPORT_READY_TO_RECORD");
+  assert.equal(result.malformedPreTriggerVerdict, undefined);
+});
+
+test("checkRecordVerdict: replaces a provably pre-trigger NOT CLEAN with the backed CLEAN, noting the replacement in the comment (issue #794)", async () => {
+  const editCalls = [];
+  const commentCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: i794View(),
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditedAtImpl: async () => null,
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async (a) => commentCalls.push(a),
+    },
+  );
+  assert.equal(result.state, "RECORDED");
+  assert.equal(result.verdict, "CLEAN");
+  assert.equal(result.replacedMalformedPreTriggerVerdict.previous, "NOT CLEAN");
+  assert.equal(editCalls.length, 1);
+  assert.equal(parseStage2Verdict(editCalls[0].body), "CLEAN");
+  assert.equal(commentCalls[0].replacedMalformedVerdict, "NOT CLEAN");
+});
+
+test("checkRecordVerdict: a NOT CLEAN edited after the trigger contradicting a CLEAN report stays CONFLICTING_VERDICT, no write (issue #794)", async () => {
+  const editCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: i794View(),
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditedAtImpl: async () => "2026-08-20T00:06:00Z",
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async () => {},
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "REPORT_READY_TO_RECORD", auditIssue: 160 }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "CONFLICTING_VERDICT");
+  assert.equal(editCalls.length, 0);
 });
