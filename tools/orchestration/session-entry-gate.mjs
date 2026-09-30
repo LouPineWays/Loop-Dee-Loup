@@ -77,11 +77,19 @@
 // `ok: false` — preserving the reconciliation's own error detail so the rejected write remains
 // diagnosable. Avoid a broad "anything other than UNBLOCKED is terminal BLOCKED" rule.
 //
+// Control-plane freshness (issue #779): before either leaf gate runs, the CLI entrypoint verifies
+// via `control-plane-freshness.mjs` that this checkout's controller/gate code is not superseded
+// by a newer authoritative correction on the remote default branch (or is explicitly authorized
+// via `--control-plane-source checkout`), and emits a `controlPlaneWitness`. A stale or
+// unverifiable runner is an operational failure (exit 1 + recovery instruction), never a
+// domain verdict.
+//
 // Tests: node --test tools/orchestration/session-entry-gate.test.mjs
 
 import { checkReadyDispatch, resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 import { runNextReviewTransitionGate } from "./next-review-transition-gate.mjs";
 import { checkReconcileControlBlocker } from "./reconcile-control-blocker.mjs";
+import { checkControlPlaneFreshness } from "./control-plane-freshness.mjs";
 import { clearLastGateVerdict, persistLastGateVerdict } from "./action-envelope-hook.mjs";
 
 // Fail-closed circuit breaker against an unbounded chain loop — never expected in practice
@@ -119,8 +127,11 @@ function operationalError(message, provenance, extra = {}) {
 // shape. Every dependency is injectable so tests never touch the real network/`gh` CLI or spawn
 // a real child process for the composed gates.
 export async function runSessionEntryGate(
-  { repo, controlIssue },
+  { repo, controlIssue, controlPlaneSource },
   {
+    // Issue #779: when supplied (the CLI entrypoint always supplies the real check), runs BEFORE
+    // any lifecycle gate so a stale controller can never produce a verdict that looks current.
+    checkControlPlaneFreshnessImpl,
     checkReadyDispatchImpl = checkReadyDispatch,
     runNextReviewTransitionGateImpl = runNextReviewTransitionGate,
     checkReconcileControlBlockerImpl = checkReconcileControlBlocker,
@@ -137,6 +148,17 @@ export async function runSessionEntryGate(
   // a different repository identity mid-sequence — `reconcile-control-blocker.mjs`'s own
   // exported function (unlike the two gate scripts) does not resolve repository identity
   // internally, so this router must always supply it explicitly.
+  let controlPlaneWitness;
+  if (checkControlPlaneFreshnessImpl) {
+    const fresh = checkControlPlaneFreshnessImpl({ source: controlPlaneSource ?? "default-branch" });
+    if (!fresh?.ok) {
+      return operationalError(fresh?.message ?? "Control-plane freshness could not be established.", provenance, {
+        freshness: fresh,
+      });
+    }
+    controlPlaneWitness = fresh.witness;
+  }
+
   let resolvedRepo = repo;
   if (!resolvedRepo) {
     const identity = resolveRepoIdentityImpl();
@@ -255,6 +277,7 @@ export async function runSessionEntryGate(
           actionEnvelope: { mode: "none", authorizedActions: [] },
           reconciliation: reconciled,
           provenance,
+          ...(controlPlaneWitness ? { controlPlaneWitness } : {}),
         };
       }
       let fresh;
@@ -281,7 +304,7 @@ export async function runSessionEntryGate(
     );
   }
 
-  return { ok: true, ...verdict, provenance };
+  return { ok: true, ...verdict, provenance, ...(controlPlaneWitness ? { controlPlaneWitness } : {}) };
 }
 
 function parseArgs(argv) {
@@ -303,7 +326,10 @@ async function main() {
   // this entrypoint).
   clearLastGateVerdict();
   const args = parseArgs(process.argv.slice(2));
-  const result = await runSessionEntryGate({ repo: args.repo, controlIssue: args["control-issue"] });
+  const result = await runSessionEntryGate(
+    { repo: args.repo, controlIssue: args["control-issue"], controlPlaneSource: args["control-plane-source"] },
+    { checkControlPlaneFreshnessImpl: checkControlPlaneFreshness },
+  );
   if (!result.ok) {
     console.error(result.message);
     process.exit(1);

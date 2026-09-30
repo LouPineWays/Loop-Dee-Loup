@@ -275,6 +275,7 @@
 //
 // Tests: node --test tools/orchestration/next-review-transition-gate.test.mjs
 
+import { enforceControlPlaneFreshness } from "./control-plane-freshness.mjs";
 import { execFileSync } from "node:child_process";
 import {
   parseControlBullet,
@@ -2328,6 +2329,8 @@ async function main() {
   // new one, so a run that errors out below never leaves an old side-channel entry behind for
   // a later, unrelated command to mistakenly consume.
   clearLastGateVerdict();
+  // Issue #779: refuse to interpret lifecycle state with a stale controller checkout.
+  enforceControlPlaneFreshness();
   const raw = parseArgs(process.argv.slice(2));
   const result = await runNextReviewTransitionGate({
     repo: raw.repo,
