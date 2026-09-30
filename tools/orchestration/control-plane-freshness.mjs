@@ -34,7 +34,7 @@
 // from GitHub, not the local subject checkout), or fast-forward a clean primary checkout.
 //
 // Usage: node tools/orchestration/control-plane-freshness.mjs [--control-plane-source <src>]
-// Exit: 0 CURRENT / explicit checkout, 1 STALE or UNVERIFIABLE.
+// Exit: 0 CURRENT / explicit checkout, 1 STALE, DIRTY, or UNVERIFIABLE.
 // Tests: node --test tools/orchestration/control-plane-freshness.test.mjs
 
 import { execFileSync } from "node:child_process";
@@ -93,21 +93,62 @@ export function checkControlPlaneFreshness({
     return unverifiable(source, `could not read HEAD of the running checkout: ${errText(err)}`, null);
   }
 
+  // Working-tree reality is part of freshness: uncommitted tracked/untracked content under the
+  // protected paths overrides the committed bytes HEAD names. Read-only (`--no-optional-locks`);
+  // nothing is cleaned, reset, or removed. Content outside the protected paths is irrelevant.
+  let dirty;
+  try {
+    const out = git(
+      ["--no-optional-locks", "status", "--porcelain", "--untracked-files=all", "--", ...CONTROL_PLANE_RUNNER_PATHS],
+      { cwd: root },
+    );
+    dirty = out ? out.split(/\r?\n/).filter(Boolean).map((l) => l.replace(/^\s*\S+\s+/, "")) : [];
+  } catch (err) {
+    return unverifiable(source, `could not read control-plane working-tree status: ${errText(err)}`, null, headCommit);
+  }
+
   if (source === "checkout") {
     return {
       ok: true,
       exitCode: 0,
       state: "CURRENT",
-      witness: { source: "checkout-explicit", headCommit, defaultBranchRef: null, defaultBranchCommit: null },
+      witness: {
+        source: "checkout-explicit",
+        headCommit,
+        defaultBranchRef: null,
+        defaultBranchCommit: null,
+        executedRevision: dirty.length > 0 ? "HEAD+working-tree" : "HEAD",
+        uncommittedControlPlanePaths: dirty.slice(0, MAX_LISTED_PATHS),
+      },
     };
   }
 
-  let branch = "main";
+  if (dirty.length > 0) {
+    const listed = dirty.slice(0, MAX_LISTED_PATHS).join(", ");
+    return {
+      ok: false,
+      exitCode: 1,
+      state: "DIRTY",
+      witness: { source, headCommit, defaultBranchRef: null, defaultBranchCommit: null, uncommittedControlPlanePaths: dirty.slice(0, MAX_LISTED_PATHS) },
+      message:
+        `Dirty control-plane runner: uncommitted content under ${CONTROL_PLANE_RUNNER_PATHS.join(", ")} ` +
+        `(${listed}) can override the committed code HEAD (${headCommit.slice(0, 12)}) names, so ` +
+        `this checkout cannot be reported as current. Nothing was modified. Run the gate from a ` +
+        `clean current control-plane checkout, or, only when this checkout's own uncommitted ` +
+        `control-plane code is the intentionally authorized runner, re-run with ` +
+        `\`--control-plane-source checkout\`.`,
+    };
+  }
+
+  // Resolve the remote's actual default branch (bounded, repository-native); never guess "main".
+  let branch;
   try {
-    const head = git(["symbolic-ref", "--short", `refs/remotes/${remote}/HEAD`], { cwd: root });
-    if (head.startsWith(`${remote}/`)) branch = head.slice(remote.length + 1);
-  } catch {
-    // No cached remote HEAD symref: fall back to "main" and let the fetch/ref read fail closed.
+    const out = git(["ls-remote", "--symref", remote, "HEAD"], { cwd: root, timeout: FETCH_TIMEOUT_MS });
+    const m = /^ref:\s+refs\/heads\/(\S+)\s+HEAD\s*$/m.exec(out);
+    if (!m) throw new Error("remote did not report a default branch symref");
+    branch = m[1];
+  } catch (err) {
+    return unverifiable(source, `could not determine the default branch of ${remote}: ${errText(err)}`, null, headCommit);
   }
   const ref = `${remote}/${branch}`;
 

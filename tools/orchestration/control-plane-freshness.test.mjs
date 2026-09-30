@@ -197,3 +197,78 @@ test("session-entry-gate: current runner proceeds and the witness rides on the v
   assert.equal(result.state, "READY_TO_DISPATCH");
   assert.deepEqual(result.controlPlaneWitness, witness);
 });
+
+test("dirty tracked/untracked control-plane content is DIRTY (not CURRENT) and left untouched; outside paths irrelevant", () => {
+  const env = setup();
+  try {
+    writeFileSync(join(env.runner, "tools/review-watch/stage1-gate.mjs"), "locally modified\n");
+    writeFileSync(join(env.runner, "tools/review-watch/untracked.mjs"), "u\n");
+    const r = checkControlPlaneFreshness({ root: env.runner });
+    assert.equal(r.ok, false);
+    assert.equal(r.state, "DIRTY");
+    assert.deepEqual([...r.witness.uncommittedControlPlanePaths].sort(), ["tools/review-watch/stage1-gate.mjs", "tools/review-watch/untracked.mjs"]);
+    assert.equal(existsSync(join(env.runner, "tools/review-watch/untracked.mjs")), true);
+    assert.match(git(env.runner, "status", "--porcelain"), /stage1-gate/);
+    // explicit checkout source authorizes it with a truthful witness
+    const ex = checkControlPlaneFreshness({ root: env.runner, source: "checkout" });
+    assert.equal(ex.ok, true);
+    assert.equal(ex.witness.executedRevision, "HEAD+working-tree");
+    // dirty content outside protected paths is irrelevant
+    git(env.runner, "checkout", "--", "tools/review-watch/stage1-gate.mjs");
+    rmSync(join(env.runner, "tools/review-watch/untracked.mjs"));
+    writeFileSync(join(env.runner, "scratch.txt"), "mine\n");
+    assert.equal(checkControlPlaneFreshness({ root: env.runner }).state, "CURRENT");
+    assert.equal(existsSync(join(env.runner, "scratch.txt")), true);
+  } finally {
+    cleanup(env);
+  }
+});
+
+test("non-main default branch without cached origin/HEAD symref is resolved from the remote", () => {
+  const base = mkdtempSync(join(tmpdir(), "ldl-freshness-trunk-"));
+  try {
+    const origin = join(base, "origin.git");
+    git(base, "init", "-q", "--bare", "-b", "trunk", origin);
+    const up = join(base, "up");
+    git(base, "clone", "-q", origin, up);
+    git(up, "checkout", "-q", "-B", "trunk");
+    commitFile(up, "tools/orchestration/a.mjs", "1\n", "init");
+    git(up, "push", "-q", "origin", "trunk");
+    const runner = join(base, "runner");
+    git(base, "clone", "-q", origin, runner);
+    try { git(runner, "remote", "set-head", "origin", "-d"); } catch {}
+    assert.equal(checkControlPlaneFreshness({ root: runner }).witness.defaultBranchRef, "origin/trunk");
+    assert.equal(checkControlPlaneFreshness({ root: runner }).state, "CURRENT");
+    commitFile(up, "tools/orchestration/b.mjs", "2\n", "adv");
+    git(up, "push", "-q", "origin", "trunk");
+    assert.equal(checkControlPlaneFreshness({ root: runner }).state, "STALE");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("unresolvable remote default branch fails closed as UNVERIFIABLE", () => {
+  const env = setup();
+  try {
+    const r = checkControlPlaneFreshness({
+      root: env.runner,
+      git: (args, o) => {
+        if (args[0] === "ls-remote") return "";
+        return git(o.cwd, ...args);
+      },
+    });
+    assert.equal(r.state, "UNVERIFIABLE");
+  } finally {
+    cleanup(env);
+  }
+});
+
+test("leaf gate CLIs attach controlPlaneWitness to emitted verdicts", async () => {
+  const { readFileSync } = await import("node:fs");
+  for (const f of ["ready-dispatch-gate.mjs", "next-review-transition-gate.mjs"]) {
+    const src = readFileSync(new URL("./" + f, import.meta.url), "utf8");
+    assert.match(src, /const controlPlaneWitness = enforceControlPlaneFreshness\(\)/, f);
+    assert.match(src, /result\.controlPlaneWitness = controlPlaneWitness/, f);
+    assert.ok(src.indexOf("result.controlPlaneWitness = controlPlaneWitness") < src.indexOf("persistLastGateVerdict(result)", src.indexOf("async function main")), f);
+  }
+});

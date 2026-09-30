@@ -2330,7 +2330,7 @@ async function main() {
   // a later, unrelated command to mistakenly consume.
   clearLastGateVerdict();
   // Issue #779: refuse to interpret lifecycle state with a stale controller checkout.
-  enforceControlPlaneFreshness();
+  const controlPlaneWitness = enforceControlPlaneFreshness();
   const raw = parseArgs(process.argv.slice(2));
   const result = await runNextReviewTransitionGate({
     repo: raw.repo,
@@ -2341,6 +2341,7 @@ async function main() {
     auditIssue: raw["audit-issue"],
     stage1Disposition: raw["stage1-disposition"],
   });
+  if (controlPlaneWitness) result.controlPlaneWitness = controlPlaneWitness;
   if (result.exitCode === 1) {
     console.error(result.message);
     process.exit(1);
