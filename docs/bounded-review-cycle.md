@@ -138,10 +138,16 @@ NOT CLEAN verdict" prose is disposition text, not a Verdict value). Every pre-tr
 control projection, or the reviewer trigger; restore the three fields on the still-untriggered issue (or prepare a
 replacement) and re-verify. Once an audit has crossed finalization (control already `AUDIT` naming it), the pending
 check is no longer applied, so an idempotent finalization rerun stays valid after a later recorded verdict. Post-response
-handling is deliberately unchanged: `record-verdict` edits only the `Verdict` field, so a recorded verdict is not
-body-distinguishable from preparation-time corruption and no comment-text provenance is used; a persisted verdict
-that conflicts with a completed report stays fail-closed (`CONFLICTING_VERDICT`) and is recovered by replacement or
-supersession of the audit, never by silent normalization.
+handling never compares body content to tell a recorded verdict from corruption (`record-verdict` edits only the
+`Verdict` field, and no comment-text provenance is used); a persisted verdict that conflicts with a completed report
+stays fail-closed (`CONFLICTING_VERDICT`) and is recovered by replacement or supersession of the audit, never by silent
+normalization. Issue #794 (live #787 recurrence) adds one provenance-proven exception: a durable `NOT CLEAN` beside
+canonical pending Findings/Next, contradicted by a completed CLEAN report, is treated as preparation-time state only
+when GitHub shows the audit body was last modified (`lastEditedAt`, else `createdAt`) strictly before the first reviewer
+trigger -- `record-verdict` only ever edits after a report exists, so such a body cannot hold a recorded verdict. Then
+`post-audit` reports `REPORT_READY_TO_RECORD` and `record-verdict` replaces the placeholder (noting it in its comment)
+instead of routing to `STAGE2_CORRECTION_REQUIRED`; any later body edit, unreadable edit history, or differing state
+fails closed exactly as before.
 
 Issue #718: the top-level controller must stay a compact lifecycle switchboard even at the
 merge → Stage 2 boundary. Deterministic control work (re-running the authoritative gate, merging

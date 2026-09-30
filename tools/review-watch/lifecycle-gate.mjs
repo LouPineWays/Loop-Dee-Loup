@@ -856,6 +856,7 @@ async function findStage2ReportEvidence(
       genuineResponsesSeen: genuineReports.length,
       genuineResponses: substantiveGenuineReports.map((r) => ({ id: r.id, url: r.url, reasons: r.reasons })),
       hasTrigger: true,
+      triggerCreatedAt: trigger.created_at,
       reason:
         reports.length === 0
           ? "no post-trigger bot response found on the audit issue thread"
@@ -871,6 +872,7 @@ async function findStage2ReportEvidence(
     responsesSeen: reports.length,
     hasGenuineResponse: true,
     hasTrigger: true,
+    triggerCreatedAt: trigger.created_at,
     genuineResponsesSeen: genuineReports.length,
     matchedCommentUrl: latest.url,
     legacyCompatible: latest.legacyCompatible,
@@ -1044,6 +1046,7 @@ export async function checkPostAudit(
     ghIssueViewImpl = defaultGhIssueView,
     ghApiImpl = defaultGhApi,
     ghIssueListImpl = defaultGhIssueList,
+    ghEditedAtImpl = defaultGhIssueLastEditedAt,
     bot = DEFAULT_BOT,
   } = {},
 ) {
@@ -1247,6 +1250,33 @@ export async function checkPostAudit(
       }
     }
 
+    // Issue #794: durable NOT CLEAN contradicted by a completed CLEAN report, where the body verdict is
+    // provably preparation-time state (see assessMalformedPreTriggerVerdict) -- route to the ordinary
+    // report-record continuation, never to source correction. Unproven disagreement is unchanged.
+    if (rawVerdict === "NOT CLEAN" && evaluated.verdict !== "CLEAN" && hasCanonicalPendingFindingsAndNext(auditIssueData.body)) {
+      let recoveryEvidence;
+      try {
+        recoveryEvidence = await findStage2ReportEvidence(
+          { repo, auditIssue, bot, mergeCommit, requestedChecklist, reviewedHeadCommit },
+          ghApiImpl,
+        );
+      } catch (err) {
+        return { exitCode: 1, message: `gh api call failed while checking for completed Stage 2 report evidence on ${repo}#${auditIssue}: ${err.message}` };
+      }
+      const provenance = await proveMalformedPreTriggerVerdict({ repo, auditIssue, auditIssueData, reportEvidence: recoveryEvidence, ghEditedAtImpl });
+      if (provenance.proven) {
+        return {
+          exitCode: 0,
+          state: "REPORT_READY_TO_RECORD",
+          workIssue: null,
+          auditIssue: Number(auditIssue),
+          rawVerdict,
+          reportEvidence: recoveryEvidence,
+          malformedPreTriggerVerdict: provenance,
+        };
+      }
+    }
+
     return {
       exitCode: 0,
       state: evaluated.verdict === "CLEAN" ? "ACCEPTED_NO_WORK_ISSUE" : "OK",
@@ -1430,6 +1460,33 @@ export async function checkPostAudit(
     }
   }
 
+  // Issue #794: durable NOT CLEAN contradicted by a completed CLEAN report, where the body verdict is
+  // provably preparation-time state (see assessMalformedPreTriggerVerdict) -- route to the ordinary
+  // report-record continuation, never to source correction. Unproven disagreement is unchanged.
+  if (!isClosed && rawVerdict === "NOT CLEAN" && hasCanonicalPendingFindingsAndNext(auditIssueData.body)) {
+    let recoveryEvidence;
+    try {
+      recoveryEvidence = await findStage2ReportEvidence(
+        { repo, auditIssue, bot, mergeCommit, requestedChecklist, reviewedHeadCommit },
+        ghApiImpl,
+      );
+    } catch (err) {
+      return { exitCode: 1, message: `gh api call failed while checking for completed Stage 2 report evidence on ${repo}#${auditIssue}: ${err.message}` };
+    }
+    const provenance = await proveMalformedPreTriggerVerdict({ repo, auditIssue, auditIssueData, reportEvidence: recoveryEvidence, ghEditedAtImpl });
+    if (provenance.proven) {
+      return {
+        exitCode: 0,
+        state: "REPORT_READY_TO_RECORD",
+        workIssue: workIssueNumber,
+        auditIssue: Number(auditIssue),
+        rawVerdict,
+        reportEvidence: recoveryEvidence,
+        malformedPreTriggerVerdict: provenance,
+      };
+    }
+  }
+
   return {
     exitCode: 0,
     state: "OK",
@@ -1553,14 +1610,17 @@ export function validateAuditVerdictRewrite(beforeBody, afterBody) {
 // report's actual finding content") — only the mechanically-established evidence pointer
 // (verdict + matched comment permalink), the same "post one explanatory comment naming the
 // backing evidence" convention close-audit/close-work-issue already use above.
-function recordedVerdictComment({ repo, auditIssue, verdict, reportEvidence }) {
+function recordedVerdictComment({ repo, auditIssue, verdict, reportEvidence, replacedMalformedVerdict = null }) {
   const evidenceRef = reportEvidence?.matchedCommentUrl ?? `this issue's own comment thread (audit issue ${repo}#${auditIssue})`;
   return (
     `Recorded by \`tools/review-watch/lifecycle-gate.mjs record-verdict\`: this audit issue's durable \`Verdict\` ` +
     `field is now set to ${verdict}, backed by a completed Stage 2 audit report (${evidenceRef}). Per ` +
     `docs/bounded-review-cycle.md, this promotion never adjudicates finding substance — it only promotes the ` +
     `report's own already-established structural evidence (merge-commit identity, an explicit verdict, and a ` +
-    `complete verification-checklist walk-through) into this issue's durable state (issue #439).`
+    `complete verification-checklist walk-through) into this issue's durable state (issue #439).` +
+    (replacedMalformedVerdict
+      ? ` The previous \`Verdict\` value (${replacedMalformedVerdict}) was replaced because this issue body was last modified before its first reviewer trigger, so it was preparation-time state rather than a recorded verdict (issue #794); no report content was altered.`
+      : "")
   );
 }
 
@@ -1582,6 +1642,7 @@ export async function checkRecordVerdict(
     ghIssueViewImpl = defaultGhIssueView,
     ghApiImpl = defaultGhApi,
     ghIssueListImpl = defaultGhIssueList,
+    ghEditedAtImpl = defaultGhIssueLastEditedAt,
     ghEditImpl = defaultGhEditAuditVerdict,
     ghCommentImpl = defaultGhRecordVerdictComment,
     bot = DEFAULT_BOT,
@@ -1595,7 +1656,7 @@ export async function checkRecordVerdict(
 
   let postAudit;
   try {
-    postAudit = await checkPostAuditImpl(args, { ghIssueViewImpl, ghApiImpl, ghIssueListImpl, bot });
+    postAudit = await checkPostAuditImpl(args, { ghIssueViewImpl, ghApiImpl, ghIssueListImpl, ghEditedAtImpl, bot });
   } catch (err) {
     return { exitCode: 1, message: `checkPostAudit threw while evaluating ${repo}#${auditIssue}: ${err.message}` };
   }
@@ -1687,7 +1748,12 @@ export async function checkRecordVerdict(
     };
   }
 
-  if (currentRawVerdict !== "PENDING" && currentRawVerdict !== null) {
+  // Issue #794: a provably preparation-time NOT CLEAN placeholder (assessMalformedPreTriggerVerdict) is not a
+  // recorded verdict; the final pre-edit re-read below re-proves it against the freshest body before any write.
+  const provenFirst = currentRawVerdict === "NOT CLEAN" && evidenceVerdict === "CLEAN"
+    ? await proveMalformedPreTriggerVerdict({ repo, auditIssue, auditIssueData, reportEvidence: freshReportEvidence, ghEditedAtImpl })
+    : { proven: false };
+  if (currentRawVerdict !== "PENDING" && currentRawVerdict !== null && !provenFirst.proven) {
     return {
       exitCode: 2,
       state: "CONFLICTING_VERDICT",
@@ -1756,7 +1822,10 @@ export async function checkRecordVerdict(
     };
   }
 
-  if (finalRawVerdict !== "PENDING" && finalRawVerdict !== null) {
+  const provenFinal = finalRawVerdict === "NOT CLEAN" && evidenceVerdict === "CLEAN"
+    ? await proveMalformedPreTriggerVerdict({ repo, auditIssue, auditIssueData: finalAuditIssueData, reportEvidence: freshReportEvidence, ghEditedAtImpl })
+    : { proven: false };
+  if (finalRawVerdict !== "PENDING" && finalRawVerdict !== null && !provenFinal.proven) {
     return {
       exitCode: 2,
       state: "CONFLICTING_VERDICT",
@@ -1802,7 +1871,7 @@ export async function checkRecordVerdict(
   let commentPosted = true;
   let commentError = null;
   try {
-    await ghCommentImpl({ repo, auditIssue, verdict: evidenceVerdict, reportEvidence: freshReportEvidence });
+    await ghCommentImpl({ repo, auditIssue, verdict: evidenceVerdict, reportEvidence: freshReportEvidence, replacedMalformedVerdict: provenFinal.proven ? finalRawVerdict : null });
   } catch (err) {
     commentPosted = false;
     commentError = err.message;
@@ -1814,6 +1883,7 @@ export async function checkRecordVerdict(
     auditIssue: postAudit.auditIssue,
     verdict: evidenceVerdict,
     reportEvidence: freshReportEvidence,
+    ...(provenFinal.proven ? { replacedMalformedPreTriggerVerdict: { previous: finalRawVerdict, ...provenFinal } } : {}),
     commentPosted,
     ...(commentError
       ? {
@@ -2061,20 +2131,85 @@ export function hasCanonicalAuditShape(body) {
 // stays fail-closed (CONFLICTING_VERDICT) with recovery by replacement/supersession.
 const PRE_AUDIT_PENDING_FINDINGS = "Pending — awaiting Stage 2 audit response.";
 const PRE_AUDIT_PENDING_NEXT = "Pending audit.";
-export function checkPreAuditPendingState(body) {
-  const text = body ?? "";
+function preAuditPendingFieldErrors(text) {
   // Full-field equality against the template's canonical initial values (whitespace-normalized), not a
   // "starts with Pending" prefix match: Stage 2 audit #790 showed a prefix match lets contradictory
   // trailing text or alternate "Pending ..." values pass.
   const isPending = (value, canonical) => value !== null && value.replace(/\s+/g, " ").trim() === canonical;
-  const errors = [];
   const findings = parseFormFieldBlock(text, "Findings");
-  if (!isPending(findings, PRE_AUDIT_PENDING_FINDINGS)) errors.push(`"Findings" is ${JSON.stringify(findings)}, expected ${JSON.stringify(PRE_AUDIT_PENDING_FINDINGS)}`);
+  const next = parseFormFieldBlock(text, "Next authorized action");
+  return {
+    findings: isPending(findings, PRE_AUDIT_PENDING_FINDINGS) ? null : `"Findings" is ${JSON.stringify(findings)}, expected ${JSON.stringify(PRE_AUDIT_PENDING_FINDINGS)}`,
+    next: isPending(next, PRE_AUDIT_PENDING_NEXT) ? null : `"Next authorized action" is ${JSON.stringify(next)}, expected ${JSON.stringify(PRE_AUDIT_PENDING_NEXT)}`,
+  };
+}
+function hasCanonicalPendingFindingsAndNext(body) {
+  const fields = preAuditPendingFieldErrors(body ?? "");
+  return !fields.findings && !fields.next;
+}
+export function checkPreAuditPendingState(body) {
+  const text = body ?? "";
+  const fields = preAuditPendingFieldErrors(text);
+  const errors = [];
+  if (fields.findings) errors.push(fields.findings);
   const verdict = parseFormField(text, "Verdict");
   if (verdict !== "PENDING") errors.push(`"Verdict" is ${JSON.stringify(verdict)}, expected "PENDING"`);
-  const next = parseFormFieldBlock(text, "Next authorized action");
-  if (!isPending(next, PRE_AUDIT_PENDING_NEXT)) errors.push(`"Next authorized action" is ${JSON.stringify(next)}, expected ${JSON.stringify(PRE_AUDIT_PENDING_NEXT)}`);
+  if (fields.next) errors.push(fields.next);
   return errors.length === 0 ? { ok: true } : { ok: false, errors };
+}
+
+// Pure. Issue #794 (live #571/#761/PR #786/Audit #787 recurrence after #788/PR #791): the post-boundary
+// recovery counterpart of checkPreAuditPendingState. An audit that escaped #788's pre-trigger validation
+// can carry a malformed preparation-time `Verdict: NOT CLEAN` beside still-canonical pending Findings/
+// Next; once a genuine completed CLEAN report landed, the stale placeholder was routed to
+// STAGE2_CORRECTION_REQUIRED. #788 rightly noted a recorded verdict is body-indistinguishable from
+// corruption by content alone, so this rule never compares content: it proves provenance from GitHub's
+// own timestamps. record-verdict (the only legitimate writer of a non-PENDING verdict on a PENDING audit)
+// edits the body strictly AFTER a completed report exists, i.e. after the reviewer trigger. A verdict
+// whose body was last modified (lastEditedAt, else createdAt when never edited) strictly BEFORE the first
+// `@codex review` trigger therefore cannot have been recorded from reviewer evidence. Any later body edit
+// defeats the proof and leaves the existing fail-closed CONFLICTING_VERDICT behavior untouched. Only NOT
+// CLEAN with still-canonical pending Findings/Next qualifies; callers additionally require a backed
+// completed report whose verdict differs.
+export function assessMalformedPreTriggerVerdict({ body, createdAt, lastEditedAt, triggerCreatedAt }) {
+  const text = body ?? "";
+  if (parseStage2Verdict(text) !== "NOT CLEAN") return { proven: false, reason: "durable Verdict is not NOT CLEAN" };
+  const fields = preAuditPendingFieldErrors(text);
+  if (fields.findings || fields.next) return { proven: false, reason: "Findings/Next are not the canonical pending initial values" };
+  const modifiedMs = new Date(lastEditedAt ?? createdAt ?? NaN).getTime();
+  const triggerMs = new Date(triggerCreatedAt ?? NaN).getTime();
+  if (!Number.isFinite(modifiedMs) || !Number.isFinite(triggerMs)) return { proven: false, reason: "body modification time or reviewer trigger time is unavailable" };
+  if (modifiedMs >= triggerMs) return { proven: false, reason: "audit body was modified at or after the reviewer trigger, so the verdict may have been legitimately recorded" };
+  return { proven: true, lastModifiedAt: new Date(modifiedMs).toISOString(), triggerCreatedAt: new Date(triggerMs).toISOString() };
+}
+
+// Issue #794. Async wrapper: given an already-fetched audit issue and a backed completed report, decide
+// whether a durable NOT CLEAN that disagrees with that report is provably preparation-time state.
+// Fails closed (proven:false) on any fetch error or missing evidence.
+async function proveMalformedPreTriggerVerdict({ repo, auditIssue, auditIssueData, reportEvidence, ghEditedAtImpl }) {
+  if (!reportEvidence?.backed || reportEvidence.verdict !== "CLEAN") return { proven: false, reason: "no completed CLEAN report contradicts the durable verdict" };
+  let lastEditedAt;
+  try {
+    lastEditedAt = await ghEditedAtImpl({ repo, number: auditIssue });
+  } catch (err) {
+    return { proven: false, reason: `could not read audit body edit history: ${err.message}` };
+  }
+  return assessMalformedPreTriggerVerdict({
+    body: auditIssueData.body,
+    createdAt: auditIssueData.createdAt,
+    lastEditedAt,
+    triggerCreatedAt: reportEvidence.triggerCreatedAt,
+  });
+}
+
+function defaultGhIssueLastEditedAt({ repo, number }) {
+  const [owner, name] = String(repo).split("/");
+  const raw = execFileSync(
+    "gh",
+    ["api", "graphql", "-f", `query=query($o:String!,$n:String!,$i:Int!){repository(owner:$o,name:$n){issue(number:$i){lastEditedAt}}}`, "-f", `o=${owner}`, "-f", `n=${name}`, "-F", `i=${number}`],
+    { encoding: "utf8" },
+  );
+  return JSON.parse(raw)?.data?.repository?.issue?.lastEditedAt ?? null;
 }
 
 // Pure. Given a list of `[Audit] in:title` search candidates (the `{ number, title, body, state,
@@ -2966,8 +3101,8 @@ function defaultGhEditAuditVerdict({ repo, auditIssue, body }) {
   });
 }
 
-function defaultGhRecordVerdictComment({ repo, auditIssue, verdict, reportEvidence }) {
-  const body = recordedVerdictComment({ repo, auditIssue, verdict, reportEvidence });
+function defaultGhRecordVerdictComment({ repo, auditIssue, verdict, reportEvidence, replacedMalformedVerdict = null }) {
+  const body = recordedVerdictComment({ repo, auditIssue, verdict, reportEvidence, replacedMalformedVerdict });
   execFileSync("gh", ["issue", "comment", String(auditIssue), "--repo", repo, "--body", body], { encoding: "utf8" });
 }
 
