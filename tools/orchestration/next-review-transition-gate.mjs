@@ -1817,7 +1817,8 @@ export async function reconcileExistingStage2AuditIssue(
   } catch (err) {
     return { exitCode: 1, message: `gh issue search failed while looking for an already-prepared Stage 2 Audit Issue: ${err.message}` };
   }
-  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid, executionIssue });
+  // Issue #788: a malformed (non-pending) candidate is never "already prepared".
+  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid, executionIssue }, { requirePendingState: true });
   if (matches.length === 0) return { exitCode: 0, state: "NONE_FOUND" };
   if (matches.length > 1) {
     const numbers = matches.map((m) => Number(m.number)).sort((a, b) => a - b);

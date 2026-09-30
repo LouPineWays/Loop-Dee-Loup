@@ -127,6 +127,22 @@ This recovery is scoped narrowly to the observed correction-satisfied path — i
 
 ## Stage 2 preparation worker
 
+Issue #788 (live #571/#761/PR #786/Audit #787): a not-yet-triggered Audit Issue must carry the
+template's pending initial state — `Findings` pending, `Verdict: PENDING`, `Next authorized
+action` pending — never a copied predecessor verdict (a correction audit's own "responding to a prior
+NOT CLEAN verdict" prose is disposition text, not a Verdict value). Every pre-trigger recognition surface requires that pending state: `verify-audit-ready.mjs` and
+`finalize-audit-breakpoint.mjs` (first finalization) reject a candidate whose pre-audit state is contradictory
+(`checkPreAuditPendingState`, `lifecycle-gate.mjs`); existing-issue reconciliation
+(`reconcileExistingStage2AuditIssue`) does not treat it as `STAGE2_AUDIT_ALREADY_PREPARED`; and
+`verifyAuditCanonicalForTrigger` refuses `TRIGGER_REQUIRED` for it. It can therefore never reach `AUDIT_READY`,
+control projection, or the reviewer trigger; restore the three fields on the still-untriggered issue (or prepare a
+replacement) and re-verify. Once an audit has crossed finalization (control already `AUDIT` naming it), the pending
+check is no longer applied, so an idempotent finalization rerun stays valid after a later recorded verdict. Post-response
+handling is deliberately unchanged: `record-verdict` edits only the `Verdict` field, so a recorded verdict is not
+body-distinguishable from preparation-time corruption and no comment-text provenance is used; a persisted verdict
+that conflicts with a completed report stays fail-closed (`CONFLICTING_VERDICT`) and is recovered by replacement or
+supersession of the audit, never by silent normalization.
+
 Issue #718: the top-level controller must stay a compact lifecycle switchboard even at the
 merge → Stage 2 boundary. Deterministic control work (re-running the authoritative gate, merging
 an already-authorized PR, recording the exact merge identity, projecting compact control state,

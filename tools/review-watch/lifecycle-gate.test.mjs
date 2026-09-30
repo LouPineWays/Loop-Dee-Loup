@@ -19,6 +19,7 @@ import {
   checkMergeReady,
   checkPostAudit,
   checkRecordVerdict,
+  checkPreAuditPendingState,
   findClosingKeywordMatch,
   findMatchingOpenAuditIssues,
   hasCanonicalAuditShape,
@@ -3102,6 +3103,10 @@ function renderedCanonicalAuditBody({
     "### Verdict",
     "",
     verdict,
+    "",
+    "### Next authorized action",
+    "",
+    "Pending audit.",
   ].join("\n");
 }
 
@@ -4053,4 +4058,84 @@ test("checkCloseWorkIssue: exits 1 when gh issue view fails", async () => {
     { ghIssueViewImpl: async () => { throw new Error("not found"); } },
   );
   assert.equal(result.exitCode, 1);
+});
+
+// -- Issue #788 (live #571/#761/PR #786/Audit #787 reproduction) --------------------------------
+// The pre-audit pending-state invariant applies to every pre-trigger recognition surface
+// (finalization read-back, existing-issue reconciliation, trigger authorization). Post-response
+// verdict handling is unchanged: no comment-text provenance, conflicting verdicts fail closed.
+
+function pendingShapedAuditBody(verdict) {
+  return (
+    `### Work issue
+
+#151
+
+### Exact merge commit
+
+${MERGE_COMMIT}
+
+` +
+    `### Findings
+
+Pending — awaiting Stage 2 audit response.
+
+### Verdict
+
+${verdict}
+
+` +
+    `### Next authorized action
+
+Pending audit.
+`
+  );
+}
+
+test("checkPreAuditPendingState: canonical pending accepted; premature NOT CLEAN/CLEAN or non-pending Findings/Next rejected", () => {
+  assert.equal(checkPreAuditPendingState(pendingShapedAuditBody("PENDING")).ok, true);
+  for (const v of ["NOT CLEAN", "CLEAN"]) {
+    const r = checkPreAuditPendingState(pendingShapedAuditBody(v));
+    assert.equal(r.ok, false);
+    assert.match(r.errors.join(" "), /Verdict/);
+  }
+  assert.equal(checkPreAuditPendingState(pendingShapedAuditBody("PENDING").replace("Pending audit.", "None")).ok, false);
+  assert.equal(checkPreAuditPendingState(["### Verdict", "", "PENDING", ""].join("\n")).ok, false, "missing Findings/Next is not the canonical initial state");
+});
+
+test("findMatchingOpenAuditIssues: requirePendingState rejects the #787 shape but default (post-boundary) matching keeps it", () => {
+  const ident = { mergeCommitOid: MERGE_COMMIT, executionIssue: 440 };
+  const good = { number: 1, state: "OPEN", body: renderedCanonicalAuditBody() };
+  const bad = { number: 2, state: "OPEN", body: renderedCanonicalAuditBody({ verdict: "NOT CLEAN" }) };
+  assert.deepEqual(findMatchingOpenAuditIssues([good, bad], ident, { requirePendingState: true }).map((m) => m.number), [1]);
+  assert.deepEqual(findMatchingOpenAuditIssues([good, bad], ident).map((m) => m.number), [1, 2]);
+});
+
+test("checkPostAudit: untriggered #787-shaped audit (premature NOT CLEAN, no comments) never reaches TRIGGER_REQUIRED", async () => {
+  const body = renderedCanonicalAuditBody({ workIssue: 440, verdict: "NOT CLEAN" });
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) => (number === 160 ? { body, state: "OPEN" } : { body: "", state: "OPEN" }),
+      ghApiImpl: async () => [],
+      ghIssueListImpl: async () => [{ number: 160, title: "[Audit] x", body, state: "OPEN", createdAt: "2026-08-20T00:00:00Z" }],
+    },
+  );
+  assert.notEqual(result.state, "TRIGGER_REQUIRED");
+});
+
+test("checkRecordVerdict: a persisted NOT CLEAN conflicting with a CLEAN report stays fail-closed regardless of comments, never overwritten", async () => {
+  const editCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: pendingShapedAuditBody("NOT CLEAN"), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(editCalls.length, 0);
+  assert.notEqual(result.state, "RECORDED");
 });

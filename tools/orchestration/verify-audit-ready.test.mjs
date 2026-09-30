@@ -9,7 +9,7 @@ import { run } from "./verify-audit-ready.mjs";
 const MERGE = "5d588a5034e13fc32cbd733a224d57715a033667";
 const CI_HEAD = "bd4a32cacefb7521f50ab73075c8e1105b8f7be0";
 
-function auditBody({ pr = 738, work = "#737", commit = MERGE, checklistHead = CI_HEAD } = {}) {
+function auditBody({ pr = 738, work = "#737", commit = MERGE, checklistHead = CI_HEAD, verdict = "PENDING" } = {}) {
   return [
     "### Merged PR", "", `https://github.com/o/r/pull/${pr}`, "",
     "### Work issue", "", work, "",
@@ -17,6 +17,9 @@ function auditBody({ pr = 738, work = "#737", commit = MERGE, checklistHead = CI
     "### Stage 1 inline review disposition", "", "correction-satisfied", "",
     "### Audit scope", "", "Complete diff.", "",
     "### Verification checklist", "", `1. Control-plane CI passed at pre-merge head ${checklistHead}.`, "",
+    "### Findings", "", "Pending — awaiting Stage 2 audit response.", "",
+    "### Verdict", "", verdict, "",
+    "### Next authorized action", "", "Pending audit.", "",
   ].join("\n");
 }
 
@@ -119,4 +122,18 @@ test("a Search failure still fails closed", async () => {
   const d = deps(auditBody());
   const r = await run(args, { ...d, ghIssueListImpl: async () => { throw new Error("boom"); } });
   assert.match(r.message, /^AUDIT_PREPARATION_FAILED /);
+});
+
+// Issue #788 (live #571/#761/PR #786/Audit #787 reproduction): identity-correct but with a premature
+// pre-audit verdict must never yield AUDIT_READY.
+test("#787 shape: pending Findings/Next + premature Verdict NOT CLEAN -> AUDIT_PREPARATION_FAILED, never AUDIT_READY", async () => {
+  const r = await run(args, deps(auditBody({ verdict: "NOT CLEAN" })));
+  assert.equal(r.exitCode, 2);
+  assert.match(r.message, /^AUDIT_PREPARATION_FAILED .*Verdict/);
+  assert.doesNotMatch(r.message, /AUDIT_READY/);
+});
+
+test("premature CLEAN Verdict is equally rejected; canonical PENDING still succeeds", async () => {
+  assert.equal((await run(args, deps(auditBody({ verdict: "CLEAN" })))).exitCode, 2);
+  assert.equal((await run(args, deps(auditBody({ verdict: "PENDING" })))).message, "AUDIT_READY #739");
 });

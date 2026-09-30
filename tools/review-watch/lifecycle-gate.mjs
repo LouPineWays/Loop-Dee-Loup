@@ -1015,7 +1015,12 @@ async function verifyAuditCanonicalForTrigger(
   } catch (err) {
     return { ok: false, reason: `gh api search failed while revalidating audit issue ${repo}#${auditIssue}: ${err.message}` };
   }
-  const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid: mergeCommit, executionIssue: workIssueRef });
+  // Issue #788: an untriggered candidate must also carry the canonical pending state.
+  const matches = findMatchingOpenAuditIssues(
+    candidates,
+    { mergeCommitOid: mergeCommit, executionIssue: workIssueRef },
+    { requirePendingState: true },
+  );
   const matchNumbers = matches.map((m) => Number(m.number));
 
   if (matchNumbers.length !== 1 || matchNumbers[0] !== Number(auditIssue)) {
@@ -2040,6 +2045,33 @@ export function hasCanonicalAuditShape(body) {
   );
 }
 
+// Pure. Issue #788 (live #571/#761/PR #786/Audit #787 reproduction): the semantic *initial* state of
+// the audit-control-issue template's parser-sensitive mutable fields. A freshly prepared Audit Issue
+// must render "Findings" pending, "Verdict" exactly PENDING (the dropdown's `default: 0`), and
+// "Next authorized action" pending -- exactly what the template defaults to. #787's preparation
+// worker hand-authored the body with a premature `Verdict: NOT CLEAN` while Findings/Next still read
+// pending; hasCanonicalAuditShape only checks the six upstream identity fields, so the malformed
+// candidate reached AUDIT_READY, was triggered, and a later zero-finding CLEAN report was routed to
+// STAGE2_CORRECTION_REQUIRED because the durable verdict was never PENDING. Used only at the
+// pre-trigger surfaces only (verifyAuditIssueMatches before finalization, existing-issue
+// reconciliation, and trigger authorization); never applied once an audit has crossed the
+// finalization/trigger boundary, whose verdict is legitimately CLEAN/NOT CLEAN. record-verdict edits
+// only the Verdict field, so a recorded verdict is body-indistinguishable from preparation-time
+// corruption after the fact; no comment-text provenance is used, and a persisted conflicting verdict
+// stays fail-closed (CONFLICTING_VERDICT) with recovery by replacement/supersession.
+export function checkPreAuditPendingState(body) {
+  const text = body ?? "";
+  const isPending = (value) => value !== null && /^pending\b/i.test(value);
+  const errors = [];
+  const findings = parseFormFieldBlock(text, "Findings");
+  if (!isPending(findings)) errors.push(`"Findings" is ${JSON.stringify(findings)}, expected the pending placeholder`);
+  const verdict = parseFormField(text, "Verdict");
+  if (verdict !== "PENDING") errors.push(`"Verdict" is ${JSON.stringify(verdict)}, expected "PENDING"`);
+  const next = parseFormFieldBlock(text, "Next authorized action");
+  if (!isPending(next)) errors.push(`"Next authorized action" is ${JSON.stringify(next)}, expected the pending placeholder`);
+  return errors.length === 0 ? { ok: true } : { ok: false, errors };
+}
+
 // Pure. Given a list of `[Audit] in:title` search candidates (the `{ number, title, body, state,
 // createdAt }` shape `defaultGhIssueList` below returns), filters to those that are genuinely
 // OPEN, carry the *complete* canonical audit shape (`hasCanonicalAuditShape` above), and whose
@@ -2062,11 +2094,12 @@ export function hasCanonicalAuditShape(body) {
 // revalidation (Stage 1 review finding P2 on PR #730, the TOCTOU gap) share the exact same
 // matching semantics rather than each maintaining a second, competing definition of "audit
 // ready" that could silently drift apart.
-export function findMatchingOpenAuditIssues(candidates, { mergeCommitOid, executionIssue }) {
+export function findMatchingOpenAuditIssues(candidates, { mergeCommitOid, executionIssue }, { requirePendingState = false } = {}) {
   const expectedWorkIssue = executionIssue === "none" ? "none" : executionIssue;
   return (candidates ?? []).filter((candidate) => {
     if (candidate.state !== "OPEN") return false;
     if (!hasCanonicalAuditShape(candidate.body ?? "")) return false;
+    if (requirePendingState && !checkPreAuditPendingState(candidate.body ?? "").ok) return false;
     const candidateMergeCommit = parseMergeCommitRef(candidate.body ?? "");
     if (!candidateMergeCommit || candidateMergeCommit.toLowerCase() !== String(mergeCommitOid).toLowerCase()) return false;
     return parseWorkIssueRef(candidate.body ?? "") === expectedWorkIssue;

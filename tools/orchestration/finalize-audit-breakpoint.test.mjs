@@ -108,6 +108,18 @@ const MATCHING_AUDIT_VIEW = {
     "",
     "1. Confirm the change works as described.",
     "",
+    "### Findings",
+    "",
+    "Pending — awaiting Stage 2 audit response.",
+    "",
+    "### Verdict",
+    "",
+    "PENDING",
+    "",
+    "### Next authorized action",
+    "",
+    "Pending audit.",
+    "",
   ].join("\n"),
 };
 
@@ -137,6 +149,18 @@ const MATCHING_AUDIT_VIEW_NO_WORK_ISSUE = {
     "### Verification checklist",
     "",
     "1. Confirm the change works as described.",
+    "",
+    "### Findings",
+    "",
+    "Pending — awaiting Stage 2 audit response.",
+    "",
+    "### Verdict",
+    "",
+    "PENDING",
+    "",
+    "### Next authorized action",
+    "",
+    "Pending audit.",
     "",
   ].join("\n"),
 };
@@ -176,6 +200,18 @@ const MISSING_MERGED_PR_AUDIT_VIEW = {
     "",
     "1. Confirm the change works as described.",
     "",
+    "### Findings",
+    "",
+    "Pending — awaiting Stage 2 audit response.",
+    "",
+    "### Verdict",
+    "",
+    "PENDING",
+    "",
+    "### Next authorized action",
+    "",
+    "Pending audit.",
+    "",
   ].join("\n"),
 };
 
@@ -201,6 +237,18 @@ const MISSING_AUDIT_SCOPE_AUDIT_VIEW = {
     "### Verification checklist",
     "",
     "1. Confirm the change works as described.",
+    "",
+    "### Findings",
+    "",
+    "Pending — awaiting Stage 2 audit response.",
+    "",
+    "### Verdict",
+    "",
+    "PENDING",
+    "",
+    "### Next authorized action",
+    "",
+    "Pending audit.",
     "",
   ].join("\n"),
 };
@@ -400,6 +448,18 @@ const RENDERED_BLANK_AUDIT_SCOPE_AUDIT_VIEW = {
     "### Verification checklist",
     "",
     "1. Confirm the change works as described.",
+    "",
+    "### Findings",
+    "",
+    "Pending — awaiting Stage 2 audit response.",
+    "",
+    "### Verdict",
+    "",
+    "PENDING",
+    "",
+    "### Next authorized action",
+    "",
+    "Pending audit.",
     "",
   ].join("\n"),
 };
@@ -1022,4 +1082,56 @@ test("runDirectReferenceVerification(): rejects missing/invalid required args wi
     },
   );
   assert.equal(result.exitCode, 1);
+});
+
+// Issue #788 (live #787 reproduction): identity-correct but premature pre-audit verdict.
+test("verifyAuditIssueMatches (#788): rejects the #787 shape - pending Findings/Next with a premature Verdict NOT CLEAN", () => {
+  const view = { ...MATCHING_AUDIT_VIEW, body: MATCHING_AUDIT_VIEW.body.replace("\nPENDING\n", "\nNOT CLEAN\n") };
+  assert.notEqual(view.body, MATCHING_AUDIT_VIEW.body);
+  const result = verifyAuditIssueMatches(view, { mergeCommitOid: "d34db33fd34db33fd34db33fd34db33fd34db33f", executionIssue: 440 });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /pre-audit mutable state/);
+  assert.equal(
+    verifyAuditIssueMatches(MATCHING_AUDIT_VIEW, { mergeCommitOid: "d34db33fd34db33fd34db33fd34db33fd34db33f", executionIssue: 440 }).ok,
+    true,
+  );
+});
+
+// Issue #788 Stage 1 P2: the pre-audit pending-state requirement must not break an idempotent rerun
+// once the audit has crossed the finalization boundary and later recorded a verdict (record-verdict
+// edits only the Verdict field, so Findings/Next placeholders stay unchanged).
+test("run() (#788): idempotent rerun against an already-AUDIT control whose audit later recorded CLEAN/NOT CLEAN stays FINALIZED", async () => {
+  for (const verdict of ["CLEAN", "NOT CLEAN"]) {
+    const view = { ...MATCHING_AUDIT_VIEW, body: MATCHING_AUDIT_VIEW.body.replace("\nPENDING\n", `\n${verdict}\n`) };
+    assert.notEqual(view.body, MATCHING_AUDIT_VIEW.body);
+    const result = await run(
+      { repo: "o/r", controlIssue: 445, executionIssue: 440, pr: 558, auditIssue: 559 },
+      {
+        ghIssueViewImpl: async () => ALREADY_AUDIT_BODY,
+        ghPrViewImpl: async () => MERGED_PR_VIEW,
+        ghAuditIssueViewImpl: async () => view,
+        writeControlSnapshotImpl: async ({ proposedBody }) => ({ exitCode: 0, state: "WRITTEN", proposedBody }),
+      },
+    );
+    assert.equal(result.state, "FINALIZED", verdict);
+  }
+});
+
+test("run() (#788): first finalization (control still REVIEW) of the #787 shape is still rejected and never writes", async () => {
+  const view = { ...MATCHING_AUDIT_VIEW, body: MATCHING_AUDIT_VIEW.body.replace("\nPENDING\n", "\nNOT CLEAN\n") };
+  let wrote = false;
+  const result = await run(
+    { repo: "o/r", controlIssue: 445, executionIssue: 440, pr: 558, auditIssue: 559 },
+    {
+      ghIssueViewImpl: async () => REVIEW_BODY,
+      ghPrViewImpl: async () => MERGED_PR_VIEW,
+      ghAuditIssueViewImpl: async () => view,
+      writeControlSnapshotImpl: async () => {
+        wrote = true;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.state, "AUDIT_BREAKPOINT_UNVERIFIED");
+  assert.equal(wrote, false);
 });
