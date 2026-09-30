@@ -156,6 +156,7 @@ import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 import { parseWorktreeListPorcelain } from "./worktree-preflight.mjs";
 import { normalizePathForComparison } from "./classify-primary-path-lock.mjs";
 import { getActionEnvelope } from "./action-envelope.mjs";
+import { persistVerdictHandoff, readVerdictHandoff } from "./verdict-handoff.mjs";
 
 // Issue #703 Stage 1 correction (P1 finding on PR #710): this process's own absolute path to
 // itself -- the controller's authoritative copy of this script, loaded from wherever the
@@ -1049,7 +1050,7 @@ export async function run(
 // ---------------------------------------------------------------------------------------------
 
 // Value-less flags (`--reserve`, `--reserve-from-gate`) never consume the following token.
-const BOOLEAN_FLAGS = new Set(["reserve", "reserve-from-gate"]);
+const BOOLEAN_FLAGS = new Set(["reserve", "reserve-from-gate", "from-handoff"]);
 
 function parseArgs(argv) {
   const args = {};
@@ -1102,14 +1103,38 @@ async function main() {
 
   if (args["reserve-from-gate"]) {
     let gate;
-    try {
-      gate = JSON.parse(readStdin());
-    } catch (err) {
-      console.error(`pr-head-checkout-preflight.mjs: could not parse gate JSON on stdin: ${err.message}`);
-      process.exit(1);
-      return;
+    // Issue #761: `--from-handoff` reads the verdict the gate script itself persisted (see
+    // verdict-handoff.mjs) instead of a stdin pipe, so a controller that no longer holds the
+    // gate's JSON never re-runs the lifecycle gate or hand-builds JSON. Fail closed on anything
+    // missing/stale/malformed/wrong-control-issue.
+    const fromHandoff = Boolean(args["from-handoff"]);
+    if (fromHandoff) {
+      const handoff = readVerdictHandoff({ controlIssue: toIntOrNull(args["control-issue"]) });
+      if (!handoff.ok) {
+        console.error(`pr-head-checkout-preflight.mjs: ${handoff.reason}`);
+        process.exit(1);
+        return;
+      }
+      gate = handoff.verdict;
+      // Idempotent: an already-reserved handoff is returned as-is, never reserved a second time.
+      if (gate.checkoutBinding) {
+        console.log(JSON.stringify(gate));
+        process.exit(0);
+        return;
+      }
+    } else {
+      try {
+        gate = JSON.parse(readStdin());
+      } catch (err) {
+        console.error(`pr-head-checkout-preflight.mjs: could not parse gate JSON on stdin: ${err.message}`);
+        process.exit(1);
+        return;
+      }
     }
     const { exitCode, output } = await reserveFromGate(gate, { repo: resolvedRepo });
+    // Persist the enriched output (verdict + checkoutBinding, or the terminal
+    // CHECKOUT_BINDING_UNVERIFIED verdict) so the formatter consumes exactly this reservation.
+    if (fromHandoff) persistVerdictHandoff(output);
     console.log(JSON.stringify(output));
     process.exit(exitCode);
     return;

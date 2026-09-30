@@ -220,6 +220,7 @@ import { fileURLToPath } from "node:url";
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { requiresPreBoundNonIsolatedDispatch } from "./action-envelope.mjs";
+import { clearVerdictHandoff, persistVerdictHandoff, verdictHandoffPath } from "./verdict-handoff.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const STATE_DIR = process.env.LDL_ACTION_ENVELOPE_STATE_DIR || join(ROOT, ".claude", "action-envelope-state");
@@ -244,6 +245,8 @@ export function persistLastGateVerdict(result, { mkdirImpl = mkdirSync, writeFil
   try {
     mkdirImpl(STATE_DIR, { recursive: true });
     writeFileImpl(LAST_GATE_VERDICT_PATH, JSON.stringify(result), "utf8");
+    // Issue #761: also keep the non-consumed handoff copy the reserve/format steps read.
+    persistVerdictHandoff(result, { mkdirImpl, writeFileImpl, path: verdictHandoffPath(STATE_DIR) });
   } catch {
     // Deliberately swallowed -- see comment above.
   }
@@ -255,6 +258,7 @@ export function persistLastGateVerdict(result, { mkdirImpl = mkdirSync, writeFil
 export function clearLastGateVerdict({ existsImpl = existsSync, unlinkImpl = unlinkSync } = {}) {
   try {
     if (existsImpl(LAST_GATE_VERDICT_PATH)) unlinkImpl(LAST_GATE_VERDICT_PATH);
+    clearVerdictHandoff({ existsImpl, unlinkImpl, path: verdictHandoffPath(STATE_DIR) });
   } catch {
     // Deliberately swallowed -- see persistLastGateVerdict above.
   }

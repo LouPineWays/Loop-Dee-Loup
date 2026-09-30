@@ -715,6 +715,12 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/ready-dispatch-gate.mjs", dependsOnDest: "tools/orchestration/control-plane-freshness.mjs" },
   { dest: "tools/orchestration/next-review-transition-gate.mjs", dependsOnDest: "tools/orchestration/control-plane-freshness.mjs" },
   { dest: "tools/orchestration/session-entry-gate.mjs", dependsOnDest: "tools/orchestration/control-plane-freshness.mjs" },
+  // Issue #761: the verdict handoff (verdict-handoff.mjs) is hard-imported by the action-envelope
+  // hook (persisted by every gate entrypoint), the checkout preflight, and the dispatch-prompt
+  // formatter. An unmanaged, preserved copy would fail at ESM load time.
+  { dest: "tools/orchestration/action-envelope-hook.mjs", dependsOnDest: "tools/orchestration/verdict-handoff.mjs" },
+  { dest: "tools/orchestration/pr-head-checkout-preflight.mjs", dependsOnDest: "tools/orchestration/verdict-handoff.mjs" },
+  { dest: "tools/orchestration/format-dispatch-prompt.mjs", dependsOnDest: "tools/orchestration/verdict-handoff.mjs" },
 ];
 
 // Pure. Given one install/update run's final toInstall/toSkip classification, returns one
