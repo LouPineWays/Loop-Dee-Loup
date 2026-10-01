@@ -1,0 +1,6 @@
+1. Confirm REST persistence replaces the GraphQL path.
+2. Confirm validation runs before transport.
+3. Confirm fail-closed response verification.
+4. Confirm repository and body transport behavior.
+5. Confirm regression coverage.
+6. Confirm required workflow checks.

@@ -739,6 +739,7 @@ function findMarkerWalkthroughRun(lines) {
   if (matchedLineIndexes.length === 0) return null;
 
   let count = 1;
+  let runFirst = matchedLineIndexes.length - 1;
   for (let k = matchedLineIndexes.length - 1; k > 0; k--) {
     let brokenByBoundary = false;
     for (let lineIndex = matchedLineIndexes[k - 1] + 1; lineIndex < matchedLineIndexes[k]; lineIndex++) {
@@ -749,8 +750,9 @@ function findMarkerWalkthroughRun(lines) {
     }
     if (brokenByBoundary) break;
     count++;
+    runFirst = k - 1;
   }
-  return { count, endLineIndex: matchedLineIndexes[matchedLineIndexes.length - 1] };
+  return { count, endLineIndex: matchedLineIndexes[matchedLineIndexes.length - 1], itemLineIndexes: matchedLineIndexes.slice(runFirst) };
 }
 
 // Pure. Counts the items in `text`'s verification-checklist walk-through, whichever of the two
@@ -772,6 +774,18 @@ export function countVerificationWalkthroughItems(text) {
   if (!numberedRun && !markerRun) return 0;
   if (!markerRun) return numberedRun.count;
   if (!numberedRun) return markerRun.count;
+  // Issue #821 (live Audit #820): a complete numbered walk-through followed by a later
+  // "### Verification Results" section whose every bullet is a literal backtick-quoted command
+  // (COMMAND_LOG_BULLET_CONTENT_PATTERN) is a command log, not a competing walk-through, even
+  // though its heading is not a "Checks"-style label. Position alone must not let it displace the
+  // numbered run. Content-gated, so prose marker walk-throughs and a lone command-shaped marker
+  // run (no numbered run to prefer) keep their prior classification.
+  if (
+    markerRun.endLineIndex > numberedRun.endLineIndex &&
+    markerRun.itemLineIndexes.every((index) => COMMAND_LOG_BULLET_CONTENT_PATTERN.test(lines[index]))
+  ) {
+    return numberedRun.count;
+  }
   return numberedRun.endLineIndex > markerRun.endLineIndex ? numberedRun.count : markerRun.count;
 }
 
