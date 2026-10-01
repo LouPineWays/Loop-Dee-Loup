@@ -57,6 +57,7 @@
 // Tests: node --test tools/orchestration/close-control.test.mjs
 
 import { execFileSync } from "node:child_process";
+import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 import {
   upsertControlBullet,
   resolveRepoIdentity,
@@ -72,10 +73,7 @@ import {
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 
 function defaultGhIssueView({ repo, number }) {
-  const raw = execFileSync("gh", ["issue", "view", String(number), "--repo", repo, "--json", "body,state"], {
-    encoding: "utf8",
-  });
-  return JSON.parse(raw);
+  return readGithubIssue({ repo, number, fields: ["body", "state"] });
 }
 
 function defaultGhClose({ repo, controlIssue }) {

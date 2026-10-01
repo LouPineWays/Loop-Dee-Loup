@@ -67,6 +67,7 @@
 // Tests: node --test tools/orchestration/reconcile-control-blocker.test.mjs
 
 import { execFileSync } from "node:child_process";
+import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 import {
   upsertControlBullet,
   resolveRepoIdentity,
@@ -84,10 +85,7 @@ import { evaluateBlockerAuthoring } from "./blocker-grammar.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 
 function defaultGhIssueView({ repo, number }) {
-  const raw = execFileSync("gh", ["issue", "view", String(number), "--repo", repo, "--json", "body,state"], {
-    encoding: "utf8",
-  });
-  return JSON.parse(raw);
+  return readGithubIssue({ repo, number, fields: ["body", "state"] });
 }
 
 // Pure. Shared Contract design decision point 5, corrected by issue #437/#610 Stage 1 finding

@@ -63,6 +63,7 @@
 // Tests: node --test tools/review-watch/stage2-control-plane-ci-head.test.mjs
 
 import { execFileSync } from "node:child_process";
+import { readGithubIssue, readGithubPr } from "../orchestration/github-read.mjs";
 import { parseControlBullet, resolveRepoIdentity } from "../orchestration/ready-dispatch-gate.mjs";
 import { defaultResolveCommit } from "./stage1-correction-gate.mjs";
 
@@ -138,10 +139,7 @@ export function resolveControlPlaneCiHead(raw) {
 }
 
 function defaultGhIssueView({ repo, number }) {
-  const raw = execFileSync("gh", ["issue", "view", String(number), "--repo", repo, "--json", "body"], {
-    encoding: "utf8",
-  });
-  return JSON.parse(raw);
+  return readGithubIssue({ repo, number, fields: ["body"] });
 }
 
 export function parseArgs(argv) {

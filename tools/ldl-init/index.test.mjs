@@ -1506,6 +1506,19 @@ test("HARD_MODULE_DEPENDENCIES: covers verify-audit-ready.mjs's imports and the 
   assert.equal(collisions[0].dest, v);
 });
 
+test("HARD_MODULE_DEPENDENCIES: covers github-read.mjs importers and flags a preserved unmanaged github-read.mjs (#725)", () => {
+  const g = "tools/orchestration/github-read.mjs";
+  for (const d of ["tools/orchestration/ready-dispatch-gate.mjs", "tools/orchestration/next-review-transition-gate.mjs", "tools/review-watch/lifecycle-gate.mjs", "tools/review-watch/stage1-gate.mjs"]) {
+    assert.ok(HARD_MODULE_DEPENDENCIES.some((e) => e.dest === d && e.dependsOnDest === g), d);
+  }
+  const collisions = findHardDependencyCollisions({
+    toInstall: [{ destRel: "tools/orchestration/ready-dispatch-gate.mjs", content: Buffer.from("x") }],
+    toSkip: [{ dest: g, reason: "unmanaged" }],
+  });
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].dest, g);
+});
+
 test("HARD_MODULE_DEPENDENCIES: covers stage1-gate.mjs -> stage1-clean-reaction.mjs (#776)", () => {
   const dest = "tools/review-watch/stage1-gate.mjs";
   const dep = "tools/review-watch/stage1-clean-reaction.mjs";

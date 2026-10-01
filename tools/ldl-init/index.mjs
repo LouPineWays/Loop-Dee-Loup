@@ -703,6 +703,26 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/verify-audit-ready.mjs", dependsOnDest: "tools/review-watch/lifecycle-gate.mjs" },
   { dest: "tools/orchestration/verify-audit-ready.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
   { dest: "tools/orchestration/format-dispatch-prompt.mjs", dependsOnDest: "tools/orchestration/verify-audit-ready.mjs" },
+  // Issue #725 Stage 1 review finding (P2, on PR #763): every importer of the new shared
+  // github-read.mjs REST boundary hard-imports readGithubIssue/readGithubPr. Without these edges an
+  // unmanaged, preserved tools/orchestration/github-read.mjs lets install/update report success
+  // while the mandatory gates fail at ESM load time.
+  { dest: "tools/orchestration/close-control.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/finalize-audit-breakpoint.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/finalize-correction-breakpoint.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/finalize-pr-breakpoint.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/finalize-stage1-satisfied-breakpoint.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/next-review-transition-gate.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/pr-head-checkout-preflight.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/ready-dispatch-gate.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/reconcile-control-blocker.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/transition-guard.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/verify-audit-ready.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/verify-correction-completion.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/review-watch/consumer-sync-gate.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/review-watch/lifecycle-gate.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/review-watch/stage1-gate.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/review-watch/stage2-control-plane-ci-head.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   // Issue #776 Stage 1 review finding (P2, on PR #777): stage1-gate.mjs hard-imports
   // findQualifyingCleanReaction/hasExplicitFindingsSignal from stage1-clean-reaction.mjs. Without
   // this edge, a consumer's unmanaged stage1-clean-reaction.mjs would be preserved while the

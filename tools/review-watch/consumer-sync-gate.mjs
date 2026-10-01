@@ -100,6 +100,7 @@
 // Tests: node --test tools/review-watch/consumer-sync-gate.test.mjs
 
 import { execFileSync } from "node:child_process";
+import { readGithubIssue, readGithubPr } from "../orchestration/github-read.mjs";
 import { findExistingTrigger, headMarker } from "./trigger.mjs";
 import { run as runMergeReadyGate } from "./merge-ready-gate.mjs";
 import { isCleanReviewResponse, isFindingsBearingResponse } from "./stage1-findings.mjs";
@@ -505,10 +506,7 @@ function defaultGhPatch({ repo, commentId, body }) {
 }
 
 function defaultGhPrView({ repo, number }) {
-  const raw = execFileSync("gh", ["pr", "view", String(number), "--repo", repo, "--json", "headRefOid"], {
-    encoding: "utf8",
-  });
-  return JSON.parse(raw).headRefOid ?? null;
+  return readGithubPr({ repo, number, fields: ["headRefOid"] }).headRefOid;
 }
 
 // --paginate --slurp: same convention as defaultGhApi, so a PR with many commits never has a

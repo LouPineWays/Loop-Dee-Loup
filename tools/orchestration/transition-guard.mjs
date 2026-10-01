@@ -97,6 +97,7 @@
 // Tests: node --test tools/orchestration/transition-guard.test.mjs
 
 import { execFileSync } from "node:child_process";
+import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 
@@ -134,10 +135,7 @@ function failure(controlIssue, failureClass, reason) {
 }
 
 function defaultGhIssueView({ repo, controlIssue }) {
-  const args = ["issue", "view", String(controlIssue), "--json", "body"];
-  if (repo) args.push("--repo", repo);
-  const raw = execFileSync("gh", args, { encoding: "utf8" });
-  return JSON.parse(raw).body ?? "";
+  return readGithubIssue({ repo, number: controlIssue, fields: ["body"] }).body;
 }
 
 // No external witness declared: a purely body-authorized transition. Returns a stable constant

@@ -30,7 +30,7 @@
 //
 // Tests: node --test tools/orchestration/verify-correction-completion.test.mjs
 
-import { execFileSync } from "node:child_process";
+import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 import { verifyExecutionMatches, verifyPrLinkage, verifyPrHeadIsCurrent } from "./finalize-pr-breakpoint.mjs";
 import { composeCorrectionControlBody, verifyFinalizedCorrectionBody } from "./finalize-correction-breakpoint.mjs";
@@ -115,15 +115,11 @@ export async function verifyCorrectionCompletion(
 }
 
 function defaultGhIssueView({ repo, controlIssue }) {
-  const args = ["issue", "view", String(controlIssue), "--json", "body"];
-  if (repo) args.push("--repo", repo);
-  return JSON.parse(execFileSync("gh", args, { encoding: "utf8" })).body ?? "";
+  return readGithubIssue({ repo, number: controlIssue, fields: ["body"] }).body ?? "";
 }
 
 function defaultGhPrView({ repo, pr }) {
-  const args = ["pr", "view", String(pr), "--json", "headRefName,headRefOid,body,state"];
-  if (repo) args.push("--repo", repo);
-  return JSON.parse(execFileSync("gh", args, { encoding: "utf8" }));
+  return readGithubPr({ repo, number: pr, fields: ["headRefName", "headRefOid", "body", "state"] });
 }
 
 function parseArgs(argv) {
