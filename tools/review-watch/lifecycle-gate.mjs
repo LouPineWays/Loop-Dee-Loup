@@ -3086,22 +3086,58 @@ export function defaultGhIssueList({ repo }) {
   return pages.flatMap((page) => normalizeSearchIssuesPage(page));
 }
 
-// `--body-file -` (stdin) rather than `--body <text>`: the rewritten issue body is the audit
-// issue's own full multi-field body text, which can exceed a shell's argv length limit and,
-// unlike `--body`, is never subject to the argv-escaping risk of passing arbitrary Markdown
-// (backticks, `#N` references, etc.) as a single execFileSync argument. `execFileSync`'s
-// `input` option pipes it via stdin directly, with no shell involved.
-function defaultGhEditAuditVerdict({ repo, auditIssue, body }) {
-  execFileSync("gh", ["issue", "edit", String(auditIssue), "--repo", repo, "--body-file", "-"], {
+// Issue #808: REST (`PATCH /repos/{repo}/issues/{n}`, `POST .../comments`) rather than `gh issue
+// edit`/`gh issue comment`, which go through GitHub GraphQL — blocked (HTTP 403) in the remote/cloud
+// profile of Audit #805 while repository REST access works. The JSON request is piped over stdin
+// (`--input -`), so the full multi-field Markdown body is never subject to argv length/escaping
+// limits and no shell is involved. The response is validated (issue identity, not a PR, body echoed
+// back) so a malformed/wrong-target response is an operational failure, never inferred progress.
+const normalizeEol = (t) => String(t ?? "").replace(/\r\n/g, "\n");
+
+function ghRestJson(method, path, payload, runImpl = execFileSync) {
+  const raw = runImpl("gh", ["api", "-X", method, path, "--input", "-"], {
     encoding: "utf8",
-    input: body,
+    input: JSON.stringify(payload),
     maxBuffer: 20 * 1024 * 1024,
   });
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error(`malformed (non-JSON) REST response from ${method} ${path}`);
+  }
+}
+
+function assertRestIssueIdentity(res, { repo, auditIssue, what }) {
+  if (!res || typeof res !== "object") throw new Error(`malformed REST ${what} response`);
+  if (res.pull_request) throw new Error(`REST ${what} response describes a pull request, not an Issue`);
+  const url = String(res.html_url ?? "");
+  if (Number(res.number) !== Number(auditIssue) || !url.toLowerCase().endsWith(`/${repo}/issues/${auditIssue}`.toLowerCase())) {
+    throw new Error(`REST ${what} response identity does not match ${repo}#${auditIssue}`);
+  }
+}
+
+export function ghRestEditIssueBody({ repo, auditIssue, body }, runImpl = execFileSync) {
+  const res = ghRestJson("PATCH", `repos/${repo}/issues/${auditIssue}`, { body }, runImpl);
+  assertRestIssueIdentity(res, { repo, auditIssue, what: "issue update" });
+  if (normalizeEol(res.body) !== normalizeEol(body)) {
+    throw new Error("REST issue update response body does not match the body written");
+  }
+}
+
+export function ghRestCommentIssue({ repo, auditIssue, body }, runImpl = execFileSync) {
+  const res = ghRestJson("POST", `repos/${repo}/issues/${auditIssue}/comments`, { body }, runImpl);
+  if (!res || typeof res !== "object" || !String(res.html_url ?? "").toLowerCase().includes(`/${repo}/issues/${auditIssue}#issuecomment-`.toLowerCase())) {
+    throw new Error(`REST comment response identity does not match ${repo}#${auditIssue}`);
+  }
+}
+
+function defaultGhEditAuditVerdict(args) {
+  ghRestEditIssueBody(args);
 }
 
 function defaultGhRecordVerdictComment({ repo, auditIssue, verdict, reportEvidence, replacedMalformedVerdict = null }) {
   const body = recordedVerdictComment({ repo, auditIssue, verdict, reportEvidence, replacedMalformedVerdict });
-  execFileSync("gh", ["issue", "comment", String(auditIssue), "--repo", repo, "--body", body], { encoding: "utf8" });
+  ghRestCommentIssue({ repo, auditIssue, body });
 }
 
 function defaultGhCloseAuditIssue({ repo, auditIssue }) {
