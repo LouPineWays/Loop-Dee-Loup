@@ -360,11 +360,12 @@ test("reconcile: legacy merged+stale but DIRTY worktree is retainedDirty with no
     mergedCommits: new Set(["mergedsha"]),
     lastActivityAt: { [path]: "2020-01-01T00:00:00.000Z" },
     checkRemovableResults: { [path]: { ok: false, reason: "fatal: weird" } },
-    removals: { [path]: { ok: false, reason: "fatal: weird" } },
+    removals: { [path]: { ok: true } },
   });
   const { outcomes: odd } = reconcile(args(broken));
   assert.deepEqual(odd.retainedDirty, []);
   assert.deepEqual(odd.legacyRetained, [{ path, reason: "fatal: weird" }]);
+  assert.deepEqual(broken._removed, [], "an unclassifiable status probe must fail closed before any mutating removal (Audit #814)");
 });
 
 test("reconcile: a merged, clean, but recently-active unregistered worktree is retained -- staleness evidence is required, not merely merged/clean state (Stage 1 review, PR #683)", () => {

@@ -578,11 +578,16 @@ export function reconcile({
       // Issue #767: classify predictable dirtiness non-destructively BEFORE any mutating removal,
       // so a durably obsolete but dirty legacy checkout is first-class retainedDirty (retryable on
       // a later run once clean) and git's own "use --force" failure is never provoked as a normal
-      // event. Only an explicit `dirty` determination is quarantined here; any other check
-      // failure falls through to the unchanged removal path / legacyRetained (stays observable).
+      // event. Mutating removal is reachable ONLY after the probe positively returns ok (Stage 2
+      // Audit #814): explicit dirtiness is retainedDirty; any other probe failure fails closed to
+      // legacyRetained with its reason, never reaching removal.
       const precheck = git.checkRemovable(primaryPath, live.path);
       if (!precheck.ok && precheck.dirty) {
         outcomes.retainedDirty.push({ path: live.path, reason: precheck.reason, legacy: true });
+        continue;
+      }
+      if (!precheck.ok) {
+        outcomes.legacyRetained.push({ path: live.path, reason: precheck.reason });
         continue;
       }
       const result = dryRun ? precheck : attemptRemoval(git, primaryPath, live.path, dryRun);
