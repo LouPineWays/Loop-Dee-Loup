@@ -3111,7 +3111,7 @@ function assertRestIssueIdentity(res, { repo, auditIssue, what }) {
   if (!res || typeof res !== "object") throw new Error(`malformed REST ${what} response`);
   if (res.pull_request) throw new Error(`REST ${what} response describes a pull request, not an Issue`);
   const url = String(res.html_url ?? "");
-  if (Number(res.number) !== Number(auditIssue) || !url.endsWith(`/${repo}/issues/${auditIssue}`)) {
+  if (Number(res.number) !== Number(auditIssue) || !url.toLowerCase().endsWith(`/${repo}/issues/${auditIssue}`.toLowerCase())) {
     throw new Error(`REST ${what} response identity does not match ${repo}#${auditIssue}`);
   }
 }
@@ -3126,7 +3126,7 @@ export function ghRestEditIssueBody({ repo, auditIssue, body }, runImpl = execFi
 
 export function ghRestCommentIssue({ repo, auditIssue, body }, runImpl = execFileSync) {
   const res = ghRestJson("POST", `repos/${repo}/issues/${auditIssue}/comments`, { body }, runImpl);
-  if (!res || typeof res !== "object" || !String(res.html_url ?? "").includes(`/${repo}/issues/${auditIssue}#issuecomment-`)) {
+  if (!res || typeof res !== "object" || !String(res.html_url ?? "").toLowerCase().includes(`/${repo}/issues/${auditIssue}#issuecomment-`.toLowerCase())) {
     throw new Error(`REST comment response identity does not match ${repo}#${auditIssue}`);
   }
 }

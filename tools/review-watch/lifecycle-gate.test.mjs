@@ -4326,3 +4326,14 @@ test("#808 ghRestCommentIssue POSTs a comment via REST and validates identity", 
     /identity/,
   );
 });
+
+test("#808 REST identity checks tolerate repository casing differences", () => {
+  ghRestEditIssueBody(
+    { repo: "Owner/Repo", auditIssue: 5, body: "x" },
+    fakeRun({ number: 5, html_url: "https://github.com/owner/repo/issues/5", body: "x" }),
+  );
+  ghRestCommentIssue(
+    { repo: "Owner/Repo", auditIssue: 5, body: "hi" },
+    fakeRun({ html_url: "https://github.com/owner/repo/issues/5#issuecomment-9" }),
+  );
+});
