@@ -330,7 +330,7 @@ test("checkReconcileControlBlocker: a gh issue edit failure during the write ste
     },
   );
   assert.equal(result.exitCode, 1);
-  assert.match(result.message, /gh issue edit failed/);
+  assert.match(result.message, /REST write failed/);
 });
 
 // -- Stage 1 correction regression tests (PR #610, closing #437's Stage 1 review) -----------

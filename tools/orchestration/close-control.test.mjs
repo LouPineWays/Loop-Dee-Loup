@@ -250,7 +250,7 @@ test("checkCloseControl: a gh issue edit failure is an operational error; the Is
     },
   );
   assert.equal(result.exitCode, 1);
-  assert.match(result.message, /gh issue edit failed/);
+  assert.match(result.message, /REST write failed/);
 });
 
 test("checkCloseControl: a gh issue close failure after a successful body write is an operational error naming the already-terminal body", async () => {
