@@ -68,6 +68,9 @@ jobs:
       - name: LDL-init bootstrap tests
         run: node --test tools/ldl-init/index.test.mjs
 
+      - name: LDL-init enforcement-hook tests
+        run: node --test tools/ldl-init/enforcement-hook.test.mjs
+
       - name: LDL-update tests
         run: node --test tools/ldl-update/index.test.mjs
 
