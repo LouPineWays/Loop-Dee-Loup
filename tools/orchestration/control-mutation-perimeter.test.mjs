@@ -176,6 +176,13 @@ test("hook boundary: representative raw thin-control body edits are denied", () 
     "gh api repos/LouPineWays/Loop-Dee-Loup/issues/726 -X PATCH -f body=@b.md",
     "gh api graphql -f query='mutation { updateIssue(input:{id:\"x\",body:\"y\"}) { clientMutationId } }'",
     "echo hi && gh issue edit 726 --body-file b.md",
+    "gh issue edit 726 \\\n  --body-file body.md",
+    "gh api graphql -f query='\nmutation {\n  updateIssue(input:{id:\"x\"}) { clientMutationId }\n}'",
+    "gh api repos/LouPineWays/Loop-Dee-Loup/issues/726 --method PATCH --input payload.json",
+    "gh --repo LouPineWays/Loop-Dee-Loup issue edit 726 --body x",
+    "gh -R LouPineWays/Loop-Dee-Loup issue edit 726 -b=x",
+    "gh issue edit 726 -Fbody.md",
+    "gh issue edit 726 -bx",
   ]) {
     const d = decideRawControlBodyWrite({ toolName: "Bash", command });
     assert.equal(d.permissionDecision, "deny", command);

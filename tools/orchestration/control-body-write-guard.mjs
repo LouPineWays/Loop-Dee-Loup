@@ -15,7 +15,7 @@
 //   - `gh issue edit ... --body | -b | --body-file | -F` (a body rewrite; label/assignee-only
 //     edits are untouched);
 //   - `gh api ... issues/<N>` (NOT `issues/comments/...`, NOT `issues/<N>/comments`) combined
-//     with a PATCH method and a `body` field;
+//     with a PATCH method and a `body` field, or any non-GET `--input` payload;
 //   - `gh api graphql` carrying an `updateIssue` mutation.
 // It permits `node tools/orchestration/write-control-snapshot.mjs ...`, every comment write,
 // `gh pr edit`, and everything else. Human/external GitHub edits are outside this boundary by
@@ -28,44 +28,99 @@
 
 import { readFileSync } from "node:fs";
 
-// Splits a command line on shell statement separators so a forbidden `gh` segment is judged on
-// its own tokens rather than as a substring of an unrelated quoted argument elsewhere.
-function segments(command) {
-  return command.split(/&&|\|\||;|\||\n/).map((s) => s.trim()).filter(Boolean);
+// Shell-aware lexer: splits a command into statements of tokens, honoring quotes, backslash
+// line-continuations, and quoted multiline arguments, so a forbidden `gh` call is judged on its
+// own tokens regardless of how it is wrapped. Quote characters are stripped from tokens.
+function lex(command) {
+  const statements = [];
+  let toks = [];
+  let cur = "";
+  let has = false;
+  let quote = null;
+  const endTok = () => { if (has) toks.push(cur); cur = ""; has = false; };
+  const endStmt = () => { endTok(); if (toks.length) statements.push(toks); toks = []; };
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (quote) {
+      if (c === quote) quote = null;
+      else if (quote === '"' && c === "\\" && i + 1 < command.length) { cur += command[++i]; }
+      else cur += c;
+      continue;
+    }
+    if (c === "\\") {
+      const n = command[i + 1];
+      if (n === "\n") { i++; continue; }
+      if (n === "\r" && command[i + 2] === "\n") { i += 2; continue; }
+      if (n !== undefined) { cur += n; has = true; i++; }
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = c; has = true; continue; }
+    if (c === ";" || c === "|" || c === "&" || c === "\n" || c === "\r") { endStmt(); continue; }
+    if (c === " " || c === "\t") { endTok(); continue; }
+    cur += c; has = true;
+  }
+  endStmt();
+  return statements;
 }
 
-function tokens(segment) {
-  return segment.split(/\s+/).filter(Boolean);
+// gh global/inherited options that consume a following value.
+const GH_VALUE_OPTS = new Set(["-R", "--repo", "--hostname"]);
+
+// Locates the `gh` invocation and returns { sub: [first two non-option words], rest: [remaining tokens] }.
+function ghInvocation(toks) {
+  let i = toks.findIndex((t) => t === "gh" || /[\/]gh(?:\.exe)?$/.test(t));
+  if (i === -1) return null;
+  i++;
+  const words = [];
+  let restStart = toks.length;
+  for (; i < toks.length; i++) {
+    const t = toks[i];
+    if (words.length >= 2) { restStart = i; break; }
+    if (t.startsWith("-")) {
+      if (GH_VALUE_OPTS.has(t)) i++;
+      continue;
+    }
+    words.push(t);
+  }
+  return { sub: words, rest: toks.slice(restStart), all: toks };
 }
 
-const BODY_FLAGS = new Set(["--body", "-b", "--body-file", "-F"]);
-
-function isGhIssueEditBodyWrite(toks) {
-  const ghIdx = toks.indexOf("gh");
-  if (ghIdx === -1) return false;
-  if (toks[ghIdx + 1] !== "issue" || toks[ghIdx + 2] !== "edit") return false;
-  return toks.slice(ghIdx + 3).some((t) => {
-    if (BODY_FLAGS.has(t)) return true;
-    return t.startsWith("--body=") || t.startsWith("--body-file=");
+function isGhIssueEditBodyWrite(inv) {
+  if (inv.sub[0] !== "issue" || inv.sub[1] !== "edit") return false;
+  return inv.all.some((t) => {
+    if (t === "--body" || t === "--body-file" || t.startsWith("--body=") || t.startsWith("--body-file=")) return true;
+    // Short flags, including attached values (-bX, -b=X, -Fbody.md) and clusters.
+    return /^-[A-Za-z]*[bF]/.test(t) && !t.startsWith("--");
   });
 }
 
-function isGhApiIssueBodyPatch(toks, segment) {
-  const ghIdx = toks.indexOf("gh");
-  if (ghIdx === -1 || toks[ghIdx + 1] !== "api") return false;
-  // A bare `issues/<N>` endpoint (optionally with a trailing quote); comment endpoints are never
-  // an Issue-body write.
-  const endpoint = toks.slice(ghIdx + 2).find((t) => /repos\/[^/\s]+\/[^/\s]+\/issues\/(?:\d+|\$\{?\w+\}?)["']?$/.test(t));
+function isGhApiIssueBodyPatch(inv) {
+  if (inv.sub[0] !== "api" || inv.sub[1] === "graphql") return false;
+  const toks = inv.all;
+  // A bare `issues/<N>` endpoint (query string stripped); comment endpoints are never an
+  // Issue-body write.
+  const endpoint = toks.find((t) => /(?:^|\/)issues\/(?:\d+|\$\{?\w+\}?|\{\w+\})$/.test(t.split("?")[0]));
   if (!endpoint) return false;
-  const patch = /(?:^|\s)(?:-X|--method)[\s=]+PATCH\b/i.test(segment) || /--method=PATCH/i.test(segment);
-  const bodyField = /(?:^|\s)(?:-f|-F|--field|--raw-field)[\s=]+["']?body\b/.test(segment);
-  return patch && bodyField;
+  const joined = toks.join(" ");
+  const get = toks.some((t, i) => /^(?:-X|--method)$/.test(t) && /^GET$/i.test(toks[i + 1] || "")) || /--method=GET\b/i.test(joined) || /(?:^| )-XGET\b/i.test(joined);
+  if (get) return false;
+  const patch =
+    toks.some((t, i) => /^(?:-X|--method)$/.test(t) && /^PATCH$/i.test(toks[i + 1] || "")) ||
+    /(?:^|\s)(?:--method=|-X=?)PATCH\b/i.test(joined);
+  // `--input` supplies the whole request body from a file/stdin we cannot inspect: deny
+  // conservatively on any non-GET call to an issue endpoint.
+  const input = toks.some((t) => t === "--input" || t.startsWith("--input="));
+  const bodyField = toks.some((t, i) => {
+    if (/^(?:-f|-F|--field|--raw-field)$/.test(t)) return /^body(?:=|$)/.test(toks[i + 1] || "");
+    if (/^--(?:field|raw-field)=body(?:=|$)/.test(t)) return true;
+    return /^-[fF]body(?:=|$)/.test(t);
+  });
+  return input || (patch && bodyField);
 }
 
-function isGraphqlUpdateIssue(toks, segment) {
-  const ghIdx = toks.indexOf("gh");
-  if (ghIdx === -1 || toks[ghIdx + 1] !== "api" || toks[ghIdx + 2] !== "graphql") return false;
-  return /updateIssue\b/.test(segment);
+function isGraphqlUpdateIssue(inv, statementText) {
+  if (inv.sub[0] !== "api" || inv.sub[1] !== "graphql") return false;
+  return /updateIssue\b/.test(statementText);
 }
 
 // Pure. Returns { permissionDecision: "allow" } or a deny decision with a reason.
@@ -73,12 +128,13 @@ export function decideRawControlBodyWrite({ toolName, command } = {}) {
   if (toolName !== "Bash" || typeof command !== "string" || command.length === 0) {
     return { permissionDecision: "allow" };
   }
-  for (const segment of segments(command)) {
-    const toks = tokens(segment);
+  for (const toks of lex(command)) {
+    const inv = ghInvocation(toks);
+    if (!inv) continue;
     if (
-      isGhIssueEditBodyWrite(toks) ||
-      isGhApiIssueBodyPatch(toks, segment) ||
-      isGraphqlUpdateIssue(toks, segment)
+      isGhIssueEditBodyWrite(inv) ||
+      isGhApiIssueBodyPatch(inv) ||
+      isGraphqlUpdateIssue(inv, toks.join(" "))
     ) {
       return {
         permissionDecision: "deny",
