@@ -327,6 +327,46 @@ test("reconcile: legacy unattributed worktree is reclaimed only when merged, cle
   assert.deepEqual(unmerged._removed, []);
 });
 
+test("reconcile: legacy merged+stale but DIRTY worktree is retainedDirty with no removal attempt; reclaimable once clean (#767)", () => {
+  const path = "/repo/.claude/worktrees/pr-738-bind-dirty";
+  const args = (git) => ({
+    ledger: [],
+    liveWorktrees: [{ path, headCommit: "mergedsha", branch: "old", locked: false }],
+    currentPath: "/repo/.claude/worktrees/current",
+    primaryPath: "/repo",
+    managedRoot: "/repo/.claude/worktrees",
+    git,
+    now: "2026-01-01T00:00:00.000Z",
+  });
+  const dirty = fakeGit({
+    mergedCommits: new Set(["mergedsha"]),
+    lastActivityAt: { [path]: "2020-01-01T00:00:00.000Z" },
+    checkRemovableResults: { [path]: { ok: false, dirty: true, reason: "worktree contains modified or untracked files" } },
+  });
+  const { outcomes } = reconcile(args(dirty));
+  assert.equal(outcomes.retainedDirty.length, 1);
+  assert.equal(outcomes.retainedDirty[0].path, path);
+  assert.deepEqual(outcomes.legacyRetained, []);
+  assert.deepEqual(outcomes.legacyReclaimed, []);
+  assert.deepEqual(dirty._removed, [], "mutating removal must never be invoked for a dirty legacy worktree");
+
+  const clean = fakeGit({ mergedCommits: new Set(["mergedsha"]), lastActivityAt: { [path]: "2020-01-01T00:00:00.000Z" } });
+  const { outcomes: later } = reconcile(args(clean));
+  assert.deepEqual(later.legacyReclaimed, [path]);
+  assert.deepEqual(clean._removed, [path]);
+
+  // A non-dirty check failure is not normalized to dirty: it stays observable as legacyRetained.
+  const broken = fakeGit({
+    mergedCommits: new Set(["mergedsha"]),
+    lastActivityAt: { [path]: "2020-01-01T00:00:00.000Z" },
+    checkRemovableResults: { [path]: { ok: false, reason: "fatal: weird" } },
+    removals: { [path]: { ok: false, reason: "fatal: weird" } },
+  });
+  const { outcomes: odd } = reconcile(args(broken));
+  assert.deepEqual(odd.retainedDirty, []);
+  assert.deepEqual(odd.legacyRetained, [{ path, reason: "fatal: weird" }]);
+});
+
 test("reconcile: a merged, clean, but recently-active unregistered worktree is retained -- staleness evidence is required, not merely merged/clean state (Stage 1 review, PR #683)", () => {
   const path = "/repo/.claude/worktrees/new-session-just-created";
   const now = "2026-01-01T12:00:00.000Z";

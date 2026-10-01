@@ -202,7 +202,7 @@ export function defaultGitImpl() {
     checkRemovable(_cwd, path) {
       try {
         const status = runGit(["status", "--porcelain"], { cwd: path });
-        if (status) return { ok: false, reason: "worktree contains modified or untracked files" };
+        if (status) return { ok: false, dirty: true, reason: "worktree contains modified or untracked files" };
         return { ok: true };
       } catch (err) {
         return { ok: false, reason: String(err.stderr || err.message || err).trim() };
@@ -575,7 +575,17 @@ export function reconcile({
         outcomes.legacyRetained.push(live.path);
         continue;
       }
-      const result = attemptRemoval(git, primaryPath, live.path, dryRun);
+      // Issue #767: classify predictable dirtiness non-destructively BEFORE any mutating removal,
+      // so a durably obsolete but dirty legacy checkout is first-class retainedDirty (retryable on
+      // a later run once clean) and git's own "use --force" failure is never provoked as a normal
+      // event. Only an explicit `dirty` determination is quarantined here; any other check
+      // failure falls through to the unchanged removal path / legacyRetained (stays observable).
+      const precheck = git.checkRemovable(primaryPath, live.path);
+      if (!precheck.ok && precheck.dirty) {
+        outcomes.retainedDirty.push({ path: live.path, reason: precheck.reason, legacy: true });
+        continue;
+      }
+      const result = dryRun ? precheck : attemptRemoval(git, primaryPath, live.path, dryRun);
       if (result.ok) {
         outcomes.legacyReclaimed.push(live.path);
       } else {
