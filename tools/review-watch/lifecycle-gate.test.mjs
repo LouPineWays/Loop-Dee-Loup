@@ -20,6 +20,8 @@ import {
   checkMergeReady,
   checkPostAudit,
   checkRecordVerdict as checkRecordVerdictRaw,
+  ghRestEditIssueBody,
+  ghRestCommentIssue,
   checkPreAuditPendingState,
   assessMalformedPreTriggerVerdict,
   findClosingKeywordMatch,
@@ -4278,4 +4280,49 @@ test("checkRecordVerdict: a NOT CLEAN edited after the trigger contradicting a C
   assert.equal(result.exitCode, 2);
   assert.equal(result.state, "CONFLICTING_VERDICT");
   assert.equal(editCalls.length, 0);
+});
+
+// Issue #808: GraphQL-independent verdict persistence (REST write boundary).
+const restRepo = "owner/repo";
+const fakeRun = (res, calls = []) => (cmd, args, opts) => {
+  calls.push({ cmd, args, input: opts.input });
+  if (res instanceof Error) throw res;
+  return typeof res === "string" ? res : JSON.stringify(res);
+};
+
+test("#808 ghRestEditIssueBody PATCHes the full body via REST, never `gh issue edit`", () => {
+  const calls = [];
+  const body = "### Verdict\nCLEAN\n\n### Other\nkeep me\n";
+  ghRestEditIssueBody(
+    { repo: restRepo, auditIssue: 5, body },
+    fakeRun({ number: 5, html_url: "https://github.com/owner/repo/issues/5", body: body.replace(/\n/g, "\r\n") }, calls),
+  );
+  assert.deepEqual(calls[0].args, ["api", "-X", "PATCH", "repos/owner/repo/issues/5", "--input", "-"]);
+  assert.equal(JSON.parse(calls[0].input).body, body);
+  assert.ok(!calls[0].args.includes("graphql") && !calls[0].args.includes("issue"));
+});
+
+test("#808 ghRestEditIssueBody fails closed on transport, malformed, wrong-identity, PR, and body-mismatch responses", () => {
+  const body = "x";
+  const ok = { number: 5, html_url: "https://github.com/owner/repo/issues/5", body };
+  const run = (res) => () => ghRestEditIssueBody({ repo: restRepo, auditIssue: 5, body }, fakeRun(res));
+  assert.throws(run(new Error("HTTP 403")), /403/);
+  assert.throws(run("not json"), /malformed/);
+  assert.throws(run({ ...ok, number: 6 }), /identity/);
+  assert.throws(run({ ...ok, html_url: "https://github.com/other/repo/issues/5" }), /identity/);
+  assert.throws(run({ ...ok, pull_request: {} }), /pull request/);
+  assert.throws(run({ ...ok, body: "different" }), /does not match/);
+});
+
+test("#808 ghRestCommentIssue POSTs a comment via REST and validates identity", () => {
+  const calls = [];
+  ghRestCommentIssue(
+    { repo: restRepo, auditIssue: 5, body: "hi" },
+    fakeRun({ html_url: "https://github.com/owner/repo/issues/5#issuecomment-9" }, calls),
+  );
+  assert.deepEqual(calls[0].args, ["api", "-X", "POST", "repos/owner/repo/issues/5/comments", "--input", "-"]);
+  assert.throws(
+    () => ghRestCommentIssue({ repo: restRepo, auditIssue: 5, body: "hi" }, fakeRun({ html_url: "https://github.com/owner/repo/issues/6#issuecomment-9" })),
+    /identity/,
+  );
 });
