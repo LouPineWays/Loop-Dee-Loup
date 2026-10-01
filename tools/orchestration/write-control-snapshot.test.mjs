@@ -7,6 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
+import { ghRestEditIssueBody } from "../review-watch/lifecycle-gate.mjs";
 import { upsertControlBullet, parseControlBullet, isNoneSentinel } from "./ready-dispatch-gate.mjs";
 
 const CORRUPT_BODY = `- **PR:** #509
@@ -66,7 +67,7 @@ test("checkWriteControlSnapshot: an operational failure from the write implement
     },
   );
   assert.equal(result.exitCode, 1);
-  assert.match(result.message, /gh issue edit failed/);
+  assert.match(result.message, /REST write failed/);
 });
 
 test("checkWriteControlSnapshot: cross-field coexistence (PR + Stage 2 pointing at distinct issues) is accepted and written (Verification case 3)", () => {
@@ -136,3 +137,58 @@ test("checkWriteControlSnapshot: #408 reproduction — clearing a consumed Found
   // why it was blocked or what satisfied it.
   assert.match(writtenBody, /PR #435 merged; Stage 2 audit #436 triggered/);
 });
+
+// Issue #818: REST transport boundary (GraphQL-independent persistence).
+const restReply = (over = {}, body = VALID_BODY) => JSON.stringify({
+  number: 499, html_url: "https://github.com/Owner/Repo/issues/499", body, ...over,
+});
+function restRun(reply, calls = []) {
+  return (cmd, args, opts) => { calls.push({ cmd, args, opts }); if (reply instanceof Error) throw reply; return reply; };
+}
+const writeVia = (runImpl, body = VALID_BODY) =>
+  checkWriteControlSnapshot({ repo: "owner/repo", controlIssue: 499, proposedBody: body }, {
+    ghEditImpl: ({ repo, controlIssue, body: b }) => ghRestEditIssueBody({ repo, auditIssue: controlIssue, body: b }, runImpl),
+  });
+
+test("REST transport: WRITTEN, exact body sent as JSON over stdin via gh api PATCH, repo case-insensitive", () => {
+  const calls = [];
+  const r = writeVia(restRun(restReply(), calls));
+  assert.equal(r.state, "WRITTEN");
+  assert.deepEqual(calls[0].args, ["api", "-X", "PATCH", "repos/owner/repo/issues/499", "--input", "-"]);
+  assert.equal(JSON.parse(calls[0].opts.input).body, VALID_BODY);
+  assert.ok(!calls[0].args.includes("issue"), "must not use GraphQL-backed gh issue edit");
+});
+
+test("REST transport: large multiline body with shell-hostile characters round-trips via stdin", () => {
+  const big = VALID_BODY + "line with `ticks` $VAR \"quotes\" 'single' && | > <\n".repeat(5000);
+  const calls = [];
+  assert.equal(writeVia(restRun(restReply({}, big), calls), big).state, "WRITTEN");
+  assert.equal(JSON.parse(calls[0].opts.input).body, big);
+});
+
+test("REST transport: CRLF-only echo difference is accepted", () => {
+  assert.equal(writeVia(restRun(restReply({}, VALID_BODY.replace(/\n/g, "\r\n")))).state, "WRITTEN");
+});
+
+test("REST transport: invalid body is REJECTED and transport never invoked", () => {
+  const calls = [];
+  const r = writeVia(restRun(restReply(), calls), CORRUPT_BODY);
+  assert.equal(r.exitCode, 2);
+  assert.equal(calls.length, 0);
+});
+
+for (const [name, reply] of [
+  ["wrong issue number", restReply({ number: 500 })],
+  ["wrong repository", restReply({ html_url: "https://github.com/Other/Repo/issues/499" })],
+  ["pull request response", restReply({ pull_request: { url: "x" } })],
+  ["non-JSON response", "<html>oops</html>"],
+  ["incomplete response", "{}"],
+  ["body mismatch", restReply({}, VALID_BODY + "extra")],
+  ["unauthorized/unavailable", new Error("HTTP 403")],
+]) {
+  test(`REST transport: ${name} is an operational failure (exit 1, never WRITTEN)`, () => {
+    const r = writeVia(restRun(reply));
+    assert.equal(r.exitCode, 1);
+    assert.notEqual(r.state, "WRITTEN");
+  });
+}

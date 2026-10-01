@@ -25,7 +25,7 @@
 //
 // Exit codes:
 //   0 — WRITTEN. The proposed body passed validateControlSnapshot and was persisted verbatim
-//       via `gh issue edit --body-file -`.
+//       via REST `PATCH /repos/{repo}/issues/{n}` (issue #818; response identity/body verified).
 //   1 — operational error (missing required arg, unresolved repository identity, or the `gh`
 //       write itself failed/threw). The durable Issue body is left exactly as it was: this
 //       script never mutates the issue until after validation has already passed.
@@ -35,16 +35,18 @@
 //
 // Tests: node --test tools/orchestration/write-control-snapshot.test.mjs
 
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { validateControlSnapshot } from "./control-field-validator.mjs";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
+import { ghRestEditIssueBody } from "../review-watch/lifecycle-gate.mjs";
 
+// Issue #818: persistence goes through REST (`PATCH /repos/{repo}/issues/{n}` via `gh api --input -`,
+// the #808 helper), not `gh issue edit`, which uses GitHub GraphQL — HTTP 403 in the remote/cloud
+// profile of the #379 reproduction while repository REST works. The helper pipes a JSON body over
+// stdin (no argv/shell escaping) and verifies response Issue identity, not-a-PR, and body echo, so
+// a wrong-target/partial/malformed response throws and surfaces here as an operational failure.
 function defaultGhEditControlIssue({ repo, controlIssue, body }) {
-  execFileSync("gh", ["issue", "edit", String(controlIssue), "--repo", repo, "--body-file", "-"], {
-    input: body,
-    encoding: "utf8",
-  });
+  ghRestEditIssueBody({ repo, auditIssue: controlIssue, body });
 }
 
 // Pure core (`ghEditImpl` injected so tests never touch the network or the real `gh` CLI):
@@ -76,7 +78,7 @@ export function checkWriteControlSnapshot({ repo, controlIssue, proposedBody }, 
   try {
     ghEditImpl({ repo, controlIssue, body: proposedBody });
   } catch (err) {
-    return { exitCode: 1, message: `gh issue edit failed for ${repo}#${controlIssue}: ${err.message}` };
+    return { exitCode: 1, message: `control snapshot REST write failed for ${repo}#${controlIssue}: ${err.message}` };
   }
 
   return { exitCode: 0, state: "WRITTEN", controlIssue: Number(controlIssue), repo: repo ?? null };
