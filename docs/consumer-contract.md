@@ -63,8 +63,14 @@ both individual measured fields (the skill's evidence-order step 3) and the
 evidence-sufficiency verdict gate itself: when `tools/telemetry/sufficiency.mjs` is absent,
 the skill's "Evidence-sufficiency verdicts" section applies a fixed fallback mapping per claim
 type instead of skipping the verdict or promoting it to CLEAN (see issue #152). Extending
-`tools/ldl-init`'s manifest to install `tools/telemetry/` and a merge-safe
-`.claude/settings.json` is unstarted follow-on work, not part of issue #45.
+`tools/ldl-init`'s manifest to install `tools/telemetry/` and the rest of a merge-safe
+`.claude/settings.json` is unstarted follow-on work, not part of issue #45. The one exception
+is the raw thin-control body-write guard (issue #799, Audit #801): `tools/ldl-init` and
+`tools/ldl-update` merge a single `PreToolUse` Bash hook entry for
+`tools/orchestration/control-body-write-guard.mjs` into the consumer's own
+`.claude/settings.json` — creating the file only when absent, preserving every other key and
+hook, idempotent, and skipped with a warning (never overwritten) when the file is unparseable
+or unexpectedly shaped.
 
 ### Consumer-owned (never overwritten)
 

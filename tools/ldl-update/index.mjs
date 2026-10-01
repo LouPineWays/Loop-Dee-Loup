@@ -62,6 +62,7 @@ import {
   contentMatchesHash,
   defaultResolveRevision,
   derivePendingManualIntegration,
+  ensureEnforcementHook,
   deriveActivatedCapabilityReminder,
   deriveSyncPrerequisiteWarnings,
   findHardDependencyCollisions,
@@ -348,6 +349,13 @@ export async function run(args, deps = {}) {
   // itself changed.
   const pendingIntegrationChanged = !pendingIntegrationListsEqual(pendingManualIntegration, parsedManifest.pendingManualIntegration || []);
 
+  // Issue #799 Stage 2 correction: merge-safe, idempotent wiring of the raw thin-control
+  // body-write guard (see ensureEnforcementHook in tools/ldl-init). Runs on every update,
+  // including an otherwise no-op one, because a consumer initialized at an older revision has
+  // the guard file but not the hook entry. Never touches the manifest or other consumer settings.
+  const enforcementHook = ensureEnforcementHook(destRoot);
+  const enforcementWarnings = enforcementHook.status === "skipped" ? [`thin-control body-write guard not wired: ${enforcementHook.reason}`] : [];
+
   if (toInstall.length === 0 && supersededTemplates.length === 0 && !skipSetChanged && !pendingIntegrationChanged) {
     // Nothing to write and nothing to reconcile: a predictable no-op. Leave
     // .ldl/manifest.json and every managed file completely untouched.
@@ -358,6 +366,8 @@ export async function run(args, deps = {}) {
         skipped: toSkip.length,
         manualIntegrationNeeded: pendingManualIntegration.length,
         revision: parsedManifest.ldlSourceRevision,
+        enforcementHook: enforcementHook.status,
+        ...(enforcementWarnings.length ? { warnings: enforcementWarnings } : {}),
         noop: true,
       }),
     };
@@ -414,7 +424,9 @@ export async function run(args, deps = {}) {
       warnings: [
         ...deriveSyncPrerequisiteWarnings(installedFiles.map((f) => f.dest)),
         ...deriveActivatedCapabilityReminder(manifest.activatedCapabilities),
+        ...enforcementWarnings,
       ],
+      enforcementHook: enforcementHook.status,
     }),
   };
 }

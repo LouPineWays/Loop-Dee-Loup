@@ -122,11 +122,11 @@ function walk(dir, out = []) {
 //   write-control-snapshot.mjs -- THE approved thin-control writer (validateControlSnapshot first).
 //   lifecycle-gate.mjs         -- rewrites a Stage 2 *Audit* Issue's own `### Verdict` field; an
 //                                 audit record, not parser-sensitive thin-control state.
-// control-body-write-guard.mjs only *names* the patterns it refuses.
+// Exactly these two. control-body-write-guard.mjs is deliberately NOT exempt (Audit #801 finding
+// 2): it is scanned like every other production file, with only inert text excluded below.
 const BODY_WRITE_ALLOWLIST = new Set([
   "orchestration/write-control-snapshot.mjs",
   "review-watch/lifecycle-gate.mjs",
-  "orchestration/control-body-write-guard.mjs",
 ]);
 
 const RAW_BODY_WRITE_PATTERNS = [
@@ -134,23 +134,71 @@ const RAW_BODY_WRITE_PATTERNS = [
   { name: "GraphQL updateIssue", re: /updateIssue\b/ },
 ];
 
+// The only text excluded from the scan of a non-allowlisted file is inert: whole-line comments
+// (documentation) and, solely in the guard module, a regular-expression *literal* naming a
+// forbidden pattern (detection, not persistence). A string literal, template, or any other
+// executable occurrence stays visible to the scan.
+const GUARD_REL = "orchestration/control-body-write-guard.mjs";
+function stripInert(rel, text) {
+  let out = text.split("\n").filter((line) => !/^\s*\/\//.test(line)).join("\n");
+  if (rel === GUARD_REL) {
+    out = out.replace(/\/[^/\n]*updateIssue[^/\n]*\/[a-z]*(?=\.test\()/g, "");
+  }
+  return out;
+}
+
+// Returns offender descriptions for one production file's source text.
+function findRawBodyWriteOffenders(rel, source) {
+  if (BODY_WRITE_ALLOWLIST.has(rel)) return [];
+  const text = stripInert(rel, source);
+  const offenders = [];
+  for (const { name, re } of RAW_BODY_WRITE_PATTERNS) {
+    if (re.test(text)) offenders.push(`${rel}: ${name}`);
+  }
+  // A REST PATCH is only acceptable against an Issue *comment* endpoint.
+  text.split("\n").forEach((line, i) => {
+    if (/PATCH/.test(line) && /issues\//.test(line) && !/issues\/comments\//.test(line)) {
+      offenders.push(`${rel}:${i + 1}: PATCH of a non-comment issues/ endpoint`);
+    }
+  });
+  return offenders;
+}
+
 test("bypass guard: no production orchestration file persists an Issue body outside the approved allowlist", () => {
+  assert.equal(BODY_WRITE_ALLOWLIST.size, 2);
+  assert.ok(!BODY_WRITE_ALLOWLIST.has(GUARD_REL));
   const offenders = [];
   for (const file of walk(TOOLS_DIR)) {
     const rel = relative(TOOLS_DIR, file).split("\\").join("/");
-    if (BODY_WRITE_ALLOWLIST.has(rel)) continue;
-    const text = readFileSync(file, "utf8");
-    for (const { name, re } of RAW_BODY_WRITE_PATTERNS) {
-      if (re.test(text)) offenders.push(`${rel}: ${name}`);
-    }
-    // A REST PATCH is only acceptable against an Issue *comment* endpoint.
-    text.split("\n").forEach((line, i) => {
-      if (/PATCH/.test(line) && /issues\//.test(line) && !/issues\/comments\//.test(line)) {
-        offenders.push(`${rel}:${i + 1}: PATCH of a non-comment issues/ endpoint`);
-      }
-    });
+    offenders.push(...findRawBodyWriteOffenders(rel, readFileSync(file, "utf8")));
   }
   assert.deepEqual(offenders, [], "raw Issue-body persistence found outside the approved writer; route it through write-control-snapshot.mjs");
+});
+
+test("bypass guard: the real guard module is scanned and its inert detection patterns do not false-positive", () => {
+  const src = readFileSync(join(HERE, "control-body-write-guard.mjs"), "utf8");
+  assert.deepEqual(findRawBodyWriteOffenders(GUARD_REL, src), []);
+  // The inert exclusion is not vacuous: the raw module text does contain the pattern name.
+  assert.match(src, /updateIssue\b/);
+});
+
+test("bypass guard: an executable raw writer anywhere outside the two authorized sites is caught, including inside the guard module", () => {
+  const real = readFileSync(join(HERE, "control-body-write-guard.mjs"), "utf8");
+  const injections = [
+    'execFileSync("gh", ["issue", "edit", "1", "--body", "x"]);',
+    'execFileSync("gh", ["api", "graphql", "-f", "query=mutation { updateIssue(input: {}) { clientMutationId } }"]);',
+    'const q = "mutation { updateIssue(input: {}) { clientMutationId } }";',
+    'execFileSync("gh", ["api", "repos/o/r/issues/726", "-X", "PATCH", "-f", "body=x"]);',
+  ];
+  for (const rel of [GUARD_REL, "orchestration/some-new-tool.mjs"]) {
+    for (const inj of injections) {
+      const base = rel === GUARD_REL ? real : "";
+      assert.notDeepEqual(findRawBodyWriteOffenders(rel, `${base}\n${inj}`), [], `${rel}: ${inj}`);
+    }
+  }
+  // The two authorized sites remain the only exempt files.
+  assert.deepEqual(findRawBodyWriteOffenders("orchestration/write-control-snapshot.mjs", injections[0]), []);
+  assert.deepEqual(findRawBodyWriteOffenders("review-watch/lifecycle-gate.mjs", injections[0]), []);
 });
 
 test("bypass guard: the approved thin-control writer validates before it persists", () => {
