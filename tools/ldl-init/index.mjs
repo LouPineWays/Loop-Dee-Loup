@@ -965,14 +965,35 @@ export function findUnsafeLdlDirReason(destRoot) {
 export const ENFORCEMENT_GUARD_DEST = "tools/orchestration/control-body-write-guard.mjs";
 export const ENFORCEMENT_HOOK_COMMAND = `node "$CLAUDE_PROJECT_DIR/${ENFORCEMENT_GUARD_DEST}"`;
 
-export function ensureEnforcementHook(destRoot) {
+// True only for a hook entry that actually executes the canonical guard: matcher exactly
+// "Bash", hook type "command", command exactly ENFORCEMENT_HOOK_COMMAND. A command that merely
+// mentions the guard filename, a different matcher, or a non-command hook does not count.
+export function isCanonicalEnforcementEntry(entry) {
+  return (
+    entry !== null &&
+    typeof entry === "object" &&
+    entry.matcher === "Bash" &&
+    Array.isArray(entry.hooks) &&
+    entry.hooks.some((h) => h !== null && typeof h === "object" && h.type === "command" && h.command === ENFORCEMENT_HOOK_COMMAND)
+  );
+}
+
+// `guardManaged` must be true only when the guard destination is recorded as LDL-managed in the
+// manifest this run produced/confirmed (installed or already current) -- never merely because a
+// file exists there: an unmanaged consumer file at that path is not an LDL guard and must never
+// be wired to auto-execute. Callers invoke this AFTER managed files are written, so a fresh
+// install or a pre-guard upgrade receives guard and hook in the same run.
+export function ensureEnforcementHook(destRoot, { guardManaged = false } = {}) {
   const settingsRel = ".claude/settings.json";
   const settingsPath = join(destRoot, ".claude", "settings.json");
   const manual = (why) => ({ status: "skipped", reason: `${why}; add a PreToolUse Bash hook for ${ENFORCEMENT_GUARD_DEST} by hand` });
-  if (!existsSync(join(destRoot, ...ENFORCEMENT_GUARD_DEST.split("/")))) {
-    // Nothing to wire (a partial/fixture install without the guard): not a manual step.
-    return { status: "not-applicable" };
+  const guardPath = join(destRoot, ...ENFORCEMENT_GUARD_DEST.split("/"));
+  if (!guardManaged) {
+    if (!existsSync(guardPath)) return { status: "not-applicable" }; // partial/fixture install without the guard
+    return { status: "skipped", reason: `${ENFORCEMENT_GUARD_DEST} exists but is not an LDL-managed file (unmanaged collision); it was not wired as enforcement` };
   }
+  const unsafe = findUnsafeDestReason(destRoot, settingsRel);
+  if (unsafe) return manual(unsafe);
   let settings = {};
   if (existsSync(settingsPath)) {
     try {
@@ -993,10 +1014,7 @@ export function ensureEnforcementHook(destRoot) {
   if (!Array.isArray(settings.hooks.PreToolUse)) {
     return manual(`${settingsRel} has an unexpected "hooks.PreToolUse" shape`);
   }
-  const present = settings.hooks.PreToolUse.some(
-    (entry) => Array.isArray(entry?.hooks) && entry.hooks.some((h) => typeof h?.command === "string" && h.command.includes("control-body-write-guard.mjs")),
-  );
-  if (present) return { status: "already-present" };
+  if (settings.hooks.PreToolUse.some(isCanonicalEnforcementEntry)) return { status: "already-present" };
   settings.hooks.PreToolUse.push({ matcher: "Bash", hooks: [{ type: "command", command: ENFORCEMENT_HOOK_COMMAND }] });
   mkdirSync(dirname(settingsPath), { recursive: true });
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
@@ -1124,7 +1142,7 @@ export async function run(args, deps = {}) {
     activatedCapabilities,
   };
 
-  const enforcementHook = ensureEnforcementHook(destRoot);
+  const enforcementHook = ensureEnforcementHook(destRoot, { guardManaged: installedFiles.some((f) => f.dest === ENFORCEMENT_GUARD_DEST) });
 
   mkdirSync(join(destRoot, ".ldl"), { recursive: true });
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");

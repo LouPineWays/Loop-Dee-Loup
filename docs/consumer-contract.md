@@ -70,7 +70,13 @@ is the raw thin-control body-write guard (issue #799, Audit #801): `tools/ldl-in
 `tools/orchestration/control-body-write-guard.mjs` into the consumer's own
 `.claude/settings.json` — creating the file only when absent, preserving every other key and
 hook, idempotent, and skipped with a warning (never overwritten) when the file is unparseable
-or unexpectedly shaped.
+or unexpectedly shaped, when the guard destination is not an LDL-managed file (an unmanaged
+collision is never wired), or when `.claude` / `.claude/settings.json` is a symlink. The hook is
+written after managed files are installed, so a pre-guard upgrade gets guard and hook in one
+update, and only an exact canonical entry (matcher `Bash`, type `command`, the canonical command)
+counts as already present. `tools/ldl-sync/verify-scope.mjs` accepts a change to `.claude/settings.json`
+only when it is exactly the consumer file plus that one canonical entry; the file otherwise stays
+consumer-owned.
 
 ### Consumer-owned (never overwritten)
 

@@ -155,12 +155,17 @@ function findRawBodyWriteOffenders(rel, source) {
   for (const { name, re } of RAW_BODY_WRITE_PATTERNS) {
     if (re.test(text)) offenders.push(`${rel}: ${name}`);
   }
-  // A REST PATCH is only acceptable against an Issue *comment* endpoint.
-  text.split("\n").forEach((line, i) => {
-    if (/PATCH/.test(line) && /issues\//.test(line) && !/issues\/comments\//.test(line)) {
-      offenders.push(`${rel}:${i + 1}: PATCH of a non-comment issues/ endpoint`);
+  // A REST PATCH is only acceptable against an Issue *comment* endpoint. Evaluated per
+  // statement (text between `;`), not per physical line, so a call split across lines (the
+  // normal formatting of a long execFileSync argument array) cannot change the verdict.
+  let offset = 0;
+  for (const stmt of text.split(";")) {
+    if (/\bPATCH\b/.test(stmt) && /issues\/(?!comments\/)/.test(stmt)) {
+      const line = text.slice(0, offset + stmt.search(/\bPATCH\b/)).split("\n").length;
+      offenders.push(`${rel}:${line}: PATCH of a non-comment issues/ endpoint`);
     }
-  });
+    offset += stmt.length + 1;
+  }
   return offenders;
 }
 
@@ -189,6 +194,9 @@ test("bypass guard: an executable raw writer anywhere outside the two authorized
     'execFileSync("gh", ["api", "graphql", "-f", "query=mutation { updateIssue(input: {}) { clientMutationId } }"]);',
     'const q = "mutation { updateIssue(input: {}) { clientMutationId } }";',
     'execFileSync("gh", ["api", "repos/o/r/issues/726", "-X", "PATCH", "-f", "body=x"]);',
+    // Same call, formatted across physical lines (Stage 1 finding: formatting must not change the verdict).
+    'execFileSync("gh", [\n  "api",\n  `repos/o/r/issues/${n}`,\n  "-X",\n  "PATCH",\n  "-f",\n  "body=x",\n]);',
+    'execFileSync("gh", [\n  "api",\n  "-X", "PATCH",\n  "repos/o/r/issues/726",\n]);',
   ];
   for (const rel of [GUARD_REL, "orchestration/some-new-tool.mjs"]) {
     for (const inj of injections) {
@@ -196,6 +204,11 @@ test("bypass guard: an executable raw writer anywhere outside the two authorized
       assert.notDeepEqual(findRawBodyWriteOffenders(rel, `${base}\n${inj}`), [], `${rel}: ${inj}`);
     }
   }
+  // A multiline PATCH of a comment endpoint stays acceptable.
+  assert.deepEqual(
+    findRawBodyWriteOffenders("orchestration/some-new-tool.mjs", 'execFileSync("gh", [\n  "api",\n  "-X",\n  "PATCH",\n  "repos/o/r/issues/comments/9",\n]);'),
+    [],
+  );
   // The two authorized sites remain the only exempt files.
   assert.deepEqual(findRawBodyWriteOffenders("orchestration/write-control-snapshot.mjs", injections[0]), []);
   assert.deepEqual(findRawBodyWriteOffenders("review-watch/lifecycle-gate.mjs", injections[0]), []);
