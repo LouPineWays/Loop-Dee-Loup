@@ -8,7 +8,8 @@
 // repository qualification, form-field anchoring, CLEAN-verdict provenance, nonnumeric
 // --issue, and partial recovery failure).
 
-import test from "node:test";
+import { ghSpawnAttempts } from "./no-gh-guard.mjs";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -18,7 +19,9 @@ import {
   checkCloseWorkIssue,
   checkMergeReady,
   checkPostAudit,
-  checkRecordVerdict,
+  checkRecordVerdict as checkRecordVerdictRaw,
+  checkPreAuditPendingState,
+  assessMalformedPreTriggerVerdict,
   findClosingKeywordMatch,
   findMatchingOpenAuditIssues,
   hasCanonicalAuditShape,
@@ -39,6 +42,14 @@ import {
   validateAuditVerdictRewrite,
 } from "./lifecycle-gate.mjs";
 import { triggerCommentBody } from "./trigger.mjs";
+
+after(() => {
+  assert.deepEqual(ghSpawnAttempts(), [], "unit suite must make zero real gh invocations");
+});
+
+// Hermetic default: edit-history lookups (issue #794) must never reach the real `gh` CLI.
+const checkRecordVerdict = (args, opts = {}) =>
+  checkRecordVerdictRaw(args, { ghEditedAtImpl: async () => null, ...opts });
 
 const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 function readFixture(name) {
@@ -3000,6 +3011,7 @@ test("checkCloseAudit: a comment-post failure after a successful close still rep
     {
       ghIssueViewImpl,
       ghApiImpl: withCompletedAuditReport(),
+      ghIssueListImpl: async () => [],
       ghCloseImpl: async () => {},
       ghCommentImpl: async () => {
         throw new Error("transient network error");
@@ -3102,6 +3114,10 @@ function renderedCanonicalAuditBody({
     "### Verdict",
     "",
     verdict,
+    "",
+    "### Next authorized action",
+    "",
+    "Pending audit.",
   ].join("\n");
 }
 
@@ -4053,4 +4069,213 @@ test("checkCloseWorkIssue: exits 1 when gh issue view fails", async () => {
     { ghIssueViewImpl: async () => { throw new Error("not found"); } },
   );
   assert.equal(result.exitCode, 1);
+});
+
+// -- Issue #788 (live #571/#761/PR #786/Audit #787 reproduction) --------------------------------
+// The pre-audit pending-state invariant applies to every pre-trigger recognition surface
+// (finalization read-back, existing-issue reconciliation, trigger authorization). Post-response
+// verdict handling is unchanged: no comment-text provenance, conflicting verdicts fail closed.
+
+function pendingShapedAuditBody(verdict) {
+  return (
+    `### Work issue
+
+#151
+
+### Exact merge commit
+
+${MERGE_COMMIT}
+
+` +
+    `### Findings
+
+Pending — awaiting Stage 2 audit response.
+
+### Verdict
+
+${verdict}
+
+` +
+    `### Next authorized action
+
+Pending audit.
+`
+  );
+}
+
+test("checkPreAuditPendingState: canonical pending accepted; premature NOT CLEAN/CLEAN or non-pending Findings/Next rejected", () => {
+  assert.equal(checkPreAuditPendingState(pendingShapedAuditBody("PENDING")).ok, true);
+  for (const v of ["NOT CLEAN", "CLEAN"]) {
+    const r = checkPreAuditPendingState(pendingShapedAuditBody(v));
+    assert.equal(r.ok, false);
+    assert.match(r.errors.join(" "), /Verdict/);
+  }
+  assert.equal(checkPreAuditPendingState(pendingShapedAuditBody("PENDING").replace("Pending audit.", "None")).ok, false);
+  assert.equal(checkPreAuditPendingState(["### Verdict", "", "PENDING", ""].join("\n")).ok, false, "missing Findings/Next is not the canonical initial state");
+});
+
+test("checkPreAuditPendingState: full-field equality, not a Pending prefix (Stage 2 audit #790)", () => {
+  const base = pendingShapedAuditBody("PENDING");
+  const F = "Pending — awaiting Stage 2 audit response.";
+  const mutants = [
+    base.replace(F, `${F}\n\nBut source correction is authorized.`),
+    base.replace("Pending audit.", "Pending audit. Then merge without review."),
+    base.replace("Pending audit.", "Pending review."),
+    base.replace(F, "Pending something else."),
+  ];
+  for (const m of mutants) assert.equal(checkPreAuditPendingState(m).ok, false);
+  assert.equal(checkPreAuditPendingState(base).ok, true);
+});
+
+test("findMatchingOpenAuditIssues: requirePendingState rejects the #787 shape but default (post-boundary) matching keeps it", () => {
+  const ident = { mergeCommitOid: MERGE_COMMIT, executionIssue: 440 };
+  const good = { number: 1, state: "OPEN", body: renderedCanonicalAuditBody() };
+  const bad = { number: 2, state: "OPEN", body: renderedCanonicalAuditBody({ verdict: "NOT CLEAN" }) };
+  assert.deepEqual(findMatchingOpenAuditIssues([good, bad], ident, { requirePendingState: true }).map((m) => m.number), [1]);
+  assert.deepEqual(findMatchingOpenAuditIssues([good, bad], ident).map((m) => m.number), [1, 2]);
+});
+
+test("checkPostAudit: untriggered #787-shaped audit (premature NOT CLEAN, no comments) never reaches TRIGGER_REQUIRED", async () => {
+  const body = renderedCanonicalAuditBody({ workIssue: 440, verdict: "NOT CLEAN" });
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) => (number === 160 ? { body, state: "OPEN" } : { body: "", state: "OPEN" }),
+      ghApiImpl: async () => [],
+      ghIssueListImpl: async () => [{ number: 160, title: "[Audit] x", body, state: "OPEN", createdAt: "2026-08-20T00:00:00Z" }],
+    },
+  );
+  assert.notEqual(result.state, "TRIGGER_REQUIRED");
+});
+
+test("checkRecordVerdict: a persisted NOT CLEAN conflicting with a CLEAN report stays fail-closed regardless of comments, never overwritten", async () => {
+  const editCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) =>
+        number === 160 ? { body: pendingShapedAuditBody("NOT CLEAN"), state: "OPEN" } : { body: "", state: "OPEN" },
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(editCalls.length, 0);
+  assert.notEqual(result.state, "RECORDED");
+});
+
+// -- Issue #794: already-triggered malformed preparation-time NOT CLEAN (live #787 recurrence) ----------
+
+const I794_CREATED = "2026-08-19T23:50:00Z"; // before completedAuditThread's default 00:00:00Z trigger
+function i794View({ workIssue = 440, verdict = "NOT CLEAN" } = {}) {
+  return async ({ number }) =>
+    number === 160
+      ? { body: renderedCanonicalAuditBody({ workIssue, verdict }), state: "OPEN", createdAt: I794_CREATED }
+      : { body: "", state: "OPEN" };
+}
+
+test("assessMalformedPreTriggerVerdict: proven only for NOT CLEAN + canonical pending fields + body last modified strictly before the trigger", () => {
+  const body = renderedCanonicalAuditBody({ verdict: "NOT CLEAN" });
+  const base = { body, createdAt: I794_CREATED, lastEditedAt: null, triggerCreatedAt: "2026-08-20T00:00:00Z" };
+  assert.equal(assessMalformedPreTriggerVerdict(base).proven, true);
+  assert.equal(assessMalformedPreTriggerVerdict({ ...base, lastEditedAt: "2026-08-19T23:59:59Z" }).proven, true);
+  assert.equal(assessMalformedPreTriggerVerdict({ ...base, lastEditedAt: "2026-08-20T00:00:00Z" }).proven, false, "edit at the trigger instant is not provably earlier");
+  assert.equal(assessMalformedPreTriggerVerdict({ ...base, lastEditedAt: "2026-08-20T00:06:00Z" }).proven, false);
+  assert.equal(assessMalformedPreTriggerVerdict({ ...base, createdAt: null }).proven, false);
+  assert.equal(assessMalformedPreTriggerVerdict({ ...base, triggerCreatedAt: null }).proven, false);
+  assert.equal(assessMalformedPreTriggerVerdict({ ...base, body: renderedCanonicalAuditBody({ verdict: "CLEAN" }) }).proven, false);
+  assert.equal(assessMalformedPreTriggerVerdict({ ...base, body: renderedCanonicalAuditBody({ verdict: "PENDING" }) }).proven, false);
+  assert.equal(
+    assessMalformedPreTriggerVerdict({ ...base, body: body.replace("Pending — awaiting Stage 2 audit response.", "P1: real finding text") }).proven,
+    false,
+    "non-pending Findings means content was authored; never proven",
+  );
+});
+
+for (const workIssue of [440, "none"]) {
+  test(`checkPostAudit: #787 shape (work issue ${workIssue}) — pre-trigger NOT CLEAN + completed CLEAN report routes to REPORT_READY_TO_RECORD, not OK/NOT CLEAN (issue #794)`, async () => {
+    const result = await checkPostAudit(
+      { repo: "owner/repo", "audit-issue": 160 },
+      { ghIssueViewImpl: i794View({ workIssue }), ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }), ghEditedAtImpl: async () => null },
+    );
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.state, "REPORT_READY_TO_RECORD");
+    assert.equal(result.reportEvidence.verdict, "CLEAN");
+    assert.equal(result.malformedPreTriggerVerdict.proven, true);
+  });
+}
+
+test("checkPostAudit: NOT CLEAN body edited after the trigger stays a recorded verdict -> OK/NOT CLEAN (issue #794 negative)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    { ghIssueViewImpl: i794View(), ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }), ghEditedAtImpl: async () => "2026-08-20T00:06:00Z" },
+  );
+  assert.equal(result.state, "OK");
+  assert.equal(result.rawVerdict, "NOT CLEAN");
+});
+
+test("checkPostAudit: unreadable edit history fails closed to the existing NOT CLEAN behavior (issue #794)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    { ghIssueViewImpl: i794View(), ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }), ghEditedAtImpl: async () => { throw new Error("boom"); } },
+  );
+  assert.equal(result.state, "OK");
+  assert.equal(result.rawVerdict, "NOT CLEAN");
+});
+
+test("checkPostAudit: pre-trigger NOT CLEAN body with a completed NOT CLEAN report is unchanged -> OK (issue #794 legitimate NOT CLEAN control)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    { ghIssueViewImpl: i794View(), ghApiImpl: withCompletedAuditReport({ verdict: "NOT CLEAN" }), ghEditedAtImpl: async () => null },
+  );
+  assert.equal(result.state, "OK");
+  assert.equal(result.rawVerdict, "NOT CLEAN");
+});
+
+test("checkPostAudit: canonical PENDING + completed NOT CLEAN report still REPORT_READY_TO_RECORD (issue #794 control)", async () => {
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    { ghIssueViewImpl: i794View({ verdict: "PENDING" }), ghApiImpl: withCompletedAuditReport({ verdict: "NOT CLEAN" }), ghEditedAtImpl: async () => null },
+  );
+  assert.equal(result.state, "REPORT_READY_TO_RECORD");
+  assert.equal(result.malformedPreTriggerVerdict, undefined);
+});
+
+test("checkRecordVerdict: replaces a provably pre-trigger NOT CLEAN with the backed CLEAN, noting the replacement in the comment (issue #794)", async () => {
+  const editCalls = [];
+  const commentCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: i794View(),
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditedAtImpl: async () => null,
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async (a) => commentCalls.push(a),
+    },
+  );
+  assert.equal(result.state, "RECORDED");
+  assert.equal(result.verdict, "CLEAN");
+  assert.equal(result.replacedMalformedPreTriggerVerdict.previous, "NOT CLEAN");
+  assert.equal(editCalls.length, 1);
+  assert.equal(parseStage2Verdict(editCalls[0].body), "CLEAN");
+  assert.equal(commentCalls[0].replacedMalformedVerdict, "NOT CLEAN");
+});
+
+test("checkRecordVerdict: a NOT CLEAN edited after the trigger contradicting a CLEAN report stays CONFLICTING_VERDICT, no write (issue #794)", async () => {
+  const editCalls = [];
+  const result = await checkRecordVerdict(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: i794View(),
+      ghApiImpl: withCompletedAuditReport({ verdict: "CLEAN" }),
+      ghEditedAtImpl: async () => "2026-08-20T00:06:00Z",
+      ghEditImpl: async (a) => editCalls.push(a),
+      ghCommentImpl: async () => {},
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "REPORT_READY_TO_RECORD", auditIssue: 160 }),
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "CONFLICTING_VERDICT");
+  assert.equal(editCalls.length, 0);
 });

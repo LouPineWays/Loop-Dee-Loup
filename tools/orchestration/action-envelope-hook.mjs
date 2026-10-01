@@ -218,7 +218,9 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pathToFileURL } from "node:url";
+import { execFileSync } from "node:child_process";
 import { requiresPreBoundNonIsolatedDispatch } from "./action-envelope.mjs";
+import { clearVerdictHandoff, persistVerdictHandoff, verdictHandoffPath } from "./verdict-handoff.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const STATE_DIR = process.env.LDL_ACTION_ENVELOPE_STATE_DIR || join(ROOT, ".claude", "action-envelope-state");
@@ -243,6 +245,8 @@ export function persistLastGateVerdict(result, { mkdirImpl = mkdirSync, writeFil
   try {
     mkdirImpl(STATE_DIR, { recursive: true });
     writeFileImpl(LAST_GATE_VERDICT_PATH, JSON.stringify(result), "utf8");
+    // Issue #761: also keep the non-consumed handoff copy the reserve/format steps read.
+    persistVerdictHandoff(result, { mkdirImpl, writeFileImpl, path: verdictHandoffPath(STATE_DIR) });
   } catch {
     // Deliberately swallowed -- see comment above.
   }
@@ -254,6 +258,7 @@ export function persistLastGateVerdict(result, { mkdirImpl = mkdirSync, writeFil
 export function clearLastGateVerdict({ existsImpl = existsSync, unlinkImpl = unlinkSync } = {}) {
   try {
     if (existsImpl(LAST_GATE_VERDICT_PATH)) unlinkImpl(LAST_GATE_VERDICT_PATH);
+    clearVerdictHandoff({ existsImpl, unlinkImpl, path: verdictHandoffPath(STATE_DIR) });
   } catch {
     // Deliberately swallowed -- see persistLastGateVerdict above.
   }
@@ -443,10 +448,19 @@ export function readMarker(sessionId, { readFileImpl = readFileSync, existsImpl 
 export function writeMarker(
   sessionId,
   verdict,
-  { mkdirImpl = mkdirSync, writeFileImpl = writeFileSync } = {},
+  { mkdirImpl = mkdirSync, writeFileImpl = writeFileSync, existingMarker = null, workerOriginated = false } = {},
 ) {
   if (!sessionId) return null;
   mkdirImpl(STATE_DIR, { recursive: true });
+  // Issue #764 Stage 1 correction: an already-active correction-completion obligation is
+  // monotonic -- it is replaced only by a fresh correction dispatch decided by the controller
+  // itself (never by a worker-originated gate observation) and is otherwise carried forward, so
+  // the dispatched worker's own gate/tool activity can never erase it before it is verified.
+  const fresh = correctionCompletionField(verdict);
+  const carried =
+    existingMarker?.correctionCompletion && (workerOriginated || !fresh.correctionCompletion)
+      ? { correctionCompletion: existingMarker.correctionCompletion }
+      : fresh;
   const marker = {
     state: verdict.state,
     mode: verdict.actionEnvelope.mode,
@@ -460,10 +474,42 @@ export function writeMarker(
     // verdict shape, which is exactly the "wave size 1" default those helpers already apply.
     dispatchReadyUnitIds: Array.isArray(verdict.dispatchReadyUnitIds) ? verdict.dispatchReadyUnitIds : [],
     dispatchStartsConsumed: 0,
+    ...carried,
     ts: new Date().toISOString(),
   };
   writeFileImpl(markerPath(sessionId), JSON.stringify(marker), "utf8");
   return marker;
+}
+
+// Issue #764 (control #577, the #726/#725/PR #763 recurrence): a findings-bearing Stage 1
+// correction dispatch (`STAGE1_CORRECTION_REQUIRED`, correctionReason !== "closing-reference")
+// against a thin control Issue carries a completion postcondition the dispatched worker cannot
+// skip: verify-correction-completion.mjs must pass before that worker may stop. Only a verdict
+// with the full identity the verifier needs (positive pr/controlIssue/issue and the reviewed
+// `head` the gate saw) gets one; the closing-reference class and the direct-reference/no-control
+// case deliberately get none, so they stay unaffected.
+export function correctionCompletionField(verdict) {
+  const pos = (v) => typeof v === "number" && Number.isInteger(v) && v > 0;
+  if (
+    verdict?.state !== "STAGE1_CORRECTION_REQUIRED" ||
+    verdict.correctionReason === "closing-reference" ||
+    !pos(verdict.pr) ||
+    !pos(verdict.controlIssue) ||
+    !pos(verdict.issue) ||
+    typeof verdict.head !== "string" ||
+    !verdict.head
+  ) {
+    return {};
+  }
+  return {
+    correctionCompletion: {
+      pr: verdict.pr,
+      controlIssue: verdict.controlIssue,
+      executionIssue: verdict.issue,
+      reviewedHead: verdict.head,
+      blocks: 0,
+    },
+  };
 }
 
 // Issue #678: does this bounded marker's own authorizedActions name a worker dispatch as one
@@ -497,6 +543,7 @@ export function consumeBoundedDispatch(
     state: marker.state,
     mode: "none",
     authorizedActions: [],
+    ...(marker.correctionCompletion ? { correctionCompletion: marker.correctionCompletion } : {}),
     reason:
       `bounded dispatch action consumed via SubagentStart for verdict "${marker.state}" ` +
       "(issue #678); further operational tool calls in this controller context are not authorized.",
@@ -530,9 +577,19 @@ export function expectedDispatchCount(marker) {
 export function recordSubagentDispatchStart(
   sessionId,
   marker,
-  { mkdirImpl = mkdirSync, writeFileImpl = writeFileSync } = {},
+  { mkdirImpl = mkdirSync, writeFileImpl = writeFileSync, agentId } = {},
 ) {
   if (!shouldConsumeBoundedDispatch(marker)) return null;
+  // Issue #764 Stage 1 correction: the authorized correction worker is the one whose start
+  // consumes the dispatch; bind the postcondition to its agent_id (first start only).
+  if (
+    marker.correctionCompletion &&
+    !marker.correctionCompletion.workerAgentId &&
+    typeof agentId === "string" &&
+    agentId.length > 0
+  ) {
+    marker = { ...marker, correctionCompletion: { ...marker.correctionCompletion, workerAgentId: agentId } };
+  }
   const consumed = (typeof marker.dispatchStartsConsumed === "number" ? marker.dispatchStartsConsumed : 0) + 1;
   if (consumed < expectedDispatchCount(marker)) {
     mkdirImpl(STATE_DIR, { recursive: true });
@@ -640,6 +697,145 @@ export function extractFailureOutput(payload) {
   return "";
 }
 
+// Issue #764: how many times SubagentStop may block the correction worker from stopping (forcing
+// it to run finalize-correction-breakpoint.mjs) before the hook stops trying and instead ends the
+// worker with an explicit fail-closed stopReason -- bounded so an unfixable postcondition can
+// never loop forever.
+export const MAX_CORRECTION_STOP_BLOCKS = 2;
+
+const VERIFY_CORRECTION_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "verify-correction-completion.mjs");
+
+// Runs the read-only verifier. Any nonzero exit (unverified, operational error, timeout) is a
+// fail-closed `{ ok: false }`; a missing verifier script (partial install) fails open.
+export function defaultVerifyCorrectionCompletion(completion, { execFileImpl = execFileSync, existsImpl = existsSync } = {}) {
+  if (!existsImpl(VERIFY_CORRECTION_SCRIPT)) return { ok: true, skipped: true };
+  try {
+    execFileImpl(
+      process.execPath,
+      [
+        VERIFY_CORRECTION_SCRIPT,
+        "--control-issue", String(completion.controlIssue),
+        "--execution-issue", String(completion.executionIssue),
+        "--pr", String(completion.pr),
+        "--reviewed-head", completion.reviewedHead,
+      ],
+      { encoding: "utf8", timeout: 120000, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    return { ok: true };
+  } catch (err) {
+    const detail = String(err?.stderr || err?.stdout || err?.message || "").trim().split(/\r?\n/).pop();
+    return { ok: false, detail };
+  }
+}
+
+// Pure-ish (verify injected). SubagentStop decision for a controller session whose marker carries
+// a correctionCompletion postcondition: { action: "allow" } when none applies or it verifies;
+// { action: "block", reason } while the worker may still be told to finalize; { action: "stop",
+// reason } once MAX_CORRECTION_STOP_BLOCKS blocks were spent and it is still unverified.
+export function decideSubagentStop(marker, { verifyImpl = defaultVerifyCorrectionCompletion, agentId } = {}) {
+  const completion = marker?.correctionCompletion;
+  if (!completion) return { action: "allow" };
+  // Issue #764 Stage 1 correction: only the bound correction worker is subject to (and spends the
+  // retry budget of) this postcondition; a helper it spawned, or an obligation never bound to a
+  // worker, stops normally.
+  if (
+    typeof completion.workerAgentId !== "string" ||
+    !completion.workerAgentId ||
+    completion.workerAgentId !== agentId
+  ) {
+    return { action: "allow", notOwner: true };
+  }
+  const result = verifyImpl(completion);
+  if (result.ok) return { action: "allow", verified: true };
+  const blocks = typeof completion.blocks === "number" ? completion.blocks : 0;
+  const detail = result.detail ? ` (${result.detail})` : "";
+  if (blocks < MAX_CORRECTION_STOP_BLOCKS) {
+    return {
+      action: "block",
+      blocks: blocks + 1,
+      reason:
+        `CORRECTION_BREAKPOINT_UNVERIFIED ${completion.pr}: control #${completion.controlIssue} does not durably carry the ` +
+        `correction-satisfied disposition for PR #${completion.pr}'s current head${detail}. Do not stop or report success. Run ` +
+        `node tools/orchestration/finalize-correction-breakpoint.mjs --control-issue ${completion.controlIssue} ` +
+        `--execution-issue ${completion.executionIssue} --pr ${completion.pr} --reviewed-head ${completion.reviewedHead} ` +
+        "--corrected-head <the PR's current pushed head>, then --release-binding; if it still fails, report that reference verbatim.",
+    };
+  }
+  return {
+    action: "stop",
+    blocks,
+    reason: `CORRECTION_BREAKPOINT_UNVERIFIED ${completion.pr}: correction completion never verified after ${blocks} attempt(s)${detail}. Not a successful correction.`,
+  };
+}
+
+// SubagentStop handler (issue #764). Returns { stdout, forwardTelemetry }: `stdout` is the hook
+// output to print (or null); `forwardTelemetry` is true only when the stop actually proceeds (allowed
+// or fail-closed terminated), never for a denied (blocked) attempt. The telemetry SubagentStop hook
+// is invoked from here rather than as a parallel hook entry, so a blocked stop leaves no false
+// completion sample and the eventual allowed stop is recorded once.
+export function handleSubagentStop(
+  payload,
+  { readMarkerImpl = readMarker, decideImpl = decideSubagentStop, writeFileImpl = writeFileSync } = {},
+) {
+  const sessionId = typeof payload?.session_id === "string" ? payload.session_id : null;
+  if (!sessionId) return { stdout: null, forwardTelemetry: true };
+  const marker = readMarkerImpl(sessionId);
+  const agentId = typeof payload.agent_id === "string" ? payload.agent_id : undefined;
+  const decision = decideImpl(marker, { agentId });
+  if (decision.action === "allow") {
+    if (decision.verified) {
+      const { correctionCompletion: _done, ...rest } = marker;
+      try {
+        writeFileImpl(markerPath(sessionId), JSON.stringify(rest), "utf8");
+      } catch {
+        // best effort -- a stale postcondition only re-verifies (idempotent) on the next stop
+      }
+    }
+    return { stdout: null, forwardTelemetry: true };
+  }
+  if (decision.action === "block") {
+    try {
+      writeFileImpl(
+        markerPath(sessionId),
+        JSON.stringify({ ...marker, correctionCompletion: { ...marker.correctionCompletion, blocks: decision.blocks } }),
+        "utf8",
+      );
+    } catch {
+      // The retry budget could not be advanced durably: another ordinary block would never
+      // exhaust, so terminate this invocation fail-closed instead of creating an unbounded loop.
+      return {
+        stdout: JSON.stringify({
+          continue: false,
+          stopReason:
+            `CORRECTION_BREAKPOINT_UNVERIFIED ${marker.correctionCompletion.pr}: correction completion unverified and the ` +
+            "retry counter could not be persisted; ending fail-closed. Not a successful correction.",
+        }),
+        forwardTelemetry: true,
+      };
+    }
+    return { stdout: JSON.stringify({ decision: "block", reason: decision.reason }), forwardTelemetry: false };
+  }
+  return { stdout: JSON.stringify({ continue: false, stopReason: decision.reason }), forwardTelemetry: true };
+}
+
+const TELEMETRY_HOOK_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "telemetry", "hook.mjs");
+
+// Replays the SubagentStop payload into the telemetry hook. Missing script (partial install) or
+// any failure is ignored -- telemetry must never affect the stop decision.
+export function forwardSubagentStopToTelemetry(payload, { execFileImpl = execFileSync, existsImpl = existsSync } = {}) {
+  try {
+    if (!existsImpl(TELEMETRY_HOOK_SCRIPT)) return false;
+    execFileImpl(process.execPath, [TELEMETRY_HOOK_SCRIPT], {
+      input: JSON.stringify(payload),
+      timeout: 30000,
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function readStdinJson() {
   try {
     const raw = readFileSync(0, "utf8");
@@ -655,15 +851,19 @@ function readStdinJson() {
 // "bounded" (new); either one writes the corresponding marker. Any other mode (bounded is the
 // only other one detectable here — chain/fallthrough verdicts are never marked, unchanged)
 // leaves the session's existing marker, if any, untouched.
-export function markObservedVerdict(sessionId, command, stdout) {
+export function markObservedVerdict(sessionId, command, stdout, { agentId, existingMarker } = {}) {
+  const markOpts = {
+    existingMarker: existingMarker !== undefined ? existingMarker : readMarker(sessionId),
+    workerOriginated: typeof agentId === "string" && agentId.length > 0,
+  };
   const noneVerdict = detectNoActionVerdict(command, stdout);
   if (noneVerdict) {
-    writeMarker(sessionId, noneVerdict);
+    writeMarker(sessionId, noneVerdict, markOpts);
     return;
   }
   const boundedVerdict = detectBoundedVerdict(command, stdout);
   if (boundedVerdict) {
-    writeMarker(sessionId, boundedVerdict);
+    writeMarker(sessionId, boundedVerdict, markOpts);
     return;
   }
   // Issue #678 Stage 1 correction, finding 1: the command's own captured stdout carried no
@@ -674,7 +874,7 @@ export function markObservedVerdict(sessionId, command, stdout) {
   if (invokedGateScriptBasenames(command).length === 0) return;
   const sideChannelVerdict = consumeLastGateVerdict();
   const mode = sideChannelVerdict?.actionEnvelope?.mode;
-  if (mode === "none" || mode === "bounded") writeMarker(sessionId, sideChannelVerdict);
+  if (mode === "none" || mode === "bounded") writeMarker(sessionId, sideChannelVerdict, markOpts);
 }
 
 function main() {
@@ -684,7 +884,9 @@ function main() {
 
     if (payload?.hook_event_name === "PostToolUse" && sessionId) {
       if (payload.tool_name === "Bash") {
-        markObservedVerdict(sessionId, payload.tool_input?.command, payload.tool_response?.stdout);
+        markObservedVerdict(sessionId, payload.tool_input?.command, payload.tool_response?.stdout, {
+          agentId: payload.agent_id,
+        });
       }
       process.exit(0);
       return;
@@ -692,7 +894,9 @@ function main() {
 
     if (payload?.hook_event_name === "PostToolUseFailure" && sessionId) {
       if (payload.tool_name === "Bash") {
-        markObservedVerdict(sessionId, payload.tool_input?.command, extractFailureOutput(payload));
+        markObservedVerdict(sessionId, payload.tool_input?.command, extractFailureOutput(payload), {
+          agentId: payload.agent_id,
+        });
       }
       process.exit(0);
       return;
@@ -705,7 +909,20 @@ function main() {
       const marker = readMarker(sessionId);
       // Issue #678 Stage 1 correction, finding 2: routes through the counting wrapper so a
       // multi-unit dispatch-unit-wave is not exhausted by its first worker's start alone.
-      recordSubagentDispatchStart(sessionId, marker);
+      recordSubagentDispatchStart(sessionId, marker, {
+        agentId: typeof payload.agent_id === "string" ? payload.agent_id : undefined,
+      });
+      process.exit(0);
+      return;
+    }
+
+    // Issue #764: mechanical (below worker compliance) enforcement of the findings-correction
+    // completion postcondition -- see decideSubagentStop/handleSubagentStop above. Also the sole
+    // SubagentStop entry point for telemetry, which is forwarded only for an actually-allowed stop.
+    if (payload?.hook_event_name === "SubagentStop") {
+      const result = handleSubagentStop(payload);
+      if (result.stdout) process.stdout.write(result.stdout);
+      if (result.forwardTelemetry) forwardSubagentStopToTelemetry(payload);
       process.exit(0);
       return;
     }

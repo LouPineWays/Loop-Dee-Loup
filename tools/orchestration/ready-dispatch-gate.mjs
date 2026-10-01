@@ -187,6 +187,7 @@
 //
 // Tests: node --test tools/orchestration/ready-dispatch-gate.test.mjs
 
+import { enforceControlPlaneFreshness } from "./control-plane-freshness.mjs";
 import { execFileSync } from "node:child_process";
 import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 // Deliberate, documented exception to this file's usual practice of not importing
@@ -293,6 +294,36 @@ const POST_PR_MID_CYCLE_LIFECYCLE_VALUES = new Set(["EXECUTING", "VERIFYING", "R
 // template's own field values instead of the ad hoc bullet. All three values are treated
 // identically as positive "do not advance" signals.
 const BLOCKING_LIFECYCLE_VALUES = new Set(["BLOCKED", "BLOCKED_FAILURE", "BLOCKED_EXTERNAL"]);
+
+// Pure. True when `value` (case-insensitive) is one of this file's own blocking-lifecycle
+// vocabulary — issue #768 Stage 1 finding: `reconcile-control-blocker.mjs`'s own "Blocked
+// lifecycle" companion field records the Lifecycle a blocked control resumes into once its
+// prerequisite(s) close. `isKnownLifecycleValue` alone accepted BLOCKED/BLOCKED_FAILURE/
+// BLOCKED_EXTERNAL as a "known" resume value, so a control could be durably authored to
+// resume from one block straight into another blocking state — `buildUnblockedControlBody`
+// would then restore a blocking Lifecycle the very next `ready-dispatch-gate.mjs` invocation
+// stops on again, defeating the automatic release this declaration promises. Exported so the
+// write-side validator and the reconciler apply the identical exclusion this gate's own
+// BLOCKED short-circuit already treats as "must not advance", never a second, independently
+// drifting list.
+export function isBlockingLifecycleValue(value) {
+  return typeof value === "string" && BLOCKING_LIFECYCLE_VALUES.has(value.toUpperCase());
+}
+
+// Pure. True when `value` (case-insensitive) is one of the Lifecycle values whose own
+// dispatch behavior actually consults the "- **Route:**" field — the existing READY path plus
+// #397's four pre-PR pipeline values (`PRE_PR_DISPATCH_LIFECYCLE_VALUES`). Issue #768 Stage 1
+// finding: a resumed Lifecycle outside this set (e.g. the ordinary post-PR mid-cycle values
+// REVIEW/EXECUTING/VERIFYING/AUDIT/CORRECTION) never reads Route at all, so requiring a
+// settled Route on resume for those states would reject the real, correct #726 recovery shape
+// (Lifecycle: REVIEW resumed with Route: none) — the "unchanged"/unsettled-Route defect this
+// module's own write-side check must actually catch is specific to a resume that lands back on
+// a route-bearing Lifecycle. Exported so `blocker-grammar.mjs`'s `evaluateBlockerAuthoring` can
+// apply the same distinction the dispatch gate itself already draws, never a second guess at
+// which Lifecycle values are "route-bearing".
+export function isRouteBearingLifecycleValue(value) {
+  return typeof value === "string" && (value.toUpperCase() === "READY" || PRE_PR_DISPATCH_LIFECYCLE_VALUES.has(value.toUpperCase()));
+}
 
 // Pure. Reads one "- **Label:** value" bullet line from a control Issue's body — the
 // "Current state" block's own rendering convention (not a GitHub issue-form field, so
@@ -2215,8 +2246,11 @@ async function main() {
   // new one, so a run that errors out below never leaves an old side-channel entry behind for
   // a later, unrelated command to mistakenly consume.
   clearLastGateVerdict();
+  // Issue #779: refuse to interpret lifecycle state with a stale controller checkout.
+  const controlPlaneWitness = enforceControlPlaneFreshness();
   const args = parseArgs(process.argv.slice(2));
   const result = await checkReadyDispatch({ repo: args.repo, controlIssue: args["control-issue"] });
+  if (controlPlaneWitness) result.controlPlaneWitness = controlPlaneWitness;
   if (result.exitCode === 1) {
     console.error(result.message);
     process.exit(1);

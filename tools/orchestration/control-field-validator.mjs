@@ -55,11 +55,16 @@ import {
   parseHeadingField,
   parseExecutionPointer,
   isNoneSentinel,
+  isKnownLifecycleValue,
+  isRouteCompatibleWithLifecycle,
+  isBlockingLifecycleValue,
+  isRouteBearingLifecycleValue,
   findNearDuplicateBulletLabels,
   readExecutionBulletField,
   describeExecutionConflict,
   extractBoldBulletLabels,
 } from "./ready-dispatch-gate.mjs";
+import { evaluateBlockerAuthoring, extractBlockedByIssueNumbers } from "./blocker-grammar.mjs";
 
 // Pure. Extracts { kind, number } for every full GitHub issue/PR URL reference inside `value`
 // — kind is "pull" for a "/pull/N" path segment, "issue" for a "/issues/N" one. A bare "#N"
@@ -201,6 +206,104 @@ export function validateLifecycleStateCoherence(body) {
   };
 }
 
+// Pure. Issue #768 Stage 1 finding: refuses a proposed control body that would durably carry
+// contradictory Blocker truth across the canonical "### Current blocker" heading and the
+// legacy ad hoc "- **Blocker:**" bullet -- mirrors validateLifecycleStateCoherence's own
+// "### State" vs "- **Lifecycle:**" precedent exactly, for the same reason: both readers this
+// repository already trusts (`evaluateBlockerCondition`'s own bullet-then-heading fallback)
+// treat these two fields as synonyms for one meaning, and a null-coalescing write-side read
+// (`parseControlBullet(body, "Blocker") ?? parseHeadingField(body, "Current blocker")`) can
+// otherwise validate only the bullet while the template's own heading still asserts a
+// different, active prerequisite -- e.g. a body carrying both "- **Blocker:** none" and a
+// "### Current blocker" heading reading "Blocked by #764." A body carrying only one
+// representation (the supported legacy-bullet-only or template-heading-only shapes) is not a
+// conflict -- this only fires when both are present and disagree.
+export function validateBlockerRepresentationCoherence(body) {
+  const bullet = parseControlBullet(body, "Blocker");
+  const heading = parseHeadingField(body, "Current blocker");
+  if (bullet === null || heading === null) return { ok: true };
+  if (bullet.trim() === heading.trim()) return { ok: true };
+  return {
+    ok: false,
+    label: "Blocker/Current blocker",
+    reason:
+      `"Blocker"/"Current blocker" representations are contradictory: the ad hoc "- **Blocker:**" bullet reads ` +
+      `${JSON.stringify(bullet)} while the canonical "### Current blocker" heading reads ${JSON.stringify(heading)} -- ` +
+      "refusing to persist a hybrid body carrying two different blocker values for the same control Issue",
+  };
+}
+
+// Pure. Issue #768: the write-side half of the reconcilable-blocker-authoring invariant
+// `reconcile-control-blocker.mjs`'s own `evaluateBlockerCondition` already enforces at read
+// time. The #726 live recurrence proved a control can be durably authored with a Blocker field
+// that names an explicit Issue prerequisite (e.g. "#764 under governing control #577 — ...")
+// without the canonical "Blocked by #N[, #N...]." grammar or a saved resume Lifecycle/Route —
+// leaving it structurally unreconcilable forever, discoverable only as a future
+// AMBIGUOUS_BLOCKER surprise at reconciliation time rather than refused at the point it became
+// durable.
+//
+// This reuses `blocker-grammar.mjs`'s own single-authority `evaluateBlockerAuthoring` — never a
+// second, independently-drifting interpretation of the grammar — so a body this validator
+// accepts can never later surprise `reconcile-control-blocker.mjs` with an AMBIGUOUS_BLOCKER it
+// did not already know about. Only the three malformed-explicit-prerequisite kinds
+// (`UNRECOGNIZED_WORDING`, `MISSING_RESUME_STATE`, `INVALID_RESUME_STATE`) are refused; `NONE`
+// and `FREE_FORM` — the two ways a control validly carries no mechanically-reconcilable
+// declaration at all, including a genuine free-form/manual/external blocker that mentions no
+// issue number — are always accepted here, exactly as `Blocker`'s own `pointerCheck: false`
+// spec above already leaves them unconstrained. `RECONCILABLE` is, by construction, a fully
+// well-formed declaration and is also always accepted.
+export function validateBlockerAuthoringField(body, controlIssue = null) {
+  const blockerRaw = parseControlBullet(body, "Blocker") ?? parseHeadingField(body, "Current blocker");
+  const blockedLifecycleRaw = parseControlBullet(body, "Blocked lifecycle");
+  const blockedRouteRaw = parseControlBullet(body, "Blocked route");
+  const currentRouteRaw = parseControlBullet(body, "Route");
+
+  // Issue #768 Stage 1 finding: these two companion fields are not in
+  // DEFAULT_CONTROL_FIELD_SPECS (they are never single-pointer fields), so unlike every other
+  // canonical control field their own exact-duplicate-bullet protection never ran -- a
+  // contradictory duplicate "Blocked lifecycle"/"Blocked route" bullet became durable and
+  // `parseControlBullet`'s own last-occurrence-wins read silently picked one at reconciliation
+  // time.
+  const dupLifecycle = exactDuplicateBulletConflict(body, "Blocked lifecycle");
+  if (dupLifecycle) return { ok: false, label: "Blocker", reason: dupLifecycle.reason };
+  const dupRoute = exactDuplicateBulletConflict(body, "Blocked route");
+  if (dupRoute) return { ok: false, label: "Blocker", reason: dupRoute.reason };
+
+  // Issue #768 Stage 1 finding: a control has no identity of its own inside
+  // `evaluateBlockerAuthoring`'s pure classification, so a control could durably name itself as
+  // its own prerequisite ("Blocker: Blocked by #<this control>."), which can never close while
+  // leaving this same control open to resume. Threaded from the write boundary the same way
+  // ready-dispatch-gate.mjs's own Execution self-reference guard already gets the control's
+  // identity, and checked independently of the field's own well-formedness so a self-reference
+  // is refused even when it happens to also be otherwise malformed.
+  if (controlIssue != null) {
+    const namedIssues = extractBlockedByIssueNumbers(blockerRaw ?? "");
+    if (namedIssues.includes(Number(controlIssue))) {
+      return {
+        ok: false,
+        label: "Blocker",
+        reason:
+          `"Blocker" field ${JSON.stringify(blockerRaw)} names control Issue #${controlIssue} as its own prerequisite -- ` +
+          "a control cannot resume by waiting on its own closure",
+      };
+    }
+  }
+
+  const evaluation = evaluateBlockerAuthoring(
+    { blockerRaw, blockedLifecycleRaw, blockedRouteRaw, currentRouteRaw },
+    { isNoneSentinel, isKnownLifecycleValue, isRouteCompatibleWithLifecycle, isBlockingLifecycleValue, isRouteBearingLifecycleValue },
+  );
+
+  if (
+    evaluation.kind === "UNRECOGNIZED_WORDING" ||
+    evaluation.kind === "MISSING_RESUME_STATE" ||
+    evaluation.kind === "INVALID_RESUME_STATE"
+  ) {
+    return { ok: false, label: "Blocker", reason: evaluation.reason };
+  }
+  return { ok: true, label: "Blocker" };
+}
+
 // Pure. Validates one field spec against a proposed control-Issue body. Returns
 // { ok: true, label, ... } or { ok: false, label, reason }.
 export function validateControlField(body, spec) {
@@ -257,10 +360,14 @@ export function validateControlField(body, spec) {
 // caller obtains a proposed body or *what* it does with an invalid result — see
 // write-control-snapshot.mjs for the write-before-validate-ordering caller this module was
 // built for.
-export function validateControlSnapshot(body, { fields = DEFAULT_CONTROL_FIELD_SPECS } = {}) {
+export function validateControlSnapshot(body, { fields = DEFAULT_CONTROL_FIELD_SPECS, controlIssue = null } = {}) {
   const errors = [];
   const coherence = validateLifecycleStateCoherence(body);
   if (!coherence.ok) errors.push(coherence.reason);
+  const blockerCoherence = validateBlockerRepresentationCoherence(body);
+  if (!blockerCoherence.ok) errors.push(blockerCoherence.reason);
+  const blockerAuthoring = validateBlockerAuthoringField(body, controlIssue);
+  if (!blockerAuthoring.ok) errors.push(blockerAuthoring.reason);
   for (const spec of fields) {
     const result = validateControlField(body, spec);
     if (!result.ok) errors.push(result.reason);

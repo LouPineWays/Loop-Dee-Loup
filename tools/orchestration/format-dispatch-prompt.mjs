@@ -75,6 +75,7 @@
 // Tests: node --test tools/orchestration/format-dispatch-prompt.test.mjs
 
 import { readFileSync } from "node:fs";
+import { readVerdictHandoff } from "./verdict-handoff.mjs";
 
 // Pure. True only for a finite, whole, positive number — the shape a real GitHub issue
 // number always has. Stage 1 review finding on this PR: `Number("abc")` is `NaN` and
@@ -703,7 +704,9 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith("--")) continue;
-    args[a.slice(2)] = argv[++i];
+    // Issue #761: `--from-handoff` is value-less (reads the persisted gate/reservation verdict).
+    if (a === "--from-handoff") args["from-handoff"] = true;
+    else args[a.slice(2)] = argv[++i];
   }
   return args;
 }
@@ -864,7 +867,7 @@ function main() {
 
   let formatter;
   let fields = null;
-  if (args["control-issue"] || args["execution-issue"] || args.route || args.kind) {
+  if (!args["from-handoff"] && (args["control-issue"] || args["execution-issue"] || args.route || args.kind)) {
     const kind = args.kind ?? "implementation";
     const entry = FORMATTERS_BY_KIND[kind];
     if (!entry) {
@@ -879,7 +882,22 @@ function main() {
     formatter = entry.formatter;
     fields = Object.fromEntries(entry.fields.map((f) => [f, readField(f, args, { isCli: true })]));
   } else {
-    const stdin = readStdinIfPiped();
+    // Issue #761: with `--from-handoff` the piped-mode input is the verdict the gate (and, for a
+    // correction, the reservation step) persisted -- same object, no stdin, no hand-built JSON.
+    // `--control-issue`, when supplied alongside, is only a cross-check against that verdict.
+    let stdin;
+    if (args["from-handoff"]) {
+      const handoff = readVerdictHandoff({ controlIssue: args["control-issue"] ?? null });
+      if (!handoff.ok) {
+        process.stderr.write(`format-dispatch-prompt.mjs: ${handoff.reason}
+`);
+        process.exit(2);
+        return;
+      }
+      stdin = JSON.stringify(handoff.verdict);
+    } else {
+      stdin = readStdinIfPiped();
+    }
     if (!stdin) {
       process.stderr.write(
         "format-dispatch-prompt.mjs: pipe ready-dispatch-gate.mjs's JSON output on stdin, or pass --control-issue/--execution-issue/--route (and optionally --kind) explicitly\n",

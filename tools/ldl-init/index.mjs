@@ -718,10 +718,29 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/reconcile-control-blocker.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/orchestration/transition-guard.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/orchestration/verify-audit-ready.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/verify-correction-completion.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/review-watch/consumer-sync-gate.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/review-watch/lifecycle-gate.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/review-watch/stage1-gate.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/review-watch/stage2-control-plane-ci-head.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  // Issue #776 Stage 1 review finding (P2, on PR #777): stage1-gate.mjs hard-imports
+  // findQualifyingCleanReaction/hasExplicitFindingsSignal from stage1-clean-reaction.mjs. Without
+  // this edge, a consumer's unmanaged stage1-clean-reaction.mjs would be preserved while the
+  // managed gate is replaced, so update would report success while the gate fails at import time.
+  { dest: "tools/review-watch/stage1-gate.mjs", dependsOnDest: "tools/review-watch/stage1-clean-reaction.mjs" },
+  // Issue #779 Stage 1 review finding (P2, on PR #782): all three managed gate entrypoints
+  // hard-import enforce/checkControlPlaneFreshness from control-plane-freshness.mjs. Without
+  // these edges an unmanaged, preserved control-plane-freshness.mjs would let install/update
+  // report success while the gates fail at ESM load time.
+  { dest: "tools/orchestration/ready-dispatch-gate.mjs", dependsOnDest: "tools/orchestration/control-plane-freshness.mjs" },
+  { dest: "tools/orchestration/next-review-transition-gate.mjs", dependsOnDest: "tools/orchestration/control-plane-freshness.mjs" },
+  { dest: "tools/orchestration/session-entry-gate.mjs", dependsOnDest: "tools/orchestration/control-plane-freshness.mjs" },
+  // Issue #761: the verdict handoff (verdict-handoff.mjs) is hard-imported by the action-envelope
+  // hook (persisted by every gate entrypoint), the checkout preflight, and the dispatch-prompt
+  // formatter. An unmanaged, preserved copy would fail at ESM load time.
+  { dest: "tools/orchestration/action-envelope-hook.mjs", dependsOnDest: "tools/orchestration/verdict-handoff.mjs" },
+  { dest: "tools/orchestration/pr-head-checkout-preflight.mjs", dependsOnDest: "tools/orchestration/verdict-handoff.mjs" },
+  { dest: "tools/orchestration/format-dispatch-prompt.mjs", dependsOnDest: "tools/orchestration/verdict-handoff.mjs" },
 ];
 
 // Pure. Given one install/update run's final toInstall/toSkip classification, returns one
@@ -953,6 +972,75 @@ export function findUnsafeLdlDirReason(destRoot) {
 
 // `resolveRevisionImpl` and `now` are injected so tests get deterministic manifest output
 // without depending on this process's own git state or wall-clock time.
+// Issue #799 Stage 2 correction (Audit #801 finding 1): the raw thin-control body-write
+// guard (tools/orchestration/control-body-write-guard.mjs, installed above as part of the
+// managed tools/orchestration/ tree) only refuses anything when a `PreToolUse` Bash hook in
+// the consumer's `.claude/settings.json` actually invokes it. `.claude/settings.json` is
+// consumer-owned, so it is never copied over; instead this merges exactly one hook entry into
+// it, preserving every other key and hook, and is idempotent (an entry already naming the guard,
+// however the consumer wrote it, counts as active). It never guesses: absent file -> created
+// with only this hook; unparseable JSON or an unexpected `hooks` shape -> left untouched and
+// reported as "skipped" so the caller can surface a manual step. Exported so tools/ldl-update
+// applies this exact same merge.
+export const ENFORCEMENT_GUARD_DEST = "tools/orchestration/control-body-write-guard.mjs";
+export const ENFORCEMENT_HOOK_COMMAND = `node "$CLAUDE_PROJECT_DIR/${ENFORCEMENT_GUARD_DEST}"`;
+
+// True only for a hook entry that actually executes the canonical guard: matcher exactly
+// "Bash", hook type "command", command exactly ENFORCEMENT_HOOK_COMMAND. A command that merely
+// mentions the guard filename, a different matcher, or a non-command hook does not count.
+export function isCanonicalEnforcementEntry(entry) {
+  return (
+    entry !== null &&
+    typeof entry === "object" &&
+    entry.matcher === "Bash" &&
+    Array.isArray(entry.hooks) &&
+    entry.hooks.some((h) => h !== null && typeof h === "object" && h.type === "command" && h.command === ENFORCEMENT_HOOK_COMMAND)
+  );
+}
+
+// `guardManaged` must be true only when the guard destination is recorded as LDL-managed in the
+// manifest this run produced/confirmed (installed or already current) -- never merely because a
+// file exists there: an unmanaged consumer file at that path is not an LDL guard and must never
+// be wired to auto-execute. Callers invoke this AFTER managed files are written, so a fresh
+// install or a pre-guard upgrade receives guard and hook in the same run.
+export function ensureEnforcementHook(destRoot, { guardManaged = false } = {}) {
+  const settingsRel = ".claude/settings.json";
+  const settingsPath = join(destRoot, ".claude", "settings.json");
+  const manual = (why) => ({ status: "skipped", reason: `${why}; add a PreToolUse Bash hook for ${ENFORCEMENT_GUARD_DEST} by hand` });
+  const guardPath = join(destRoot, ...ENFORCEMENT_GUARD_DEST.split("/"));
+  if (!guardManaged) {
+    if (!existsSync(guardPath)) return { status: "not-applicable" }; // partial/fixture install without the guard
+    return { status: "skipped", reason: `${ENFORCEMENT_GUARD_DEST} exists but is not an LDL-managed file (unmanaged collision); it was not wired as enforcement` };
+  }
+  const unsafe = findUnsafeDestReason(destRoot, settingsRel);
+  if (unsafe) return manual(unsafe);
+  let settings = {};
+  if (existsSync(settingsPath)) {
+    try {
+      if (!statSync(settingsPath).isFile()) throw new Error("not a regular file");
+      settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+    } catch (err) {
+      return manual(`${settingsRel} is not parseable JSON (${err.message})`);
+    }
+    if (settings === null || typeof settings !== "object" || Array.isArray(settings)) {
+      return manual(`${settingsRel} is not a JSON object`);
+    }
+  }
+  if (settings.hooks === undefined) settings.hooks = {};
+  if (settings.hooks === null || typeof settings.hooks !== "object" || Array.isArray(settings.hooks)) {
+    return manual(`${settingsRel} has an unexpected "hooks" shape`);
+  }
+  if (settings.hooks.PreToolUse === undefined) settings.hooks.PreToolUse = [];
+  if (!Array.isArray(settings.hooks.PreToolUse)) {
+    return manual(`${settingsRel} has an unexpected "hooks.PreToolUse" shape`);
+  }
+  if (settings.hooks.PreToolUse.some(isCanonicalEnforcementEntry)) return { status: "already-present" };
+  settings.hooks.PreToolUse.push({ matcher: "Bash", hooks: [{ type: "command", command: ENFORCEMENT_HOOK_COMMAND }] });
+  mkdirSync(dirname(settingsPath), { recursive: true });
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  return { status: "installed" };
+}
+
 export async function run(args, deps = {}) {
   const { resolveRevisionImpl = defaultResolveRevision, now = () => new Date().toISOString() } = deps;
 
@@ -1074,6 +1162,8 @@ export async function run(args, deps = {}) {
     activatedCapabilities,
   };
 
+  const enforcementHook = ensureEnforcementHook(destRoot, { guardManaged: installedFiles.some((f) => f.dest === ENFORCEMENT_GUARD_DEST) });
+
   mkdirSync(join(destRoot, ".ldl"), { recursive: true });
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
 
@@ -1091,7 +1181,9 @@ export async function run(args, deps = {}) {
       warnings: [
         ...deriveSyncPrerequisiteWarnings(manifest.files.map((f) => f.dest)),
         ...deriveActivatedCapabilityReminder(manifest.activatedCapabilities),
+        ...(enforcementHook.status === "skipped" ? [`thin-control body-write guard not wired: ${enforcementHook.reason}`] : []),
       ],
+      enforcementHook: enforcementHook.status,
     }),
   };
 }

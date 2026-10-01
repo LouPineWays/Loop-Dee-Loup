@@ -27,7 +27,9 @@
 //   RESPONSE_RECEIVED — a trigger and a genuine post-trigger bot response both exist, and
 //                      (per issue #638) either the response is a recognized "clean"/no-
 //                      actionable-findings reply, or at least one findings-bearing match
-//                      carries formal review-object provenance. exit 0.
+//                      carries formal review-object provenance, or (issue #776) a qualifying
+//                      post-trigger Codex `+1` PR reaction (stage1-clean-reaction.mjs) is
+//                      present, reported in a `cleanReaction` field. exit 0.
 //
 // Issue #616 (recurrence of #135; live #441/#442, merged PR #615): a claimed exemption
 // never grants EXEMPT when the PR's own changed-file set touches a path
@@ -114,6 +116,7 @@ import { endpointsFor, findAllMatches, matchBelongsToHead } from "./poll.mjs";
 import { findExistingTrigger, findTriggerRounds } from "./trigger.mjs";
 import { isGenuineResponse } from "./genuine-response.mjs";
 import { isFindingsBearingResponse, isFormalReviewEndpoint } from "./stage1-findings.mjs";
+import { findQualifyingCleanReaction, hasExplicitFindingsSignal } from "./stage1-clean-reaction.mjs";
 import { isControlPlanePath, isLoopDeeLoupRepo } from "./control-plane-paths.mjs";
 
 // Re-exported so existing callers/tests that import isGenuineResponse from this module
@@ -351,13 +354,45 @@ export async function run(
   if (!hasFormalBoundMatch) {
     const findingsMatches = boundGenuineMatches.filter((m) => isFindingsBearingResponse(m.body_excerpt));
     if (findingsMatches.length > 0) {
-      return {
+      // Issue #776: structured clean evidence -- a qualifying post-trigger Codex `+1` PR
+      // reaction (stage1-clean-reaction.mjs) -- replaces prose enumeration as the clean
+      // discriminator for the issue-comment-only path. Read only here (no formal bound match
+      // and a non-recognized-clean genuine response), so every other path is unchanged.
+      let reactions;
+      try {
+        reactions = await ghApiImpl(`repos/${repo}/issues/${number}/reactions`);
+      } catch (err) {
+        return { exitCode: 1, message: `gh api call failed for repos/${repo}/issues/${number}/reactions: ${err.message}` };
+      }
+      if (!Array.isArray(reactions)) {
+        return {
+          exitCode: 1,
+          message: `Ambiguous reaction read: expected an array of reactions for ${repo}#${number}.`,
+        };
+      }
+      const cleanReaction = findQualifyingCleanReaction(reactions, { bot, sinceMs, head, rounds });
+      const failClosed = {
         exitCode: 2,
         state: "FINDINGS_LACK_FORMAL_REVIEW",
         triggerTimestamp: trigger.created_at,
         findingsMatches,
         nonGenuineMatches,
         unboundGenuineMatches,
+      };
+      if (!cleanReaction) return failClosed;
+      if (findingsMatches.some((m) => hasExplicitFindingsSignal(m.body_excerpt))) {
+        // Contradictory evidence: an explicit findings heading alongside a clean reaction.
+        // Never guess; fail closed with a diagnosable marker.
+        return { ...failClosed, cleanReactionConflict: cleanReaction };
+      }
+      return {
+        exitCode: 0,
+        state: "RESPONSE_RECEIVED",
+        triggerTimestamp: trigger.created_at,
+        matches: boundGenuineMatches,
+        unboundGenuineMatches,
+        cleanReaction,
+        ...(rejectedExemption ? { rejectedExemption } : {}),
       };
     }
   }

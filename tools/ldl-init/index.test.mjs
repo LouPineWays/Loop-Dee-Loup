@@ -1518,3 +1518,43 @@ test("HARD_MODULE_DEPENDENCIES: covers github-read.mjs importers and flags a pre
   assert.equal(collisions.length, 1);
   assert.equal(collisions[0].dest, g);
 });
+
+test("HARD_MODULE_DEPENDENCIES: covers stage1-gate.mjs -> stage1-clean-reaction.mjs (#776)", () => {
+  const dest = "tools/review-watch/stage1-gate.mjs";
+  const dep = "tools/review-watch/stage1-clean-reaction.mjs";
+  assert.ok(HARD_MODULE_DEPENDENCIES.some((e) => e.dest === dest && e.dependsOnDest === dep));
+  const collisions = findHardDependencyCollisions({
+    toInstall: [{ destRel: dest, content: Buffer.from("x") }],
+    toSkip: [{ dest: dep, reason: "unmanaged" }],
+  });
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].dest, dep);
+});
+
+test("HARD_MODULE_DEPENDENCIES: covers all three gate importers of control-plane-freshness.mjs (#779)", () => {
+  const dep = "tools/orchestration/control-plane-freshness.mjs";
+  for (const dest of [
+    "tools/orchestration/ready-dispatch-gate.mjs",
+    "tools/orchestration/next-review-transition-gate.mjs",
+    "tools/orchestration/session-entry-gate.mjs",
+  ]) {
+    assert.ok(HARD_MODULE_DEPENDENCIES.some((e) => e.dest === dest && e.dependsOnDest === dep), dest);
+    const collisions = findHardDependencyCollisions({
+      toInstall: [{ destRel: dest, content: Buffer.from("x") }],
+      toSkip: [{ dest: dep, reason: "unmanaged" }],
+    });
+    assert.equal(collisions.length, 1);
+    assert.equal(collisions[0].dest, dep);
+  }
+});
+
+test("HARD_MODULE_DEPENDENCIES: covers the three importers of verdict-handoff.mjs (#761)", () => {
+  const dep = "tools/orchestration/verdict-handoff.mjs";
+  for (const dest of [
+    "tools/orchestration/action-envelope-hook.mjs",
+    "tools/orchestration/pr-head-checkout-preflight.mjs",
+    "tools/orchestration/format-dispatch-prompt.mjs",
+  ]) {
+    assert.ok(HARD_MODULE_DEPENDENCIES.some((e) => e.dest === dest && e.dependsOnDest === dep), dest);
+  }
+});

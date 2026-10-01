@@ -465,7 +465,26 @@ async function deriveRecoveredStage1Head({ repo, pr, prView, existingStage1 }, {
     // -- a generic acknowledgement can land before merge while the real clean-pass reply that
     // made the round clean arrives only after, and `isCleanStage1Response` above already
     // confirmed at least one qualifying match exists, so this filter is never empty here.
-    const qualifyingCleanPassMatches = (stage1Result.matches ?? []).filter((m) => isCleanPassMatch(m));
+    // Issue #776: a structured `cleanReaction` is itself the qualifying clean evidence.
+    const qualifyingCleanPassMatches = stage1Result.cleanReaction
+      ? [stage1Result.cleanReaction]
+      : (stage1Result.matches ?? []).filter((m) => isCleanPassMatch(m));
+    // Stage 1 review finding (P2, PR #777): a structured clean reaction is only one half of the
+    // #776 evidence -- the genuine bound response must also predate merge, else the gate was
+    // still PENDING at the merge boundary. Check that response's own timestamp too.
+    if (stage1Result.cleanReaction) {
+      const genuineMs = earliestMatchTimestampMs(stage1Result.matches ?? []);
+      if (genuineMs === null || genuineMs >= mergedAtMs) {
+        return {
+          ok: false,
+          reason:
+            `the genuine Stage 1 response accompanying the clean reaction ` +
+            `${genuineMs === null ? "carries no usable timestamp" : `(${new Date(genuineMs).toISOString()}) does not predate PR #${pr}'s merge boundary (${prView.mergedAt})`} ` +
+            "-- recovery must not let evidence that only arrived after merge retroactively authorize it " +
+            "(unknown ordering fails closed)",
+        };
+      }
+    }
     const responseMs = earliestMatchTimestampMs(qualifyingCleanPassMatches);
     if (responseMs === null) {
       return {

@@ -43,9 +43,71 @@ export function parseArgs(argv) {
 // as an unexpected change and refuse to proceed. Every other changed path must still appear in
 // `managedPaths` (the *new* manifest's own `files[].dest` list, i.e. what the update itself
 // claims it manages) to be accepted.
-export function findUnexpectedPaths(changedPaths, managedPaths) {
+export function findUnexpectedPaths(changedPaths, managedPaths, { settingsChangeIsCanonicalHookOnly = false } = {}) {
   const allowed = new Set(managedPaths);
-  return changedPaths.filter((p) => !allowed.has(p) && p !== ".ldl/manifest.json" && !p.startsWith(".ldl/"));
+  return changedPaths.filter(
+    (p) =>
+      !allowed.has(p) &&
+      p !== ".ldl/manifest.json" &&
+      !p.startsWith(".ldl/") &&
+      !(p === SETTINGS_PATH && settingsChangeIsCanonicalHookOnly),
+  );
+}
+
+// Issue #799 Stage 1 correction: .claude/settings.json is consumer-owned, never LDL-managed, yet
+// tools/ldl-update legitimately merges exactly one entry into it -- the canonical PreToolUse Bash
+// hook for the raw thin-control body-write guard. That single controlled mutation is accepted
+// here, and ONLY here: the file's after-state must equal its before-state plus that one canonical
+// entry (any other key/hook change, or a differently shaped entry, is still unexpected). The
+// command string intentionally duplicates tools/ldl-init's ENFORCEMENT_HOOK_COMMAND (this file is
+// installed into consumers that may lack tools/ldl-init); a test pins the two together.
+export const SETTINGS_PATH = ".claude/settings.json";
+export const CANONICAL_HOOK_COMMAND = 'node "$CLAUDE_PROJECT_DIR/tools/orchestration/control-body-write-guard.mjs"';
+
+const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const isCanonicalEntry = (e) =>
+  isPlainObject(e) &&
+  e.matcher === "Bash" &&
+  Array.isArray(e.hooks) &&
+  e.hooks.length === 1 &&
+  isPlainObject(e.hooks[0]) &&
+  e.hooks[0].type === "command" &&
+  e.hooks[0].command === CANONICAL_HOOK_COMMAND &&
+  Object.keys(e).length === 2 &&
+  Object.keys(e.hooks[0]).length === 2;
+
+// before/after are parsed JSON values (before === null when the file did not exist at HEAD).
+export function isCanonicalHookOnlyChange(before, after) {
+  if (before !== null && !isPlainObject(before)) return false;
+  if (!isPlainObject(after)) return false;
+  const base = before === null ? {} : before;
+  const pre = after.hooks?.PreToolUse;
+  if (!isPlainObject(after.hooks) || !Array.isArray(pre)) return false;
+  const idx = pre.findIndex(isCanonicalEntry);
+  if (idx === -1) return false;
+  const rest = pre.filter((_, i) => i !== idx);
+  const stripped = { ...after, hooks: { ...after.hooks } };
+  if (rest.length > 0 || base.hooks?.PreToolUse !== undefined) stripped.hooks.PreToolUse = rest;
+  else delete stripped.hooks.PreToolUse;
+  if (Object.keys(stripped.hooks).length === 0 && base.hooks === undefined) delete stripped.hooks;
+  return JSON.stringify(sortKeys(stripped)) === JSON.stringify(sortKeys(base));
+}
+
+function sortKeys(v) {
+  if (Array.isArray(v)) return v.map(sortKeys);
+  if (isPlainObject(v)) return Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys(v[k])]));
+  return v;
+}
+
+function defaultReadSettingsPair(dest) {
+  let before = null;
+  try {
+    before = JSON.parse(execFileSync("git", ["-C", dest, "show", `HEAD:${SETTINGS_PATH}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
+  } catch {
+    before = null; // absent at HEAD (or unparseable): treated as an empty object only if absent
+  }
+  const after = JSON.parse(readFileSync(join(dest, ".claude", "settings.json"), "utf8"));
+  return { before, after };
 }
 
 // `git status --porcelain=v1` lines are two status columns, one space, then the path (column
@@ -70,7 +132,7 @@ function defaultGitChangedPaths(dest) {
 }
 
 export function run(args, deps = {}) {
-  const { gitChangedPathsImpl = defaultGitChangedPaths, readFileImpl = readFileSync } = deps;
+  const { gitChangedPathsImpl = defaultGitChangedPaths, readFileImpl = readFileSync, readSettingsPairImpl = defaultReadSettingsPair } = deps;
   const dest = args.dest || ".";
   const manifestPath = join(dest, ".ldl", "manifest.json");
 
@@ -89,7 +151,16 @@ export function run(args, deps = {}) {
     return { exitCode: 1, message: `failed reading git status for ${dest}: ${err.message}` };
   }
 
-  const unexpected = findUnexpectedPaths(changedPaths, managedPaths);
+  let settingsChangeIsCanonicalHookOnly = false;
+  if (changedPaths.includes(SETTINGS_PATH)) {
+    try {
+      const { before, after } = readSettingsPairImpl(dest);
+      settingsChangeIsCanonicalHookOnly = isCanonicalHookOnlyChange(before, after);
+    } catch {
+      settingsChangeIsCanonicalHookOnly = false; // fail closed
+    }
+  }
+  const unexpected = findUnexpectedPaths(changedPaths, managedPaths, { settingsChangeIsCanonicalHookOnly });
   if (unexpected.length > 0) {
     return {
       exitCode: 1,

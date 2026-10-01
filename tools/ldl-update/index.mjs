@@ -62,6 +62,8 @@ import {
   contentMatchesHash,
   defaultResolveRevision,
   derivePendingManualIntegration,
+  ENFORCEMENT_GUARD_DEST,
+  ensureEnforcementHook,
   deriveActivatedCapabilityReminder,
   deriveSyncPrerequisiteWarnings,
   findHardDependencyCollisions,
@@ -348,9 +350,19 @@ export async function run(args, deps = {}) {
   // itself changed.
   const pendingIntegrationChanged = !pendingIntegrationListsEqual(pendingManualIntegration, parsedManifest.pendingManualIntegration || []);
 
+  // Issue #799 Stage 1 correction: the guard hook is wired by wireEnforcementHook, AFTER managed
+  // files are written, so a consumer upgrading from a pre-guard revision gets the guard file and
+  // the active hook in the same run. The guard counts as LDL-managed only when it is in this
+  // run's resulting managed set (installed or already current), never merely because it exists.
+  const wireEnforcementHook = (managedFiles) => {
+    const hook = ensureEnforcementHook(destRoot, { guardManaged: managedFiles.some((f) => f.dest === ENFORCEMENT_GUARD_DEST) });
+    return { hook, warnings: hook.status === "skipped" ? [`thin-control body-write guard not wired: ${hook.reason}`] : [] };
+  };
+
   if (toInstall.length === 0 && supersededTemplates.length === 0 && !skipSetChanged && !pendingIntegrationChanged) {
     // Nothing to write and nothing to reconcile: a predictable no-op. Leave
     // .ldl/manifest.json and every managed file completely untouched.
+    const { hook: enforcementHook, warnings: enforcementWarnings } = wireEnforcementHook([...unchangedFiles, ...parsedManifest.files]);
     return {
       exitCode: 0,
       message: JSON.stringify({
@@ -358,6 +370,8 @@ export async function run(args, deps = {}) {
         skipped: toSkip.length,
         manualIntegrationNeeded: pendingManualIntegration.length,
         revision: parsedManifest.ldlSourceRevision,
+        enforcementHook: enforcementHook.status,
+        ...(enforcementWarnings.length ? { warnings: enforcementWarnings } : {}),
         noop: true,
       }),
     };
@@ -396,6 +410,8 @@ export async function run(args, deps = {}) {
 
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
 
+  const { hook: enforcementHook, warnings: enforcementWarnings } = wireEnforcementHook(files);
+
   return {
     exitCode: 0,
     message: JSON.stringify({
@@ -414,7 +430,9 @@ export async function run(args, deps = {}) {
       warnings: [
         ...deriveSyncPrerequisiteWarnings(installedFiles.map((f) => f.dest)),
         ...deriveActivatedCapabilityReminder(manifest.activatedCapabilities),
+        ...enforcementWarnings,
       ],
+      enforcementHook: enforcementHook.status,
     }),
   };
 }
