@@ -111,6 +111,16 @@ export const TRANSITIONS = Object.freeze({
     postcondition: "PR reads MERGED at the exact corrected head the gate authorized",
     invalidation: ["PR head changed since the verdict", "PR closed without merge"],
   },
+  // Issue #837 / PR #838: a provenance-verified corrected head whose canonical correction-satisfied
+  // disposition was never projected. The only mechanical action is the verdict's own finalizer;
+  // success is the exact disposition read back at the unchanged PR head, then the gate re-enters.
+  STAGE1_CORRECTION_FINALIZATION_REQUIRED: {
+    preState: "STAGE1_CORRECTION_FINALIZATION_REQUIRED",
+    action: "finalize-correction-breakpoint",
+    verifier: "control-correction-disposition-readback",
+    postcondition: "control Issue Stage 1 reads the canonical correction-satisfied disposition for the exact reviewed/corrected heads while the PR head is still the corrected head",
+    invalidation: ["PR head changed since the verdict", "PR closed or merged", "control Stage 1 bullet changed"],
+  },
   STAGE2_CORRECTION_PR_NEEDS_FINALIZATION: {
     preState: "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
     action: "finalize-pr-breakpoint",

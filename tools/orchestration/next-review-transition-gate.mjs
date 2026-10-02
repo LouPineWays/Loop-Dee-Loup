@@ -291,6 +291,7 @@ import {
   defaultOpenExecutionLinkedPrList,
 } from "./ready-dispatch-gate.mjs";
 import { run as stage1Run } from "../review-watch/stage1-gate.mjs";
+import { findTriggerRounds } from "../review-watch/trigger.mjs";
 import {
   checkMergeReady,
   checkPostAudit,
@@ -467,7 +468,7 @@ function hasFindingsStage1Response(stage1) {
 }
 
 export function resolvePreMergeVerdict(
-  { stage1, mergeReady, stage1Disposition = null, correctionDelta = null, mergeConflict = null },
+  { stage1, mergeReady, stage1Disposition = null, correctionDelta = null, mergeConflict = null, unfinalizedCorrection = null },
   context = {},
 ) {
   if (!hasTrustworthyExitCode(stage1) || !hasTrustworthyExitCode(mergeReady)) {
@@ -625,7 +626,28 @@ export function resolvePreMergeVerdict(
       };
     } else {
       // correctionDelta is falsy and no correction-satisfied-shaped bullet is present at all
-      // -- plain NO_ACTION_YET, exactly as before this disposition shape existed.
+      // -- plain NO_ACTION_YET, exactly as before this disposition shape existed, EXCEPT
+      // (issue #837, the #817/#835/PR #836 live reproduction) when `unfinalizedCorrection` proves
+      // a findings-bearing correction already advanced this head from a reviewed head without
+      // the canonical correction-satisfied disposition ever being finalized on the control
+      // Issue. That state is a stranded breakpoint, not "nothing to do yet": it names exactly
+      // the one deterministic finalize step, reusing finalize-correction-breakpoint.mjs as the
+      // only evidence/projection path.
+      if (unfinalizedCorrection && context.controlIssue != null && Number.isInteger(context.issue)) {
+        return {
+          state: "STAGE1_CORRECTION_FINALIZATION_REQUIRED",
+          stopAfter: true,
+          ...context,
+          stage1,
+          mergeReady,
+          reviewedHead: unfinalizedCorrection.reviewedHead,
+          correctedHead: unfinalizedCorrection.correctedHead,
+          nextCommand:
+            `node tools/orchestration/finalize-correction-breakpoint.mjs --control-issue ${context.controlIssue} ` +
+            `--execution-issue ${context.issue} --pr ${context.pr} ` +
+            `--reviewed-head ${unfinalizedCorrection.reviewedHead} --corrected-head ${unfinalizedCorrection.correctedHead}`,
+        };
+      }
       return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
     }
   }
@@ -981,6 +1003,9 @@ function exitCodeFor(state) {
     case "STAGE2_TRIGGER_REQUIRED":
       return 0;
     case "STAGE1_CORRECTION_REQUIRED":
+    // Issue #837: names the one concrete, non-blocking finalize step a stranded corrected head
+    // needs -- same bucket as its STAGE1_CORRECTION_REQUIRED sibling.
+    case "STAGE1_CORRECTION_FINALIZATION_REQUIRED":
     case "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT":
     case "STAGE2_CORRECTION_REQUIRED":
     // Issue #646: STAGE2_CORRECTION_PR_NEEDS_FINALIZATION names a concrete, non-blocking
@@ -1004,7 +1029,14 @@ function exitCodeFor(state) {
 
 async function resolvePreMerge(
   { repo, pr, head, issue, stage1Disposition = null, controlIssue },
-  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl = defaultGhPrMergeable },
+  {
+    stage1RunImpl,
+    checkMergeReadyImpl,
+    checkCorrectionDeltaImpl,
+    checkMergeConflictImpl = defaultGhPrMergeable,
+    listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
+    readCorrectionCommitsImpl = defaultReadCorrectionCommits,
+  },
 ) {
   let stage1;
   try {
@@ -1042,6 +1074,93 @@ async function resolvePreMerge(
     }
   }
 
+  // Issue #837 (the #817/#835/PR #836 live reproduction): a findings-bearing correction advanced
+  // the PR head, but the canonical correction-satisfied disposition never reached the control
+  // Issue (control still "Stage 1: requested"), so the corrected head's NOT_REQUESTED fell into
+  // plain NO_ACTION_YET forever. Probe only in the exact stranded shape -- control-Issue mode,
+  // Stage 1 NOT_REQUESTED at the current head, and a disposition that is neither an affirmative
+  // satisfied/exempt shape nor any correction-satisfied-shaped bullet -- so the common path and
+  // every other disposition shape spend no extra `gh` call. The reviewed head is the head of the
+  // most recent Stage 1 trigger round that differs from the current head; it is *evidence-checked*
+  // by the same checkCorrectionDelta every other correction path trusts (genuine head-bound
+  // findings at that head + strict non-diverged ancestry), never taken on faith.
+  let unfinalizedCorrection = null;
+  if (
+    stage1.state === "NOT_REQUESTED" &&
+    controlIssue != null &&
+    !correctionDelta &&
+    !looksLikeCorrectionSatisfiedDisposition(stage1Disposition) &&
+    !parseAffirmativeStage1Disposition(stage1Disposition)
+  ) {
+    let heads;
+    try {
+      heads = await listStage1TriggerHeadsImpl({ repo, pr });
+    } catch (err) {
+      return {
+        exitCode: 4,
+        state: "AMBIGUOUS",
+        stopAfter: true,
+        repo,
+        pr,
+        head,
+        issue,
+        controlIssue,
+        reason: `could not read PR #${pr}'s Stage 1 trigger rounds to check for an unfinalized correction: ${err.message}`,
+      };
+    }
+    const reviewedHead = (Array.isArray(heads) ? heads : []).find(
+      (h) => typeof h === "string" && h && h.toLowerCase() !== String(head).toLowerCase(),
+    );
+    if (reviewedHead) {
+      let delta;
+      try {
+        delta = await checkCorrectionDeltaImpl({ repo, pr, reviewedHead, correctedHead: head, gatedHead: head });
+      } catch (err) {
+        delta = { exitCode: 1, message: `stage1-correction-gate threw: ${err.message}` };
+      }
+      if (!delta || typeof delta.exitCode !== "number" || delta.exitCode === 1) {
+        return {
+          exitCode: 4,
+          state: "AMBIGUOUS",
+          stopAfter: true,
+          repo,
+          pr,
+          head,
+          issue,
+          controlIssue,
+          reason: `unfinalized-correction probe against reviewed head ${reviewedHead} failed operationally: ${delta && delta.message}`,
+        };
+      }
+      if (delta.state === "CORRECTION_SATISFIED") {
+        // Stage 1 review finding on PR #838 (P1): head ancestry plus genuine findings at the
+        // reviewed head proves a descendant exists, not that the descendant is the authorized
+        // correction of those findings (an unrelated commit or merge-forward satisfies the same
+        // shape). Require every intervening commit to carry the execution Issue's own
+        // provenance; anything unverifiable stays NO_ACTION_YET (unrelated) or AMBIGUOUS
+        // (unreadable) -- never a finalization authorization.
+        let commits;
+        try {
+          commits = await readCorrectionCommitsImpl({ repo, base: delta.reviewedHead, head: delta.correctedHead });
+        } catch (err) {
+          return {
+            exitCode: 4,
+            state: "AMBIGUOUS",
+            stopAfter: true,
+            repo,
+            pr,
+            head,
+            issue,
+            controlIssue,
+            reason: `could not read the commits between reviewed head ${reviewedHead} and ${head} to verify correction provenance: ${err.message}`,
+          };
+        }
+        if (verifyCorrectionProvenance(commits, issue).ok) {
+          unfinalizedCorrection = { reviewedHead: delta.reviewedHead, correctedHead: delta.correctedHead };
+        }
+      }
+    }
+  }
+
   // Issue #665: only ever fetched once correctionDelta itself already reports
   // CORRECTION_SATISFIED *and* lifecycle-gate's own merge-ready leg already succeeded --
   // exactly the one case where resolvePreMergeVerdict's own composed check below could
@@ -1066,7 +1185,10 @@ async function resolvePreMerge(
   }
 
   const context = { repo, pr, head, issue, ...(controlIssue != null ? { controlIssue } : {}) };
-  const verdict = resolvePreMergeVerdict({ stage1, mergeReady, stage1Disposition, correctionDelta, mergeConflict }, context);
+  const verdict = resolvePreMergeVerdict(
+    { stage1, mergeReady, stage1Disposition, correctionDelta, mergeConflict, unfinalizedCorrection },
+    context,
+  );
   return { exitCode: exitCodeFor(verdict.state), ...verdict };
 }
 
@@ -1693,7 +1815,7 @@ async function resolveStalePointerCorrectionRecovery(
 // the head itself, only once the Execution reference has already checked out.
 async function resolvePreMergeFromControlBody(
   { repo, body, prIssue, controlIssueNumber, head, ghPrHeadImpl },
-  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl },
+  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
 ) {
   const executionField = readExecutionBulletField(body);
   const executionRef = executionField.conflict
@@ -1724,12 +1846,59 @@ async function resolvePreMergeFromControlBody(
   const stage1Disposition = parseControlBullet(body, "Stage 1");
   return resolvePreMerge(
     { repo, pr: prIssue, head: resolvedHead, issue: executionRef.issue, stage1Disposition, controlIssue: controlIssueNumber },
-    { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl },
+    { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
   );
 }
 
 function defaultGhIssueView({ repo, number }) {
   return readGithubIssue({ repo, number, fields: ["body", "state"] });
+}
+
+// Issue #837: the heads of every Stage 1 trigger round on the PR, most recent first. Reuses
+// trigger.mjs's own findTriggerRounds (requires a valid head marker, so prose mentions of the
+// trigger text never count) rather than a second parse of the marker format.
+export function defaultListStage1TriggerHeads({ repo, pr }) {
+  const raw = execFileSync("gh", ["api", `repos/${repo}/issues/${pr}/comments`, "--paginate", "--slurp"], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  const comments = JSON.parse(raw).flat();
+  return findTriggerRounds(comments)
+    .map((r) => r.head)
+    .reverse();
+}
+
+// Issue #837 / PR #838 Stage 1 correction: the commits strictly between the reviewed head and the
+// corrected head (GitHub compare API), reduced to what provenance needs. Throws on any I/O or
+// shape failure so the caller fails closed to AMBIGUOUS.
+export function defaultReadCorrectionCommits({ repo, base, head }) {
+  const raw = execFileSync(
+    "gh",
+    ["api", `repos/${repo}/compare/${base}...${head}`, "--jq", "[.commits[]|{sha:.sha,parents:(.parents|length),message:.commit.message}]"],
+    { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+  );
+  const commits = JSON.parse(raw);
+  if (!Array.isArray(commits)) throw new Error("compare API returned no commit list");
+  return commits;
+}
+
+// Pure. Correction provenance for a strict reviewed->corrected descendant: the pair is the
+// completed result of the authorized findings correction only when EVERY intervening commit is a
+// plain single-parent commit (a merge-forward is not a correction) and names the execution Issue
+// whose dispatch authorized the correction (LDL commit convention `... (#<execution>)`). The one
+// representation of correction satisfaction remains the canonical finalized disposition; this
+// only decides whether the gate may authorize writing it.
+export function verifyCorrectionProvenance(commits, executionIssue) {
+  if (!Array.isArray(commits) || commits.length === 0) return { ok: false, reason: "no intervening commits" };
+  if (!Number.isInteger(executionIssue) || executionIssue <= 0) return { ok: false, reason: "no execution Issue to bind provenance to" };
+  const ref = new RegExp(`(^|[^\\w/])#${executionIssue}(?!\\d)`);
+  for (const c of commits) {
+    if (!c || c.parents !== 1) return { ok: false, reason: `commit ${c?.sha ?? "?"} is not a single-parent commit` };
+    if (typeof c.message !== "string" || !ref.test(c.message)) {
+      return { ok: false, reason: `commit ${c.sha} does not reference execution Issue #${executionIssue}` };
+    }
+  }
+  return { ok: true };
 }
 
 function defaultGhPrHead({ repo, number }) {
@@ -1844,6 +2013,8 @@ async function runNextReviewTransitionGateCore(
     checkPostAuditImpl = checkPostAudit,
     checkCorrectionDeltaImpl = checkCorrectionDelta,
     checkMergeConflictImpl = defaultGhPrMergeable,
+    listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
+    readCorrectionCommitsImpl = defaultReadCorrectionCommits,
     reconcileStage2CorrectionPrImpl = reconcileStage2CorrectionPr,
     reconcileExistingStage2AuditIssueImpl = reconcileExistingStage2AuditIssue,
   } = {},
@@ -2004,7 +2175,7 @@ async function runNextReviewTransitionGateCore(
       const head = args.head || prState.headRefOid;
       return resolvePreMergeFromControlBody(
         { repo, body, prIssue: prRef.issue, controlIssueNumber, head, ghPrHeadImpl },
-        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl },
+        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
       );
     }
     // CLOSED without merging (or any other state gh might report): a genuinely contradictory
@@ -2040,7 +2211,7 @@ async function runNextReviewTransitionGateCore(
     if (args.head) {
       return resolvePreMergeFromControlBody(
         { repo, body, prIssue: prRef.issue, controlIssueNumber, head: args.head, ghPrHeadImpl },
-        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl },
+        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
       );
     }
     // No settled "Stage 2" reference exists here (the auditRef.kind === "issue" branch above
@@ -2274,7 +2445,7 @@ async function runNextReviewTransitionGateCore(
     const head = prState.headRefOid;
     return resolvePreMergeFromControlBody(
       { repo, body, prIssue: prRef.issue, controlIssueNumber, head, ghPrHeadImpl },
-      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl },
+      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
     );
   }
 

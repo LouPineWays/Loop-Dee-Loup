@@ -215,6 +215,18 @@ export function buildDeps({
         await projectRoutedFromFreshGate();
       } else if (NEXT_COMMAND_STATES.has(state)) {
         for (const c of parseNextCommand(verdict.nextCommand)) io.node(c.file, c.args);
+      } else if (state === "STAGE1_CORRECTION_FINALIZATION_REQUIRED") {
+        // Only the one canonical finalizer, with arguments that must equal the verdict's own
+        // identity, and only while the PR head is still the verified corrected head.
+        const { pr, reviewedHead, correctedHead } = verdict;
+        if (!Number.isInteger(pr) || typeof reviewedHead !== "string" || typeof correctedHead !== "string") throw new Error("finalization verdict lacks pr/reviewed/corrected heads");
+        if (String(prState(verdict).headRefOid).toLowerCase() !== correctedHead.toLowerCase()) throw new Error("PR head changed since the verdict");
+        const segs = parseNextCommand(verdict.nextCommand);
+        const want = ["--control-issue", String(controlIssue), "--execution-issue", String(executionIssue), "--pr", String(pr), "--reviewed-head", reviewedHead, "--corrected-head", correctedHead];
+        if (segs.length !== 1 || segs[0].file !== "tools/orchestration/finalize-correction-breakpoint.mjs" || JSON.stringify(segs[0].args) !== JSON.stringify(want)) {
+          throw new Error("finalization verdict nextCommand is not the canonical finalizer for this launch");
+        }
+        io.node(segs[0].file, segs[0].args);
       } else if (MERGE_STATES.has(state)) {
         const { pr, head } = verdict;
         if (!Number.isInteger(pr) || typeof head !== "string" || !head) throw new Error("merge verdict lacks pr/head");
