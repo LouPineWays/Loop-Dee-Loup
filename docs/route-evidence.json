@@ -1,0 +1,6 @@
+[
+  { "route": "local-inference", "outcomeClass": "bounded-implementation", "verifiedClean": false, "reworkRate": 0.4, "founderInterventions": 0, "relativeCost": 1, "requiresLocalInference": true },
+  { "route": "claude-subagent", "outcomeClass": "bounded-implementation", "verifiedClean": true, "reworkRate": 0.2, "founderInterventions": 0, "relativeCost": 3, "requiresLocalInference": false },
+  { "route": "claude-subagent", "outcomeClass": "correction", "verifiedClean": true, "reworkRate": 0.2, "founderInterventions": 0, "relativeCost": 3, "requiresLocalInference": false },
+  { "route": "codex-reviewer", "outcomeClass": "independent-review", "verifiedClean": true, "reworkRate": 0.1, "founderInterventions": 0, "relativeCost": 2, "requiresLocalInference": false }
+]
