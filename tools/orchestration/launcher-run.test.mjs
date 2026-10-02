@@ -36,12 +36,29 @@ function fakeIo({ gateStates, prStates = ["OPEN", "MERGED"], headRef = "h1" }) {
   };
 }
 
-test("claimed launch advances: a mechanical transition runs the verdict's own body and is verified by a fresh gate read-back", async () => {
-  const verdict = { state: "READY_TO_PROJECT_ROUTED", controlIssue: 379, executionIssue: 73, proposedBody: "BODY", actionEnvelope: {} };
-  const { io, calls, readPr } = fakeIo({ gateStates: [verdict, verdict, { state: "READY_TO_DISPATCH_UNITS", controlIssue: 379 }] });
-  const r = await runLauncherStep({ controlIssue: 379, deps: buildDeps({ controlIssue: 379, executionIssue: 73, readPr, io }) });
+test("claimed launch advances: a projection runs the verdict's own body and is verified by reading the control body back", async () => {
+  const proposedBody = "- **Lifecycle:** ROUTED\n";
+  const verdict = { state: "READY_TO_PROJECT_ROUTED", controlIssue: 379, executionIssue: 73, proposedBody, actionEnvelope: {} };
+  let body = "- **Lifecycle:** PLAN_READY\n";
+  const { io, calls, readPr } = fakeIo({ gateStates: [verdict] });
+  const nodeFn = io.node;
+  io.node = (file, args, input) => {
+    if (file.endsWith("write-control-snapshot.mjs")) body = input;
+    return nodeFn(file, args, input);
+  };
+  const readIssue = () => ({ body, state: "OPEN" });
+  const r = await runLauncherStep({ controlIssue: 379, deps: buildDeps({ controlIssue: 379, executionIssue: 73, readPr, readIssue, io }) });
   assert.equal(r.outcome, Outcome.ADVANCED);
   assert.ok(calls.some((c) => c[1] === "tools/orchestration/write-control-snapshot.mjs"));
+});
+
+test("a write that leaves the control body on the wrong successor is not proof: FAIL_CLOSED, no unlock", async () => {
+  const verdict = { state: "READY_TO_PROJECT_ROUTED", controlIssue: 379, executionIssue: 73, proposedBody: "- **Lifecycle:** ROUTED\n" };
+  const { io, readPr } = fakeIo({ gateStates: [verdict, { state: "READY_TO_DISPATCH_UNITS", controlIssue: 379 }] });
+  const readIssue = () => ({ body: "- **Lifecycle:** BLOCKED\n", state: "OPEN" }); // gate state "changed", effect not there
+  const r = await runLauncherStep({ controlIssue: 379, deps: buildDeps({ controlIssue: 379, executionIssue: 73, readPr, readIssue, io }) });
+  assert.equal(r.outcome, Outcome.FAIL_CLOSED);
+  assert.equal(r.successorEligible, false);
 });
 
 test("clean Stage 1 satisfied merges the exact authorized head after finalize + merge-ready gate", async () => {
