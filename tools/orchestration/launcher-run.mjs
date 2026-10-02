@@ -17,7 +17,7 @@
 
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { runLauncherStep, authorizeLauncherVerdict, parseDecisionSurface, extractVerdictReferences, DECISION_SURFACE_HEADING } from "./launcher-step.mjs";
+import { runLauncherStep, authorizeLauncherVerdict, parseDecisionSurface, resolveOpenPath, isWriterComment, extractVerdictReferences, DECISION_SURFACE_HEADING } from "./launcher-step.mjs";
 import { runLauncherSupervisor } from "./launcher-supervisor.mjs";
 import { buildReadEffect } from "./launcher-readback.mjs";
 import { loadRouteEvidence } from "./route-qualification.mjs";
@@ -53,6 +53,11 @@ export function findStage2ReportCommentId(comments, { bot = REVIEW_BOT } = {}) {
 // clears. One "### Resolved founder decisions" section; lines for the same surface are replaced,
 // other surfaces' lines are kept.
 export const RESOLVED_DECISIONS_HEADING = "### Resolved founder decisions";
+
+const parseControlRef = (body) => {
+  const m = /^\s*[-*]\s+\*\*Control issue:\*\*\s*#(\d+)\s*$/m.exec(String(body ?? ""));
+  return m ? Number(m[1]) : null;
+};
 
 export function renderResolvedDecisionLines({ surfaceId, answers, generalComments }) {
   const lines = Object.entries(answers ?? {}).map(([q, a]) => `- **Surface ${surfaceId} Answer ${q}:** ${a}`);
@@ -281,7 +286,7 @@ export function buildDeps({
 // configured this reports not-launched so the supervisor stops at a durable waiting boundary and a
 // fresh `work on #<control>` remains the documented fallback. The worker's own exit/report never
 // unlocks anything: the supervisor re-reads durable state afterwards.
-export function dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize, env = process.env, runWorker }) {
+export async function dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize, reestablish, env = process.env, runWorker }) {
   const raw = env.LDL_WORKER_COMMAND;
   if (!raw) return { launched: false, reason: "no fresh-worker runner configured (LDL_WORKER_COMMAND); resume with a fresh `work on #<control>`" };
   let argv;
@@ -309,6 +314,15 @@ export function dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue
   for (const k of new Set([...Object.keys(wantRefs), ...Object.keys(freshRefs)])) {
     if (JSON.stringify(wantRefs[k] ?? null) !== JSON.stringify(freshRefs[k] ?? null)) throw new Error(`stale dispatch: ${k} changed`);
   }
+  // Stage 2 #833 finding 1: the selected route and exact-target Chat guidance are part of the
+  // dispatch too. Re-establish the complete open-path dispatch from the fresh verdict through the
+  // same route selection and guidance verification, and require it to equal the dispatched one.
+  if (typeof reestablish !== "function") throw new Error("no open-path re-establishment supplied for the fresh verdict");
+  const redo = await reestablish(fresh);
+  const freshDispatch = redo?.evidence?.dispatch;
+  if (!freshDispatch) throw new Error(`stale dispatch: fresh open path no longer yields a dispatch (${redo?.evidence?.reason ?? redo?.outcome ?? "unspecified"})`);
+  if (freshDispatch.route !== dispatch.route) throw new Error("stale dispatch: qualified route changed");
+  if (JSON.stringify(freshDispatch.byReference?.guidance ?? null) !== JSON.stringify(want.guidance ?? null)) throw new Error("stale dispatch: Chat guidance changed");
   let prompts;
   let workerCwd;
   let binding = null;
@@ -336,7 +350,7 @@ export function dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue
   const run =
     runWorker ??
     ((prompt, { cwd } = {}) =>
-      execFileSync(argv[0], argv.slice(1), { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["pipe", "ignore", "inherit"], input: prompt, cwd, env: { ...env, LDL_WORKER_ROUTE: String(dispatch.route) } }));
+      execFileSync(argv[0], argv.slice(1), { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["pipe", "ignore", "inherit"], input: prompt, cwd, env: { ...env, LDL_WORKER_ROUTE: String(freshDispatch.route) } }));
   try {
     for (const p of prompts) run(p, { cwd: workerCwd });
   } finally {
@@ -362,7 +376,7 @@ export function buildSupervisorDeps({ controlIssue, executionIssue, stepDeps, io
   return {
     step: () => runLauncherStep({ controlIssue, deps: stepDeps }),
     dispatchWorker: async (dispatch) =>
-      dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize: (v, a) => authorizeLauncherVerdict(v, a), env, runWorker }),
+      dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize: (v, a) => authorizeLauncherVerdict(v, a), reestablish: (fresh) => resolveOpenPath(fresh.state, fresh, stepDeps), env, runWorker }),
     now,
     sleep,
     // Canonical poller (tools/review-watch/poll.mjs) for the bounded reviewer wait: since = the
@@ -387,9 +401,12 @@ export function buildSupervisorDeps({ controlIssue, executionIssue, stepDeps, io
       const body = controlBody();
       if (isNone(parseControlBullet(body, "Founder decision"))) return null;
       const comments = readComments(controlIssue);
-      const surfaces = comments.filter((c) => String(c.body ?? "").trimStart().startsWith(DECISION_SURFACE_HEADING));
+      // The surface is execution-relevant input: only a repository writer's comment bound to THIS
+      // control issue counts; a non-writer or other-control lookalike never replaces it. The latest
+      // trusted surface must itself parse unambiguously (unique question ids, no reserved option).
+      const surfaces = comments.filter((c) => isWriterComment(c) && String(c.body ?? "").trimStart().startsWith(DECISION_SURFACE_HEADING) && parseControlRef(c.body) === controlIssue);
       const latest = surfaces[surfaces.length - 1];
-      const parsed = latest ? parseDecisionSurface(latest.body) : null;
+      const parsed = latest ? parseDecisionSurface(latest.body, { controlIssue }) : null;
       if (!parsed) return { noSurface: true };
       // Exactly one authorized continuation: the control's single current execution pointer is
       // the very execution issue this launch authorizes; anything else is zero continuations.

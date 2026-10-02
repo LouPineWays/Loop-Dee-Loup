@@ -226,7 +226,7 @@ function result(outcome, evidence, extra = {}) {
 // deps.readOpenPath(verdict) -> { comments, reportCommentId?, routeInput? } is optional; absent,
 // the open path is reported without a dispatch (prior behavior). `routeInput` is
 // { outcomeClass, assurance, candidates, evidence, availability } for selectRoute.
-async function resolveOpenPath(state, verdict, deps) {
+export async function resolveOpenPath(state, verdict, deps) {
   if (typeof deps.readOpenPath !== "function") return result(Outcome.OPEN_PATH_REQUIRED, { state });
   try {
     const input = await deps.readOpenPath(verdict);
@@ -335,6 +335,10 @@ export async function runLauncherStep({ controlIssue, deps } = {}) {
 export const DECISION_SURFACE_HEADING = "## Launcher Decision Surface (v1)";
 export const FOUNDER_DECISION_STATES = Object.freeze({ NONE: "none", PENDING: "pending" });
 const WRITER_PERMISSIONS = ["admin", "maintain", "write"];
+export const isWriterComment = (c) => WRITER_PERMISSIONS.includes(String(c?.authorPermission ?? "").toLowerCase());
+// The literal token `open` in an options field means "open-ended"; a real option spelled `open`
+// would be indistinguishable from it, so it is reserved (rejected on render and parse).
+const OPEN_ENDED_TOKEN = "open";
 
 // One durable surface batching every currently known founder question on the active path.
 // questions: [{ id, question, blocking, options?: string[], recommended?: string, resolves?: string }]
@@ -354,10 +358,14 @@ export function newSurfaceId(controlIssue, questions, round = 1) {
 export function renderDecisionSurface({ controlIssue, questions, surfaceId } = {}) {
   if (!Number.isInteger(controlIssue) || !Array.isArray(questions) || questions.length === 0) return null;
   if (!SURFACE_ID.test(String(surfaceId ?? ""))) return null;
+  const seenIds = new Set();
   const lines = [DECISION_SURFACE_HEADING, "", `- **Surface id:** ${surfaceId}`, `- **Control issue:** #${controlIssue}`];
   for (const q of questions) {
     if (!q?.id || !q?.question || !q?.blocking) return null;
     if (q.resolves != null && !DECISION_KEY.test(String(q.resolves))) return null;
+    if ((q.options ?? []).some((o) => String(o).trim() === "" || String(o).trim() === OPEN_ENDED_TOKEN || String(o).includes("|"))) return null;
+    if (seenIds.has(String(q.id))) return null;
+    seenIds.add(String(q.id));
     lines.push(
       `- **Question ${q.id}:** ${q.question} (blocks: ${q.blocking}; options: ${(q.options ?? []).join(" | ") || "open"}; recommended: ${q.recommended ?? "none"}${q.resolves ? `; resolves: ${q.resolves}` : ""})`,
     );
@@ -372,27 +380,35 @@ export function renderDecisionSurface({ controlIssue, questions, surfaceId } = {
 
 // Inverse of renderDecisionSurface for the production resume path: the surface id and question ids
 // a durable surface comment declares, or null when the body is not a well-formed surface.
-export function parseDecisionSurface(body) {
+// With { controlIssue }, a surface naming a different (or no) control issue is rejected. A surface
+// that repeats a question id or reserves-token option is ambiguous and rejected (null).
+export function parseDecisionSurface(body, { controlIssue } = {}) {
   const text = String(body ?? "");
   if (!text.trimStart().startsWith(DECISION_SURFACE_HEADING)) return null;
   let surfaceId = null;
+  let surfaceControl = null;
   const questionIds = [];
   const questions = [];
   for (const line of text.split(/\r?\n/)) {
     const s = /^\s*[-*]\s+\*\*Surface id:\*\*\s*(\S+)\s*$/.exec(line);
     if (s && surfaceId === null) surfaceId = s[1];
+    const cm = /^\s*[-*]\s+\*\*Control issue:\*\*\s*#(\d+)\s*$/.exec(line);
+    if (cm && surfaceControl === null) surfaceControl = Number(cm[1]);
     const q = /^\s*[-*]\s+\*\*Question ([^*:]+):\*\*(.*)$/.exec(line);
     if (q) {
       const id = q[1].trim();
+      if (questionIds.includes(id)) return null;
       questionIds.push(id);
       const meta = /\(blocks: [^;]*; options: ([^;]*); recommended: [^;)]*(?:; resolves: ([A-Za-z0-9._-]{1,64}))?\)\s*$/.exec(q[2]);
       const optRaw = meta ? meta[1].trim() : "";
-      const options = !meta || optRaw === "open" || optRaw === "" ? [] : optRaw.split(" | ").map((o) => o.trim());
+      const options = !meta || optRaw === OPEN_ENDED_TOKEN || optRaw === "" ? [] : optRaw.split(" | ").map((o) => o.trim());
+      if (options.length > 1 && options.includes(OPEN_ENDED_TOKEN)) return null;
       questions.push({ id, options, resolves: meta?.[2] ?? null });
     }
   }
   if (!SURFACE_ID.test(String(surfaceId ?? "")) || questionIds.length === 0) return null;
-  return { surfaceId, questionIds, questions };
+  if (controlIssue !== undefined && surfaceControl !== Number(controlIssue)) return null;
+  return { surfaceId, questionIds, questions, controlIssue: surfaceControl };
 }
 
 // Pure. The deterministic projection of founder answers onto authoritative state: each question
@@ -430,7 +446,7 @@ export function parseDecisionResolution(comments, questionIds, { surfaceId } = {
     return { resolved: false, missing: [...questionIds], answers, generalComments, reason: "no surface id" };
   }
   for (const c of Array.isArray(comments) ? comments : []) {
-    if (!WRITER_PERMISSIONS.includes(String(c?.authorPermission ?? "").toLowerCase())) continue;
+    if (!isWriterComment(c)) continue;
     const lines = String(c.body ?? "").split(/\r?\n/);
     const bound = lines.some((l) => {
       const m = /^\s*[-*]\s+\*\*Surface id:\*\*\s*(\S+)\s*$/.exec(l);
