@@ -1872,13 +1872,30 @@ export function defaultListStage1TriggerHeads({ repo, pr }) {
 // corrected head (GitHub compare API), reduced to what provenance needs. Throws on any I/O or
 // shape failure so the caller fails closed to AMBIGUOUS.
 export function defaultReadCorrectionCommits({ repo, base, head }) {
-  const raw = execFileSync(
-    "gh",
-    ["api", `repos/${repo}/compare/${base}...${head}`, "--jq", "[.commits[]|{sha:.sha,parents:(.parents|length),message:.commit.message}]"],
-    { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
-  );
-  const commits = JSON.parse(raw);
-  if (!Array.isArray(commits)) throw new Error("compare API returned no commit list");
+  const raw = execFileSync("gh", ["api", `repos/${repo}/compare/${base}...${head}?per_page=100`, "--paginate", "--slurp"], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  return reduceCompareCommits(JSON.parse(raw));
+}
+
+// Pure (Stage 2 Audit #839 finding 1). Flattens every paginated compare page and proves the
+// enumeration is complete: the compare API's `total_commits` must equal the commits collected,
+// otherwise the evidence is truncated and this throws so the caller fails closed to AMBIGUOUS.
+export function reduceCompareCommits(pages) {
+  const list = Array.isArray(pages) ? pages : [pages];
+  const commits = [];
+  let total = null;
+  for (const page of list) {
+    if (!page || !Array.isArray(page.commits)) throw new Error("compare API returned no commit list");
+    if (Number.isInteger(page.total_commits)) total = page.total_commits;
+    for (const c of page.commits) {
+      commits.push({ sha: c.sha, parents: Array.isArray(c.parents) ? c.parents.length : -1, message: c.commit?.message });
+    }
+  }
+  if (!Number.isInteger(total) || total !== commits.length) {
+    throw new Error(`compare API commit enumeration incomplete (collected ${commits.length}, total_commits ${total})`);
+  }
   return commits;
 }
 
@@ -1891,7 +1908,7 @@ export function defaultReadCorrectionCommits({ repo, base, head }) {
 export function verifyCorrectionProvenance(commits, executionIssue) {
   if (!Array.isArray(commits) || commits.length === 0) return { ok: false, reason: "no intervening commits" };
   if (!Number.isInteger(executionIssue) || executionIssue <= 0) return { ok: false, reason: "no execution Issue to bind provenance to" };
-  const ref = new RegExp(`(^|[^\\w/])#${executionIssue}(?!\\d)`);
+  const ref = new RegExp(`(^|[^\\w/])#${executionIssue}(?!\\w)`);
   for (const c of commits) {
     if (!c || c.parents !== 1) return { ok: false, reason: `commit ${c?.sha ?? "?"} is not a single-parent commit` };
     if (typeof c.message !== "string" || !ref.test(c.message)) {
