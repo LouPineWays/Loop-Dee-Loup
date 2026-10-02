@@ -46,7 +46,7 @@ export const TRANSITIONS = Object.freeze({
     preState: "READY_TO_PROJECT_PLAN_READY",
     action: "write-control-snapshot",
     verifier: "control-lifecycle-readback",
-    postcondition: "control Issue Lifecycle reads PLAN_READY",
+    postcondition: "control Issue Lifecycle reads PLAN_READY and its Plan pointer names the canonical plan index",
     invalidation: ["control body changed since read-back", "plan comment superseded"],
   },
   READY_TO_PROJECT_ROUTED: {
@@ -346,6 +346,23 @@ export function renderDecisionSurface({ controlIssue, questions, surfaceId } = {
     `Resolve by replying (repository writer) with \`- **Surface id:** ${surfaceId}\` and one \`- **Answer <id>:** <choice>\` bullet per question.`,
   );
   return lines.join("\n");
+}
+
+// Inverse of renderDecisionSurface for the production resume path: the surface id and question ids
+// a durable surface comment declares, or null when the body is not a well-formed surface.
+export function parseDecisionSurface(body) {
+  const text = String(body ?? "");
+  if (!text.trimStart().startsWith(DECISION_SURFACE_HEADING)) return null;
+  let surfaceId = null;
+  const questionIds = [];
+  for (const line of text.split(/\r?\n/)) {
+    const s = /^\s*[-*]\s+\*\*Surface id:\*\*\s*(\S+)\s*$/.exec(line);
+    if (s && surfaceId === null) surfaceId = s[1];
+    const q = /^\s*[-*]\s+\*\*Question ([^*:]+):\*\*/.exec(line);
+    if (q) questionIds.push(q[1].trim());
+  }
+  if (!SURFACE_ID.test(String(surfaceId ?? "")) || questionIds.length === 0) return null;
+  return { surfaceId, questionIds };
 }
 
 // comments: [{ id, body, authorPermission }] in chronological order. Answers count only from
