@@ -211,17 +211,19 @@ export function readGithubPrClosingEvidence({ repo, number, workIssue, execFileI
       }
       if (ev.event !== "connected" && ev.event !== "disconnected") continue;
       const subject = ev.subject;
-      const subjectRepo = subject?.repository?.full_name;
-      if (
-        subject === null || typeof subject !== "object" || !Number.isInteger(subject.number) ||
-        typeof subjectRepo !== "string" || subjectRepo === "" || !Number.isInteger(ev.id)
-      ) {
+      // The REST timeline subject carries `url` (e.g. https://api.github.com/repos/o/r/pulls/9) and `type`.
+      const m = typeof subject?.url === "string"
+        ? /\/repos\/([^/]+\/[^/]+)\/(?:pulls|issues)\/([0-9]+)\/?$/.exec(subject.url)
+        : null;
+      if (m === null || !Number.isInteger(ev.id)) {
         throw new Error(
           `GitHub REST timeline for ${timelinePath} has a ${ev.event} event with an unreadable subject or id; ` +
             `current link state is ambiguous`,
         );
       }
-      if (subject.number === Number(number) && subjectRepo.toLowerCase() === String(repo ?? "").toLowerCase()) {
+      const subjectRepo = m[1];
+      const subjectNumber = Number(m[2]);
+      if (subjectNumber === Number(number) && subjectRepo.toLowerCase() === String(repo ?? "").toLowerCase()) {
         linkEvents.push(ev);
       }
     }

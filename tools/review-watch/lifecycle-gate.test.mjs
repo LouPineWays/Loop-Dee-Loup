@@ -4354,7 +4354,7 @@ function restFake({ body = "Addresses #151.", commits = [], timeline = [], prOve
     throw new Error(`unexpected path ${p}`);
   };
 }
-const link = (event, id, number = 9, full_name = "owner/repo") => ({ event, id, subject: { type: "pull_request", number, repository: { full_name } } });
+const link = (event, id, number = 9, full_name = "owner/repo") => ({ event, id, subject: { type: "PullRequest", url: `https://api.github.com/repos/${full_name}/pulls/${number}` } });
 const viaRest = (opts, issue = "151") => checkMergeReady(
   { repo: "owner/repo", pr: 9, issue },
   { ghPrViewImpl: (a) => defaultGhPrView({ ...a, execFileImpl: restFake(opts) }) },
@@ -4382,7 +4382,7 @@ test("REST merge-ready: current manual sidebar link blocks; disconnected, unrela
 });
 test("REST merge-ready: ambiguous/malformed link evidence fails closed (exit 1)", async () => {
   assert.equal((await viaRest({ timeline: [{ event: "connected", id: 1 }] })).exitCode, 1);
-  assert.equal((await viaRest({ timeline: [{ event: "connected", subject: { number: 9, repository: { full_name: "owner/repo" } } }] })).exitCode, 1);
+  assert.equal((await viaRest({ timeline: [{ event: "connected", subject: { type: "PullRequest", number: 9, repository: { full_name: "owner/repo" } } }] })).exitCode, 1);
 });
 test("REST merge-ready: transport/identity/commit-limit negatives are operational failures", async () => {
   assert.equal((await viaRest({ fail: "HTTP 403" })).exitCode, 1);
