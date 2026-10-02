@@ -23,6 +23,7 @@ import {
   findMatchingOpenAuditIssues,
   reconcileExistingStage2AuditIssue,
   verifyCorrectionProvenance,
+  reduceCompareCommits,
 } from "./next-review-transition-gate.mjs";
 
 // -- parseOptionalIssueRef ------------------------------------------------------------------
@@ -1669,6 +1670,9 @@ test("verifyCorrectionProvenance: whole-token Issue reference only, single-paren
   assert.equal(verifyCorrectionProvenance([{ sha: "a", parents: 1, message: "fix (#437)" }], 437).ok, true);
   assert.equal(verifyCorrectionProvenance([{ sha: "a", parents: 1, message: "fix (#4370)" }], 437).ok, false);
   assert.equal(verifyCorrectionProvenance([{ sha: "a", parents: 1, message: "see o/r#437" }], 437).ok, false);
+  assert.equal(verifyCorrectionProvenance([{ sha: "a", parents: 1, message: "fix (#437abc)" }], 437).ok, false);
+  assert.equal(verifyCorrectionProvenance([{ sha: "a", parents: 1, message: "fix (#437_x)" }], 437).ok, false);
+  assert.equal(verifyCorrectionProvenance([{ sha: "a", parents: 1, message: "fix #437, done" }], 437).ok, true);
   assert.equal(verifyCorrectionProvenance([], 437).ok, false);
   assert.equal(verifyCorrectionProvenance([{ sha: "a", parents: 1, message: "fix (#437)" }], null).ok, false);
 });
@@ -3867,4 +3871,27 @@ test("reconcileExistingStage2AuditIssue (#788): a #787-shaped candidate (prematu
   );
   assert.equal(found.state, "FOUND");
   assert.equal(found.auditIssue, 728);
+});
+
+// Stage 2 Audit #839 finding 1: compare-API enumeration must be provably complete.
+test("reduceCompareCommits: paginated pages are flattened and validated beyond the first segment", () => {
+  const mk = (n, parents = [{}]) => ({ sha: `s${n}`, parents, commit: { message: `fix (#437) ${n}` } });
+  const out = reduceCompareCommits([
+    { total_commits: 3, commits: [mk(1), mk(2)] },
+    { total_commits: 3, commits: [mk(3, [{}, {}])] },
+  ]);
+  assert.equal(out.length, 3);
+  assert.equal(out[2].parents, 2);
+  assert.equal(verifyCorrectionProvenance(out, 437).ok, false);
+});
+
+test("reduceCompareCommits: a truncated comparison (total_commits > collected) throws", () => {
+  const c = { sha: "s1", parents: [{}], commit: { message: "fix (#437)" } };
+  assert.throws(() => reduceCompareCommits([{ total_commits: 300, commits: [c] }]), /incomplete/);
+  assert.throws(() => reduceCompareCommits({ commits: [c] }), /incomplete/);
+});
+
+test("runNextReviewTransitionGate: #837 provenance -- truncated compare evidence fails closed to AMBIGUOUS", async () => {
+  const r = await runProvenance(new Error("compare API commit enumeration incomplete (collected 250, total_commits 300)"));
+  assert.equal(r.state, "AMBIGUOUS");
 });
