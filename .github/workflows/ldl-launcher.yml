@@ -1,8 +1,13 @@
 name: LDL launcher
 
-# Thin GitHub-native adapter for issue #73 (unit 73-A). All decisions live in the pure
-# modules tools/orchestration/launch-authorization.mjs and attempt-claim.mjs; this file
-# only reads durable GitHub state, calls them, and posts one claim comment.
+# Thin GitHub-native adapter for issue #73. All decisions live in the pure modules
+# tools/orchestration/launch-authorization.mjs, attempt-claim.mjs and launcher-step.mjs; this file
+# reads durable GitHub state, calls them, posts the attempt claim, runs the launcher step
+# (tools/orchestration/launcher-run.mjs), and settles the claim.
+#
+# A Launch Authorization comment is a launch REQUEST, never execution authority: the launcher step
+# derives mutation authority from the gate verdict's own execution-authority envelope and refuses
+# any verdict that does not belong to the requested control/execution issue.
 #
 # Security posture:
 #   - Triggers are issue_comment (created) and workflow_dispatch only; no pull_request or
@@ -11,8 +16,9 @@ name: LDL launcher
 #     code is ever checked out or executed.
 #   - Event-derived values reach the shell only through env, never interpolated into
 #     script text.
-#   - Permissions are least-privilege: contents read, issues write (claim comment),
-#     actions read (liveness read-back).
+#   - Permissions: issues write (claim comments, control-body writes), actions read (liveness
+#     read-back), and contents/pull-requests write ONLY because the clean-Stage-1 continuation
+#     merges the exact authorized head (gh pr merge --match-head-commit) after merge-ready-gate.
 #   - Secrets are only ever GitHub-provided (GITHUB_TOKEN); none are added here.
 on:
   issue_comment:
@@ -27,7 +33,8 @@ on:
         required: true
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
   issues: write
   actions: read
 
@@ -69,7 +76,7 @@ jobs:
           node --input-type=module <<'JS'
           import { execFileSync } from "node:child_process";
           import { parseLaunchAuthorization, verifyTrustedTrigger } from "./tools/orchestration/launch-authorization.mjs";
-          import { parseAttemptClaims, planClaim, renderClaimBody, formatAttemptId } from "./tools/orchestration/attempt-claim.mjs";
+          import { parseAttemptClaims, planClaim, renderClaimBody, formatAttemptId, parseAttemptId } from "./tools/orchestration/attempt-claim.mjs";
 
           const env = process.env;
           const gh = (...args) => execFileSync("gh", args, { encoding: "utf8" });
@@ -89,12 +96,15 @@ jobs:
             return permCache.get(login);
           };
 
-          const comments = api(`repos/${env.REPO}/issues/${controlIssue}/comments?per_page=100`).map((c) => ({
+          // --paginate --slurp reads EVERY page of the control issue's comments: a newer conflicting
+          // request or an existing attempt claim on a later page must not be missed.
+          const pages = JSON.parse(gh("api", "--paginate", "--slurp", `repos/${env.REPO}/issues/${controlIssue}/comments?per_page=100`));
+          const comments = pages.flat().map((c) => ({
             id: c.id, body: c.body, author: c.user?.login, authorPermission: permission(c.user?.login),
           }));
 
           const auth = parseLaunchAuthorization(comments, { controlIssue });
-          if (auth.status !== "AUTHORIZED") fail(`authorization ${auth.status}: ${auth.reason}`);
+          if (auth.status !== "LAUNCH_REQUESTED") fail(`authorization ${auth.status}: ${auth.reason}`);
 
           const trigger = verifyTrustedTrigger({
             name: env.EVENT_NAME,
@@ -113,9 +123,11 @@ jobs:
           const claims = parseAttemptClaims(comments);
           const liveness = {};
           for (const c of claims) {
-            const runId = c.attemptId.split("-")[0];
+            // Exact run attempt: a rerun (123-2) must not inherit the status of the claimed 123-1.
+            const id = parseAttemptId(c.attemptId);
+            if (!id) continue; // malformed id stays unknown -> fail closed
             try {
-              const run = api(`repos/${env.REPO}/actions/runs/${runId}`);
+              const run = api(`repos/${env.REPO}/actions/runs/${id.runId}/attempts/${id.runAttempt}`);
               liveness[c.attemptId] = { status: run.status, conclusion: run.conclusion };
             } catch { /* unknown stays unknown -> fail closed */ }
           }
@@ -131,4 +143,20 @@ jobs:
           execFileSync("gh", ["api", `repos/${env.REPO}/issues/${controlIssue}/comments`, "-F", "body=@-"],
             { input: body, encoding: "utf8" });
           console.log(`LAUNCH CLAIMED: attempt ${attemptId} (${plan.action}) for control #${controlIssue}`);
+
+          // Advance: run exactly one launcher step for the requested control/execution issue. A thrown
+          // error leaves the claim open so the next trigger reconciles it as ORPHANED.
+          const out = execFileSync("node", [
+            "tools/orchestration/launcher-run.mjs",
+            "--control-issue", String(controlIssue),
+            "--execution-issue", String(auth.authorization.executionIssue),
+          ], { encoding: "utf8" });
+          const step = JSON.parse(out.trim().split("\n").pop());
+          console.log(`LAUNCH STEP: ${step.outcome} ${JSON.stringify(step.evidence ?? {})}`);
+          const settled = renderClaimBody({
+            attemptId, nonce: auth.authorization.nonce, claimedAt: new Date().toISOString(),
+            runner: "github-actions", phase: "DONE", outcome: String(step.outcome).replace(/[^A-Z_]/g, ""),
+          });
+          execFileSync("gh", ["api", `repos/${env.REPO}/issues/${controlIssue}/comments`, "-F", "body=@-"],
+            { input: settled, encoding: "utf8" });
           JS

@@ -18,6 +18,13 @@ export function formatAttemptId(runId, runAttempt) {
   return `${runId}-${runAttempt}`;
 }
 
+// Attempt ids are `<run_id>-<run_attempt>`. A GitHub rerun keeps run_id and bumps run_attempt, so
+// liveness must be looked up for the exact attempt, never for the run id alone.
+export function parseAttemptId(attemptId) {
+  const m = /^(\d+)-(\d+)$/.exec(String(attemptId ?? ""));
+  return m ? { runId: m[1], runAttempt: m[2] } : null;
+}
+
 export function parseAttemptClaims(comments) {
   const claims = [];
   for (const c of Array.isArray(comments) ? comments : []) {
@@ -38,10 +45,14 @@ export function parseAttemptClaims(comments) {
       phase: (f.get("Phase") ?? "").toUpperCase(),
     });
   }
-  return claims;
+  // One attempt id may carry several claim comments (CLAIMED, then DONE); the latest comment for
+  // an attempt id is its current phase.
+  const latest = new Map();
+  for (const c of claims) latest.set(c.attemptId, c);
+  return [...latest.values()];
 }
 
-export function renderClaimBody({ attemptId, nonce, claimedAt, runner, phase = "CLAIMED" }) {
+export function renderClaimBody({ attemptId, nonce, claimedAt, runner, phase = "CLAIMED", outcome = null }) {
   return [
     LAUNCH_ATTEMPT_HEADING,
     "",
@@ -50,6 +61,7 @@ export function renderClaimBody({ attemptId, nonce, claimedAt, runner, phase = "
     `- **Claimed at:** ${claimedAt}`,
     `- **Runner:** ${runner}`,
     `- **Phase:** ${phase}`,
+    ...(outcome ? [`- **Outcome:** ${outcome}`] : []),
     "",
   ].join("\n");
 }

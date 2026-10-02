@@ -19,6 +19,7 @@ function harness(state, reads, { execThrows = false } = {}) {
     calls,
     deps: {
       runGate: async () => ({ state }),
+      authorizeVerdict: async () => ({ authorized: true }),
       readEffect: async () => reads[Math.min(i++, reads.length - 1)],
       execute: async () => {
         calls.push("execute");
@@ -103,7 +104,7 @@ test("stale, wrong-target, malformed evidence cannot unlock", () => {
 test("execute throwing fails closed; waiting/open-path/unknown verdicts map correctly", async () => {
   const h = harness("STAGE2_CLOSE_READY", [ev()], { execThrows: true });
   assert.equal((await runLauncherStep({ controlIssue: 1, deps: h.deps })).outcome, Outcome.FAIL_CLOSED);
-  const mk = (state) => ({ runGate: async () => ({ state }) });
+  const mk = (state) => ({ runGate: async () => ({ state }), authorizeVerdict: async () => ({ authorized: true }) });
   assert.equal((await runLauncherStep({ controlIssue: 1, deps: mk("NO_ACTION_YET") })).outcome, Outcome.WAITING);
   assert.equal((await runLauncherStep({ controlIssue: 1, deps: mk("STAGE1_CORRECTION_REQUIRED") })).outcome, Outcome.OPEN_PATH_REQUIRED);
   assert.equal((await runLauncherStep({ controlIssue: 1, deps: mk("WEIRD") })).outcome, Outcome.FAIL_CLOSED);

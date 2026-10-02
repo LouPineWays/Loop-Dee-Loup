@@ -1,11 +1,14 @@
 // Trusted launch boundary for issue #73 (unit 73-A). Pure functions only.
 //
-// Authority comes ONLY from one fixed-heading durable comment on the CONTROL issue,
-// `## Launch Authorization (v1)`, authored by an actor with repository write/admin
-// permission. Prose elsewhere is never authority (AGENTS.md § Execution authority
-// boundary; tools/orchestration/execution-authority-gate.mjs). A launch trigger event
-// is trusted only when it comes from the same repository (never a fork), from a
-// write-permission actor, on the authorized control issue, and carries the nonce.
+// A `## Launch Authorization (v1)` comment on the CONTROL issue, authored by an actor with
+// repository write/admin permission, records a launch REQUEST (consent, target, nonce). It is
+// NOT execution authority: a comment can never itself authorize repository mutation (AGENTS.md
+// § Execution authority boundary; tools/orchestration/execution-authority-gate.mjs). Mutation
+// authority is the current execution-authority envelope derived from the gate verdict, checked by
+// launcher-step.mjs's authorizeLauncherVerdict, which also requires the verdict to name the same
+// execution issue this request names. A launch trigger event is trusted only when it comes from
+// the same repository (never a fork), from a write-permission actor, on the control issue named by
+// the request, and carries the nonce.
 //
 // Tests: node --test tools/orchestration/launch-authorization.test.mjs
 
@@ -37,7 +40,7 @@ function firstNonBlankLine(body) {
 
 // comments: [{ id, body, authorPermission }]. authorPermission is the repository
 // permission of the comment author as read back from GitHub, never self-declared text.
-// Returns { status: "AUTHORIZED" | "NONE" | "AMBIGUOUS", authorization?, reason }.
+// Returns { status: "LAUNCH_REQUESTED" | "NONE" | "AMBIGUOUS", authorization?, reason }.
 export function parseLaunchAuthorization(comments, { controlIssue } = {}) {
   if (!Number.isInteger(controlIssue) || controlIssue <= 0) {
     return { status: "NONE", reason: "controlIssue must be a positive integer" };
@@ -60,7 +63,7 @@ export function parseLaunchAuthorization(comments, { controlIssue } = {}) {
   if (distinct.size > 1) {
     return { status: "AMBIGUOUS", reason: "multiple conflicting Launch Authorization comments" };
   }
-  return { status: "AUTHORIZED", authorization: valid[0], reason: "single valid authorization" };
+  return { status: "LAUNCH_REQUESTED", authorization: valid[0], reason: "single valid launch request (not execution authority)" };
 }
 
 // event: { name, action, actor, actorPermission, isFork, isPullRequest, issueNumber,

@@ -53,6 +53,13 @@ export function selectRoute({ outcomeClass, assurance, candidates, evidence, ava
   if (!Array.isArray(candidates) || candidates.length === 0) return failClosed("no authorized candidate routes");
   if (!Array.isArray(evidence)) return failClosed("route evidence missing or malformed");
   const assure = assurance && typeof assurance === "object" ? assurance : {};
+  // A supplied limit that is not a finite number (e.g. the string "0.2" from untyped durable
+  // config) must never read as "no constraint": fail closed instead of weakening assurance.
+  for (const key of ["maxReworkRate", "maxFounderInterventions"]) {
+    if (assure[key] !== undefined && assure[key] !== null && !isNum(assure[key])) {
+      return failClosed(`malformed assurance limit ${key}: must be a finite number`);
+    }
+  }
   const avail = availability && typeof availability === "object" ? availability : {};
 
   const skipped = [];

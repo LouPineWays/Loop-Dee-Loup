@@ -56,3 +56,15 @@ test("committed evidence: no copilot route; unqualified local is not chosen", ()
   const r = selectRoute({ outcomeClass: "bounded-implementation", assurance: {}, candidates: ["local-inference", "claude-subagent"], evidence, availability: { localInference: true } });
   assert.equal(r.route, "claude-subagent");
 });
+
+test("malformed supplied assurance limits fail closed; valid numeric limits are unchanged", () => {
+  const base = { outcomeClass: "impl", candidates: ["a"], evidence: [ev("a", 1, { reworkRate: 0.9 })], availability: {} };
+  for (const bad of [{ maxReworkRate: "0.2" }, { maxFounderInterventions: "0" }, { maxReworkRate: NaN }, { maxReworkRate: Infinity }, { maxReworkRate: {} }]) {
+    const r = selectRoute({ ...base, assurance: bad });
+    assert.equal(r.failClosed, true, JSON.stringify(bad));
+    assert.match(r.reason, /malformed assurance limit/);
+  }
+  assert.equal(selectRoute({ ...base, assurance: { maxReworkRate: 0.95 } }).route, "a");
+  assert.equal(selectRoute({ ...base, assurance: { maxReworkRate: 0.2 } }).failClosed, true);
+  assert.equal(selectRoute({ ...base, assurance: { maxReworkRate: undefined } }).route, "a");
+});

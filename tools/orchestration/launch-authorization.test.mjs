@@ -14,7 +14,7 @@ const ok = { id: 1, body: body(), authorPermission: "admin" };
 
 test("single authorization parses; duplicate identical comment stays single", () => {
   const r = parseLaunchAuthorization([ok, { ...ok, id: 2 }], { controlIssue: 10 });
-  assert.equal(r.status, "AUTHORIZED");
+  assert.equal(r.status, "LAUNCH_REQUESTED");
   assert.equal(r.authorization.executionIssue, 73);
 });
 

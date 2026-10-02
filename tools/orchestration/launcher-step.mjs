@@ -18,6 +18,9 @@
 
 import { verifyChatGuidance, guidanceTargetForVerdict } from "./chat-guidance-gate.mjs";
 import { selectRoute } from "./route-qualification.mjs";
+import { classifyExecutionAuthority } from "./execution-authority-gate.mjs";
+import { getActionEnvelope, ENVELOPE_MODES } from "./action-envelope.mjs";
+import { createHash } from "node:crypto";
 
 const GUIDED_CORRECTION_STATES = new Set(["STAGE1_CORRECTION_REQUIRED", "STAGE2_CORRECTION_REQUIRED"]);
 
@@ -81,6 +84,24 @@ export const TRANSITIONS = Object.freeze({
     postcondition: "audit Issue (and gated work Issue, when present) read CLOSED",
     invalidation: ["audit Issue reopened"],
   },
+  // Normal clean Stage 1 continuation (Stage 1 satisfied, or correction-satisfied): the mechanical
+  // part is finalize (ordinary variant only) + merge of the exact authorized head. Stage 2
+  // preparation after the merge is semantic and surfaces on the next step as
+  // STAGE2_PREPARATION_REQUIRED (open path), never as a launcher action.
+  STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2: {
+    preState: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
+    action: "finalize-stage1-satisfied-then-merge-pr",
+    verifier: "pr-merged-readback",
+    postcondition: "PR reads MERGED at the exact head the gate authorized",
+    invalidation: ["PR head changed since the verdict", "PR closed without merge"],
+  },
+  STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2: {
+    preState: "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
+    action: "merge-pr",
+    verifier: "pr-merged-readback",
+    postcondition: "PR reads MERGED at the exact corrected head the gate authorized",
+    invalidation: ["PR head changed since the verdict", "PR closed without merge"],
+  },
   STAGE2_CORRECTION_PR_NEEDS_FINALIZATION: {
     preState: "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
     action: "finalize-pr-breakpoint",
@@ -136,6 +157,59 @@ export function verifyPostcondition(evidence) {
   );
 }
 
+// By-reference targets/provenance the gate verdict already computed; a dispatched worker is built
+// from exactly these, never reconstructed. Whitelisted so no bulky diagnostic text is carried.
+export const VERDICT_REFERENCE_KEYS = Object.freeze([
+  "repo", "controlIssue", "executionIssue", "route", "pr", "head", "issue", "workIssue", "auditIssue",
+  "planIndexUrl", "manifestCommentId", "manifestUrl", "dispatchReadyUnitIds", "alreadyDoneUnitIds",
+  "replanRequiredUnitIds", "correctionReason",
+]);
+
+export function extractVerdictReferences(verdict) {
+  const refs = {};
+  for (const k of VERDICT_REFERENCE_KEYS) if (verdict && verdict[k] !== undefined && verdict[k] !== null) refs[k] = verdict[k];
+  return refs;
+}
+
+// Pure. Mutation authority for a launcher step is NEVER a comment: it is the current
+// execution-authority envelope derived from the gate verdict (the same shapes
+// execution-authority-gate.mjs recognizes) or, for the mechanical transitions, the gate's own
+// bounded action envelope. `authorization` ({controlIssue, executionIssue}) only names which
+// launch was requested; the verdict must belong to that control/execution issue.
+export function authorizeLauncherVerdict(verdict, authorization) {
+  const no = (reason) => ({ authorized: false, reason });
+  const state = verdict?.state;
+  if (typeof state !== "string") return no("verdict has no state");
+  if (!authorization || !Number.isInteger(authorization.controlIssue) || !Number.isInteger(authorization.executionIssue)) {
+    return no("no launch request naming a control and execution issue");
+  }
+  if (verdict.controlIssue != null && Number(verdict.controlIssue) !== authorization.controlIssue) {
+    return no("verdict belongs to a different control issue");
+  }
+  for (const k of ["executionIssue", "issue", "workIssue"]) {
+    if (verdict[k] != null && Number(verdict[k]) !== authorization.executionIssue) {
+      return no(`verdict ${k} does not match the requested execution issue`);
+    }
+  }
+  const base = { controlIssue: verdict.controlIssue != null ? Number(verdict.controlIssue) : authorization.controlIssue, executionIssue: authorization.executionIssue };
+  let trigger = null;
+  if (state === "READY_TO_DISPATCH") trigger = { origin: "control_plane_dispatch", ...base, route: verdict.route };
+  else if (state === "READY_TO_DISPATCH_PLANNING") trigger = { origin: "planning_dispatch", ...base };
+  else if (state === "READY_TO_DISPATCH_INTEGRATION") trigger = { origin: "integration_dispatch", ...base };
+  else if (GUIDED_CORRECTION_STATES.has(state)) {
+    trigger = { origin: "correction_dispatch", controlIssue: base.controlIssue, pr: verdict.pr, auditIssue: verdict.auditIssue };
+  }
+  if (trigger) {
+    const c = classifyExecutionAuthority(trigger);
+    return c.authorized ? { authorized: true, reason: c.reason } : no(c.reason);
+  }
+  const env = getActionEnvelope(state, verdict);
+  if (env?.mode === ENVELOPE_MODES.BOUNDED && Array.isArray(env.authorizedActions) && env.authorizedActions.length > 0) {
+    return { authorized: true, reason: `gate action envelope authorizes: ${env.authorizedActions.join(", ")}` };
+  }
+  return no(`no execution-authority envelope for verdict state ${state}`);
+}
+
 function result(outcome, evidence, extra = {}) {
   return { outcome, successorEligible: outcome === Outcome.ADVANCED, evidence, ...extra };
 }
@@ -161,14 +235,21 @@ async function resolveOpenPath(state, verdict, deps) {
     const role = GUIDED_CORRECTION_STATES.has(state) ? "correction worker" : "implementation worker";
     return result(Outcome.OPEN_PATH_REQUIRED, {
       state,
-      dispatch: { role, route: route.route, byReference: { state, guidance }, freshWorker: true, supervisorAuthors: false },
+      dispatch: {
+        role,
+        route: route.route,
+        byReference: { state, guidance, ...extractVerdictReferences(verdict) },
+        freshWorker: true,
+        supervisorAuthors: false,
+      },
     });
   } catch (e) {
     return result(Outcome.FAIL_CLOSED, { state, reason: `open path failed: ${e?.message ?? e}` });
   }
 }
 
-// deps: { runGate(controlIssue) -> verdict, readEffect(transition, verdict) -> evidence,
+// deps: { runGate(controlIssue) -> verdict, authorizeVerdict(verdict) -> { authorized, reason } (required;
+//         production binds authorizeLauncherVerdict to the launch request), readEffect(transition, verdict) -> evidence,
 //         execute(transition, verdict) -> any (result ignored for unlocking),
 //         finalize(transition, verdict) -> any (project an already-completed effect; no replay) }
 export async function runLauncherStep({ controlIssue, deps } = {}) {
@@ -184,6 +265,20 @@ export async function runLauncherStep({ controlIssue, deps } = {}) {
   const state = verdict?.state;
   if (typeof state !== "string") return result(Outcome.FAIL_CLOSED, { reason: "verdict has no state" });
   if (WAITING_STATES.has(state)) return result(Outcome.WAITING, { state });
+  // Authority is established before any read-for-action, dispatch, or mutation. A missing check
+  // fails closed; a comment alone is never authority.
+  if (typeof deps.authorizeVerdict !== "function") {
+    return result(Outcome.FAIL_CLOSED, { state, reason: "no execution-authority check supplied" });
+  }
+  let authority;
+  try {
+    authority = await deps.authorizeVerdict(verdict);
+  } catch (e) {
+    return result(Outcome.FAIL_CLOSED, { state, reason: `authority check failed: ${e?.message ?? e}` });
+  }
+  if (authority?.authorized !== true) {
+    return result(Outcome.FAIL_CLOSED, { state, reason: `no execution authority: ${authority?.reason ?? "unspecified"}` });
+  }
   if (OPEN_PATH_STATES.has(state)) return resolveOpenPath(state, verdict, deps);
 
   const transition = TRANSITIONS[state];
@@ -226,40 +321,70 @@ const WRITER_PERMISSIONS = ["admin", "maintain", "write"];
 
 // One durable surface batching every currently known founder question on the active path.
 // questions: [{ id, question, blocking, options?: string[], recommended?: string }]
-export function renderDecisionSurface({ controlIssue, questions } = {}) {
+// surfaceId: unique identity of THIS surface (see newSurfaceId); answers bind to it so a later
+// surface that reuses an id such as Q1 never inherits an earlier answer.
+const SURFACE_ID = /^[A-Za-z0-9._-]{4,64}$/;
+
+export function newSurfaceId(controlIssue, questions, round = 1) {
+  const h = createHash("sha256").update(JSON.stringify({ controlIssue, round, questions })).digest("hex").slice(0, 10);
+  return `${controlIssue}-r${round}-${h}`;
+}
+
+export function renderDecisionSurface({ controlIssue, questions, surfaceId } = {}) {
   if (!Number.isInteger(controlIssue) || !Array.isArray(questions) || questions.length === 0) return null;
-  const lines = [DECISION_SURFACE_HEADING, "", `- **Control issue:** #${controlIssue}`];
+  if (!SURFACE_ID.test(String(surfaceId ?? ""))) return null;
+  const lines = [DECISION_SURFACE_HEADING, "", `- **Surface id:** ${surfaceId}`, `- **Control issue:** #${controlIssue}`];
   for (const q of questions) {
     if (!q?.id || !q?.question || !q?.blocking) return null;
     lines.push(
       `- **Question ${q.id}:** ${q.question} (blocks: ${q.blocking}; options: ${(q.options ?? []).join(" | ") || "open"}; recommended: ${q.recommended ?? "none"})`,
     );
   }
-  lines.push("", "Resolve by replying with `- **Answer <id>:** <choice>` bullets from a repository writer.");
+  lines.push(
+    "- **General comments:** (optional) reply with a `- **General comments:** <text>` bullet for any other founder input",
+    "",
+    `Resolve by replying (repository writer) with \`- **Surface id:** ${surfaceId}\` and one \`- **Answer <id>:** <choice>\` bullet per question.`,
+  );
   return lines.join("\n");
 }
 
-// comments: [{ id, body, authorPermission }]. Answers count only from write/maintain/admin
-// authors; the first answer per question wins.
-export function parseDecisionResolution(comments, questionIds) {
+// comments: [{ id, body, authorPermission }] in chronological order. Answers count only from
+// write/maintain/admin authors, only from comments carrying this exact `- **Surface id:**` bullet,
+// and the LATEST answer per question wins (a corrected answer replaces an earlier one).
+export function parseDecisionResolution(comments, questionIds, { surfaceId } = {}) {
   const answers = new Map();
+  let generalComments = null;
+  if (!SURFACE_ID.test(String(surfaceId ?? ""))) {
+    return { resolved: false, missing: [...questionIds], answers, generalComments, reason: "no surface id" };
+  }
   for (const c of Array.isArray(comments) ? comments : []) {
     if (!WRITER_PERMISSIONS.includes(String(c?.authorPermission ?? "").toLowerCase())) continue;
-    for (const line of String(c.body ?? "").split(/\r?\n/)) {
+    const lines = String(c.body ?? "").split(/\r?\n/);
+    const bound = lines.some((l) => {
+      const m = /^\s*[-*]\s+\*\*Surface id:\*\*\s*(\S+)\s*$/.exec(l);
+      return m && m[1] === surfaceId;
+    });
+    if (!bound) continue;
+    for (const line of lines) {
       const m = /^\s*[-*]\s+\*\*Answer ([^*:]+):\*\*\s*(\S.*?)\s*$/.exec(line);
-      if (m && !answers.has(m[1].trim())) answers.set(m[1].trim(), m[2].trim());
+      if (m) answers.set(m[1].trim(), m[2].trim());
+      const g = /^\s*[-*]\s+\*\*General comments:\*\*\s*(\S.*?)\s*$/.exec(line);
+      if (g) generalComments = g[1];
     }
   }
   const missing = questionIds.filter((id) => !answers.has(id));
-  return { resolved: missing.length === 0, missing, answers };
+  return { resolved: missing.length === 0, missing, answers, generalComments };
 }
 
-// Resume automatically only when the decision is fully resolved AND exactly one authorized
+// Resume automatically only when the decision surface is fully resolved AND exactly one authorized
 // continuation remains; zero or several is itself a founder-level stop.
-export function resolveFounderResume({ questionIds, comments, continuations } = {}) {
+export function resolveFounderResume({ questionIds, surfaceId, comments, continuations } = {}) {
   const ids = Array.isArray(questionIds) ? questionIds : [];
   if (ids.length === 0) return { outcome: Outcome.FAIL_CLOSED, resume: false, reason: "no decision surface" };
-  const r = parseDecisionResolution(comments, ids);
+  if (!SURFACE_ID.test(String(surfaceId ?? ""))) {
+    return { outcome: Outcome.FAIL_CLOSED, resume: false, reason: "no surface id: answers cannot be bound to a decision surface" };
+  }
+  const r = parseDecisionResolution(comments, ids, { surfaceId });
   if (!r.resolved) {
     return { outcome: Outcome.WAITING, resume: false, founderDecision: FOUNDER_DECISION_STATES.PENDING, missing: r.missing };
   }
@@ -271,6 +396,7 @@ export function resolveFounderResume({ questionIds, comments, continuations } = 
       continuation: list[0],
       founderDecision: FOUNDER_DECISION_STATES.NONE,
       answers: Object.fromEntries(r.answers),
+      generalComments: r.generalComments,
     };
   }
   return {
@@ -325,6 +451,11 @@ export function resumeFromDurableState({ durable, trigger, environment } = {}) {
     return result(Outcome.FAIL_CLOSED, { reason: "environment mismatch", mismatched, durableHold: true });
   }
   const action = durable.claimsPlan?.action;
-  if (action === "BLOCK" || action == null) return result(Outcome.WAITING, { reason: "attempt claim blocks launch", action });
+  // Only actions that start or reconcile an attempt resume work. A consumed nonce (REPLAY) is
+  // terminal; BLOCK / ALREADY_CLAIMED / missing mean this trigger must not start another attempt.
+  if (action === "REPLAY") return result(Outcome.FAIL_CLOSED, { reason: "authorization nonce already consumed", action });
+  if (action !== "CLAIM" && action !== "RECONCILE_THEN_CLAIM") {
+    return result(Outcome.WAITING, { reason: "attempt claim does not authorize starting or reconciling an attempt", action });
+  }
   return result(Outcome.ADVANCED, { resume: true, action, authorization: durable.authorization.commentId ?? null });
 }

@@ -29,3 +29,24 @@ test("planClaim: duplicate event yields one claim; replay, live and ambiguous bl
   const settled = parseAttemptClaims([claim(id, { phase: "DONE" })]);
   assert.equal(planClaim(settled, {}, { attemptId: "7-1", nonce: "n1" }).action, "REPLAY");
 });
+
+test("parseAttemptId distinguishes run attempts; malformed ids are null", async () => {
+  const { parseAttemptId } = await import("./attempt-claim.mjs");
+  assert.deepEqual(parseAttemptId("123-1"), { runId: "123", runAttempt: "1" });
+  assert.deepEqual(parseAttemptId("123-2"), { runId: "123", runAttempt: "2" });
+  assert.equal(parseAttemptId("123"), null);
+  assert.equal(parseAttemptId("a-1"), null);
+});
+
+test("latest claim comment per attempt id wins: CLAIMED then DONE settles the attempt and consumes the nonce", () => {
+  const claims = parseAttemptClaims([claim("9-1"), claim("9-1", { phase: "DONE" })]);
+  assert.equal(claims.length, 1);
+  assert.equal(classifyAttempt(claims, {}), "NO_CLAIM");
+  assert.equal(planClaim(claims, {}, { attemptId: "10-1", nonce: "n1" }).action, "REPLAY");
+});
+
+test("rerun attempt of a completed prior attempt reconciles rather than inheriting its liveness", () => {
+  const claims = parseAttemptClaims([claim("123-1")]);
+  const r = planClaim(claims, { "123-1": { status: "completed", conclusion: "failure" } }, { attemptId: "123-2", nonce: "n1" });
+  assert.equal(r.action, "RECONCILE_THEN_CLAIM");
+});

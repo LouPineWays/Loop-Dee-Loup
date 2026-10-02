@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   renderDecisionSurface,
+  newSurfaceId,
   resolveFounderResume,
   renderTerminalReturn,
   projectTerminalReturn,
@@ -15,30 +16,32 @@ const qs = [
   { id: "Q1", question: "Ship scope A or B?", blocking: "slice scope", options: ["A", "B"], recommended: "A" },
   { id: "Q2", question: "Rename?", blocking: "naming" },
 ];
-const ans = (body, perm = "write") => ({ id: 1, body, authorPermission: perm });
+const SID = "379-r1-abc123";
+const ans = (body, perm = "write", sid = SID) => ({ id: 1, body: `- **Surface id:** ${sid}
+${body}`, authorPermission: perm });
 
 test("check 13: one batched decision surface; resumes automatically when exactly one continuation remains", () => {
-  const body = renderDecisionSurface({ controlIssue: 379, questions: qs });
+  const body = renderDecisionSurface({ controlIssue: 379, questions: qs, surfaceId: SID });
   assert.equal((body.match(/^## /gm) ?? []).length, 1);
   assert.match(body, /Question Q1/);
   assert.match(body, /Question Q2/);
   const ids = ["Q1", "Q2"];
-  const partial = resolveFounderResume({ questionIds: ids, comments: [ans("- **Answer Q1:** A")], continuations: ["c1"] });
+  const partial = resolveFounderResume({ surfaceId: SID, questionIds: ids, comments: [ans("- **Answer Q1:** A")], continuations: ["c1"] });
   assert.equal(partial.resume, false);
   assert.equal(partial.outcome, Outcome.WAITING);
   const full = [ans("- **Answer Q1:** A\n- **Answer Q2:** no")];
-  const one = resolveFounderResume({ questionIds: ids, comments: full, continuations: ["c1"] });
+  const one = resolveFounderResume({ surfaceId: SID, questionIds: ids, comments: full, continuations: ["c1"] });
   assert.equal(one.resume, true);
   assert.equal(one.continuation, "c1");
-  assert.equal(resolveFounderResume({ questionIds: ids, comments: full, continuations: ["c1", "c2"] }).resume, false);
-  assert.equal(resolveFounderResume({ questionIds: ids, comments: full, continuations: [] }).resume, false);
+  assert.equal(resolveFounderResume({ surfaceId: SID, questionIds: ids, comments: full, continuations: ["c1", "c2"] }).resume, false);
+  assert.equal(resolveFounderResume({ surfaceId: SID, questionIds: ids, comments: full, continuations: [] }).resume, false);
   const weak = resolveFounderResume({
     questionIds: ids,
     comments: [ans("- **Answer Q1:** A\n- **Answer Q2:** x", "read")],
     continuations: ["c1"],
   });
   assert.equal(weak.resume, false);
-  assert.equal(renderDecisionSurface({ controlIssue: 379, questions: [] }), null);
+  assert.equal(renderDecisionSurface({ controlIssue: 379, questions: [], surfaceId: SID }), null);
 });
 
 test("check 14: terminal CLEAN projects compact fields to #379 and proves them on read-back", async () => {
@@ -93,4 +96,45 @@ test("check 15: replacement environment resumes from durable state only; untrust
   const fork = verifyTrustedTrigger({ ...good, isFork: true }, { authorization: auth });
   assert.equal(resumeFromDurableState({ durable, trigger: fork, environment: { node: "22" } }).outcome, Outcome.FAIL_CLOSED);
   assert.equal(verifyTrustedTrigger({ ...good, actorPermission: "read" }, { authorization: auth }).trusted, false);
+});
+
+test("decision surface retains the required general-comments field and a surface id", () => {
+  const body = renderDecisionSurface({ controlIssue: 379, questions: qs, surfaceId: SID });
+  assert.match(body, /\*\*General comments:\*\*/);
+  assert.ok(body.includes(`- **Surface id:** ${SID}`));
+  assert.equal(renderDecisionSurface({ controlIssue: 379, questions: qs }), null, "surface id is required");
+  assert.equal(renderDecisionSurface({ controlIssue: 379, questions: qs, surfaceId: "x" }), null);
+});
+
+test("answers bind to the exact surface: reused Q1 on a later surface is not inherited; corrections win", () => {
+  const ids = ["Q1", "Q2"];
+  const older = ans("- **Answer Q1:** A\n- **Answer Q2:** no", "write", "379-r1-old111");
+  const none = resolveFounderResume({ surfaceId: "379-r2-new222", questionIds: ids, comments: [older], continuations: ["c1"] });
+  assert.equal(none.resume, false);
+  assert.deepEqual(none.missing, ids);
+  const unbound = { id: 3, authorPermission: "write", body: "- **Answer Q1:** A\n- **Answer Q2:** no" };
+  assert.equal(resolveFounderResume({ surfaceId: SID, questionIds: ids, comments: [unbound], continuations: ["c1"] }).resume, false);
+  const first = ans("- **Answer Q1:** A\n- **Answer Q2:** no");
+  const fix = ans("- **Answer Q1:** B\n- **General comments:** thanks");
+  const r = resolveFounderResume({ surfaceId: SID, questionIds: ids, comments: [first, fix], continuations: ["c1"] });
+  assert.equal(r.resume, true);
+  assert.equal(r.answers.Q1, "B");
+  assert.equal(r.generalComments, "thanks");
+  assert.equal(resolveFounderResume({ questionIds: ids, comments: [first], continuations: ["c1"] }).outcome, "FAIL_CLOSED");
+  assert.notEqual(newSurfaceId(379, qs, 1), newSurfaceId(379, qs, 2));
+});
+
+test("consumed nonce (REPLAY) and non-starting claim actions never resume", () => {
+  const trigger = { trusted: true };
+  const durable = (action) => ({ authorization: { commentId: 1 }, claimsPlan: { action } });
+  const env = {};
+  assert.equal(resumeFromDurableState({ durable: durable("REPLAY"), trigger, environment: env }).outcome, Outcome.FAIL_CLOSED);
+  for (const a of ["BLOCK", "ALREADY_CLAIMED", undefined]) {
+    const r = resumeFromDurableState({ durable: durable(a), trigger, environment: env });
+    assert.equal(r.outcome, Outcome.WAITING, String(a));
+    assert.notEqual(r.evidence.resume, true);
+  }
+  for (const a of ["CLAIM", "RECONCILE_THEN_CLAIM"]) {
+    assert.equal(resumeFromDurableState({ durable: durable(a), trigger, environment: env }).outcome, Outcome.ADVANCED, a);
+  }
 });
