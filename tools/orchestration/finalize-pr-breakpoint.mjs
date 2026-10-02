@@ -126,6 +126,9 @@ import { run as stage1GateRun } from "../review-watch/stage1-gate.mjs";
 // worker route's (docs/operating-model.md § "Execution-stage session boundaries" stage 4).
 // `REVIEW` is included so a repeated finalize against the same already-finalized PR/head
 // (Verification scenario 6) is a safe no-op rather than a fail-closed rejection.
+// `ROUTED` is issue #856's addition: an all-units-DONE Integration/PR dispatch recovered from a
+// control Issue still recording `ROUTED`, and a plan-authorized unit-owned PR breakpoint whose
+// owning unit worker finalizes while the control is still `ROUTED`, reach this same breakpoint.
 // `AUDIT` is issue #646's own addition: a Stage 2 NOT CLEAN correction worker's new correction
 // PR reaches this exact same PR/Stage-1/Lifecycle breakpoint from a control Issue still
 // durably `Lifecycle: AUDIT` (the post-Stage-2-trigger value `finalize-audit-breakpoint.mjs`
@@ -135,7 +138,7 @@ import { run as stage1GateRun } from "../review-watch/stage1-gate.mjs";
 // bullet (a real `#<audit-issue>` reference, never the legacy sentinel this function already
 // normalizes) is deliberately left as-is — it remains the most-recent-Stage-2-audit pointer
 // until the correction PR's own eventual merge triggers a fresh Stage 2 and overwrites it.
-const ALLOWED_PRE_FINALIZE_LIFECYCLE = new Set(["READY", "EXECUTION_COMPLETE", "REVIEW", "AUDIT"]);
+const ALLOWED_PRE_FINALIZE_LIFECYCLE = new Set(["READY", "ROUTED", "EXECUTION_COMPLETE", "REVIEW", "AUDIT"]);
 
 function isPositiveInteger(value) {
   return typeof value === "number" && Number.isInteger(value) && value > 0;

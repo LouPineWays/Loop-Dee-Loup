@@ -199,6 +199,8 @@ import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 import { parseStage2Verdict, parseFormField } from "../review-watch/lifecycle-gate.mjs";
 // Issue #486: the deterministic action-envelope table every verdict below is stamped with.
 import { getActionEnvelope } from "./action-envelope.mjs";
+// Issue #856: shared Plan Index "Integration/PR route" classifier (pure; no import cycle).
+import { classifyIntegrationRoute } from "./parse-execution-plan.mjs";
 // Issue #678 Stage 1 correction (PR #714, finding 1): persists this gate's own verdict to a
 // side channel at the exact moment main() is about to print it, so action-envelope-hook.mjs
 // can still observe a bounded/none verdict when a downstream pipeline stage (e.g.
@@ -1690,6 +1692,13 @@ export async function verifyRoutedDispatchManifest(
   );
   const dispatchReadyUnitIds = dispatchReadyManifestUnitIds.filter((unitId) => !alreadyDoneUnitIds.includes(unitId));
 
+  // Issue #856: every Plan Index unit's own live Worker Unit Contract State is DONE -- the
+  // post-unit boundary (Integration/PR or unit-owned PR breakpoint) is what comes next, not
+  // another unit wave. Same leading-token match as alreadyDoneUnitIds above.
+  const allUnitsDone =
+    planUnitIds.length > 0 &&
+    planUnitIds.every((unitId) => /^done\b/i.test(String(parsed.plan.units?.[unitId]?.state ?? "").trim()));
+
   return {
     ok: true,
     executionIssue: Number(executionIssue),
@@ -1698,6 +1707,8 @@ export async function verifyRoutedDispatchManifest(
     manifestUrl,
     dispatchReadyUnitIds,
     alreadyDoneUnitIds,
+    allUnitsDone,
+    integrationRoute: parsed.plan.planIndex.integrationRoute,
   };
 }
 
@@ -1777,6 +1788,16 @@ export async function probeReplanRequired(
       reason:
         "operational failure computing unit routes while evaluating PLAN_READY for REPLAN_REQUIRED: " +
         (result?.message ?? "unknown operational failure"),
+    };
+  }
+  // Issue #856: a plan-level failure (Integration/PR route establishes no PR-breakpoint owner)
+  // is a REPLAN_REQUIRED fail-closed stop exactly like an unroutable unit.
+  if (result.exitCode === 3 && result.state === "REPLAN_REQUIRED" && result.planLevelReason) {
+    return {
+      replanRequired: true,
+      planIndexUrl: result.planIndexUrl ?? null,
+      replanRequiredUnitIds: result.replanRequiredUnitIds,
+      reason: result.planLevelReason,
     };
   }
   if (result.exitCode !== 0) {
@@ -2044,7 +2065,9 @@ async function checkReadyDispatchCore(
       };
     }
     if (manifestProbe.ok) {
-      const proposedBody = upsertControlBullet(data.body ?? "", "Lifecycle", "ROUTED");
+      // Issue #856: the control must stop advertising the planning worker once routing is
+      // verified -- the stage actually reached is unit execution.
+      const proposedBody = upsertControlBullet(upsertControlBullet(data.body ?? "", "Lifecycle", "ROUTED"), "Route", "unit workers");
       return {
         exitCode: EXIT_CODES_BY_STATUS.READY_TO_PROJECT_ROUTED,
         state: "READY_TO_PROJECT_ROUTED",
@@ -2136,6 +2159,58 @@ async function checkReadyDispatchCore(
     // controller into the reasoning that discovers and reconciles the real post-PR state, per
     // Required behavior item 4's "route toward post-PR handling instead of dispatching when
     // reconciliation finds the boundary already crossed."
+    // Issue #856 (the #389/#390 live reproduction): once every plan unit is DONE the next
+    // transition is never another unit wave. Resolve the post-unit PR continuation from the
+    // Plan Index's own Integration/PR route, reusing the existing Integration/PR dispatch and
+    // the #456 execution-linked-PR reconciliation (no second lifecycle writer).
+    if (manifestCheck.allUnitsDone) {
+      const integrationRoute = classifyIntegrationRoute(manifestCheck.integrationRoute);
+      if (["integration", "legacy-none", "unit-owned"].includes(integrationRoute.kind)) {
+        const reconciliation = await reconcileReadyPrBreakpoint(
+          { repo: resolvedRepo, executionIssue: result.executionIssue },
+          { ghPrListImpl },
+        );
+        if (reconciliation.operationalError) {
+          return {
+            exitCode: 1,
+            message:
+              `Operational failure reconciling a possibly-already-crossed PR breakpoint for ${resolvedRepo}#${result.executionIssue} ` +
+              `while evaluating ROUTED with every unit DONE: ${reconciliation.reason}`,
+          };
+        }
+        if (reconciliation.crossed) {
+          return {
+            exitCode: 3,
+            state: "NOT_READY",
+            controlIssue: Number(controlIssue),
+            repo: resolvedRepo,
+            reasons: [
+              `every unit is DONE and execution Issue #${result.executionIssue} already has a linked PR (${reconciliation.pr.url}, state ${reconciliation.pr.state}) -- ` +
+                `the PR/Stage 1 breakpoint has already been crossed even though Lifecycle is still "ROUTED"; do not redispatch, reconcile toward post-PR handling instead`,
+            ],
+          };
+        }
+        if (integrationRoute.kind === "unit-owned") {
+          return {
+            exitCode: 1,
+            message:
+              `Execution-state repair needed for ${resolvedRepo}#${result.executionIssue}: every unit is DONE and the plan assigns the PR breakpoint to unit ` +
+              `${integrationRoute.unitId}, but no execution-linked PR exists (the owning unit finished without opening a PR and running finalize-pr-breakpoint.mjs). ` +
+              `Do not redispatch units; repair the unit-owned PR breakpoint or correct the plan's Integration/PR route.`,
+          };
+        }
+        return {
+          exitCode: EXIT_CODES_BY_STATUS.READY_TO_DISPATCH_INTEGRATION,
+          state: "READY_TO_DISPATCH_INTEGRATION",
+          stopAfter: true,
+          controlIssue: Number(controlIssue),
+          repo: resolvedRepo,
+          executionIssue: result.executionIssue,
+          route: "integration worker",
+          recoveredFromLifecycle: "ROUTED",
+        };
+      }
+    }
     if (manifestCheck.dispatchReadyUnitIds.length === 0 && manifestCheck.alreadyDoneUnitIds.length > 0) {
       return {
         exitCode: 3,

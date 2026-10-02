@@ -637,3 +637,18 @@ test("WORKER_UNIT_FIELDS: covers exactly the thirteen bold-label bullets fixed b
     ],
   );
 });
+
+import { classifyIntegrationRoute } from "./parse-execution-plan.mjs";
+
+test("classifyIntegrationRoute: accepts the three explicit forms, rejects bare none / unknown / missing, flags unsupplied (#856)", () => {
+  assert.deepEqual(classifyIntegrationRoute("integration worker"), { kind: "integration" });
+  assert.deepEqual(classifyIntegrationRoute("Integration worker — opens the one PR"), { kind: "integration" });
+  assert.deepEqual(classifyIntegrationRoute("unit-owned: 389-E"), { kind: "unit-owned", unitId: "389-E" });
+  assert.deepEqual(classifyIntegrationRoute("no-pr: docs-free investigation"), { kind: "no-pr", reason: "docs-free investigation" });
+  assert.deepEqual(classifyIntegrationRoute("none"), { kind: "legacy-none" });
+  assert.deepEqual(classifyIntegrationRoute("#123"), { kind: "unknown" });
+  assert.deepEqual(classifyIntegrationRoute("no-pr:"), { kind: "unknown" });
+  assert.deepEqual(classifyIntegrationRoute(null), { kind: "missing" });
+  assert.deepEqual(classifyIntegrationRoute(""), { kind: "missing" });
+  assert.deepEqual(classifyIntegrationRoute(undefined), { kind: "unsupplied" });
+});
