@@ -124,7 +124,7 @@ test("malformed PR payloads fail closed", () => {
 
 test("no production orchestration/review-watch script reads Issues or PR fields via GraphQL-backed gh commands", () => {
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const allowedPrView = new Set(["lifecycle-gate.mjs"]); // closingIssuesReferences has no REST equivalent (recorded in #725)
+  const allowedPrView = new Set();
   for (const dir of [here, path.join(here, "..", "review-watch")]) {
     for (const file of fs.readdirSync(dir)) {
       if (!file.endsWith(".mjs") || file.endsWith(".test.mjs")) continue;

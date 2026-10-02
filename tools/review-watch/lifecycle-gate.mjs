@@ -307,7 +307,7 @@
 // Tests: node --test tools/review-watch/lifecycle-gate.test.mjs
 
 import { execFileSync } from "node:child_process";
-import { readGithubIssue, readGithubPr } from "../orchestration/github-read.mjs";
+import { readGithubIssue, readGithubPr, readGithubPrClosingEvidence } from "../orchestration/github-read.mjs";
 import { endpointsFor, findAllMatches } from "./poll.mjs";
 import { findExistingTrigger, findCommentById } from "./trigger.mjs";
 import {
@@ -675,7 +675,7 @@ export async function checkMergeReady(args, { ghPrViewImpl = defaultGhPrView } =
 
   let data;
   try {
-    data = await ghPrViewImpl({ repo, number: pr });
+    data = await ghPrViewImpl({ repo, number: pr, workIssue: issue });
   } catch (err) {
     return { exitCode: 1, message: `gh pr view failed for ${repo}#${pr}: ${err.message}` };
   }
@@ -2992,13 +2992,18 @@ export async function checkCloseAudit(
   };
 }
 
-function defaultGhPrView({ repo, number }) {
-  const raw = execFileSync(
-    "gh",
-    ["pr", "view", String(number), "--repo", repo, "--json", "closingIssuesReferences,commits"],
-    { encoding: "utf8" },
-  );
-  return JSON.parse(raw);
+// REST-backed (issue #846): derives the same `{ closingIssuesReferences, commits }` input the
+// GraphQL `gh pr view --json` call used to supply, so checkMergeReady's semantics are
+// unchanged. A PR-body closing keyword (the same findClosingKeywordMatch rules used for
+// commits) or a currently-active manual Development-sidebar link to the work issue becomes a
+// closingIssuesReferences entry.
+export function defaultGhPrView({ repo, number, workIssue, execFileImpl }) {
+  const evidence = readGithubPrClosingEvidence({ repo, number, workIssue, ...(execFileImpl ? { execFileImpl } : {}) });
+  const closingIssuesReferences = [];
+  if (workIssue && (evidence.manualLinkActive || findClosingKeywordMatch(evidence.body, workIssue, repo))) {
+    closingIssuesReferences.push({ number: Number(workIssue), url: `https://github.com/${repo}/issues/${workIssue}` });
+  }
+  return { closingIssuesReferences, commits: evidence.commits };
 }
 
 function defaultGhIssueView({ repo, number }) {

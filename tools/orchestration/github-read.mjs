@@ -134,3 +134,105 @@ export function readGithubPr({ repo, number, fields, execFileImpl = execFileSync
   }
   return out;
 }
+
+// REST-backed merge-ready closing evidence — issue #846 (control #845).
+//
+// `gh pr view --json closingIssuesReferences,commits` is GraphQL-backed and fails with HTTP 403
+// in a GraphQL-blocked, REST-authorized remote environment (#817/#835/PR #844 live
+// reproduction). This returns the raw evidence `lifecycle-gate.mjs merge-ready` needs through
+// REST only: the current PR body, every commit on the PR, and whether a manual Development-
+// sidebar PR<->Issue link to `workIssue` is currently active. Fail-closed throughout: an
+// unauthorized/unavailable transport, malformed or wrong-identity payload, a PR with more
+// commits than REST's documented 250-commit list limit (or a list that does not match the PR's
+// own commit count), or ambiguous link-event evidence throws, which callers treat as an
+// operational failure, never a clean verdict.
+export const PR_COMMIT_LIST_LIMIT = 250;
+
+function callRestPages(path, execFileImpl) {
+  const sep = path.includes("?") ? "&" : "?";
+  const full = `${path}${sep}per_page=100`;
+  const raw = execFileImpl("gh", ["api", full, "--paginate", "--slurp"], { encoding: "utf8" });
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`GitHub REST response for ${path} is not valid JSON: ${err.message}`);
+  }
+  if (!Array.isArray(parsed) || parsed.some((page) => !Array.isArray(page))) {
+    throw new Error(`GitHub REST response for ${path} is not a paginated JSON array`);
+  }
+  return parsed.flat();
+}
+
+export function readGithubPrClosingEvidence({ repo, number, workIssue, execFileImpl = execFileSync }) {
+  const prPath = restPath("pulls", repo, number);
+  const pr = callRest(prPath, execFileImpl);
+  requireNumber(pr, number, prPath);
+  const body = requireStringOrNull(pr, "body", prPath);
+  if (!Number.isInteger(pr.commits) || pr.commits < 0) {
+    throw new Error(`GitHub REST response for ${prPath} has a malformed or missing "commits" count`);
+  }
+  if (pr.commits > PR_COMMIT_LIST_LIMIT) {
+    throw new Error(
+      `PR #${number} has ${pr.commits} commits, beyond the ${PR_COMMIT_LIST_LIMIT}-commit limit of ` +
+        `GitHub's list-PR-commits REST endpoint; commit evidence would be incomplete`,
+    );
+  }
+
+  const commitsPath = `${prPath}/commits`;
+  const rawCommits = callRestPages(commitsPath, execFileImpl);
+  if (rawCommits.length !== pr.commits) {
+    throw new Error(
+      `GitHub REST commit list for ${commitsPath} returned ${rawCommits.length} commits, expected ${pr.commits}; ` +
+        `commit evidence is incomplete`,
+    );
+  }
+  const commits = rawCommits.map((c) => {
+    const message = c?.commit?.message;
+    if (typeof c?.sha !== "string" || c.sha === "" || typeof message !== "string") {
+      throw new Error(`GitHub REST commit list for ${commitsPath} contains a malformed commit entry`);
+    }
+    const nl = message.indexOf("\n");
+    return {
+      oid: c.sha,
+      messageHeadline: nl === -1 ? message : message.slice(0, nl),
+      messageBody: nl === -1 ? "" : message.slice(nl + 1),
+    };
+  });
+
+  let manualLinkActive = false;
+  if (workIssue !== undefined && workIssue !== null) {
+    const timelinePath = restPath("issues", repo, workIssue) + "/timeline";
+    const events = callRestPages(timelinePath, execFileImpl);
+    const linkEvents = [];
+    for (const ev of events) {
+      if (ev === null || typeof ev !== "object") {
+        throw new Error(`GitHub REST timeline for ${timelinePath} contains a malformed event`);
+      }
+      if (ev.event !== "connected" && ev.event !== "disconnected") continue;
+      const subject = ev.subject;
+      // The REST timeline subject carries `url` (e.g. https://api.github.com/repos/o/r/pulls/9) and `type`.
+      const m = typeof subject?.url === "string"
+        ? /\/repos\/([^/]+\/[^/]+)\/(?:pulls|issues)\/([0-9]+)\/?$/.exec(subject.url)
+        : null;
+      if (m === null || !Number.isInteger(ev.id)) {
+        throw new Error(
+          `GitHub REST timeline for ${timelinePath} has a ${ev.event} event with an unreadable subject or id; ` +
+            `current link state is ambiguous`,
+        );
+      }
+      const subjectRepo = m[1];
+      const subjectNumber = Number(m[2]);
+      if (subjectNumber === Number(number) && subjectRepo.toLowerCase() === String(repo ?? "").toLowerCase()) {
+        linkEvents.push(ev);
+      }
+    }
+    // Ordered by monotonically increasing event id; the latest event for this exact PR<->Issue
+    // pair decides whether the link is currently active.
+    linkEvents.sort((a, b) => a.id - b.id);
+    const last = linkEvents[linkEvents.length - 1];
+    manualLinkActive = last?.event === "connected";
+  }
+
+  return { body, commits, manualLinkActive };
+}

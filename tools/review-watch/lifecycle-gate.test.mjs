@@ -4337,3 +4337,77 @@ test("#808 REST identity checks tolerate repository casing differences", () => {
     fakeRun({ html_url: "https://github.com/owner/repo/issues/5#issuecomment-9" }),
   );
 });
+
+// -- REST-backed merge-ready evidence (issue #846) ----------------------------------------
+
+import { defaultGhPrView } from "./lifecycle-gate.mjs";
+
+function restFake({ body = "Addresses #151.", commits = [], timeline = [], prOverride = {}, fail } = {}) {
+  return (cmd, args) => {
+    const p = args[1];
+    if (fail) throw new Error(fail);
+    if (/\/pulls\/\d+\/commits/.test(p)) {
+      return JSON.stringify([commits.map((m, i) => ({ sha: `sha${i}`, commit: { message: m } }))]);
+    }
+    if (/\/issues\/\d+\/timeline/.test(p)) return JSON.stringify([timeline]);
+    if (/\/pulls\/\d+$/.test(p)) return JSON.stringify({ number: 9, body, commits: commits.length, ...prOverride });
+    throw new Error(`unexpected path ${p}`);
+  };
+}
+const link = (event, id, number = 9, full_name = "owner/repo") => ({ event, id, subject: { type: "PullRequest", url: `https://api.github.com/repos/${full_name}/pulls/${number}` } });
+const viaRest = (opts, issue = "151") => checkMergeReady(
+  { repo: "owner/repo", pr: 9, issue },
+  { ghPrViewImpl: (a) => defaultGhPrView({ ...a, execFileImpl: restFake(opts) }) },
+);
+
+test("REST merge-ready: clean PR is MERGE_READY", async () => {
+  assert.equal((await viaRest({ commits: ["feat: x\n\nAddresses #151"] })).state, "MERGE_READY");
+});
+test("REST merge-ready: PR-body closing keyword blocks (also repo-qualified; other repo does not)", async () => {
+  assert.equal((await viaRest({ body: "Fixes #151" })).exitCode, 2);
+  assert.equal((await viaRest({ body: "Closes owner/repo#151" })).exitCode, 2);
+  assert.equal((await viaRest({ body: "Fixes other/repo#151" })).state, "MERGE_READY");
+});
+test("REST merge-ready: commit closing keyword blocks, including repo-qualified", async () => {
+  const r = await viaRest({ commits: ["a", "b\n\nResolves owner/repo#151"] });
+  assert.equal(r.exitCode, 2);
+  assert.match(r.violations[0].source, /^commit:sha1$/);
+});
+test("REST merge-ready: current manual sidebar link blocks; disconnected, unrelated and cross-repo do not", async () => {
+  assert.equal((await viaRest({ timeline: [link("connected", 1)] })).exitCode, 2);
+  assert.equal((await viaRest({ timeline: [link("connected", 1), link("disconnected", 2)] })).state, "MERGE_READY");
+  assert.equal((await viaRest({ timeline: [link("connected", 1), link("disconnected", 2), link("connected", 3)] })).exitCode, 2);
+  assert.equal((await viaRest({ timeline: [link("connected", 1, 10)] })).state, "MERGE_READY");
+  assert.equal((await viaRest({ timeline: [link("connected", 1, 9, "other/repo")] })).state, "MERGE_READY");
+});
+test("REST merge-ready: ambiguous/malformed link evidence fails closed (exit 1)", async () => {
+  assert.equal((await viaRest({ timeline: [{ event: "connected", id: 1 }] })).exitCode, 1);
+  assert.equal((await viaRest({ timeline: [{ event: "connected", subject: { type: "PullRequest", number: 9, repository: { full_name: "owner/repo" } } }] })).exitCode, 1);
+});
+test("REST merge-ready: transport/identity/commit-limit negatives are operational failures", async () => {
+  assert.equal((await viaRest({ fail: "HTTP 403" })).exitCode, 1);
+  assert.equal((await viaRest({ prOverride: { number: 10 } })).exitCode, 1);
+  assert.equal((await viaRest({ prOverride: { commits: undefined } })).exitCode, 1);
+  assert.equal((await viaRest({ prOverride: { commits: 251 } })).exitCode, 1); // beyond 250-commit REST limit
+  assert.equal((await viaRest({ commits: ["a"], prOverride: { commits: 2 } })).exitCode, 1); // truncated list
+});
+test("REST merge-ready: --issue none performs no REST reads", async () => {
+  let called = false;
+  const r = await checkMergeReady({ repo: "owner/repo", pr: 9, issue: "none" }, { ghPrViewImpl: () => { called = true; } });
+  assert.equal(r.state, "MERGE_READY_NO_WORK_ISSUE");
+  assert.equal(called, false);
+});
+test("REST merge-ready: multi-page commit list is fully scanned", async () => {
+  const exec = (cmd, args) => {
+    const p = args[1];
+    if (/\/commits/.test(p)) {
+      const page = (a, b) => Array.from({ length: b - a }, (_, i) => ({ sha: `s${a + i}`, commit: { message: a + i === 199 ? "Fixes #151" : "x" } }));
+      return JSON.stringify([page(0, 100), page(100, 200), page(200, 250)]);
+    }
+    if (/timeline/.test(p)) return "[[]]";
+    return JSON.stringify({ number: 9, body: "", commits: 250 });
+  };
+  const r = await checkMergeReady({ repo: "owner/repo", pr: 9, issue: "151" }, { ghPrViewImpl: (a) => defaultGhPrView({ ...a, execFileImpl: exec }) });
+  assert.equal(r.exitCode, 2);
+  assert.equal(r.violations[0].source, "commit:s199");
+});
