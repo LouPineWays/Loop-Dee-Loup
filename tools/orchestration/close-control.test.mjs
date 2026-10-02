@@ -347,3 +347,36 @@ test("checkCloseControl: ACCEPTED_NO_WORK_ISSUE shape (no --work-issue) still te
   assert.equal(result.workIssue, null);
   assert.doesNotMatch(calls[0].body, /work issue #/);
 });
+
+// Issue #852: control close over the GraphQL-independent REST transport.
+import { ghRestCloseIssue } from "../review-watch/lifecycle-gate.mjs";
+
+test("#852 checkCloseControl closes via REST after the snapshot write; a not-closed REST response is an operational failure with the body already terminal", async () => {
+  const writes = [];
+  const run = (reply, calls) => (cmd, args, opts) => { calls.push({ args, input: opts.input }); return JSON.stringify(reply); };
+  const calls = [];
+  const ok = await checkCloseControl(
+    { repo: "owner/repo", "control-issue": 487, "audit-issue": 538, "work-issue": 486 },
+    {
+      ghIssueViewImpl: makeGhIssueViewImpl(),
+      ghEditImpl: (a) => writes.push(a),
+      ghCloseImpl: ({ repo, controlIssue }) => ghRestCloseIssue({ repo, issue: controlIssue }, run({ number: 487, state: "closed", html_url: "https://github.com/owner/repo/issues/487" }, calls)),
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(ok.exitCode, 0);
+  assert.equal(writes.length, 1);
+  assert.deepEqual(calls[0].args, ["api", "-X", "PATCH", "repos/owner/repo/issues/487", "--input", "-"]);
+
+  const bad = await checkCloseControl(
+    { repo: "owner/repo", "control-issue": 487, "audit-issue": 538, "work-issue": 486 },
+    {
+      ghIssueViewImpl: makeGhIssueViewImpl(),
+      ghEditImpl: () => {},
+      ghCloseImpl: ({ repo, controlIssue }) => ghRestCloseIssue({ repo, issue: controlIssue }, run({ number: 487, state: "open", html_url: "https://github.com/owner/repo/issues/487" }, [])),
+      ghCommentImpl: async () => {},
+    },
+  );
+  assert.equal(bad.exitCode, 1);
+  assert.match(bad.message, /already terminal/);
+});

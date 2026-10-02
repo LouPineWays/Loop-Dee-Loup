@@ -4445,3 +4445,49 @@ test("REST merge-ready: multi-page commit list is fully scanned", async () => {
   assert.equal(r.exitCode, 2);
   assert.equal(r.violations[0].source, "commit:s199");
 });
+
+// Issue #852: GraphQL-independent terminal close (REST write boundary).
+import { ghRestCloseIssue } from "./lifecycle-gate.mjs";
+const closedReply = (n, extra = {}) => ({ number: n, state: "closed", html_url: `https://github.com/owner/repo/issues/${n}`, ...extra });
+
+test("#852 ghRestCloseIssue PATCHes state=closed via REST, never `gh issue close`", () => {
+  const calls = [];
+  ghRestCloseIssue({ repo: restRepo, issue: 7 }, fakeRun(closedReply(7), calls));
+  assert.deepEqual(calls[0].args, ["api", "-X", "PATCH", "repos/owner/repo/issues/7", "--input", "-"]);
+  assert.deepEqual(JSON.parse(calls[0].input), { state: "closed", state_reason: "completed" });
+  assert.ok(!calls[0].args.includes("graphql") && !calls[0].args.includes("issue"));
+});
+
+test("#852 ghRestCloseIssue fails closed on transport, malformed, identity, PR, and not-closed responses", () => {
+  const run = (res) => () => ghRestCloseIssue({ repo: restRepo, issue: 7 }, fakeRun(res));
+  assert.throws(run(new Error("HTTP 403")), /403/);
+  assert.throws(run("not json"), /malformed/);
+  assert.throws(run(closedReply(8)), /identity/);
+  assert.throws(run(closedReply(7, { html_url: "https://github.com/other/repo/issues/7" })), /identity/);
+  assert.throws(run(closedReply(7, { pull_request: {} })), /pull request/);
+  assert.throws(run(closedReply(7, { state: "open" })), /does not show the Issue closed/);
+  assert.throws(run(closedReply(7, { state: undefined })), /does not show the Issue closed/);
+});
+
+test("#852 close-work-issue closes via REST transport, is idempotent on CLOSED, and fails operationally on a not-closed response", async () => {
+  const calls = [];
+  const view = async () => ({ state: "OPEN" });
+  const ok = await checkCloseWorkIssue(
+    { repo: restRepo, "work-issue": 7, "audit-issue": 9 },
+    { ghIssueViewImpl: view, ghCloseImpl: ({ repo, workIssue }) => ghRestCloseIssue({ repo, issue: workIssue }, fakeRun(closedReply(7), calls)), ghCommentImpl: async () => {} },
+  );
+  assert.equal(ok.state, "CLOSED");
+  assert.equal(calls.length, 1);
+
+  const again = await checkCloseWorkIssue(
+    { repo: restRepo, "work-issue": 7, "audit-issue": 9 },
+    { ghIssueViewImpl: async () => ({ state: "CLOSED" }), ghCloseImpl: () => assert.fail("must not close again") },
+  );
+  assert.equal(again.state, "ALREADY_TERMINAL");
+
+  const bad = await checkCloseWorkIssue(
+    { repo: restRepo, "work-issue": 7, "audit-issue": 9 },
+    { ghIssueViewImpl: view, ghCloseImpl: ({ repo, workIssue }) => ghRestCloseIssue({ repo, issue: workIssue }, fakeRun(closedReply(7, { state: "open" }))), ghCommentImpl: async () => {} },
+  );
+  assert.equal(bad.exitCode, 1);
+});

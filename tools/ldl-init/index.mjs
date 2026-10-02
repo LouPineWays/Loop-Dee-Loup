@@ -708,6 +708,10 @@ export const HARD_MODULE_DEPENDENCIES = [
   // unmanaged, preserved tools/orchestration/github-read.mjs lets install/update report success
   // while the mandatory gates fail at ESM load time.
   { dest: "tools/orchestration/close-control.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  // Issue #852 Stage 1 review finding (P2, on PR #854): close-control.mjs hard-imports the REST
+  // helpers ghRestCloseIssue/ghRestCommentIssue from lifecycle-gate.mjs; a preserved older
+  // unmanaged lifecycle-gate.mjs would make install/update succeed yet fail at ESM load time.
+  { dest: "tools/orchestration/close-control.mjs", dependsOnDest: "tools/review-watch/lifecycle-gate.mjs" },
   { dest: "tools/orchestration/finalize-audit-breakpoint.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/orchestration/finalize-correction-breakpoint.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/orchestration/finalize-pr-breakpoint.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
