@@ -45,8 +45,9 @@ import { ghRestEditIssueBody } from "../review-watch/lifecycle-gate.mjs";
 // profile of the #379 reproduction while repository REST works. The helper pipes a JSON body over
 // stdin (no argv/shell escaping) and verifies response Issue identity, not-a-PR, and body echo, so
 // a wrong-target/partial/malformed response throws and surfaces here as an operational failure.
-function defaultGhEditControlIssue({ repo, controlIssue, body }) {
-  ghRestEditIssueBody({ repo, auditIssue: controlIssue, body });
+// Issue #835: tolerate only the one known trailing attribution block; any other mismatch still throws.
+export function defaultGhEditControlIssue({ repo, controlIssue, body }, runImpl) {
+  ghRestEditIssueBody({ repo, auditIssue: controlIssue, body, allowKnownAttribution: true }, runImpl);
 }
 
 // Pure core (`ghEditImpl` injected so tests never touch the network or the real `gh` CLI):
