@@ -583,6 +583,10 @@ A resulting slice begins only when the founder explicitly dispatches it in a fre
 
 Once dispatched, a slice runs autonomously per `AGENTS.md` § Session execution and the bounded review cycle until it reaches CLEAN completion or a genuine founder interrupt or unrecoverable blocker applies. CLEAN completion of one slice does not authorize beginning a sibling slice created in the same decomposition, even one that is now unblocked, obviously next, or has no remaining founder decision. The founder chooses which executable issue to dispatch next.
 
+## Launcher closure and postcondition verification
+
+`tools/orchestration/launcher-step.mjs` (issue #73) composes the existing gates; it adds no lifecycle engine. One step reads the gate verdict, acts only on mechanically decidable verdicts, and returns `ADVANCED | WAITING | OPEN_PATH_REQUIRED | FAIL_CLOSED`. Each transition has a table row of pre-state, action, verifier, postcondition, and invalidation. Before acting, it reads back the durable effect and classifies it (`classifyExternalEffect`): definitely not completed may retry; completed but unprojected is finalized without replay; ambiguous, stale, wrong-target, or malformed evidence fails closed. A successor is eligible only after `verifyPostcondition` proves the postcondition from a fresh read-back; an actor's exit status or self-report never unlocks one.
+
 ## Verification and autonomy
 
 Autonomy begins after the founder dispatches the issue. It means completing the slice without routine questions or approvals. It does not mean bypassing controls.
