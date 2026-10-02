@@ -100,6 +100,12 @@ node tools/telemetry/sufficiency.mjs <session_id> <claim_type>
 by hand, and never add a new ad hoc completeness rule inside this skill; extend
 `CLAIM_REQUIREMENTS` instead when a new class of claim needs its own evidence bar.
 
+The result's `evidenceSource` names what made a claim answerable: `hook` (hook telemetry) or
+`managed_session` (a managed-session record from a complete terminal result, issue #389). A
+managed-session cost figure is an estimated list cost, never actual billing — report the
+result's `caveats` with it. Never add the two sources' figures together, and never promote a
+managed-session record to support a claim the gate returns `INSUFFICIENT` for.
+
 If `tools/telemetry/sufficiency.mjs` does not exist — an installed consumer repository per
 `docs/consumer-contract.md` that has not received `tools/telemetry/` — this is the same case
 step 3 of the evidence order above already names for individual fields: fall back for

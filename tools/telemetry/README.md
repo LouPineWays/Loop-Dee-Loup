@@ -365,6 +365,22 @@ partial snapshot — see "SessionEnd is not always invoked" above), and
 cost_usd_by_model` is always `null` — no local pricing table). `assessSufficiency()` is exported
 as a pure function; see `sufficiency.test.mjs` for the #120 regression case.
 
+### Managed-session records as alternative evidence (issue #389, unit 389-D)
+
+`token_allocation` and `monetary_cost_total` each declare an `alternatives` entry: a canonical
+managed-session record (`managed-session-record.mjs`) attached via `reduce.mjs`'s
+`attachManagedSession`/`reduceManagedSessionRecord` (under `measured.managed_session`, beside and
+never merged into the hook fields) satisfies them only when the record has trustworthy terminal
+evidence (`whole_run_complete`, economics authority `terminal_result`). The subagent token portion
+is whole-agent-tree usage minus top-level usage, and only when both are fully present; a missing
+field is never treated as 0. Cost is the surface's estimated list figure, returned with a `caveats`
+note that it is not actual billing. Sources are assessed independently (hook first) and never
+summed, so nothing is double-counted; every other claim (`monetary_cost_by_model`, compaction,
+subagent pattern) stays `INSUFFICIENT` for a managed record, as does any interrupted, generic, or
+non-terminal-result record. `assessSufficiency()` now also returns `evidenceSource`, and
+`coverage.mjs` reports a per-claim `claimSufficiency` source breakdown without changing its
+field-level verdict. Tests: `managed-session-sufficiency.test.mjs`.
+
 This script is source-repository-only — `tools/ldl-init` does not distribute `tools/telemetry/`
 to consumer repositories (see `docs/consumer-contract.md`). An installed consumer's `spend`
 skill checks for this file's absence and applies a fixed per-claim fallback mapping instead

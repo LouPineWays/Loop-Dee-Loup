@@ -48,10 +48,29 @@ export const CLAIM_REQUIREMENTS = {
     // review of #139/PR #144: without this, an in-progress session's partial snapshot
     // could authorize a whole-session CLEAN/NOT CLEAN verdict.
     requiresTrue: ["measured.token_usage_is_session_complete"],
+    // Issue #389 (unit 389-D): a managed-session record from a complete terminal result is an
+    // alternative evidence source, not an addition to hook evidence (never summed with it).
+    alternatives: [
+      {
+        source: "managed_session",
+        requires: ["measured.managed_session.token_main_total", "measured.managed_session.token_subagent_total"],
+        requiresTrue: ["measured.managed_session.whole_run_complete", "measured.managed_session.economics_from_terminal_result"],
+      },
+    ],
   },
   monetary_cost_total: {
     label: "the session's total monetary cost",
     requires: ["measured.cost_usd_total"],
+    // The managed-session figure is an estimated list cost, never actual billing; it supports
+    // this claim only with that caveat attached to the result.
+    alternatives: [
+      {
+        source: "managed_session",
+        requires: ["measured.managed_session.estimated_list_cost_usd"],
+        requiresTrue: ["measured.managed_session.whole_run_complete", "measured.managed_session.economics_from_terminal_result"],
+        caveat: "cost is an estimated list figure from the surface's terminal result, not actual billing",
+      },
+    ],
   },
   monetary_cost_by_model: {
     label: "monetary cost broken down by model",
@@ -103,16 +122,34 @@ export function assessSufficiency(record, claimType) {
   if (!spec) {
     throw new Error(`Unknown claim type "${claimType}". Known: ${Object.keys(CLAIM_REQUIREMENTS).join(", ")}`);
   }
-  const missingFields = (spec.requires ?? []).filter((fieldPath) => !isPresent(getPath(record, fieldPath)));
-  const missingPositive = (spec.requiresPositive ?? []).filter((fieldPath) => !isPositiveNumber(getPath(record, fieldPath)));
-  const missingTrue = (spec.requiresTrue ?? []).filter((fieldPath) => getPath(record, fieldPath) !== true);
-  const allMissing = [...missingFields, ...missingPositive, ...missingTrue];
+  const allMissing = missingFor(record, spec);
+  let evidenceSource = allMissing.length === 0 ? "hook" : null;
+  let caveats = [];
+  if (evidenceSource === null) {
+    const alt = (spec.alternatives ?? []).find((a) => missingFor(record, a).length === 0);
+    if (alt) {
+      evidenceSource = alt.source;
+      caveats = alt.caveat ? [alt.caveat] : [];
+    }
+  }
   return {
     claimType,
     label: spec.label,
-    verdict: allMissing.length === 0 ? "SUFFICIENT" : "INSUFFICIENT",
-    missingFields: allMissing,
+    verdict: evidenceSource !== null ? "SUFFICIENT" : "INSUFFICIENT",
+    evidenceSource,
+    ...(caveats.length > 0 ? { caveats } : {}),
+    missingFields: evidenceSource !== null ? [] : allMissing,
   };
+}
+
+// A claim is SUFFICIENT when its primary (hook-derived) requirements are met, or when one
+// alternative evidence source's own complete requirement set is met. Sources are evaluated
+// independently and never combined, so no field is double-counted.
+function missingFor(record, spec) {
+  const missingFields = (spec.requires ?? []).filter((fieldPath) => !isPresent(getPath(record, fieldPath)));
+  const missingPositive = (spec.requiresPositive ?? []).filter((fieldPath) => !isPositiveNumber(getPath(record, fieldPath)));
+  const missingTrue = (spec.requiresTrue ?? []).filter((fieldPath) => getPath(record, fieldPath) !== true);
+  return [...missingFields, ...missingPositive, ...missingTrue];
 }
 
 function main() {
