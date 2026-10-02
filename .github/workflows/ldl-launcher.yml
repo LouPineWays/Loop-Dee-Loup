@@ -1,0 +1,134 @@
+name: LDL launcher
+
+# Thin GitHub-native adapter for issue #73 (unit 73-A). All decisions live in the pure
+# modules tools/orchestration/launch-authorization.mjs and attempt-claim.mjs; this file
+# only reads durable GitHub state, calls them, and posts one claim comment.
+#
+# Security posture:
+#   - Triggers are issue_comment (created) and workflow_dispatch only; no pull_request or
+#     pull_request_target, and PR comments are rejected by the module.
+#   - Checkout is the default-branch/dispatch ref of THIS repository; no fork or PR-head
+#     code is ever checked out or executed.
+#   - Event-derived values reach the shell only through env, never interpolated into
+#     script text.
+#   - Permissions are least-privilege: contents read, issues write (claim comment),
+#     actions read (liveness read-back).
+#   - Secrets are only ever GitHub-provided (GITHUB_TOKEN); none are added here.
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      control_issue:
+        description: Control issue number
+        required: true
+      nonce:
+        description: Launch Authorization nonce
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+concurrency:
+  group: ldl-launcher-${{ github.event.issue.number || inputs.control_issue }}
+  cancel-in-progress: false
+
+jobs:
+  authorize-and-claim:
+    # Cheap pre-filter only; the module re-verifies everything.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request == null &&
+       startsWith(github.event.comment.body, '/ldl launch '))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify trigger, authorization, and claim
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          ACTOR: ${{ github.actor }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          IS_PR: ${{ github.event.issue.pull_request != null }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          INPUT_CONTROL_ISSUE: ${{ inputs.control_issue }}
+          INPUT_NONCE: ${{ inputs.nonce }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          node --input-type=module <<'JS'
+          import { execFileSync } from "node:child_process";
+          import { parseLaunchAuthorization, verifyTrustedTrigger } from "./tools/orchestration/launch-authorization.mjs";
+          import { parseAttemptClaims, planClaim, renderClaimBody, formatAttemptId } from "./tools/orchestration/attempt-claim.mjs";
+
+          const env = process.env;
+          const gh = (...args) => execFileSync("gh", args, { encoding: "utf8" });
+          const api = (path) => JSON.parse(gh("api", path));
+          const fail = (msg) => { console.log(`LAUNCH REFUSED: ${msg}`); process.exit(0); };
+
+          const isDispatch = env.EVENT_NAME === "workflow_dispatch";
+          const controlIssue = Number(isDispatch ? env.INPUT_CONTROL_ISSUE : env.ISSUE_NUMBER);
+          if (!Number.isInteger(controlIssue) || controlIssue <= 0) fail("no control issue");
+
+          const permCache = new Map();
+          const permission = (login) => {
+            if (!permCache.has(login)) {
+              try { permCache.set(login, api(`repos/${env.REPO}/collaborators/${login}/permission`).permission); }
+              catch { permCache.set(login, "none"); }
+            }
+            return permCache.get(login);
+          };
+
+          const comments = api(`repos/${env.REPO}/issues/${controlIssue}/comments?per_page=100`).map((c) => ({
+            id: c.id, body: c.body, author: c.user?.login, authorPermission: permission(c.user?.login),
+          }));
+
+          const auth = parseLaunchAuthorization(comments, { controlIssue });
+          if (auth.status !== "AUTHORIZED") fail(`authorization ${auth.status}: ${auth.reason}`);
+
+          const trigger = verifyTrustedTrigger({
+            name: env.EVENT_NAME,
+            action: isDispatch ? "dispatch" : env.EVENT_ACTION,
+            actor: env.ACTOR,
+            actorPermission: permission(env.ACTOR),
+            isFork: false, // same-repo events only: issue_comment/workflow_dispatch never run fork code
+            isPullRequest: isDispatch ? false : env.IS_PR === "true",
+            issueNumber: isDispatch ? controlIssue : Number(env.ISSUE_NUMBER),
+            commentBody: env.COMMENT_BODY,
+            inputs: { control_issue: env.INPUT_CONTROL_ISSUE, nonce: env.INPUT_NONCE },
+          }, { authorization: auth.authorization });
+          if (!trigger.trusted) fail(`untrusted trigger: ${trigger.reason}`);
+
+          // Liveness comes from the Actions run API, never from claim text.
+          const claims = parseAttemptClaims(comments);
+          const liveness = {};
+          for (const c of claims) {
+            const runId = c.attemptId.split("-")[0];
+            try {
+              const run = api(`repos/${env.REPO}/actions/runs/${runId}`);
+              liveness[c.attemptId] = { status: run.status, conclusion: run.conclusion };
+            } catch { /* unknown stays unknown -> fail closed */ }
+          }
+
+          const attemptId = formatAttemptId(env.RUN_ID, env.RUN_ATTEMPT);
+          const plan = planClaim(claims, liveness, { attemptId, nonce: auth.authorization.nonce });
+          if (plan.action !== "CLAIM" && plan.action !== "RECONCILE_THEN_CLAIM") fail(`${plan.action}: ${plan.reason}`);
+
+          const body = renderClaimBody({
+            attemptId, nonce: auth.authorization.nonce, claimedAt: new Date().toISOString(),
+            runner: "github-actions", phase: "CLAIMED",
+          });
+          execFileSync("gh", ["api", `repos/${env.REPO}/issues/${controlIssue}/comments`, "-F", "body=@-"],
+            { input: body, encoding: "utf8" });
+          console.log(`LAUNCH CLAIMED: attempt ${attemptId} (${plan.action}) for control #${controlIssue}`);
+          JS
