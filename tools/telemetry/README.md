@@ -387,6 +387,29 @@ skill checks for this file's absence and applies a fixed per-claim fallback mapp
 (`.claude/skills/spend/SKILL.md`'s "Evidence-sufficiency verdicts" section), never skipping the
 verdict or promoting it to CLEAN merely because this script is unavailable there (issue #152).
 
+## Managed-session records: authority split, shape, and join (issue #389)
+
+The launcher (`tools/orchestration/launcher-run.mjs`) writes one compact JSON file per run to
+`<telemetry dir>/managed-sessions/<run_id>.json`: a provider-neutral session record
+(`managed-session-record.mjs`, `schema_version` 1) per worker run, and a gate-outcome record
+(`record_kind: "gate_outcome"`) per launcher step. These are surface-native evidence: economic
+fields appear only when the surface's terminal result exposes them (unavailable is `null`, never 0
+or inferred), cost is only ever an estimated list figure, and a run without a terminal result is
+`whole_run_complete: false`. No prompt, response, or transcript content is stored.
+
+Authority split: launcher/process plus the surface terminal result own completion and economic
+evidence; deterministic gate results own control/transition outcome evidence; hooks stay
+structural runtime evidence; diagnostic traces stay opt-in; GitHub (PRs, Audits) remains the
+lifecycle, review, and audit authority. No record is a competing whole-session authority.
+
+`managed-session-join.mjs` is the deterministic reader (`summarizeManagedRuns()`): it validates each
+record, skips bad files by name, joins by control/execution issue, and emits a by-reference summary
+for the #377/#391 diagnostic packet: record file names, run ids, stage/route/surface rows, gate
+result classes, and `outcome_refs: {authority: "github", pr: [...], audit: [...]}` numbers. The
+verified outcome is never copied; a later comparison resolves it on GitHub. Tests:
+`managed-session-join.test.mjs` (Verification items 1-12; only one surface is qualified, so the
+non-Claude case uses a generic-surface fixture).
+
 ## Execution-boundary proving probe (issue #245)
 
 Everything above observes a session from *inside* the process Claude Code itself runs
