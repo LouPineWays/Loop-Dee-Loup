@@ -189,6 +189,15 @@ test("#835 decorated-success with preserved trailing blank lines in the request"
   const req = NO_NL + "\n\n\n";
   assert.equal(writeVia(restRun(restReply({}, req + ATTR)), req).state, "WRITTEN");
 });
+for (const n of [0, 1, 3]) {
+  const req = NO_NL + "\n".repeat(n);
+  test(`#835 boundary: ${n} trailing newline(s) preserved exactly; removed/extra newline rejected`, () => {
+    assert.equal(writeVia(restRun(restReply({}, req + ATTR)), req).state, "WRITTEN");
+    if (n > 0) assert.equal(writeVia(restRun(restReply({}, req.slice(0, -1) + ATTR)), req).exitCode, 1);
+    assert.equal(writeVia(restRun(restReply({}, req + "\n" + ATTR)), req).exitCode, 1);
+    assert.equal(writeVia(restRun(restReply({}, req + ATTR.slice(1))), req).exitCode, 1);
+  });
+}
 test("#835 request already carrying the attribution block: second block rejected, exact echo accepted", () => {
   const req = NO_NL + ATTR;
   assert.equal(writeVia(restRun(restReply({}, req + ATTR)), req).exitCode, 1);
