@@ -237,6 +237,17 @@ const ENVELOPES = {
     mode: ENVELOPE_MODES.BOUNDED,
     authorizedActions: ["run-finalize-stage1-satisfied-recover"],
   },
+  // Issue #837 (the #817/#835/PR #836 live reproduction): a findings-bearing Stage 1 correction
+  // already advanced the PR head, but the canonical correction-satisfied disposition never reached
+  // the control Issue. Authorizes exactly the one deterministic finalize command this verdict's
+  // own `nextCommand` names (finalize-correction-breakpoint.mjs, the same compose-write-verify path
+  // every correction worker is required to run) -- no worker dispatch, no second Stage 1 round, no
+  // merge; a fresh gate invocation afterward resolves normally to the correction-satisfied merge
+  // verdict (or its closing-reference/merge-conflict siblings).
+  STAGE1_CORRECTION_FINALIZATION_REQUIRED: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["run-finalize-correction-breakpoint"],
+  },
   // Issue #665 (live #639/#638/PR #640 reproduction): every documented merge prerequisite for a
   // correction-satisfied disposition passed, but GitHub's own live mergeable state reported a
   // real conflict against the current target branch -- a dimension neither stage1-gate.mjs nor

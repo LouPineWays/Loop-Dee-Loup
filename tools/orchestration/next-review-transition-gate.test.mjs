@@ -1551,7 +1551,7 @@ const CONTROL_BODY_438_STALE_STAGE1_REQUESTED = `## Current state
 - **Founder decision:** none
 `;
 
-test("runNextReviewTransitionGate: exact #438/PR #610 regression, before finalization -- a stale 'Stage 1: requested' bullet at the corrected head reproduces the stuck NO_ACTION_YET loop", async () => {
+test("runNextReviewTransitionGate: exact #438/PR #610 regression, before finalization -- a stale 'Stage 1: requested' bullet at the corrected head with NO earlier trigger round to derive evidence from stays NO_ACTION_YET", async () => {
   let correctionDeltaCalls = 0;
   const result = await runNextReviewTransitionGate(
     { repo: "o/r", controlIssue: "438" },
@@ -1560,15 +1560,132 @@ test("runNextReviewTransitionGate: exact #438/PR #610 regression, before finaliz
       ghPrStateImpl: async () => ({ headRefOid: ISSUE_611_CORRECTED_HEAD, state: "OPEN" }),
       stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      listStage1TriggerHeadsImpl: async () => [],
       checkCorrectionDeltaImpl: async () => {
         correctionDeltaCalls += 1;
-        throw new Error("should never be called: the stale 'requested' bullet carries no reviewed/corrected head pair to derive evidence from");
+        throw new Error("should never be called: no earlier trigger round carries a reviewed head to derive evidence from");
       },
     },
   );
   assert.equal(correctionDeltaCalls, 0);
   assert.equal(result.state, "NO_ACTION_YET");
   assert.equal(result.stopAfter, true);
+});
+
+// Issue #837 (the #817/#835/PR #836 live reproduction): the same stale 'Stage 1: requested' shape,
+// but an earlier Stage 1 trigger round bound to an ancestor head carries valid findings evidence --
+// the gate no longer dead-ends; it names exactly the one deterministic finalize command.
+test("runNextReviewTransitionGate: #837 -- stale 'Stage 1: requested' at a corrected head whose earlier trigger round has findings + strict ancestry resolves to STAGE1_CORRECTION_FINALIZATION_REQUIRED", async () => {
+  let deltaArgs = null;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "438" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_438_STALE_STAGE1_REQUESTED, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: ISSUE_611_CORRECTED_HEAD, state: "OPEN" }),
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      listStage1TriggerHeadsImpl: async () => [ISSUE_611_REVIEWED_HEAD],
+      checkCorrectionDeltaImpl: async (args) => {
+        deltaArgs = args;
+        return { exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: args.reviewedHead, correctedHead: args.correctedHead };
+      },
+    },
+  );
+  assert.deepEqual(deltaArgs, {
+    repo: "o/r",
+    pr: 610,
+    reviewedHead: ISSUE_611_REVIEWED_HEAD,
+    correctedHead: ISSUE_611_CORRECTED_HEAD,
+    gatedHead: ISSUE_611_CORRECTED_HEAD,
+  });
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE1_CORRECTION_FINALIZATION_REQUIRED");
+  assert.equal(result.stopAfter, true);
+  assert.equal(
+    result.nextCommand,
+    `node tools/orchestration/finalize-correction-breakpoint.mjs --control-issue 438 --execution-issue 437 --pr 610 --reviewed-head ${ISSUE_611_REVIEWED_HEAD} --corrected-head ${ISSUE_611_CORRECTED_HEAD}`,
+  );
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["run-finalize-correction-breakpoint"],
+  });
+});
+
+test("runNextReviewTransitionGate: #837 -- the trigger round for the current head itself is never treated as a reviewed head", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "438" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_438_STALE_STAGE1_REQUESTED, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: ISSUE_611_CORRECTED_HEAD, state: "OPEN" }),
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      listStage1TriggerHeadsImpl: async () => [ISSUE_611_CORRECTED_HEAD.toUpperCase()],
+      checkCorrectionDeltaImpl: async () => {
+        throw new Error("must not be called");
+      },
+    },
+  );
+  assert.equal(result.state, "NO_ACTION_YET");
+});
+
+test("runNextReviewTransitionGate: #837 -- NOT_SATISFIED evidence (clean-pass/no findings, diverged, stale) never yields a finalization verdict", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "438" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_438_STALE_STAGE1_REQUESTED, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: ISSUE_611_CORRECTED_HEAD, state: "OPEN" }),
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      listStage1TriggerHeadsImpl: async () => [ISSUE_611_REVIEWED_HEAD],
+      checkCorrectionDeltaImpl: async () => ({ exitCode: 2, state: "NOT_SATISFIED", reason: "no findings" }),
+    },
+  );
+  assert.equal(result.state, "NO_ACTION_YET");
+});
+
+test("runNextReviewTransitionGate: #837 -- an operational failure of the probe (trigger listing or evidence check) fails closed to AMBIGUOUS, never NO_ACTION_YET", async () => {
+  const base = {
+    ghIssueViewImpl: async () => ({ body: CONTROL_BODY_438_STALE_STAGE1_REQUESTED, state: "OPEN" }),
+    ghPrStateImpl: async () => ({ headRefOid: ISSUE_611_CORRECTED_HEAD, state: "OPEN" }),
+    stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+    checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+  };
+  const listFails = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "438" },
+    {
+      ...base,
+      listStage1TriggerHeadsImpl: async () => {
+        throw new Error("boom");
+      },
+    },
+  );
+  assert.equal(listFails.state, "AMBIGUOUS");
+  const deltaFails = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "438" },
+    {
+      ...base,
+      listStage1TriggerHeadsImpl: async () => [ISSUE_611_REVIEWED_HEAD],
+      checkCorrectionDeltaImpl: async () => ({ exitCode: 1, message: "gh down" }),
+    },
+  );
+  assert.equal(deltaFails.state, "AMBIGUOUS");
+});
+
+test("runNextReviewTransitionGate: #837 -- direct-reference mode (no control Issue) never probes for an unfinalized correction", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", pr: 610, head: ISSUE_611_CORRECTED_HEAD, issue: "437" },
+    {
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      listStage1TriggerHeadsImpl: async () => {
+        throw new Error("must not be called");
+      },
+      checkCorrectionDeltaImpl: async () => {
+        throw new Error("must not be called");
+      },
+    },
+  );
+  assert.equal(result.state, "NO_ACTION_YET");
 });
 
 const CONTROL_BODY_438_CORRECTION_SATISFIED = `## Current state
@@ -1627,6 +1744,7 @@ test("runNextReviewTransitionGate: control-Issue mode with no correction-satisfi
       ghPrStateImpl: async () => ({ headRefOid: "livehead123", state: "OPEN" }),
       stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      listStage1TriggerHeadsImpl: async () => [],
       checkCorrectionDeltaImpl: async () => {
         correctionDeltaCalls++;
         throw new Error("should never be called when no correction-satisfied disposition parses");
