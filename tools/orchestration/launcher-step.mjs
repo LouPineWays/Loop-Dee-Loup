@@ -214,3 +214,117 @@ export async function runLauncherStep({ controlIssue, deps } = {}) {
     return result(Outcome.FAIL_CLOSED, { state, reason: `step failed: ${e?.message ?? e}` });
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Founder interrupt/resume, terminal return, environment resume (issue #73, unit 73-E).
+// Pure helpers; durable writes go through injected deps (write-control-snapshot.mjs in production).
+// ---------------------------------------------------------------------------------------------
+
+export const DECISION_SURFACE_HEADING = "## Launcher Decision Surface (v1)";
+export const FOUNDER_DECISION_STATES = Object.freeze({ NONE: "none", PENDING: "pending" });
+const WRITER_PERMISSIONS = ["admin", "maintain", "write"];
+
+// One durable surface batching every currently known founder question on the active path.
+// questions: [{ id, question, blocking, options?: string[], recommended?: string }]
+export function renderDecisionSurface({ controlIssue, questions } = {}) {
+  if (!Number.isInteger(controlIssue) || !Array.isArray(questions) || questions.length === 0) return null;
+  const lines = [DECISION_SURFACE_HEADING, "", `- **Control issue:** #${controlIssue}`];
+  for (const q of questions) {
+    if (!q?.id || !q?.question || !q?.blocking) return null;
+    lines.push(
+      `- **Question ${q.id}:** ${q.question} (blocks: ${q.blocking}; options: ${(q.options ?? []).join(" | ") || "open"}; recommended: ${q.recommended ?? "none"})`,
+    );
+  }
+  lines.push("", "Resolve by replying with `- **Answer <id>:** <choice>` bullets from a repository writer.");
+  return lines.join("\n");
+}
+
+// comments: [{ id, body, authorPermission }]. Answers count only from write/maintain/admin
+// authors; the first answer per question wins.
+export function parseDecisionResolution(comments, questionIds) {
+  const answers = new Map();
+  for (const c of Array.isArray(comments) ? comments : []) {
+    if (!WRITER_PERMISSIONS.includes(String(c?.authorPermission ?? "").toLowerCase())) continue;
+    for (const line of String(c.body ?? "").split(/\r?\n/)) {
+      const m = /^\s*[-*]\s+\*\*Answer ([^*:]+):\*\*\s*(\S.*?)\s*$/.exec(line);
+      if (m && !answers.has(m[1].trim())) answers.set(m[1].trim(), m[2].trim());
+    }
+  }
+  const missing = questionIds.filter((id) => !answers.has(id));
+  return { resolved: missing.length === 0, missing, answers };
+}
+
+// Resume automatically only when the decision is fully resolved AND exactly one authorized
+// continuation remains; zero or several is itself a founder-level stop.
+export function resolveFounderResume({ questionIds, comments, continuations } = {}) {
+  const ids = Array.isArray(questionIds) ? questionIds : [];
+  if (ids.length === 0) return { outcome: Outcome.FAIL_CLOSED, resume: false, reason: "no decision surface" };
+  const r = parseDecisionResolution(comments, ids);
+  if (!r.resolved) {
+    return { outcome: Outcome.WAITING, resume: false, founderDecision: FOUNDER_DECISION_STATES.PENDING, missing: r.missing };
+  }
+  const list = Array.isArray(continuations) ? continuations : [];
+  if (list.length === 1) {
+    return {
+      outcome: Outcome.ADVANCED,
+      resume: true,
+      continuation: list[0],
+      founderDecision: FOUNDER_DECISION_STATES.NONE,
+      answers: Object.fromEntries(r.answers),
+    };
+  }
+  return {
+    outcome: Outcome.WAITING,
+    resume: false,
+    founderDecision: FOUNDER_DECISION_STATES.PENDING,
+    reason: list.length === 0 ? "no authorized continuation remains" : "multiple equally authorized continuations",
+  };
+}
+
+// Compact founder-evaluation result persisted to the thin control Issue on terminal CLEAN.
+export function renderTerminalReturn({ objective, terminalResult, evidencePointers, residualLimitation, founderDecision } = {}) {
+  const fd = founderDecision ?? FOUNDER_DECISION_STATES.NONE;
+  if (!objective || !terminalResult || !Array.isArray(evidencePointers) || evidencePointers.length === 0) return null;
+  if (!Object.values(FOUNDER_DECISION_STATES).includes(fd)) return null;
+  return [
+    `- **Objective:** ${objective}`,
+    `- **Terminal result:** ${terminalResult}`,
+    `- **Evidence:** ${evidencePointers.join("; ")}`,
+    `- **Residual limitation:** ${residualLimitation || "none"}`,
+    `- **Founder decision:** ${fd}`,
+  ].join("\n");
+}
+
+// deps.writeControl(block) persists via write-control-snapshot; deps.readControl() reads back.
+// ADVANCED only when the read-back contains the exact block; never selects follow-on work
+// (autonomy ends at the authorized objective boundary).
+export async function projectTerminalReturn(input, deps) {
+  const block = renderTerminalReturn(input);
+  if (!block) return result(Outcome.FAIL_CLOSED, { reason: "terminal return fields incomplete" });
+  try {
+    await deps.writeControl(block);
+    const back = await deps.readControl();
+    if (typeof back !== "string" || !back.includes(block)) {
+      return result(Outcome.FAIL_CLOSED, { reason: "terminal return not provable on read-back" });
+    }
+    return result(Outcome.ADVANCED, { terminal: true, block, selectsNextObjective: false });
+  } catch (e) {
+    return result(Outcome.FAIL_CLOSED, { reason: `terminal projection failed: ${e?.message ?? e}` });
+  }
+}
+
+// Replacement-environment resume: derived only from durable state passed in (authorization,
+// attempt-claim plan, recorded environment requirements); runner/provider memory is never read.
+// Untrusted triggers gain nothing; an environment mismatch fails durably, never silently.
+export function resumeFromDurableState({ durable, trigger, environment } = {}) {
+  if (!trigger?.trusted) return result(Outcome.FAIL_CLOSED, { reason: `untrusted trigger: ${trigger?.reason ?? "none"}` });
+  if (!durable?.authorization) return result(Outcome.FAIL_CLOSED, { reason: "no durable authorization" });
+  const required = durable.requiredEnvironment ?? {};
+  const mismatched = Object.keys(required).filter((k) => environment?.[k] !== required[k]);
+  if (mismatched.length) {
+    return result(Outcome.FAIL_CLOSED, { reason: "environment mismatch", mismatched, durableHold: true });
+  }
+  const action = durable.claimsPlan?.action;
+  if (action === "BLOCK" || action == null) return result(Outcome.WAITING, { reason: "attempt claim blocks launch", action });
+  return result(Outcome.ADVANCED, { resume: true, action, authorization: durable.authorization.commentId ?? null });
+}
