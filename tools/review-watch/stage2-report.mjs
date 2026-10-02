@@ -739,6 +739,7 @@ function findMarkerWalkthroughRun(lines) {
   if (matchedLineIndexes.length === 0) return null;
 
   let count = 1;
+  let runFirst = matchedLineIndexes.length - 1;
   for (let k = matchedLineIndexes.length - 1; k > 0; k--) {
     let brokenByBoundary = false;
     for (let lineIndex = matchedLineIndexes[k - 1] + 1; lineIndex < matchedLineIndexes[k]; lineIndex++) {
@@ -749,8 +750,20 @@ function findMarkerWalkthroughRun(lines) {
     }
     if (brokenByBoundary) break;
     count++;
+    runFirst = k - 1;
   }
-  return { count, endLineIndex: matchedLineIndexes[matchedLineIndexes.length - 1] };
+  return { count, endLineIndex: matchedLineIndexes[matchedLineIndexes.length - 1], itemLineIndexes: matchedLineIndexes.slice(runFirst) };
+}
+
+// Pure. True when the numbered run is independently identifiable as verification walk-through
+// content: every item carries a status glyph (numberedWalkthroughIsFullyMarked's rule), or the
+// nearest heading above its first item names verification. Deterministic; no semantic parsing.
+function numberedRunIsVerificationContent(lines, run) {
+  if (run.itemLineIndexes.every((index) => NUMBERED_MARKER_ITEM_PATTERN.test(lines[index]))) return true;
+  for (let i = run.itemLineIndexes[0] - 1; i >= 0; i--) {
+    if (HEADING_LEVEL_PATTERN.test(lines[i])) return VERIFICATION_MENTION_PATTERN.test(lines[i]);
+  }
+  return false;
 }
 
 // Pure. Counts the items in `text`'s verification-checklist walk-through, whichever of the two
@@ -772,6 +785,23 @@ export function countVerificationWalkthroughItems(text) {
   if (!numberedRun && !markerRun) return 0;
   if (!markerRun) return numberedRun.count;
   if (!numberedRun) return markerRun.count;
+  // Issue #821 (live Audit #820): a complete numbered walk-through followed by a later
+  // "### Verification Results" section whose every bullet is a literal backtick-quoted command
+  // (COMMAND_LOG_BULLET_CONTENT_PATTERN) is a command log, not a competing walk-through, even
+  // though its heading is not a "Checks"-style label. Position alone must not let it displace the
+  // numbered run. Content-gated, so prose marker walk-throughs and a lone command-shaped marker
+  // run (no numbered run to prefer) keep their prior classification.
+  // Stage 1 correction: command-log shape alone is never positive evidence for the numbered run.
+  // The numbered run must independently be established as verification content: every item
+  // carries a status glyph, or its nearest preceding heading is a verification heading. An
+  // unrelated numbered notes/findings list fails both and falls through to the position rule.
+  if (
+    markerRun.endLineIndex > numberedRun.endLineIndex &&
+    markerRun.itemLineIndexes.every((index) => COMMAND_LOG_BULLET_CONTENT_PATTERN.test(lines[index])) &&
+    numberedRunIsVerificationContent(lines, numberedRun)
+  ) {
+    return numberedRun.count;
+  }
   return numberedRun.endLineIndex > markerRun.endLineIndex ? numberedRun.count : markerRun.count;
 }
 

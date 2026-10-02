@@ -1,0 +1,34 @@
+## Stage 2 Audit Report
+
+**Verdict: CLEAN**
+
+**Reviewed merge:** `ea83d234f6d2467bd895b7554d6949c923c38710`  
+**Merged PR:** #819  
+**Work issue:** #818
+
+### Findings
+
+No correctness, safety, or regression findings.
+
+### Verification Checklist
+
+1. **REST persistence confirmed.** `write-control-snapshot.mjs` delegates persistence to `ghRestEditIssueBody`, replacing the previous GraphQL-backed `gh issue edit` path. The shared helper performs `PATCH repos/{repo}/issues/{n}` through `gh api --input -`. 
+
+2. **Validation-before-transport confirmed.** `checkWriteControlSnapshot` calls `validateControlSnapshot` and returns `REJECTED` before invoking the injected transport when validation fails. 
+
+3. **Fail-closed response verification confirmed.** The REST helper rejects pull-request responses, mismatched issue numbers or repositories, malformed JSON, and body mismatches. Body comparison permits only CRLF-to-LF normalization. Transport errors propagate to the writer as operational exit code 1. 
+
+4. **Repository and body transport behavior confirmed.** The CLI retains explicit `--repo` support and otherwise uses `resolveRepoIdentity`; proposed bodies are read from a file or stdin. The REST request serializes the body as JSON on stdin, avoiding argv and shell-escaping dependence. 
+
+5. **Regression coverage confirmed.** Tests cover successful REST writes, case-insensitive repository identity, large multiline bodies, CRLF normalization, validation rejection without transport, wrong targets, PR responses, malformed/incomplete responses, body mismatch, and HTTP 403 failure. 
+
+6. **Required workflow confirmed.** The only workflow with a matching `tools/orchestration/**` path trigger is `Control-plane paths`; the queried run for reviewed head `23c641f9c745ff933f7bc97c74a348e52f50e1be` completed successfully. 
+
+### Verification Results
+
+* ✅ `node --test tools/orchestration/write-control-snapshot.test.mjs tools/orchestration/close-control.test.mjs tools/orchestration/reconcile-control-blocker.test.mjs` — 73 tests passed.
+* ✅ `git diff --check ea83d234f6d2467bd895b7554d6949c923c38710^ ea83d234f6d2467bd895b7554d6949c923c38710`
+* ✅ `gh api 'repos/LouPineWays/Loop-Dee-Loup/actions/runs?head_sha=23c641f9c745ff933f7bc97c74a348e52f50e1be&per_page=100' --jq '.workflow_runs[] | [.name,.status,.conclusion,.html_url] | @tsv'` — `Control-plane paths` reported `completed / success`.
+* ✅ `git status --porcelain=v1` — working tree remained clean; this audit made no repository changes, so no follow-up commit or PR was created.
+
+ [View task →](https://chatgpt.com/s/cd_6abe8eafdef88191b0f217fb9a7b2a3d)

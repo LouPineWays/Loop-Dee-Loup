@@ -1718,3 +1718,80 @@ test("extractResponseVerdict: two contradictory genuine verdict declarations in 
   const body = ["CLEAN — looks fine.", "", "Verdict: NOT CLEAN"].join("\n");
   assert.equal(extractResponseVerdict(body), null);
 });
+
+// Issue #821: Audit #820's real genuine CLEAN response (comment 5936147032) — a six-item numbered
+// "### Verification Checklist" followed by a later four-bullet "### Verification Results"
+// command/result section. Pre-fix, the later marker run won the end-position tie-break (count 4).
+const ISSUE_820_COMMENT = readFixture("issue-820-comment.txt");
+const ISSUE_820_CHECKLIST = readFixture("issue-820-checklist.txt");
+
+test("countVerificationWalkthroughItems (issue #821): a later all-command-bullet 'Verification Results' section does not displace the six-item numbered walk-through (exact #820)", () => {
+  assert.equal(countNumberedItems(ISSUE_820_CHECKLIST), 6);
+  assert.equal(countVerificationWalkthroughItems(ISSUE_820_COMMENT), 6);
+  assert.equal(hasCompleteVerificationEvidence(ISSUE_820_COMMENT, ISSUE_820_CHECKLIST), true);
+});
+
+test("countVerificationWalkthroughItems (issue #821): a truncated numbered walk-through is not padded by a longer later command-bullet section", () => {
+  const body = [
+    "### Verification Checklist",
+    "",
+    "1. ✅ First item confirmed.",
+    "2. ✅ Second item confirmed.",
+    "",
+    "### Verification Results",
+    "",
+    ...Array.from({ length: 7 }, (_, i) => `* ✅ \`node check-${i}.mjs\` — ok`),
+    "",
+    "Verdict: CLEAN",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 2);
+  assert.equal(hasCompleteVerificationEvidence(body, ISSUE_820_CHECKLIST), false);
+});
+
+test("countVerificationWalkthroughItems (issue #821): a later prose marker-bullet walk-through still wins over an earlier numbered findings list", () => {
+  const body = [
+    "1. Finding A",
+    "",
+    "### Verification Results",
+    "",
+    "- ✅ Confirmed the first item.",
+    "- ✅ Confirmed the second item.",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 2);
+});
+
+test("countVerificationWalkthroughItems (issue #821 correction): an unrelated numbered notes list is not promoted over a later command-log marker run", () => {
+  const body = [
+    "### Notes",
+    "",
+    "1. Observation A.",
+    "2. Observation B.",
+    "3. Observation C.",
+    "4. Observation D.",
+    "5. Observation E.",
+    "6. Observation F.",
+    "",
+    "### Verification Results",
+    "",
+    "* ✅ `node check-a.mjs` — ok",
+    "* ✅ `node check-b.mjs` — ok",
+    "",
+    "Verdict: CLEAN",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 2);
+  assert.equal(hasCompleteVerificationEvidence(body, ISSUE_820_CHECKLIST), false);
+});
+
+test("countVerificationWalkthroughItems (issue #821 correction): a glyph-marked numbered run is preferred over a later command log without a verification heading", () => {
+  const body = [
+    "1. ✅ One.",
+    "2. ✅ Two.",
+    "3. ✅ Three.",
+    "",
+    "### Results",
+    "",
+    "* ✅ `node a.mjs` — ok",
+    "* ✅ `node b.mjs` — ok",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 3);
+});
