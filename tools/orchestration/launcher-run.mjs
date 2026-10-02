@@ -23,6 +23,66 @@ import { buildReadEffect } from "./launcher-readback.mjs";
 import { loadRouteEvidence } from "./route-qualification.mjs";
 import { readGithubPr, readGithubIssue } from "./github-read.mjs";
 import { parseControlBullet, upsertControlBullet, parseExecutionPointer, resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
+import { findExistingTrigger } from "../review-watch/trigger.mjs";
+import { isGenuineResponse } from "../review-watch/genuine-response.mjs";
+import { extractResponseVerdict } from "../review-watch/stage2-report.mjs";
+
+const REVIEW_BOT = "chatgpt-codex-connector[bot]";
+
+// Finding 1 (Stage 1 on PR #826): a normal STAGE2_CORRECTION_REQUIRED verdict carries no report
+// identity, so the guidance target's evidence id is derived from the audit thread itself: the
+// latest genuine post-trigger reviewer comment whose own stated verdict is NOT CLEAN. Reuses the
+// canonical trigger/genuine-response/verdict primitives; null when no such comment exists (the
+// guidance gate then reports a malformed target and the launcher stops, never guesses).
+export function findStage2ReportCommentId(comments, { bot = REVIEW_BOT } = {}) {
+  const list = Array.isArray(comments) ? comments : [];
+  const trigger = findExistingTrigger(list, {});
+  if (!trigger) return null;
+  const since = new Date(trigger.created_at).getTime();
+  const reports = list.filter(
+    (c) =>
+      c.login === bot &&
+      new Date(c.created_at).getTime() >= since &&
+      isGenuineResponse(c.body ?? "") &&
+      extractResponseVerdict(c.body ?? "") === "NOT CLEAN",
+  );
+  return reports.length > 0 ? reports[reports.length - 1].id : null;
+}
+
+// Finding 5: founder answers are routed into the durable control snapshot before the interrupt
+// clears. One "### Resolved founder decisions" section; lines for the same surface are replaced,
+// other surfaces' lines are kept.
+export const RESOLVED_DECISIONS_HEADING = "### Resolved founder decisions";
+
+export function renderResolvedDecisionLines({ surfaceId, answers, generalComments }) {
+  const lines = Object.entries(answers ?? {}).map(([q, a]) => `- **Surface ${surfaceId} Answer ${q}:** ${a}`);
+  if (generalComments) lines.push(`- **Surface ${surfaceId} General comments:** ${generalComments}`);
+  return lines;
+}
+
+export function upsertResolvedDecisions(body, { surfaceId, answers, generalComments }) {
+  const lines = String(body ?? "").replace(/\r\n/g, "\n").split("\n");
+  const start = lines.findIndex((l) => l.trim() === RESOLVED_DECISIONS_HEADING);
+  let before = lines;
+  let kept = [];
+  let after = [];
+  if (start >= 0) {
+    let end = lines.length;
+    for (let i = start + 1; i < lines.length; i += 1) {
+      if (/^#{1,6}\s/.test(lines[i])) {
+        end = i;
+        break;
+      }
+    }
+    before = lines.slice(0, start);
+    kept = lines.slice(start + 1, end).filter((l) => l.trim() !== "" && !l.startsWith(`- **Surface ${surfaceId} `));
+    after = lines.slice(end);
+  }
+  const section = [RESOLVED_DECISIONS_HEADING, "", ...kept, ...renderResolvedDecisionLines({ surfaceId, answers, generalComments }), ""];
+  const head = before.join("\n").replace(/\s+$/, "");
+  const tail = after.join("\n");
+  return `${`${head}\n\n${section.join("\n")}${tail ? `\n${tail}` : ""}`.replace(/\s+$/, "")}\n`;
+}
 
 const SAFE_TOKEN = /^[A-Za-z0-9_.\/=:#@-]+$/;
 
@@ -46,6 +106,7 @@ const MERGE_STATES = new Set(["STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", "STAG
 const NEXT_COMMAND_STATES = new Set([
   "STAGE2_REPORT_READY_TO_RECORD",
   "STAGE2_TRIGGER_REQUIRED",
+  "STAGE2_AUDIT_ALREADY_PREPARED",
   "STAGE2_CLOSE_READY",
   "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
 ]);
@@ -78,7 +139,7 @@ export function buildDeps({
   };
   const readComments = (number) =>
     JSON.parse(paged(`repos/{owner}/{repo}/issues/${number}/comments`)).flat().map((c) => ({
-      id: c.id, body: c.body, authorPermission: permission(c.user?.login),
+      id: c.id, body: c.body, authorPermission: permission(c.user?.login), login: c.user?.login ?? null, created_at: c.created_at ?? null,
     }));
   const writeControlBody = (body) =>
     io.node("tools/orchestration/write-control-snapshot.mjs", ["--control-issue", String(controlIssue), "--body-file", "-"], body);
@@ -139,6 +200,12 @@ export function buildDeps({
         if (control.length !== 1) throw new Error("close verdict has no single control-terminalization segment to finalize");
         return io.node(control[0].file, control[0].args);
       }
+      if (state === "STAGE2_AUDIT_ALREADY_PREPARED") {
+        // The trigger already exists (read-back); only the control projection is missing.
+        const fin = parseNextCommand(verdict.nextCommand).filter((c) => c.file === "tools/orchestration/finalize-audit-breakpoint.mjs");
+        if (fin.length !== 1) throw new Error("prepared-audit verdict has no single finalize-audit-breakpoint segment");
+        return io.node(fin[0].file, fin[0].args);
+      }
       if (state === "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION") {
         for (const c of parseNextCommand(verdict.nextCommand)) io.node(c.file, c.args);
         return undefined;
@@ -153,7 +220,10 @@ export function buildDeps({
       const evidence = readEvidence();
       return {
         comments,
-        reportCommentId: verdict.reportCommentId ?? verdict.postAudit?.reportCommentId ?? null,
+        reportCommentId:
+          verdict.reportCommentId ??
+          verdict.postAudit?.reportCommentId ??
+          (verdict.state === "STAGE2_CORRECTION_REQUIRED" ? findStage2ReportCommentId(comments) : null),
         routeInput: {
           outcomeClass,
           assurance: {},
@@ -195,16 +265,44 @@ export function dispatchFreshWorker({ dispatch, io, controlIssue, env = process.
     if (want[k] != null && fresh[k] != null && String(want[k]) !== String(fresh[k])) throw new Error(`stale dispatch: ${k} changed`);
   }
   let prompts;
+  let workerCwd;
+  let binding = null;
   if (fresh.state === "READY_TO_DISPATCH_UNITS") {
     const units = Array.isArray(fresh.dispatchReadyUnitIds) ? fresh.dispatchReadyUnitIds : [];
     if (units.length === 0) throw new Error("units verdict names no dispatch-ready unit");
     // Sequential: one writer at a time, so no overlapping-writer directory conflict.
     prompts = units.map((u) => io.node("tools/orchestration/format-unit-dispatch-prompt.mjs", ["--execution-issue", String(fresh.executionIssue), "--unit", String(u)]));
+  } else if (fresh.state === "STAGE1_CORRECTION_REQUIRED") {
+    // Finding 2: a findings-bearing Stage 1 correction needs the pre-spawn PR-head checkout
+    // reservation the formatter requires; the worker runs from that reserved path and the
+    // reservation is released afterwards (idempotent; the worker normally releases it itself).
+    const reservedRaw = io.node("tools/orchestration/pr-head-checkout-preflight.mjs", ["--reserve-from-gate"], freshRaw);
+    const reserved = JSON.parse(reservedRaw);
+    if (reserved?.state === "CHECKOUT_BINDING_UNVERIFIED") throw new Error(`PR-head checkout reservation failed: ${reserved.reason ?? reserved.verdict ?? "unverified"}`);
+    if (fresh.correctionReason !== "closing-reference") {
+      if (typeof reserved?.checkoutBinding?.path !== "string") throw new Error("reservation returned no checkoutBinding");
+      workerCwd = reserved.checkoutBinding.path;
+      binding = reserved.checkoutBinding;
+    }
+    prompts = [io.node("tools/orchestration/format-dispatch-prompt.mjs", [], reservedRaw)];
   } else {
     prompts = [io.node("tools/orchestration/format-dispatch-prompt.mjs", [], freshRaw)];
   }
-  const run = runWorker ?? ((prompt) => execFileSync(argv[0], argv.slice(1), { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["pipe", "ignore", "inherit"], input: prompt, env: { ...env, LDL_WORKER_ROUTE: String(dispatch.route) } }));
-  for (const p of prompts) run(p);
+  const run =
+    runWorker ??
+    ((prompt, { cwd } = {}) =>
+      execFileSync(argv[0], argv.slice(1), { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["pipe", "ignore", "inherit"], input: prompt, cwd, env: { ...env, LDL_WORKER_ROUTE: String(dispatch.route) } }));
+  try {
+    for (const p of prompts) run(p, { cwd: workerCwd });
+  } finally {
+    if (binding?.token) {
+      try {
+        io.node("tools/orchestration/pr-head-checkout-preflight.mjs", ["--release-binding", String(binding.token)]);
+      } catch {
+        // already released by the worker, or unreleasable: durable state is re-read either way
+      }
+    }
+  }
   return { launched: true, count: prompts.length };
 }
 
@@ -221,6 +319,22 @@ export function buildSupervisorDeps({ controlIssue, executionIssue, stepDeps, io
     dispatchWorker: async (dispatch) => dispatchFreshWorker({ dispatch, io, controlIssue, env, runWorker }),
     now,
     sleep,
+    // Canonical poller (tools/review-watch/poll.mjs) for the bounded reviewer wait: since = the
+    // existing trigger's own timestamp (trigger.mjs authority). Exit 0 = matched, 2 = timed out
+    // (still waiting); anything else is an operational failure.
+    waitForReviewer: async (wait, budgetMs) => {
+      const triggerAt = findExistingTrigger(readComments(wait.number), {})?.created_at;
+      if (!triggerAt) return { matched: false, reason: "no reviewer trigger on the thread to poll since" };
+      const timeoutSec = Math.max(1, Math.floor(budgetMs / 1000));
+      const args = ["--repo", String(wait.repo ?? repo), "--kind", wait.kind, "--number", String(wait.number), "--since", triggerAt, "--timeout", String(timeoutSec), "--interval", String(Math.min(150, timeoutSec))];
+      try {
+        io.node("tools/review-watch/poll.mjs", args);
+        return { matched: true };
+      } catch (e) {
+        if (e?.status === 2) return { matched: false, reason: "timeout" };
+        throw e;
+      }
+    },
     // A pending Founder decision on the control issue blocks stepping until its durable surface is
     // fully answered by writers and exactly one authorized continuation remains.
     readFounderSurface: async () => {
@@ -237,9 +351,18 @@ export function buildSupervisorDeps({ controlIssue, executionIssue, stepDeps, io
       const continuations = ptr?.ok && ptr.issue === executionIssue ? [`execution#${executionIssue}`] : [];
       return { surfaceId: parsed.surfaceId, questionIds: parsed.questionIds, comments, continuations };
     },
-    resumeFounder: async () => {
-      writeControlBody(upsertControlBullet(controlBody(), "Founder decision", "none"));
-      if (!isNone(parseControlBullet(controlBody(), "Founder decision"))) throw new Error("cleared founder decision not provable on read-back");
+    // Route the founder answers into the durable snapshot FIRST, then clear the interrupt in the
+    // same write, and prove both on read-back; an unprovable record never clears the decision.
+    resumeFounder: async (resolution) => {
+      const { surfaceId, answers, generalComments } = resolution ?? {};
+      if (!surfaceId || !answers || Object.keys(answers).length === 0) throw new Error("resolution carries no surface id or answers to persist");
+      const next = upsertControlBullet(upsertResolvedDecisions(controlBody(), { surfaceId, answers, generalComments }), "Founder decision", "none");
+      writeControlBody(next);
+      const after = controlBody();
+      if (!isNone(parseControlBullet(after, "Founder decision"))) throw new Error("cleared founder decision not provable on read-back");
+      for (const line of renderResolvedDecisionLines({ surfaceId, answers, generalComments })) {
+        if (!after.split(/\r?\n/).some((l) => l.trim() === line)) throw new Error(`resolved founder decision not provable on read-back: ${line}`);
+      }
     },
     terminalInput: async (r) => {
       const body = controlBody();
@@ -295,7 +418,6 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const stepDeps = buildDeps({ controlIssue, executionIssue, io: realIo, repo: id.repo });
   const deps = buildSupervisorDeps({
     controlIssue, executionIssue, stepDeps, io: realIo, repo: id.repo,
-    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   });
   const waitBudgetMs = Number(process.env.LDL_WAIT_BUDGET_MS ?? 0) || 0;
   const r = await runLauncherSupervisor({ deps, maxSteps: Number(process.env.LDL_MAX_STEPS ?? 25) || 25, waitBudgetMs });

@@ -46,8 +46,8 @@ function refKey(evidence) {
 //   readFounderSurface() -> null | { noSurface: true } | { surfaceId, questionIds, comments, continuations },
 //   resumeFounder(resolution) -> persists the cleared founder decision (throws when unprovable),
 //   terminalInput() -> input for projectTerminalReturn, writeControl/readControl -> terminal deps,
-//   sleep(ms), now() }
-export async function runLauncherSupervisor({ deps, maxSteps = 25, waitBudgetMs = 0, pollIntervalMs = 60000 } = {}) {
+//   waitForReviewer(wait, budgetMs) -> { matched }, now() }
+export async function runLauncherSupervisor({ deps, maxSteps = 25, waitBudgetMs = 0, } = {}) {
   const trail = [];
   const done = (outcome, extra = {}) => ({ outcome, trail, ...extra });
   if (!deps) return done(SupervisorOutcome.FAIL_CLOSED, { reason: "missing deps" });
@@ -69,7 +69,7 @@ export async function runLauncherSupervisor({ deps, maxSteps = 25, waitBudgetMs 
       trail.push({ founder: r.outcome, resume: r.resume });
       if (!r.resume) return done(SupervisorOutcome.WAITING, { reason: r.reason ?? "founder decision pending", founderDecision: r.founderDecision, missing: r.missing });
       try {
-        await deps.resumeFounder(r);
+        await deps.resumeFounder({ ...r, surfaceId: surface.surfaceId });
       } catch (e) {
         return done(SupervisorOutcome.FAIL_CLOSED, { reason: `founder resume not durable: ${e?.message ?? e}` });
       }
@@ -124,11 +124,21 @@ export async function runLauncherSupervisor({ deps, maxSteps = 25, waitBudgetMs 
         break;
       }
       case Outcome.WAITING: {
-        const needsExternal = r.evidence?.state === "NO_ACTION_YET" && !r.evidence?.chatGuidanceRequired;
+        const needsExternal = r.evidence?.state === "NO_ACTION_YET" && !r.evidence?.chatGuidanceRequired && r.evidence?.wait;
         const now = deps.now ? deps.now() : Date.now();
-        if (needsExternal && deps.sleep && now - startedAt + pollIntervalMs <= waitBudgetMs) {
-          await deps.sleep(pollIntervalMs);
-          break;
+        const remaining = waitBudgetMs - (now - startedAt);
+        // The external wait uses the canonical review poller (deps.waitForReviewer binds
+        // tools/review-watch/poll.mjs), never a hand-rolled sleep-and-rerun loop; after it
+        // returns matched the gate is simply re-read on the next iteration.
+        if (needsExternal && deps.waitForReviewer && remaining >= 1000) {
+          let w;
+          try {
+            w = await deps.waitForReviewer(r.evidence.wait, remaining);
+          } catch (e) {
+            return done(SupervisorOutcome.FAIL_CLOSED, { reason: `reviewer wait failed: ${e?.message ?? e}`, state: r.evidence.state });
+          }
+          trail.push({ waited: r.evidence.wait.kind, matched: w?.matched === true });
+          if (w?.matched === true) break;
         }
         return done(SupervisorOutcome.WAITING, { reason: r.evidence?.reason ?? r.evidence?.handoff ?? "waiting on an external durable event", state: r.evidence?.state });
       }

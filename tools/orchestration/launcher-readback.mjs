@@ -16,9 +16,7 @@
 
 import { parseControlBullet, verifyRoutedDispatchManifest } from "./ready-dispatch-gate.mjs";
 import { parseStage2Verdict } from "../review-watch/lifecycle-gate.mjs";
-
-const WRITERS = ["admin", "maintain", "write"];
-const TRIGGER_TEXT = "@codex review";
+import { findExistingTrigger } from "../review-watch/trigger.mjs";
 const NO_MANIFEST_POINTER = "Execution Plan Index has no settled Dispatch manifest pointer";
 
 const MERGE_STATES = new Set(["STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2"]);
@@ -111,8 +109,13 @@ export function buildReadEffect(deps) {
     const { body } = await readIssue({ repo, number: audit });
     const v = parseStage2Verdict(body);
     if (v === null) return bad(target, target, "audit Verdict field is malformed");
-    const recorded = v === "CLEAN" || v === "NOT CLEAN";
-    return ev(target, recorded ? "present" : "absent", recorded, { verdict: v });
+    // The durable value must equal the verdict the completed report itself backs. A settled but
+    // different value (e.g. a preparation-time NOT CLEAN placeholder over a CLEAN report) is NOT
+    // the promoted verdict: it reads as absent so record-verdict runs, never as proof.
+    const expected = verdict?.postAudit?.reportEvidence?.verdict;
+    if (expected !== "CLEAN" && expected !== "NOT CLEAN") return bad(target, target, "verdict carries no report-backed verdict to record");
+    const recorded = v === expected;
+    return ev(target, recorded ? "present" : "absent", recorded, { verdict: v, expectedVerdict: expected });
   }
 
   async function stage2Trigger(verdict) {
@@ -121,12 +124,28 @@ export function buildReadEffect(deps) {
     const target = `audit#${audit}`;
     const issue = await readIssue({ repo, number: audit });
     if (issue.state !== "OPEN") return bad(target, target, "audit issue is not open");
+    // trigger.mjs's own existing-trigger authority (the workflow posts as github-actions[bot],
+    // which has no collaborator permission): never a second, permission-filtered detector.
     const comments = await readComments(audit);
-    const triggers = comments.filter(
-      (c) => WRITERS.includes(String(c.authorPermission ?? "").toLowerCase()) && String(c.body ?? "").includes(TRIGGER_TEXT),
-    );
-    if (triggers.length > 1) return bad(target, target, "more than one reviewer trigger comment");
-    return ev(target, triggers.length === 1 ? "present" : "absent", triggers.length === 1);
+    const present = findExistingTrigger(comments, {}) !== null;
+    return ev(target, present ? "present" : "absent", present);
+  }
+
+  // Prepared-audit continuation (finalize-audit-breakpoint then the idempotent trigger): complete
+  // only when the control projection names this audit AND the reviewer trigger exists. A missing
+  // trigger reads as absent/unprojected so the whole (idempotent) command re-runs; a posted
+  // trigger without the projection is completed-unprojected and only the finalize step re-runs.
+  async function stage2Prepared(verdict) {
+    const audit = issueNumberOf(verdict?.auditIssue);
+    if (!audit) return bad("audit:none", "audit:none", "verdict names no audit issue");
+    const target = `audit#${audit}`;
+    const issue = await readIssue({ repo, number: audit });
+    if (issue.state !== "OPEN") return bad(target, target, "audit issue is not open");
+    const trigger = findExistingTrigger(await readComments(audit), {}) !== null;
+    const { body } = await readControl();
+    const projected = singlePointer(parseControlBullet(body, "Stage 2")) === audit && parseControlBullet(body, "Lifecycle") === "AUDIT";
+    if (!trigger) return ev(target, "absent", false);
+    return ev(target, "present", projected);
   }
 
   async function stage2Close(verdict) {
@@ -194,6 +213,8 @@ export function buildReadEffect(deps) {
             return await stage2Record(verdict);
           case "STAGE2_TRIGGER_REQUIRED":
             return await stage2Trigger(verdict);
+          case "STAGE2_AUDIT_ALREADY_PREPARED":
+            return await stage2Prepared(verdict);
           case "STAGE2_CLOSE_READY":
             return await stage2Close(verdict);
           case "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION":

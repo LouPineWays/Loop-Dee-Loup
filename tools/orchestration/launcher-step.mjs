@@ -77,6 +77,15 @@ export const TRANSITIONS = Object.freeze({
     postcondition: "exactly one valid reviewer trigger comment exists on the audit Issue",
     invalidation: ["audit Issue closed or superseded", "trigger comment deleted"],
   },
+  // Normal midpoint after a Stage 2 preparation worker returns (and the pre-merge resume case):
+  // the Audit Issue exists; finalize the control projection, then post the one idempotent trigger.
+  STAGE2_AUDIT_ALREADY_PREPARED: {
+    preState: "STAGE2_AUDIT_ALREADY_PREPARED",
+    action: "finalize-audit-breakpoint-then-post-stage2-reviewer-trigger",
+    verifier: "audit-projection-and-trigger-readback",
+    postcondition: "control Issue reads Lifecycle AUDIT with Stage 2 naming this audit AND exactly the reviewer trigger exists on the audit thread",
+    invalidation: ["audit Issue closed or superseded", "trigger comment deleted"],
+  },
   STAGE2_CLOSE_READY: {
     preState: "STAGE2_CLOSE_READY",
     action: "close-audit",
@@ -264,7 +273,15 @@ export async function runLauncherStep({ controlIssue, deps } = {}) {
   }
   const state = verdict?.state;
   if (typeof state !== "string") return result(Outcome.FAIL_CLOSED, { reason: "verdict has no state" });
-  if (WAITING_STATES.has(state)) return result(Outcome.WAITING, { state });
+  if (WAITING_STATES.has(state)) {
+    // Name the external thread a reviewer wait would poll (canonical poll.mjs target), when the
+    // verdict identifies one: a Stage 2 audit issue, else the Stage 1 PR.
+    const audit = verdict.auditIssue ?? verdict.postAudit?.auditIssue;
+    let wait = null;
+    if (Number.isInteger(Number(audit)) && Number(audit) > 0) wait = { kind: "issue", number: Number(audit), repo: verdict.repo ?? null };
+    else if (Number.isInteger(Number(verdict.pr)) && Number(verdict.pr) > 0) wait = { kind: "pr", number: Number(verdict.pr), repo: verdict.repo ?? null };
+    return result(Outcome.WAITING, { state, ...(wait ? { wait } : {}) });
+  }
   // Authority is established before any read-for-action, dispatch, or mutation. A missing check
   // fails closed; a comment alone is never authority.
   if (typeof deps.authorizeVerdict !== "function") {

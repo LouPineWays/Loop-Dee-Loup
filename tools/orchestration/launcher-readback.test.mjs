@@ -64,21 +64,27 @@ test("manifest transition: absent -> retry; manifest present but not ROUTED -> c
 test("Stage 2 record: PENDING absent, recorded present, malformed ambiguous, missing identity ambiguous", async () => {
   const t = TRANSITIONS.STAGE2_REPORT_READY_TO_RECORD;
   const aud = (v) => ({ 825: { body: `### Verdict\n\n${v}\n`, state: "OPEN" } });
-  assert.equal(cls(await make({ issues: aud("PENDING") })(t, { auditIssue: 825 })), EffectClass.NOT_COMPLETED);
-  assert.equal(cls(await make({ issues: aud("NOT CLEAN") })(t, { auditIssue: 825 })), "PROVED");
-  assert.equal(cls(await make({ issues: aud("MAYBE") })(t, { auditIssue: 825 })), EffectClass.AMBIGUOUS);
+  const v = (verdict) => ({ auditIssue: 825, postAudit: { reportEvidence: { backed: true, verdict } } });
+  assert.equal(cls(await make({ issues: aud("PENDING") })(t, v("CLEAN"))), EffectClass.NOT_COMPLETED);
+  assert.equal(cls(await make({ issues: aud("NOT CLEAN") })(t, v("NOT CLEAN"))), "PROVED");
+  assert.equal(cls(await make({ issues: aud("CLEAN") })(t, v("CLEAN"))), "PROVED");
+  // a settled-but-different value (preparation-time NOT CLEAN placeholder over a CLEAN report) is not the promotion
+  assert.equal(cls(await make({ issues: aud("NOT CLEAN") })(t, v("CLEAN"))), EffectClass.NOT_COMPLETED);
+  assert.equal(cls(await make({ issues: aud("MAYBE") })(t, v("CLEAN"))), EffectClass.AMBIGUOUS);
+  assert.equal(cls(await make({ issues: aud("CLEAN") })(t, { auditIssue: 825 })), EffectClass.AMBIGUOUS); // no report-backed verdict
   assert.equal(cls(await make({ issues: aud("CLEAN") })(t, {})), EffectClass.AMBIGUOUS);
 });
 
-test("Stage 2 trigger: exactly one writer trigger is proved; none retries; duplicates and closed audits fail closed", async () => {
+test("Stage 2 trigger: trigger.mjs authority proves it (Actions bot included); none retries; closed audits fail closed", async () => {
   const t = TRANSITIONS.STAGE2_TRIGGER_REQUIRED;
   const trig = { id: 1, body: "@codex review", authorPermission: "write" };
   const open = { 825: { body: "", state: "OPEN" } };
   assert.equal(cls(await make({ issues: open })(t, { auditIssue: 825 })), EffectClass.NOT_COMPLETED);
   assert.equal(cls(await make({ issues: open, comments: { 825: [trig] } })(t, { auditIssue: 825 })), "PROVED");
-  assert.equal(cls(await make({ issues: open, comments: { 825: [trig, { ...trig, id: 2 }] } })(t, { auditIssue: 825 })), EffectClass.AMBIGUOUS);
-  // an untrusted author's mention is not a trigger
-  assert.equal(cls(await make({ issues: open, comments: { 825: [{ ...trig, authorPermission: "read" }] } })(t, { auditIssue: 825 })), EffectClass.NOT_COMPLETED);
+  // the workflow posts as github-actions[bot], which has no collaborator permission
+  const bot = { id: 3, body: "@codex review", authorPermission: "none", login: "github-actions[bot]", created_at: "2026-10-01T00:00:00Z" };
+  assert.equal(cls(await make({ issues: open, comments: { 825: [bot] } })(t, { auditIssue: 825 })), "PROVED");
+  assert.equal(cls(await make({ issues: open, comments: { 825: [{ id: 4, body: "unrelated" }] } })(t, { auditIssue: 825 })), EffectClass.NOT_COMPLETED);
   assert.equal(cls(await make({ issues: { 825: { body: "", state: "CLOSED" } } })(t, { auditIssue: 825 })), EffectClass.AMBIGUOUS);
 });
 
@@ -120,4 +126,21 @@ test("a throwing reader is ambiguous, never success", async () => {
     readIssue: () => { throw new Error("403"); }, readComments: () => [], readPr: () => null, verifyManifest: async () => ({ ok: true }),
   }).readEffect;
   assert.equal(cls(await f(TRANSITIONS.READY_TO_PROJECT_ROUTED, { proposedBody: "- **Lifecycle:** ROUTED\n" })), EffectClass.AMBIGUOUS);
+});
+
+
+test("prepared-audit continuation: complete only with the control projection AND the trigger; each half reconciles alone", async () => {
+  const t = TRANSITIONS.STAGE2_AUDIT_ALREADY_PREPARED;
+  const open = { 825: { body: "", state: "OPEN" } };
+  const trig = { id: 1, body: "@codex review", created_at: "2026-10-01T00:00:00Z" };
+  const projected = "- **Lifecycle:** AUDIT\n- **Stage 2:** #825\n";
+  const review = "- **Lifecycle:** REVIEW\n";
+  const v = { auditIssue: 825 };
+  assert.equal(cls(await make({ issues: open, comments: { 825: [trig] }, control: projected })(t, v)), "PROVED");
+  // trigger posted, projection missing: only the finalize half re-runs
+  assert.equal(cls(await make({ issues: open, comments: { 825: [trig] }, control: review })(t, v)), EffectClass.COMPLETED_UNPROJECTED);
+  // nothing posted yet (or projection without trigger): the whole idempotent command re-runs
+  assert.equal(cls(await make({ issues: open, control: review })(t, v)), EffectClass.NOT_COMPLETED);
+  assert.equal(cls(await make({ issues: open, control: projected })(t, v)), EffectClass.NOT_COMPLETED);
+  assert.equal(cls(await make({ issues: { 825: { body: "", state: "CLOSED" } }, comments: { 825: [trig] }, control: projected })(t, v)), EffectClass.AMBIGUOUS);
 });

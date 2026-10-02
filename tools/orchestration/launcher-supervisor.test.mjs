@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runLauncherSupervisor, SupervisorOutcome } from "./launcher-supervisor.mjs";
 import { Outcome, renderDecisionSurface, parseDecisionSurface } from "./launcher-step.mjs";
-import { buildDeps, buildSupervisorDeps, dispatchFreshWorker } from "./launcher-run.mjs";
+import { buildDeps, buildSupervisorDeps, dispatchFreshWorker, findStage2ReportCommentId, upsertResolvedDecisions } from "./launcher-run.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 import { renderClaimBody, parseAttemptClaims, planClaim } from "./attempt-claim.mjs";
 import { upsertControlBullet } from "./ready-dispatch-gate.mjs";
@@ -59,16 +59,76 @@ test("guidance-required and fail-closed steps stop; same transition advancing tw
   assert.match(loop.reason, /twice/);
 });
 
-test("a reviewer wait polls within the budget and then stops WAITING", async () => {
-  let slept = 0;
+test("a reviewer wait uses the canonical poller within the budget, re-reads the gate on a match, then stops WAITING", async () => {
+  const waits = [];
   let t = 0;
+  const wait = { kind: "issue", number: 825, repo: "o/r" };
   const r = await runLauncherSupervisor({
     waitBudgetMs: 3000,
-    pollIntervalMs: 1000,
-    deps: { step: steps(R(Outcome.WAITING, { state: "NO_ACTION_YET" })), sleep: async (ms) => { slept += 1; t += ms; }, now: () => t },
+    deps: {
+      step: steps(R(Outcome.WAITING, { state: "NO_ACTION_YET", wait }), R(Outcome.WAITING, { state: "NO_ACTION_YET", wait })),
+      waitForReviewer: async (w, budget) => {
+        waits.push([w, budget]);
+        t += 1500;
+        return { matched: waits.length === 1 };
+      },
+      now: () => t,
+    },
   });
   assert.equal(r.outcome, SupervisorOutcome.WAITING);
-  assert.ok(slept >= 2 && slept <= 3);
+  assert.equal(waits.length, 2);
+  assert.deepEqual(waits[0][0], wait);
+  // no wait target -> never a hand-rolled sleep loop, just stop WAITING
+  const r2 = await runLauncherSupervisor({ deps: { step: steps(R(Outcome.WAITING, { state: "NO_ACTION_YET" })), waitForReviewer: async () => assert.fail("no target"), now: () => 0 }, waitBudgetMs: 9000 });
+  assert.equal(r2.outcome, SupervisorOutcome.WAITING);
+});
+
+test("findStage2ReportCommentId derives the latest NOT CLEAN reviewer report after the trigger", () => {
+  const bot = "chatgpt-codex-connector[bot]";
+  const c = (id, login, body, at) => ({ id, login, body, created_at: at });
+  const comments = [
+    c(1, "github-actions[bot]", "@codex review", "2026-10-01T00:00:00Z"),
+    c(2, bot, "Starting #825.", "2026-10-01T00:01:00Z"),
+    c(3, bot, "## Stage 2 Audit Report\n\nVerdict: NOT CLEAN\n\nFound a P1 defect in the launcher.", "2026-10-01T00:05:00Z"),
+  ];
+  assert.equal(findStage2ReportCommentId(comments), 3);
+  assert.equal(findStage2ReportCommentId([comments[1], comments[2]]), null); // no trigger -> no derivable report
+  assert.equal(findStage2ReportCommentId([comments[0], comments[1]]), null);
+});
+
+test("dispatchFreshWorker reserves the PR-head checkout for a Stage 1 findings correction, runs the worker there, and releases it", () => {
+  const calls = [];
+  const gate = { state: "STAGE1_CORRECTION_REQUIRED", pr: 826, issue: 73, controlIssue: 379, correctionReason: "findings" };
+  const binding = { path: "C:/wt/pr-826", token: "efb5522c", scriptPath: "C:/s.mjs" };
+  const io = {
+    node: (f, a, input) => {
+      calls.push([f.split("/").pop(), a]);
+      if (f.endsWith("session-entry-gate.mjs")) return JSON.stringify(gate);
+      if (f.endsWith("pr-head-checkout-preflight.mjs") && a[0] === "--reserve-from-gate") return JSON.stringify({ ...gate, checkoutBinding: binding });
+      if (f.endsWith("format-dispatch-prompt.mjs")) return input.includes("checkoutBinding") ? "PROMPT" : "NO-BINDING";
+      return "";
+    },
+  };
+  const ran = [];
+  const dispatch = { route: "r", byReference: { state: "STAGE1_CORRECTION_REQUIRED", pr: 826 } };
+  const out = dispatchFreshWorker({ dispatch, io, controlIssue: 379, env: { LDL_WORKER_COMMAND: JSON.stringify(["w"]) }, runWorker: (p, o) => ran.push([p, o.cwd]) });
+  assert.equal(out.launched, true);
+  assert.deepEqual(ran, [["PROMPT", "C:/wt/pr-826"]]);
+  assert.deepEqual(calls.map((c) => c[0]), ["session-entry-gate.mjs", "pr-head-checkout-preflight.mjs", "format-dispatch-prompt.mjs", "pr-head-checkout-preflight.mjs"]);
+  assert.deepEqual(calls[3][1], ["--release-binding", "efb5522c"]);
+  // a failed reservation fails closed before any worker runs
+  const bad = { node: (f) => (f.endsWith("session-entry-gate.mjs") ? JSON.stringify(gate) : JSON.stringify({ state: "CHECKOUT_BINDING_UNVERIFIED", reason: "locked" })) };
+  assert.throws(() => dispatchFreshWorker({ dispatch, io: bad, controlIssue: 379, env: { LDL_WORKER_COMMAND: JSON.stringify(["w"]) }, runWorker: () => assert.fail("no worker") }), /reservation failed/);
+});
+
+test("upsertResolvedDecisions routes answers into one replaceable section", () => {
+  const body = "- **Founder decision:** pending\n\n### Notes\nx\n";
+  const once = upsertResolvedDecisions(body, { surfaceId: "S1", answers: { Q1: "A" }, generalComments: "ok" });
+  assert.match(once, /### Resolved founder decisions[\s\S]*\*\*Surface S1 Answer Q1:\*\* A/);
+  const twice = upsertResolvedDecisions(once, { surfaceId: "S1", answers: { Q1: "B" } });
+  assert.doesNotMatch(twice, /Answer Q1:\*\* A/);
+  assert.match(twice, /Answer Q1:\*\* B/);
+  assert.match(twice, /### Notes/);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -263,6 +323,8 @@ test("PRODUCTION: founder resolution resumes through the production path only wh
   b = fakeBinding(w);
   r = await runLauncherSupervisor({ deps: b.deps, maxSteps: 3 });
   assert.match(w.control, /\*\*Founder decision:\*\* none/);
+  // the answer itself is durable in the snapshot, not merely the cleared interrupt
+  assert.match(w.control, /\*\*Surface 379-r1-abc123 Answer Q1:\*\* A/);
   assert.ok(w.calls.some((c) => c[0].endsWith("session-entry-gate.mjs")));
   // a control that names a different execution issue has zero authorized continuations
   const w2 = world({ founderPending: true });
