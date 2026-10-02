@@ -9,7 +9,17 @@
 //   4. make a successor eligible only when that postcondition is proved.
 // An actor's exit status or self-report is never consulted for unlocking a successor.
 //
+// Open path (unit 73-C): semantic stages dispatch one fresh bounded worker BY REFERENCE using the
+// route chosen by route-qualification. A correction (Stage 1 findings, Stage 2 NOT CLEAN) also
+// needs exact-target Chat guidance (chat-guidance-gate); without it the step stops with the fixed
+// handoff string and dispatches nothing. The supervisor never authors the correction.
+//
 // Tests: node --test tools/orchestration/launcher-step.test.mjs
+
+import { verifyChatGuidance, guidanceTargetForVerdict } from "./chat-guidance-gate.mjs";
+import { selectRoute } from "./route-qualification.mjs";
+
+const GUIDED_CORRECTION_STATES = new Set(["STAGE1_CORRECTION_REQUIRED", "STAGE2_CORRECTION_REQUIRED"]);
 
 export const Outcome = Object.freeze({
   ADVANCED: "ADVANCED",
@@ -130,6 +140,34 @@ function result(outcome, evidence, extra = {}) {
   return { outcome, successorEligible: outcome === Outcome.ADVANCED, evidence, ...extra };
 }
 
+// deps.readOpenPath(verdict) -> { comments, reportCommentId?, routeInput? } is optional; absent,
+// the open path is reported without a dispatch (prior behavior). `routeInput` is
+// { outcomeClass, assurance, candidates, evidence, availability } for selectRoute.
+async function resolveOpenPath(state, verdict, deps) {
+  if (typeof deps.readOpenPath !== "function") return result(Outcome.OPEN_PATH_REQUIRED, { state });
+  try {
+    const input = await deps.readOpenPath(verdict);
+    let guidance = null;
+    if (GUIDED_CORRECTION_STATES.has(state)) {
+      const target = guidanceTargetForVerdict(verdict, { reportCommentId: input?.reportCommentId });
+      const g = verifyChatGuidance(input?.comments, target);
+      if (g.status !== "VALID") {
+        return result(Outcome.WAITING, { state, chatGuidanceRequired: true, guidanceStatus: g.status, handoff: g.handoff, reason: g.reason });
+      }
+      guidance = { commentId: g.guidance.commentId, target };
+    }
+    const route = selectRoute(input?.routeInput ?? {});
+    if (route.failClosed) return result(Outcome.FAIL_CLOSED, { state, reason: `no qualified route: ${route.reason}` });
+    const role = GUIDED_CORRECTION_STATES.has(state) ? "correction worker" : "implementation worker";
+    return result(Outcome.OPEN_PATH_REQUIRED, {
+      state,
+      dispatch: { role, route: route.route, byReference: { state, guidance }, freshWorker: true, supervisorAuthors: false },
+    });
+  } catch (e) {
+    return result(Outcome.FAIL_CLOSED, { state, reason: `open path failed: ${e?.message ?? e}` });
+  }
+}
+
 // deps: { runGate(controlIssue) -> verdict, readEffect(transition, verdict) -> evidence,
 //         execute(transition, verdict) -> any (result ignored for unlocking),
 //         finalize(transition, verdict) -> any (project an already-completed effect; no replay) }
@@ -146,7 +184,7 @@ export async function runLauncherStep({ controlIssue, deps } = {}) {
   const state = verdict?.state;
   if (typeof state !== "string") return result(Outcome.FAIL_CLOSED, { reason: "verdict has no state" });
   if (WAITING_STATES.has(state)) return result(Outcome.WAITING, { state });
-  if (OPEN_PATH_STATES.has(state)) return result(Outcome.OPEN_PATH_REQUIRED, { state });
+  if (OPEN_PATH_STATES.has(state)) return resolveOpenPath(state, verdict, deps);
 
   const transition = TRANSITIONS[state];
   if (!transition) return result(Outcome.FAIL_CLOSED, { state, reason: "unrecognized verdict state" });
