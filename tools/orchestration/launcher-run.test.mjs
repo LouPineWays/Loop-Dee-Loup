@@ -156,3 +156,117 @@ test("correction finalization verdict: a nextCommand that is not the canonical f
   assert.equal(r.outcome, Outcome.FAIL_CLOSED);
   assert.ok(!calls.some((c) => c[1] === "tools/orchestration/finalize-correction-breakpoint.mjs"));
 });
+
+// ---- Issue #389 unit 389-B: managed-session capture at the launcher process boundary ----
+import { dispatchFreshWorker as dispatchForRecords, parseTerminalResult, lifecycleStageForState } from "./launcher-run.mjs";
+import { authorizeLauncherVerdict as authorizeForRecords } from "./launcher-step.mjs";
+import { validateManagedSessionRecord } from "../telemetry/managed-session-record.mjs";
+
+function recordHarness(fresh, { runWorker, persistRecord, env = { LDL_WORKER_COMMAND: '["w"]' }, routeProvenance } = {}) {
+  const records = [];
+  const io = { node: (f) => (f.endsWith("session-entry-gate.mjs") ? JSON.stringify(fresh) : "PROMPT") };
+  const call = () =>
+    dispatchForRecords({
+      dispatch: { route: "r1", routeProvenance, byReference: { ...fresh, guidance: null } },
+      io, controlIssue: 379, executionIssue: 73,
+      authorize: (v, a) => authorizeForRecords(v, a),
+      reestablish: async () => ({ evidence: { dispatch: { route: "r1", byReference: { guidance: null } } } }),
+      env, runWorker, persistRecord: persistRecord ?? ((r) => records.push(r)),
+    });
+  return { call, records };
+}
+
+const RESULT_LINE = JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "s-1", duration_ms: 1234, num_turns: 3, total_cost_usd: 0.5, result: "SECRET TEXT", usage: { input_tokens: 10, output_tokens: 5 }, modelUsage: { m: { inputTokens: 10, outputTokens: 5 } } });
+
+test("parseTerminalResult / lifecycleStageForState", () => {
+  assert.equal(parseTerminalResult(`noise\n${RESULT_LINE}\n`).session_id, "s-1");
+  assert.equal(parseTerminalResult("no json"), null);
+  assert.equal(parseTerminalResult(""), null);
+  assert.equal(lifecycleStageForState("READY_TO_DISPATCH_PLANNING"), "PLAN");
+  assert.equal(lifecycleStageForState("WHATEVER"), "OTHER");
+});
+
+test("planning, unit, and integration dispatches each yield attributable, valid records", async () => {
+  const cases = [
+    [{ state: "READY_TO_DISPATCH_PLANNING", controlIssue: 379, executionIssue: 73 }, "PLAN", 1, null],
+    [{ state: "READY_TO_DISPATCH_UNITS", controlIssue: 379, executionIssue: 73, dispatchReadyUnitIds: ["A", "B"] }, "EXECUTE_UNIT", 2, "A"],
+    [{ state: "READY_TO_DISPATCH_INTEGRATION", controlIssue: 379, executionIssue: 73 }, "INTEGRATE_PR", 1, null],
+  ];
+  for (const [fresh, stage, n, firstUnit] of cases) {
+    const h = recordHarness(fresh, { runWorker: () => ({ exitCode: 0, stdout: `${RESULT_LINE}\n` }), routeProvenance: { qualification_ref: "cheapest qualified", fallback_used: true } });
+    assert.equal((await h.call()).count, n);
+    assert.equal(h.records.length, n);
+    const r = h.records[0];
+    assert.equal(validateManagedSessionRecord(r).valid, true);
+    assert.equal(r.lifecycle_stage, stage);
+    assert.equal(r.unit_id, firstUnit);
+    assert.equal(r.control_issue, 379);
+    assert.equal(r.execution_issue, 73);
+    assert.equal(r.route, "r1");
+    assert.deepEqual(r.route_provenance, { qualification_ref: "cheapest qualified", fallback_used: true, preferred_unavailable: null });
+    assert.equal(r.terminal_result.available, true);
+    assert.equal(r.provider_session_id, "s-1");
+    assert.equal(r.economics.estimated_list_cost_usd, 0.5);
+    assert.equal(JSON.stringify(r).includes("SECRET TEXT"), false);
+    assert.equal(new Set(h.records.map((x) => x.run_id)).size, n);
+  }
+});
+
+test("correction dispatch is attributed to its correction stage", async () => {
+  const h = recordHarness({ state: "STAGE2_CORRECTION_REQUIRED", controlIssue: 379, executionIssue: 73, auditIssue: 9 }, { runWorker: () => {} });
+  // guided correction needs verified guidance in the real flow; the harness bypasses it via reestablish.
+  await h.call();
+  assert.equal(h.records[0].lifecycle_stage, "STAGE2_CORRECTION");
+});
+
+test("no terminal result: record is explicitly incomplete with unavailable economics", async () => {
+  const h = recordHarness({ state: "READY_TO_DISPATCH_PLANNING", controlIssue: 379, executionIssue: 73 }, { runWorker: () => {} });
+  await h.call();
+  const r = h.records[0];
+  assert.equal(r.whole_run_complete, false);
+  assert.equal(r.terminal_result.available, false);
+  assert.equal(r.economics.usage, null);
+  assert.equal(r.process.completion_state, "completed");
+});
+
+test("abnormal child: worker failure still rethrows and yields an explicitly incomplete record", async () => {
+  const h = recordHarness({ state: "READY_TO_DISPATCH_INTEGRATION", controlIssue: 379, executionIssue: 73 }, {
+    runWorker: () => { throw Object.assign(new Error("boom"), { status: 3 }); },
+  });
+  await assert.rejects(h.call(), /boom/);
+  assert.equal(h.records.length, 1);
+  assert.equal(h.records[0].process.completion_state, "failed");
+  assert.equal(h.records[0].process.exit_code, 3);
+  assert.equal(h.records[0].whole_run_complete, false);
+  const sig = recordHarness({ state: "READY_TO_DISPATCH_INTEGRATION", controlIssue: 379, executionIssue: 73 }, {
+    runWorker: () => { throw Object.assign(new Error("killed"), { signal: "SIGTERM" }); },
+  });
+  await assert.rejects(sig.call(), /killed/);
+  assert.equal(sig.records[0].process.completion_state, "interrupted");
+});
+
+test("persistence failure (throw or ok:false) never changes the dispatch result", async () => {
+  const fresh = { state: "READY_TO_DISPATCH_PLANNING", controlIssue: 379, executionIssue: 73 };
+  const a = recordHarness(fresh, { runWorker: () => {}, persistRecord: () => { throw new Error("disk full"); } });
+  assert.deepEqual(await a.call(), { launched: true, count: 1 });
+  const b = recordHarness(fresh, { runWorker: () => {}, persistRecord: () => ({ ok: false, error: "x" }) });
+  assert.deepEqual(await b.call(), { launched: true, count: 1 });
+  const c = recordHarness(fresh, { runWorker: () => { throw new Error("worker failed"); }, persistRecord: () => { throw new Error("disk full"); } });
+  await assert.rejects(c.call(), /worker failed/);
+});
+
+test("real default runner: captures stdout terminal result and exit state; non-zero exit still throws", async () => {
+  const emit = (code) => JSON.stringify(["node", "-e", `console.log(${JSON.stringify(RESULT_LINE)});process.exit(${code})`]);
+  const fresh = { state: "READY_TO_DISPATCH_PLANNING", controlIssue: 379, executionIssue: 73 };
+  const ok = recordHarness(fresh, { env: { LDL_WORKER_COMMAND: emit(0) } });
+  assert.deepEqual(await ok.call(), { launched: true, count: 1 });
+  assert.equal(ok.records[0].terminal_result.available, true);
+  assert.equal(ok.records[0].process.exit_code, 0);
+  assert.equal(ok.records[0].whole_run_complete, true);
+  const bad = recordHarness(fresh, { env: { LDL_WORKER_COMMAND: emit(2) } });
+  await assert.rejects(bad.call(), /status 2/);
+  assert.equal(bad.records[0].process.completion_state, "failed");
+  const missing = recordHarness(fresh, { env: { LDL_WORKER_COMMAND: '["definitely-not-a-real-binary-389"]' } });
+  await assert.rejects(missing.call());
+  assert.equal(missing.records[0].process.completion_state, "spawn_failed");
+});

@@ -114,7 +114,7 @@ test("dispatchFreshWorker reserves the PR-head checkout for a Stage 1 findings c
   };
   const ran = [];
   const dispatch = { route: "r", byReference: { state: "STAGE1_CORRECTION_REQUIRED", pr: 826, issue: 73, controlIssue: 379, correctionReason: "findings" } };
-  const out = await dispatchFreshWorker({ dispatch, io, controlIssue: 379, executionIssue: 73, authorize, reestablish, env: { LDL_WORKER_COMMAND: JSON.stringify(["w"]) }, runWorker: (p, o) => ran.push([p, o.cwd]) });
+  const out = await dispatchFreshWorker({ dispatch, io, controlIssue: 379, executionIssue: 73, authorize, reestablish, env: { LDL_WORKER_COMMAND: JSON.stringify(["w"]) }, runWorker: (p, o) => ran.push([p, o.cwd]), persistRecord: () => {} });
   assert.equal(out.launched, true);
   assert.deepEqual(ran, [["PROMPT", "C:/wt/pr-826"]]);
   assert.deepEqual(calls.map((c) => c[0]), ["session-entry-gate.mjs", "pr-head-checkout-preflight.mjs", "format-dispatch-prompt.mjs", "pr-head-checkout-preflight.mjs"]);
@@ -244,7 +244,7 @@ function fakeBinding(w, { failProjectionOnce = false } = {}) {
   const deps = buildSupervisorDeps({
     controlIssue: 379, executionIssue: 73, stepDeps, io, repo: REPO, readIssue,
     env: { LDL_WORKER_COMMAND: JSON.stringify(["worker"]) },
-    runWorker: () => { w.workers += 1; w.phase = 1; }, // the fresh worker's durable effect: plan routed, manifest due
+    persistRecord: () => {}, runWorker: () => { w.workers += 1; w.phase = 1; }, // the fresh worker's durable effect: plan routed, manifest due
   });
   return { deps, io };
 }
@@ -362,7 +362,7 @@ function freshDispatchHarness(fresh, want, { authorizeFn = authorize, reestablis
     dispatchFreshWorker({
       dispatch: { route, byReference: want },
       io, controlIssue: 379, executionIssue: 73, authorize: authorizeFn, reestablish: reestablishFn,
-      env: { LDL_WORKER_COMMAND: '["w"]' }, runWorker: (p) => ran.push(p),
+      env: { LDL_WORKER_COMMAND: '["w"]' }, runWorker: (p) => ran.push(p), persistRecord: () => {},
     });
   return { call, ran };
 }

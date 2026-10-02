@@ -257,6 +257,7 @@ export async function resolveOpenPath(state, verdict, deps) {
       dispatch: {
         role,
         route: route.route,
+        routeProvenance: { qualification_ref: route.reason ?? null },
         byReference: { state, guidance, ...extractVerdictReferences(verdict) },
         freshWorker: true,
         supervisorAuthors: false,

@@ -15,7 +15,8 @@
 //
 // Tests: node --test tools/orchestration/launcher-run.test.mjs launcher-supervisor.test.mjs
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { runLauncherStep, authorizeLauncherVerdict, parseDecisionSurface, resolveOpenPath, isWriterComment, extractVerdictReferences, DECISION_SURFACE_HEADING } from "./launcher-step.mjs";
 import { runLauncherSupervisor } from "./launcher-supervisor.mjs";
@@ -26,6 +27,7 @@ import { parseControlBullet, upsertControlBullet, parseExecutionPointer, resolve
 import { findExistingTrigger } from "../review-watch/trigger.mjs";
 import { isGenuineResponse } from "../review-watch/genuine-response.mjs";
 import { extractResponseVerdict } from "../review-watch/stage2-report.mjs";
+import { fromClaudeRun, fromGenericRun, persistManagedSessionRecord } from "../telemetry/managed-session-record.mjs";
 
 const REVIEW_BOT = "chatgpt-codex-connector[bot]";
 
@@ -291,6 +293,68 @@ export function buildDeps({
   };
 }
 
+// Issue #389 unit 389-B: managed-session capture at the real launcher process boundary.
+// Lifecycle stage is derived from the dispatched verdict state only.
+const STAGE_BY_STATE = {
+  READY_TO_DISPATCH_PLANNING: "PLAN",
+  READY_TO_DISPATCH_UNITS: "EXECUTE_UNIT",
+  READY_TO_DISPATCH_INTEGRATION: "INTEGRATE_PR",
+  STAGE1_CORRECTION_REQUIRED: "STAGE1_CORRECTION",
+  STAGE2_CORRECTION_REQUIRED: "STAGE2_CORRECTION",
+};
+export const lifecycleStageForState = (state) => STAGE_BY_STATE[state] ?? "OTHER";
+
+// Extract a stream-json terminal result object ({type:"result"}) from worker stdout; null when
+// the surface exposes none. Only the parsed object is kept (the adapter never reads its text).
+export function parseTerminalResult(stdout) {
+  if (typeof stdout !== "string" || stdout.trim() === "") return null;
+  const lines = stdout.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const l = lines[i].trim();
+    if (!l.startsWith("{")) continue;
+    try {
+      const o = JSON.parse(l);
+      if (o && typeof o === "object" && o.type === "result") return o;
+    } catch {
+      // not a JSON line
+    }
+  }
+  try {
+    const o = JSON.parse(stdout);
+    if (o && typeof o === "object" && !Array.isArray(o) && o.type === "result") return o;
+  } catch {
+    // not a single JSON document
+  }
+  return null;
+}
+
+// Build the canonical record for one worker run.
+export function buildWorkerRunRecord({ identity, started, ended, exitCode, signal, spawnError, stdout }) {
+  const terminalResult = parseTerminalResult(stdout);
+  const spawn = spawnError ? true : undefined;
+  if (terminalResult) {
+    return fromClaudeRun({ identity, spawnResult: { startedAt: started, endedAt: ended, exitCode, signal, spawnError: spawn, terminalResult } });
+  }
+  return fromGenericRun({
+    identity,
+    run: { started_at: started, ended_at: ended, exit_code: exitCode, signal, spawn_error: spawn },
+  });
+}
+
+// Default worker runner: same process contract as before (argv, prompt on stdin, route env,
+// inherited stderr), additionally capturing stdout so a terminal result can be read plus
+// exit/signal state. Throws exactly where execFileSync did (non-zero exit, signal, spawn failure).
+function spawnWorker(argv, prompt, { cwd, env }) {
+  const r = spawnSync(argv[0], argv.slice(1), { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["pipe", "pipe", "inherit"], input: prompt, cwd, env });
+  const info = { exitCode: r.status, signal: r.signal, spawnError: r.error ?? null, stdout: r.stdout };
+  if (r.error || r.status !== 0) {
+    const err = r.error ?? new Error(r.signal ? `worker terminated by ${r.signal}` : `worker exited with status ${r.status}`);
+    err.workerRun = info;
+    throw err;
+  }
+  return info;
+}
+
 // Dispatch ONE fresh bounded worker by reference. The prompt is rendered by the existing
 // formatters from a FRESH gate verdict that must still be the dispatched state (a stale dispatch is
 // refused). The worker command is repository configuration (LDL_WORKER_COMMAND: a JSON argv array,
@@ -298,7 +362,7 @@ export function buildDeps({
 // configured this reports not-launched so the supervisor stops at a durable waiting boundary and a
 // fresh `work on #<control>` remains the documented fallback. The worker's own exit/report never
 // unlocks anything: the supervisor re-reads durable state afterwards.
-export async function dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize, reestablish, env = process.env, runWorker }) {
+export async function dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize, reestablish, env = process.env, runWorker, persistRecord = persistManagedSessionRecord, clock = () => new Date() }) {
   const raw = env.LDL_WORKER_COMMAND;
   if (!raw) return { launched: false, reason: "no fresh-worker runner configured (LDL_WORKER_COMMAND); resume with a fresh `work on #<control>`" };
   let argv;
@@ -359,12 +423,67 @@ export async function dispatchFreshWorker({ dispatch, io, controlIssue, executio
   } else {
     prompts = [io.node("tools/orchestration/format-dispatch-prompt.mjs", [], freshRaw)];
   }
-  const run =
-    runWorker ??
-    ((prompt, { cwd } = {}) =>
-      execFileSync(argv[0], argv.slice(1), { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["pipe", "ignore", "inherit"], input: prompt, cwd, env: { ...env, LDL_WORKER_ROUTE: String(freshDispatch.route) } }));
+  const workerEnv = { ...env, LDL_WORKER_ROUTE: String(freshDispatch.route) };
+  const run = runWorker ?? ((prompt, { cwd } = {}) => spawnWorker(argv, prompt, { cwd, env: workerEnv }));
+  const rp = dispatch.routeProvenance ?? freshDispatch.routeProvenance ?? null;
+  const routeProvenance = rp
+    ? { qualification_ref: rp.qualification_ref ?? null, fallback_used: rp.fallback_used ?? null, preferred_unavailable: rp.preferred_unavailable ?? null }
+    : null;
+  const stage = lifecycleStageForState(fresh.state);
+  const unitIds = fresh.state === "READY_TO_DISPATCH_UNITS" ? fresh.dispatchReadyUnitIds : [];
+  let runStamp;
+  let nonce;
   try {
-    for (const p of prompts) run(p, { cwd: workerCwd });
+    runStamp = clock().toISOString().replace(/[^0-9A-Za-z]/g, "");
+    nonce = randomBytes(3).toString("hex");
+  } catch {
+    runStamp = "t";
+    nonce = "x";
+  }
+  try {
+    for (const [i, p] of prompts.entries()) {
+      let started = null;
+      try {
+        started = clock().toISOString();
+      } catch {
+        // telemetry-only clock failure
+      }
+      let info = {};
+      let thrown = null;
+      try {
+        const ret = run(p, { cwd: workerCwd });
+        if (typeof ret === "string") info = { stdout: ret, exitCode: 0 };
+        else if (ret && typeof ret === "object") info = { exitCode: 0, ...ret };
+        else info = { exitCode: 0 };
+      } catch (e) {
+        thrown = e;
+        info = e?.workerRun ?? { exitCode: Number.isInteger(e?.status) ? e.status : null, signal: e?.signal ?? null, spawnError: e?.code && e?.status == null && !e?.signal ? e : null };
+      }
+      // Telemetry capture/persistence failure never alters the dispatch outcome.
+      try {
+        const record = buildWorkerRunRecord({
+          identity: {
+            runId: `${controlIssue}-${executionIssue}-${stage}-${runStamp}-${nonce}-${i}`,
+            controlIssue,
+            executionIssue,
+            lifecycleStage: stage,
+            unitId: unitIds?.[i] ?? null,
+            route: freshDispatch.route,
+            routeProvenance,
+          },
+          started,
+          ended: clock().toISOString(),
+          exitCode: info.exitCode ?? null,
+          signal: info.signal ?? null,
+          spawnError: info.spawnError,
+          stdout: info.stdout,
+        });
+        persistRecord(record);
+      } catch {
+        // swallowed by design
+      }
+      if (thrown) throw thrown;
+    }
   } finally {
     if (binding?.token) {
       try {
@@ -379,7 +498,7 @@ export async function dispatchFreshWorker({ dispatch, io, controlIssue, executio
 
 // Production supervisor bindings over buildDeps (all durable reads/writes go through the same
 // scripts and REST readers as the step itself).
-export function buildSupervisorDeps({ controlIssue, executionIssue, stepDeps, io, repo = null, readIssue, env = process.env, sleep, now, runWorker }) {
+export function buildSupervisorDeps({ controlIssue, executionIssue, stepDeps, io, repo = null, readIssue, env = process.env, sleep, now, runWorker, persistRecord }) {
   const rIssue = readIssue ?? (({ repo: r, number }) => readGithubIssue({ repo: r, number, fields: ["body", "state"] }));
   const { readComments, writeControlBody } = stepDeps._io;
   const controlBody = () => rIssue({ repo, number: controlIssue }).body ?? "";
@@ -388,7 +507,7 @@ export function buildSupervisorDeps({ controlIssue, executionIssue, stepDeps, io
   return {
     step: () => runLauncherStep({ controlIssue, deps: stepDeps }),
     dispatchWorker: async (dispatch) =>
-      dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize: (v, a) => authorizeLauncherVerdict(v, a), reestablish: (fresh) => resolveOpenPath(fresh.state, fresh, stepDeps), env, runWorker }),
+      dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize: (v, a) => authorizeLauncherVerdict(v, a), reestablish: (fresh) => resolveOpenPath(fresh.state, fresh, stepDeps), env, runWorker, ...(persistRecord ? { persistRecord } : {}) }),
     now,
     sleep,
     // Canonical poller (tools/review-watch/poll.mjs) for the bounded reviewer wait: since = the
