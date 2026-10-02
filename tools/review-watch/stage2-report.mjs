@@ -755,6 +755,17 @@ function findMarkerWalkthroughRun(lines) {
   return { count, endLineIndex: matchedLineIndexes[matchedLineIndexes.length - 1], itemLineIndexes: matchedLineIndexes.slice(runFirst) };
 }
 
+// Pure. True when the numbered run is independently identifiable as verification walk-through
+// content: every item carries a status glyph (numberedWalkthroughIsFullyMarked's rule), or the
+// nearest heading above its first item names verification. Deterministic; no semantic parsing.
+function numberedRunIsVerificationContent(lines, run) {
+  if (run.itemLineIndexes.every((index) => NUMBERED_MARKER_ITEM_PATTERN.test(lines[index]))) return true;
+  for (let i = run.itemLineIndexes[0] - 1; i >= 0; i--) {
+    if (HEADING_LEVEL_PATTERN.test(lines[i])) return VERIFICATION_MENTION_PATTERN.test(lines[i]);
+  }
+  return false;
+}
+
 // Pure. Counts the items in `text`'s verification-checklist walk-through, whichever of the two
 // observed shapes it uses: a numbered list, or a per-item status-marker bullet list (issue
 // #330). When both a numbered run and a marker-bullet run exist in the same body, picks whichever
@@ -780,9 +791,14 @@ export function countVerificationWalkthroughItems(text) {
   // though its heading is not a "Checks"-style label. Position alone must not let it displace the
   // numbered run. Content-gated, so prose marker walk-throughs and a lone command-shaped marker
   // run (no numbered run to prefer) keep their prior classification.
+  // Stage 1 correction: command-log shape alone is never positive evidence for the numbered run.
+  // The numbered run must independently be established as verification content: every item
+  // carries a status glyph, or its nearest preceding heading is a verification heading. An
+  // unrelated numbered notes/findings list fails both and falls through to the position rule.
   if (
     markerRun.endLineIndex > numberedRun.endLineIndex &&
-    markerRun.itemLineIndexes.every((index) => COMMAND_LOG_BULLET_CONTENT_PATTERN.test(lines[index]))
+    markerRun.itemLineIndexes.every((index) => COMMAND_LOG_BULLET_CONTENT_PATTERN.test(lines[index])) &&
+    numberedRunIsVerificationContent(lines, numberedRun)
   ) {
     return numberedRun.count;
   }

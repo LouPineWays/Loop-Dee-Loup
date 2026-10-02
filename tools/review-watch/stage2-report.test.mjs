@@ -1759,3 +1759,39 @@ test("countVerificationWalkthroughItems (issue #821): a later prose marker-bulle
   ].join("\n");
   assert.equal(countVerificationWalkthroughItems(body), 2);
 });
+
+test("countVerificationWalkthroughItems (issue #821 correction): an unrelated numbered notes list is not promoted over a later command-log marker run", () => {
+  const body = [
+    "### Notes",
+    "",
+    "1. Observation A.",
+    "2. Observation B.",
+    "3. Observation C.",
+    "4. Observation D.",
+    "5. Observation E.",
+    "6. Observation F.",
+    "",
+    "### Verification Results",
+    "",
+    "* ✅ `node check-a.mjs` — ok",
+    "* ✅ `node check-b.mjs` — ok",
+    "",
+    "Verdict: CLEAN",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 2);
+  assert.equal(hasCompleteVerificationEvidence(body, ISSUE_820_CHECKLIST), false);
+});
+
+test("countVerificationWalkthroughItems (issue #821 correction): a glyph-marked numbered run is preferred over a later command log without a verification heading", () => {
+  const body = [
+    "1. ✅ One.",
+    "2. ✅ Two.",
+    "3. ✅ Three.",
+    "",
+    "### Results",
+    "",
+    "* ✅ `node a.mjs` — ok",
+    "* ✅ `node b.mjs` — ok",
+  ].join("\n");
+  assert.equal(countVerificationWalkthroughItems(body), 3);
+});
