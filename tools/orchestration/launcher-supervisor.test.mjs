@@ -244,7 +244,7 @@ function fakeBinding(w, { failProjectionOnce = false } = {}) {
   const deps = buildSupervisorDeps({
     controlIssue: 379, executionIssue: 73, stepDeps, io, repo: REPO, readIssue,
     env: { LDL_WORKER_COMMAND: JSON.stringify(["worker"]) },
-    persistRecord: () => {}, runWorker: () => { w.workers += 1; w.phase = 1; }, // the fresh worker's durable effect: plan routed, manifest due
+    persistRecord: () => {}, persistGateRecord: () => {}, runWorker: () => { w.workers += 1; w.phase = 1; }, // the fresh worker's durable effect: plan routed, manifest due
   });
   return { deps, io };
 }
@@ -483,4 +483,84 @@ test("founder resume: the interrupt is cleared only after the decision is applie
   assert.match(w.control, /\*\*Decision scope:\*\* B/);
   assert.match(w.control, /\*\*Founder decision:\*\* none/);
   assert.notEqual(w.control, control);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Issue #389 unit 389-C: gate-outcome records
+// ---------------------------------------------------------------------------------------------
+
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { persistRecordWith } from "../telemetry/managed-session-record.mjs";
+import { buildGateOutcomeRecord, validateGateOutcomeRecord } from "./launcher-step.mjs";
+
+const gated = (outcome, state, extra = {}, gate = {}) => ({
+  outcome, successorEligible: outcome === Outcome.ADVANCED,
+  evidence: { state, ...extra },
+  gate: { state, inputLifecycle: "REVIEW", references: { controlIssue: 379, executionIssue: 73, pr: 826, auditIssue: 900 }, ...gate },
+});
+
+function recordingDeps(dir, over = {}) {
+  let seq = 0;
+  return {
+    recordGateOutcome: ({ stepResult, stop, founderInterrupt }) => {
+      const rec = buildGateOutcomeRecord({ runId: `379-73-gate-T-${seq++}`, controlIssue: 379, executionIssue: 73, stepResult, stop, founderInterrupt, endedAt: "2026-01-01T00:00:00.000Z" });
+      return persistRecordWith(rec, validateGateOutcomeRecord, { dir });
+    },
+    ...over,
+  };
+}
+
+test("389-C: transition, fail-closed, waiting and ambiguous gate results are each persisted with references and lifecycle state", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "gate-rec-"));
+  const cases = [
+    [[gated(Outcome.ADVANCED, "READY_TO_PROJECT_ROUTED"), gated(Outcome.FAIL_CLOSED, "STAGE1_CORRECTION_REQUIRED")], "transition+fail_closed"],
+    [gated(Outcome.FAIL_CLOSED, "STAGE1_CORRECTION_REQUIRED", { reason: "x" }), "fail_closed"],
+    [gated(Outcome.WAITING, "NO_ACTION_YET", { wait: { kind: "pr", number: 826 } }), "waiting"],
+    [gated(Outcome.FAIL_CLOSED, "STAGE2_CLOSE_READY", { effectClass: "AMBIGUOUS", reason: "ambiguous external effect" }), "ambiguous"],
+  ];
+  const rd = recordingDeps(dir);
+  for (const [res] of cases) {
+    await runLauncherSupervisor({ deps: { step: steps(...[].concat(res)), ...rd } });
+  }
+  const recs = readdirSync(dir).sort().map((f) => JSON.parse(readFileSync(join(dir, f), "utf8")));
+  assert.deepEqual(recs.map((r) => r.result_class), ["transition", "fail_closed", "fail_closed", "waiting", "ambiguous"]);
+  for (const r of recs) {
+    assert.equal(r.record_kind, "gate_outcome");
+    assert.equal(r.input_lifecycle_state, "REVIEW");
+    assert.deepEqual(r.references, { control: 379, execution: 73, pr: 826, audit: 900 });
+    assert.equal(r.founder_interrupt, false);
+    assert.equal(validateGateOutcomeRecord(r).valid, true);
+  }
+  assert.equal(recs[3].route_wait_stop_state, "pr");
+});
+
+test("389-C: a pending founder decision is recorded as a mechanically established founder interrupt", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "gate-rec-"));
+  const r = await runLauncherSupervisor({
+    deps: { readFounderSurface: async () => ({ surfaceId: "s", questionIds: ["q"], comments: [], continuations: [], questions: [] }), step: steps(R(Outcome.WAITING)), ...recordingDeps(dir) },
+  });
+  assert.equal(r.outcome, SupervisorOutcome.WAITING);
+  const [f] = readdirSync(dir).map((n) => JSON.parse(readFileSync(join(dir, n), "utf8")));
+  assert.equal(f.founder_interrupt, true);
+  assert.equal(f.gate_or_transition, "FOUNDER_DECISION_PENDING");
+});
+
+test("389-C: recorder or persistence failure never alters the supervisor outcome or trail", async () => {
+  const run = (over) => runLauncherSupervisor({ deps: { step: steps(gated(Outcome.ADVANCED, "READY_TO_PROJECT_ROUTED"), gated(Outcome.WAITING, "NO_ACTION_YET")), ...over } });
+  const base = await run({});
+  const throwing = await run({ recordGateOutcome: () => { throw new Error("disk full"); } });
+  const rejecting = await run({ recordGateOutcome: async () => { throw new Error("nope"); } });
+  const badDir = await run(recordingDeps("\0invalid"));
+  for (const o of [throwing, rejecting, badDir]) {
+    assert.equal(o.outcome, base.outcome);
+    assert.deepEqual(o.trail, base.trail);
+  }
+});
+
+test("389-C: invalid gate record is refused by the validator and records no content text", () => {
+  assert.equal(validateGateOutcomeRecord({ schema_version: 1, record_kind: "gate_outcome", run_id: "a/b", result_class: "waiting", founder_interrupt: false, references: {} }).valid, false);
+  const rec = buildGateOutcomeRecord({ runId: "r1", controlIssue: 1, executionIssue: 2, stepResult: gated(Outcome.FAIL_CLOSED, "X", { reason: "secret body text" }) });
+  assert.equal(JSON.stringify(rec).includes("secret"), false);
 });

@@ -172,19 +172,26 @@ export function validateManagedSessionRecord(r) {
 }
 
 // Deterministic persister: one compact JSON file per run, atomic rename, never throws.
-export function persistManagedSessionRecord(record, { dir = MANAGED_SESSIONS_DIR } = {}) {
+// Shared by every record kind (session record, 389-C gate-outcome record): the caller supplies
+// the validator for its own kind; identity/atomicity/never-throw behavior is identical.
+export function persistRecordWith(record, validate, { dir = MANAGED_SESSIONS_DIR } = {}) {
   try {
-    const v = validateManagedSessionRecord(record);
+    const v = validate(record);
     if (!v.valid) return { ok: false, error: `invalid record: ${v.errors.join("; ")}` };
     mkdirSync(dir, { recursive: true });
     const path = join(dir, `${record.run_id}.json`);
     const tmp = `${path}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify(record)}\n`, "utf8");
+    writeFileSync(tmp, `${JSON.stringify(record)}
+`, "utf8");
     renameSync(tmp, path);
     return { ok: true, path };
   } catch (err) {
     return { ok: false, error: err?.message ?? String(err) };
   }
+}
+
+export function persistManagedSessionRecord(record, opts = {}) {
+  return persistRecordWith(record, validateManagedSessionRecord, opts);
 }
 
 function completionFromProcess({ exitCode, signal, spawnError }) {

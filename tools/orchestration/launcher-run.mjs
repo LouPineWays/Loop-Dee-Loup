@@ -18,7 +18,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { runLauncherStep, authorizeLauncherVerdict, parseDecisionSurface, resolveOpenPath, isWriterComment, extractVerdictReferences, DECISION_SURFACE_HEADING } from "./launcher-step.mjs";
+import { runLauncherStep, buildGateOutcomeRecord, validateGateOutcomeRecord, authorizeLauncherVerdict, parseDecisionSurface, resolveOpenPath, isWriterComment, extractVerdictReferences, DECISION_SURFACE_HEADING } from "./launcher-step.mjs";
 import { runLauncherSupervisor } from "./launcher-supervisor.mjs";
 import { buildReadEffect } from "./launcher-readback.mjs";
 import { loadRouteEvidence } from "./route-qualification.mjs";
@@ -27,7 +27,7 @@ import { parseControlBullet, upsertControlBullet, parseExecutionPointer, resolve
 import { findExistingTrigger } from "../review-watch/trigger.mjs";
 import { isGenuineResponse } from "../review-watch/genuine-response.mjs";
 import { extractResponseVerdict } from "../review-watch/stage2-report.mjs";
-import { fromClaudeRun, fromGenericRun, persistManagedSessionRecord } from "../telemetry/managed-session-record.mjs";
+import { fromClaudeRun, fromGenericRun, persistManagedSessionRecord, persistRecordWith } from "../telemetry/managed-session-record.mjs";
 
 const REVIEW_BOT = "chatgpt-codex-connector[bot]";
 
@@ -362,7 +362,7 @@ function spawnWorker(argv, prompt, { cwd, env }) {
 // configured this reports not-launched so the supervisor stops at a durable waiting boundary and a
 // fresh `work on #<control>` remains the documented fallback. The worker's own exit/report never
 // unlocks anything: the supervisor re-reads durable state afterwards.
-export async function dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize, reestablish, env = process.env, runWorker, persistRecord = persistManagedSessionRecord, clock = () => new Date() }) {
+export async function dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize, reestablish, env = process.env, runWorker, persistRecord = persistManagedSessionRecord, clock = () => new Date(), runBase = null }) {
   const raw = env.LDL_WORKER_COMMAND;
   if (!raw) return { launched: false, reason: "no fresh-worker runner configured (LDL_WORKER_COMMAND); resume with a fresh `work on #<control>`" };
   let argv;
@@ -463,7 +463,7 @@ export async function dispatchFreshWorker({ dispatch, io, controlIssue, executio
       try {
         const record = buildWorkerRunRecord({
           identity: {
-            runId: `${controlIssue}-${executionIssue}-${stage}-${runStamp}-${nonce}-${i}`,
+            runId: `${controlIssue}-${executionIssue}-${stage}-${runBase ?? `${runStamp}-${nonce}`}-${i}`,
             controlIssue,
             executionIssue,
             lifecycleStage: stage,
@@ -498,7 +498,16 @@ export async function dispatchFreshWorker({ dispatch, io, controlIssue, executio
 
 // Production supervisor bindings over buildDeps (all durable reads/writes go through the same
 // scripts and REST readers as the step itself).
-export function buildSupervisorDeps({ controlIssue, executionIssue, stepDeps, io, repo = null, readIssue, env = process.env, sleep, now, runWorker, persistRecord }) {
+export function buildSupervisorDeps({ controlIssue, executionIssue, stepDeps, io, repo = null, readIssue, env = process.env, sleep, now, runWorker, persistRecord, persistGateRecord = (rec) => persistRecordWith(rec, validateGateOutcomeRecord), clock = () => new Date() }) {
+  // One run identity base per supervised launch: worker session records and gate-outcome records
+  // of the same launch share it (389-B/389-C join key).
+  let runBase;
+  try {
+    runBase = `${clock().toISOString().replace(/[^0-9A-Za-z]/g, "")}-${randomBytes(3).toString("hex")}`;
+  } catch {
+    runBase = "t-x";
+  }
+  let gateSeq = 0;
   const rIssue = readIssue ?? (({ repo: r, number }) => readGithubIssue({ repo: r, number, fields: ["body", "state"] }));
   const { readComments, writeControlBody } = stepDeps._io;
   const controlBody = () => rIssue({ repo, number: controlIssue }).body ?? "";
@@ -507,7 +516,15 @@ export function buildSupervisorDeps({ controlIssue, executionIssue, stepDeps, io
   return {
     step: () => runLauncherStep({ controlIssue, deps: stepDeps }),
     dispatchWorker: async (dispatch) =>
-      dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize: (v, a) => authorizeLauncherVerdict(v, a), reestablish: (fresh) => resolveOpenPath(fresh.state, fresh, stepDeps), env, runWorker, ...(persistRecord ? { persistRecord } : {}) }),
+      dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize: (v, a) => authorizeLauncherVerdict(v, a), reestablish: (fresh) => resolveOpenPath(fresh.state, fresh, stepDeps), env, runWorker, runBase, ...(persistRecord ? { persistRecord } : {}) }),
+    recordGateOutcome: ({ stepResult, stop = null, founderInterrupt = false }) => {
+      try {
+        const rec = buildGateOutcomeRecord({ runId: `${controlIssue}-${executionIssue}-gate-${runBase}-${gateSeq++}`, controlIssue, executionIssue, stepResult, stop, founderInterrupt, endedAt: clock().toISOString() });
+        persistGateRecord(rec);
+      } catch {
+        // telemetry failure never alters launcher outcome
+      }
+    },
     now,
     sleep,
     // Canonical poller (tools/review-watch/poll.mjs) for the bounded reviewer wait: since = the

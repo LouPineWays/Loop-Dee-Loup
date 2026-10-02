@@ -47,6 +47,17 @@ function refKey(evidence) {
 //   resumeFounder(resolution) -> persists the cleared founder decision (throws when unprovable),
 //   terminalInput() -> input for projectTerminalReturn, writeControl/readControl -> terminal deps,
 //   waitForReviewer(wait, budgetMs) -> { matched }, now() }
+// Issue #389 unit 389-C: observation only. Never awaited for its result, never allowed to throw
+// into routing; a failing recorder cannot change a supervisor outcome.
+async function observe(deps, payload) {
+  if (typeof deps?.recordGateOutcome !== "function") return;
+  try {
+    await deps.recordGateOutcome(payload);
+  } catch {
+    // swallowed by design
+  }
+}
+
 export async function runLauncherSupervisor({ deps, maxSteps = 25, waitBudgetMs = 0, } = {}) {
   const trail = [];
   const done = (outcome, extra = {}) => ({ outcome, trail, ...extra });
@@ -67,6 +78,7 @@ export async function runLauncherSupervisor({ deps, maxSteps = 25, waitBudgetMs 
       if (surface.noSurface) return done(SupervisorOutcome.WAITING, { reason: "founder decision pending with no durable decision surface" });
       const r = resolveFounderResume(surface);
       trail.push({ founder: r.outcome, resume: r.resume });
+      if (!r.resume) await observe(deps, { stepResult: { outcome: Outcome.WAITING, evidence: { state: "FOUNDER_DECISION_PENDING" }, gate: { state: "FOUNDER_DECISION_PENDING", inputLifecycle: null, references: {} } }, stop: "founder_decision_pending", founderInterrupt: true });
       if (!r.resume) return done(SupervisorOutcome.WAITING, { reason: r.reason ?? "founder decision pending", founderDecision: r.founderDecision, missing: r.missing });
       try {
         await deps.resumeFounder({ ...r, surfaceId: surface.surfaceId });
@@ -79,6 +91,7 @@ export async function runLauncherSupervisor({ deps, maxSteps = 25, waitBudgetMs 
     // 2. one gate-driven step
     const r = await deps.step();
     trail.push({ outcome: r.outcome, state: r.evidence?.state ?? null });
+    await observe(deps, { stepResult: r });
 
     switch (r.outcome) {
       case Outcome.ADVANCED: {

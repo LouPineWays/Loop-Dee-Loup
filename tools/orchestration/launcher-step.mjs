@@ -273,6 +273,16 @@ export async function resolveOpenPath(state, verdict, deps) {
 //         execute(transition, verdict) -> any (result ignored for unlocking),
 //         finalize(transition, verdict) -> any (project an already-completed effect; no replay) }
 export async function runLauncherStep({ controlIssue, deps } = {}) {
+  // Issue #389 unit 389-C: attach the already-computed gate facts (no new gate invocation) so the
+  // supervisor can persist a gate-outcome observation. Pure addition; outcome is unchanged.
+  const seen = {};
+  const r = await runLauncherStepInner({ controlIssue, deps, seen });
+  return { ...r, gate: { state: typeof seen.verdict?.state === "string" ? seen.verdict.state : null, inputLifecycle: lifecycleOf(seen.verdict), references: extractVerdictReferences(seen.verdict) } };
+}
+
+const lifecycleOf = (v) => (typeof (v?.lifecycle ?? v?.lifecycleState) === "string" ? String(v.lifecycle ?? v.lifecycleState) : null);
+
+async function runLauncherStepInner({ controlIssue, deps, seen } = {}) {
   if (controlIssue == null || !deps) {
     return result(Outcome.FAIL_CLOSED, { reason: "missing controlIssue or deps" });
   }
@@ -282,6 +292,7 @@ export async function runLauncherStep({ controlIssue, deps } = {}) {
   } catch (e) {
     return result(Outcome.FAIL_CLOSED, { reason: `gate failed: ${e?.message ?? e}` });
   }
+  seen.verdict = verdict;
   const state = verdict?.state;
   if (typeof state !== "string") return result(Outcome.FAIL_CLOSED, { reason: "verdict has no state" });
   if (WAITING_STATES.has(state)) {
@@ -564,4 +575,60 @@ export function resumeFromDurableState({ durable, trigger, environment } = {}) {
     return result(Outcome.WAITING, { reason: "attempt claim does not authorize starting or reconciling an attempt", action });
   }
   return result(Outcome.ADVANCED, { resume: true, action, authorization: durable.authorization.commentId ?? null });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate-outcome record (issue #389 unit 389-C). An observation of one launcher step; never a
+// methodology verdict. Identifiers/classes only: no gate output text, reasons, or bodies.
+// ---------------------------------------------------------------------------------------------
+
+export const GATE_RESULT_CLASSES = Object.freeze(["transition", "waiting", "open_path", "fail_closed", "ambiguous"]);
+const refInt = (v) => (v != null && Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
+
+export function gateResultClass(stepResult) {
+  switch (stepResult?.outcome) {
+    case Outcome.ADVANCED: return "transition";
+    case Outcome.WAITING: return "waiting";
+    case Outcome.OPEN_PATH_REQUIRED: return "open_path";
+    default: return stepResult?.evidence?.effectClass === EffectClass.AMBIGUOUS ? "ambiguous" : "fail_closed";
+  }
+}
+
+// `stop` is the supervisor's own stop/route state for this step when known (compact string).
+export function buildGateOutcomeRecord({ runId, controlIssue, executionIssue, stepResult, stop = null, founderInterrupt = false, endedAt = null } = {}) {
+  const g = stepResult?.gate ?? {};
+  const refs = g.references ?? {};
+  const ev = stepResult?.evidence ?? {};
+  const routeWaitStop = ev.dispatch?.route ?? ev.wait?.kind ?? stop ?? null;
+  return {
+    schema_version: 1,
+    record_kind: "gate_outcome",
+    run_id: runId ?? null,
+    control_issue: refInt(controlIssue),
+    execution_issue: refInt(executionIssue),
+    gate_or_transition: g.state ?? ev.state ?? null,
+    input_lifecycle_state: g.inputLifecycle ?? null,
+    result_class: gateResultClass(stepResult),
+    route_wait_stop_state: typeof routeWaitStop === "string" ? routeWaitStop : null,
+    references: { control: refInt(refs.controlIssue ?? controlIssue), execution: refInt(refs.executionIssue ?? refs.issue ?? refs.workIssue ?? executionIssue), pr: refInt(refs.pr), audit: refInt(refs.auditIssue) },
+    founder_interrupt: founderInterrupt === true,
+    ended_at: typeof endedAt === "string" ? endedAt : null,
+  };
+}
+
+export function validateGateOutcomeRecord(r) {
+  const errors = [];
+  if (!r || typeof r !== "object") return { valid: false, errors: ["record must be an object"] };
+  if (r.schema_version !== 1) errors.push("schema_version must be 1");
+  if (r.record_kind !== "gate_outcome") errors.push("record_kind must be gate_outcome");
+  if (typeof r.run_id !== "string" || !/^[A-Za-z0-9._-]{1,160}$/.test(r.run_id) || r.run_id.includes("..")) errors.push("run_id must be a stable filename-safe string");
+  if (!GATE_RESULT_CLASSES.includes(r.result_class)) errors.push("result_class invalid");
+  for (const k of ["gate_or_transition", "input_lifecycle_state", "route_wait_stop_state", "ended_at"]) {
+    if (r[k] !== null && typeof r[k] !== "string") errors.push(`${k} must be a string or null`);
+  }
+  if (typeof r.founder_interrupt !== "boolean") errors.push("founder_interrupt must be boolean");
+  const refs = r.references;
+  if (!refs || typeof refs !== "object") errors.push("references required");
+  else for (const k of ["control", "execution", "pr", "audit"]) if (refs[k] !== null && !Number.isInteger(refs[k])) errors.push(`references.${k} must be an integer or null`);
+  return { valid: errors.length === 0, errors };
 }
