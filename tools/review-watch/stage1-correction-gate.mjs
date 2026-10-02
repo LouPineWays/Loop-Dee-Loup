@@ -59,7 +59,8 @@
 
 import { execFileSync } from "node:child_process";
 import { run as stage1Run } from "./stage1-gate.mjs";
-import { isFindingsBearingResponse } from "./stage1-findings.mjs";
+import { isFindingsBearingResponse, isFormalReviewEndpoint } from "./stage1-findings.mjs";
+import { hasExplicitFindingsSignal } from "./stage1-clean-reaction.mjs";
 import { stage1DispositionMatchesHead } from "../orchestration/next-review-transition-gate.mjs";
 
 // Matches the disposition shape from this module's own header comment. Case-insensitive on
@@ -169,6 +170,15 @@ function hasFindingsStage1Response(stage1) {
   return (stage1.matches ?? []).some((m) => {
     const body = stripOuterWhitespace(m.body_excerpt);
     if (FINDINGS_PREAMBLE_PATTERN.test(body)) return true;
+    // Issue #827 (PR #826 live reproduction): Codex's current formal review opens with
+    // "### 💡 Codex Review" + a source link + a severity-labelled finding, omitting the older
+    // fixed "Here are some automated review suggestions..." sentence. Affirmative proof reuses
+    // stage1-clean-reaction.mjs's structural, positive-only signal (findings heading or P0-P3
+    // severity label) -- never the fail-closed classifier -- and only for a formal review
+    // artifact (review submission / inline review comment), so a plain top-level Issue comment
+    // never becomes findings authority (#638/#639). `stage1.matches` is already head-bound
+    // (inline comments via original_commit_id), so wrong-head evidence stays excluded.
+    if (isFormalReviewEndpoint(m.endpoint) && hasExplicitFindingsSignal(body)) return true;
     return CLEAN_PREAMBLE_PATTERN.test(body) && isFindingsBearingResponse(body);
   });
 }

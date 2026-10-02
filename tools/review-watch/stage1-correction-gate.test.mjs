@@ -150,6 +150,57 @@ test("checkCorrectionDelta: NOT_SATISFIED (findings-provenance) — a clean-pass
   assert.match(result.reason, /no findings-bearing/);
 });
 
+// Issue #827: PR #826's current formal-review shape (no legacy "Here are some..." sentence).
+const CURRENT_FORMAL_BODY = [
+  "### 💡 Codex Review",
+  "",
+  "https://github.com/o/r/blob/abc/x.mjs#L1",
+  "",
+  "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Fix this**",
+].join("\n");
+const correctionArgs = { repo: "o/r", pr: 826, reviewedHead: REVIEWED, correctedHead: CORRECTED, gatedHead: CORRECTED };
+
+async function verdictFor(matches) {
+  return checkCorrectionDelta(correctionArgs, {
+    stage1RunImpl: async () => findingsReceived({ matches }),
+    compareImpl: async () => ({ status: "ahead" }),
+  });
+}
+
+test("checkCorrectionDelta (#827): current formal review shape with severity finding is findings proof", async () => {
+  const r = await verdictFor([{ endpoint: "pull-reviews", body_excerpt: CURRENT_FORMAL_BODY }]);
+  assert.equal(r.state, "CORRECTION_SATISFIED");
+});
+
+test("checkCorrectionDelta (#827): inline severity-labelled formal comment is findings proof", async () => {
+  const r = await verdictFor([{ endpoint: "pull-comments", body_excerpt: "**P1 Badge** Missing check" }]);
+  assert.equal(r.state, "CORRECTION_SATISFIED");
+});
+
+test("checkCorrectionDelta (#827): plain top-level issue comment with findings is not proof", async () => {
+  const r = await verdictFor([{ endpoint: "issue-comments", body_excerpt: CURRENT_FORMAL_BODY }]);
+  assert.equal(r.state, "NOT_SATISFIED");
+});
+
+test("checkCorrectionDelta (#827): ambiguous formal-review prose without findings structure is not proof", async () => {
+  const r = await verdictFor([{ endpoint: "pull-reviews", body_excerpt: "Thanks, this is an interesting change." }]);
+  assert.equal(r.state, "NOT_SATISFIED");
+});
+
+test("checkCorrectionDelta (#827): clean formal review is not proof", async () => {
+  const r = await verdictFor([{ endpoint: "pull-reviews", body_excerpt: "Codex Review: Didn't find any major issues. Nice work!" }]);
+  assert.equal(r.state, "NOT_SATISFIED");
+});
+
+test("checkCorrectionDelta (#827): findings only in unboundGenuineMatches (wrong head) are not proof", async () => {
+  const r = await checkCorrectionDelta(correctionArgs, {
+    stage1RunImpl: async () =>
+      findingsReceived({ matches: [], unboundGenuineMatches: [{ endpoint: "pull-reviews", body_excerpt: CURRENT_FORMAL_BODY }] }),
+    compareImpl: throwingSpy("compareImpl"),
+  });
+  assert.equal(r.state, "NOT_SATISFIED");
+});
+
 test("checkCorrectionDelta: CORRECTION_SATISFIED — gatedHead only needs to start with correctedHead (prefix match)", async () => {
   const shortCorrected = CORRECTED.slice(0, 10);
   const fullGated = CORRECTED;
