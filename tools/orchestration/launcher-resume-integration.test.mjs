@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  parseDecisionSurface,
   renderDecisionSurface,
   newSurfaceId,
   resolveFounderResume,
@@ -13,10 +14,11 @@ import { verifyTrustedTrigger, parseLaunchAuthorization } from "./launch-authori
 import { planClaim, parseAttemptClaims } from "./attempt-claim.mjs";
 
 const qs = [
-  { id: "Q1", question: "Ship scope A or B?", blocking: "slice scope", options: ["A", "B"], recommended: "A" },
-  { id: "Q2", question: "Rename?", blocking: "naming" },
+  { id: "Q1", question: "Ship scope A or B?", blocking: "slice scope", options: ["A", "B"], recommended: "A", resolves: "scope" },
+  { id: "Q2", question: "Rename?", blocking: "naming", resolves: "naming" },
 ];
 const SID = "379-r1-abc123";
+const rq = parseDecisionSurface(renderDecisionSurface({ controlIssue: 379, questions: qs, surfaceId: SID })).questions;
 const ans = (body, perm = "write", sid = SID) => ({ id: 1, body: `- **Surface id:** ${sid}
 ${body}`, authorPermission: perm });
 
@@ -26,17 +28,17 @@ test("check 13: one batched decision surface; resumes automatically when exactly
   assert.match(body, /Question Q1/);
   assert.match(body, /Question Q2/);
   const ids = ["Q1", "Q2"];
-  const partial = resolveFounderResume({ surfaceId: SID, questionIds: ids, comments: [ans("- **Answer Q1:** A")], continuations: ["c1"] });
+  const partial = resolveFounderResume({ surfaceId: SID, questionIds: ids, questions: rq, comments: [ans("- **Answer Q1:** A")], continuations: ["c1"] });
   assert.equal(partial.resume, false);
   assert.equal(partial.outcome, Outcome.WAITING);
   const full = [ans("- **Answer Q1:** A\n- **Answer Q2:** no")];
-  const one = resolveFounderResume({ surfaceId: SID, questionIds: ids, comments: full, continuations: ["c1"] });
+  const one = resolveFounderResume({ surfaceId: SID, questionIds: ids, questions: rq, comments: full, continuations: ["c1"] });
   assert.equal(one.resume, true);
   assert.equal(one.continuation, "c1");
-  assert.equal(resolveFounderResume({ surfaceId: SID, questionIds: ids, comments: full, continuations: ["c1", "c2"] }).resume, false);
-  assert.equal(resolveFounderResume({ surfaceId: SID, questionIds: ids, comments: full, continuations: [] }).resume, false);
+  assert.equal(resolveFounderResume({ surfaceId: SID, questionIds: ids, questions: rq, comments: full, continuations: ["c1", "c2"] }).resume, false);
+  assert.equal(resolveFounderResume({ surfaceId: SID, questionIds: ids, questions: rq, comments: full, continuations: [] }).resume, false);
   const weak = resolveFounderResume({
-    questionIds: ids,
+    questionIds: ids, questions: rq,
     comments: [ans("- **Answer Q1:** A\n- **Answer Q2:** x", "read")],
     continuations: ["c1"],
   });
@@ -109,18 +111,18 @@ test("decision surface retains the required general-comments field and a surface
 test("answers bind to the exact surface: reused Q1 on a later surface is not inherited; corrections win", () => {
   const ids = ["Q1", "Q2"];
   const older = ans("- **Answer Q1:** A\n- **Answer Q2:** no", "write", "379-r1-old111");
-  const none = resolveFounderResume({ surfaceId: "379-r2-new222", questionIds: ids, comments: [older], continuations: ["c1"] });
+  const none = resolveFounderResume({ surfaceId: "379-r2-new222", questionIds: ids, questions: rq, comments: [older], continuations: ["c1"] });
   assert.equal(none.resume, false);
   assert.deepEqual(none.missing, ids);
   const unbound = { id: 3, authorPermission: "write", body: "- **Answer Q1:** A\n- **Answer Q2:** no" };
-  assert.equal(resolveFounderResume({ surfaceId: SID, questionIds: ids, comments: [unbound], continuations: ["c1"] }).resume, false);
+  assert.equal(resolveFounderResume({ surfaceId: SID, questionIds: ids, questions: rq, comments: [unbound], continuations: ["c1"] }).resume, false);
   const first = ans("- **Answer Q1:** A\n- **Answer Q2:** no");
   const fix = ans("- **Answer Q1:** B\n- **General comments:** thanks");
-  const r = resolveFounderResume({ surfaceId: SID, questionIds: ids, comments: [first, fix], continuations: ["c1"] });
+  const r = resolveFounderResume({ surfaceId: SID, questionIds: ids, questions: rq, comments: [first, fix], continuations: ["c1"] });
   assert.equal(r.resume, true);
   assert.equal(r.answers.Q1, "B");
   assert.equal(r.generalComments, "thanks");
-  assert.equal(resolveFounderResume({ questionIds: ids, comments: [first], continuations: ["c1"] }).outcome, "FAIL_CLOSED");
+  assert.equal(resolveFounderResume({ questionIds: ids, questions: rq, comments: [first], continuations: ["c1"] }).outcome, "FAIL_CLOSED");
   assert.notEqual(newSurfaceId(379, qs, 1), newSurfaceId(379, qs, 2));
 });
 
@@ -137,4 +139,22 @@ test("consumed nonce (REPLAY) and non-starting claim actions never resume", () =
   for (const a of ["CLAIM", "RECONCILE_THEN_CLAIM"]) {
     assert.equal(resumeFromDurableState({ durable: durable(a), trigger, environment: env }).outcome, Outcome.ADVANCED, a);
   }
+});
+
+test("founder answers resume only through a deterministic projection onto authoritative decisions", () => {
+  const full = [ans("- **Answer Q1:** A\n- **Answer Q2:** no")];
+  const ok = resolveFounderResume({ surfaceId: SID, questionIds: ["Q1", "Q2"], questions: rq, comments: full, continuations: ["c1"] });
+  assert.deepEqual(ok.decisions, [{ key: "scope", answer: "A" }, { key: "naming", answer: "no" }]);
+  // no declared projection (legacy surface / omitted questions) -> pending, never a guessed mapping
+  const noQ = resolveFounderResume({ surfaceId: SID, questionIds: ["Q1", "Q2"], comments: full, continuations: ["c1"] });
+  assert.equal(noQ.resume, false);
+  assert.equal(noQ.outcome, Outcome.WAITING);
+  assert.match(noQ.reason, /not deterministically applicable/);
+  const bare = parseDecisionSurface(renderDecisionSurface({ controlIssue: 379, surfaceId: SID, questions: [{ id: "Q1", question: "x?", blocking: "b" }] })).questions;
+  assert.equal(resolveFounderResume({ surfaceId: SID, questionIds: ["Q1"], questions: bare, comments: [ans("- **Answer Q1:** anything")], continuations: ["c1"] }).resume, false);
+  // an answer outside the declared options cannot be applied
+  const off = resolveFounderResume({ surfaceId: SID, questionIds: ["Q1", "Q2"], questions: rq, comments: [ans("- **Answer Q1:** C\n- **Answer Q2:** no")], continuations: ["c1"] });
+  assert.equal(off.resume, false);
+  assert.match(off.reason, /declared options/);
+  assert.equal(parseDecisionSurface(renderDecisionSurface({ controlIssue: 379, surfaceId: SID, questions: qs })).questions[0].resolves, "scope");
 });

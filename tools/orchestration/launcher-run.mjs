@@ -17,7 +17,7 @@
 
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { runLauncherStep, authorizeLauncherVerdict, parseDecisionSurface, DECISION_SURFACE_HEADING } from "./launcher-step.mjs";
+import { runLauncherStep, authorizeLauncherVerdict, parseDecisionSurface, resolveOpenPath, isWriterComment, extractVerdictReferences, DECISION_SURFACE_HEADING } from "./launcher-step.mjs";
 import { runLauncherSupervisor } from "./launcher-supervisor.mjs";
 import { buildReadEffect } from "./launcher-readback.mjs";
 import { loadRouteEvidence } from "./route-qualification.mjs";
@@ -54,6 +54,11 @@ export function findStage2ReportCommentId(comments, { bot = REVIEW_BOT } = {}) {
 // other surfaces' lines are kept.
 export const RESOLVED_DECISIONS_HEADING = "### Resolved founder decisions";
 
+const parseControlRef = (body) => {
+  const m = /^\s*[-*]\s+\*\*Control issue:\*\*\s*#(\d+)\s*$/m.exec(String(body ?? ""));
+  return m ? Number(m[1]) : null;
+};
+
 export function renderResolvedDecisionLines({ surfaceId, answers, generalComments }) {
   const lines = Object.entries(answers ?? {}).map(([q, a]) => `- **Surface ${surfaceId} Answer ${q}:** ${a}`);
   if (generalComments) lines.push(`- **Surface ${surfaceId} General comments:** ${generalComments}`);
@@ -79,6 +84,42 @@ export function upsertResolvedDecisions(body, { surfaceId, answers, generalComme
     after = lines.slice(end);
   }
   const section = [RESOLVED_DECISIONS_HEADING, "", ...kept, ...renderResolvedDecisionLines({ surfaceId, answers, generalComments }), ""];
+  const head = before.join("\n").replace(/\s+$/, "");
+  const tail = after.join("\n");
+  return `${`${head}\n\n${section.join("\n")}${tail ? `\n${tail}` : ""}`.replace(/\s+$/, "")}\n`;
+}
+
+// The authoritative application of a founder answer (stage 2 audit #832, finding 2): the decision a
+// surface question declares it resolves becomes a keyed bullet in one "### Settled decisions"
+// section of the parent snapshot (replacing any earlier value of the same key). The generic
+// resolved-decisions record above is provenance only and never authorizes resume.
+export const SETTLED_DECISIONS_HEADING = "### Settled decisions";
+
+export function renderSettledDecisionLine({ key, answer }) {
+  return `- **Decision ${key}:** ${answer}`;
+}
+
+export function upsertSettledDecisions(body, decisions) {
+  const lines = String(body ?? "").replace(/\r\n/g, "\n").split("\n");
+  const start = lines.findIndex((l) => l.trim() === SETTLED_DECISIONS_HEADING);
+  const keyOf = (l) => /^- \*\*Decision ([^*:]+):\*\*/.exec(l)?.[1];
+  const incoming = new Set(decisions.map((d) => d.key));
+  let before = lines;
+  let kept = [];
+  let after = [];
+  if (start >= 0) {
+    let end = lines.length;
+    for (let i = start + 1; i < lines.length; i += 1) {
+      if (/^#{1,6}\s/.test(lines[i])) {
+        end = i;
+        break;
+      }
+    }
+    before = lines.slice(0, start);
+    kept = lines.slice(start + 1, end).filter((l) => l.trim() !== "" && !incoming.has(keyOf(l)));
+    after = lines.slice(end);
+  }
+  const section = [SETTLED_DECISIONS_HEADING, "", ...kept, ...decisions.map(renderSettledDecisionLine), ""];
   const head = before.join("\n").replace(/\s+$/, "");
   const tail = after.join("\n");
   return `${`${head}\n\n${section.join("\n")}${tail ? `\n${tail}` : ""}`.replace(/\s+$/, "")}\n`;
@@ -245,7 +286,7 @@ export function buildDeps({
 // configured this reports not-launched so the supervisor stops at a durable waiting boundary and a
 // fresh `work on #<control>` remains the documented fallback. The worker's own exit/report never
 // unlocks anything: the supervisor re-reads durable state afterwards.
-export function dispatchFreshWorker({ dispatch, io, controlIssue, env = process.env, runWorker }) {
+export async function dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize, reestablish, env = process.env, runWorker }) {
   const raw = env.LDL_WORKER_COMMAND;
   if (!raw) return { launched: false, reason: "no fresh-worker runner configured (LDL_WORKER_COMMAND); resume with a fresh `work on #<control>`" };
   let argv;
@@ -261,9 +302,27 @@ export function dispatchFreshWorker({ dispatch, io, controlIssue, env = process.
   const fresh = JSON.parse(freshRaw);
   const want = dispatch.byReference ?? {};
   if (fresh?.state !== want.state) throw new Error(`stale dispatch: gate now reports ${fresh?.state}, dispatch was for ${want.state}`);
-  for (const k of ["pr", "auditIssue", "executionIssue", "issue"]) {
-    if (want[k] != null && fresh[k] != null && String(want[k]) !== String(fresh[k])) throw new Error(`stale dispatch: ${k} changed`);
+  // Stage 2 #832 finding 1: the fresh verdict is independently authorized, and EVERY dispatch-defining
+  // reference (control/execution identity, PR/audit target, head, units, plan/manifest identity,
+  // route, ...) must match exactly. An expected value that became absent, newly present, or changed
+  // is a mismatch; a changed target needs a newly authorized dispatch, never reused authority.
+  if (typeof authorize !== "function") throw new Error("no execution-authority check supplied for the fresh verdict");
+  const authority = authorize(fresh, { controlIssue, executionIssue });
+  if (authority?.authorized !== true) throw new Error(`fresh verdict not authorized: ${authority?.reason ?? "unspecified"}`);
+  const wantRefs = extractVerdictReferences(want);
+  const freshRefs = extractVerdictReferences(fresh);
+  for (const k of new Set([...Object.keys(wantRefs), ...Object.keys(freshRefs)])) {
+    if (JSON.stringify(wantRefs[k] ?? null) !== JSON.stringify(freshRefs[k] ?? null)) throw new Error(`stale dispatch: ${k} changed`);
   }
+  // Stage 2 #833 finding 1: the selected route and exact-target Chat guidance are part of the
+  // dispatch too. Re-establish the complete open-path dispatch from the fresh verdict through the
+  // same route selection and guidance verification, and require it to equal the dispatched one.
+  if (typeof reestablish !== "function") throw new Error("no open-path re-establishment supplied for the fresh verdict");
+  const redo = await reestablish(fresh);
+  const freshDispatch = redo?.evidence?.dispatch;
+  if (!freshDispatch) throw new Error(`stale dispatch: fresh open path no longer yields a dispatch (${redo?.evidence?.reason ?? redo?.outcome ?? "unspecified"})`);
+  if (freshDispatch.route !== dispatch.route) throw new Error("stale dispatch: qualified route changed");
+  if (JSON.stringify(freshDispatch.byReference?.guidance ?? null) !== JSON.stringify(want.guidance ?? null)) throw new Error("stale dispatch: Chat guidance changed");
   let prompts;
   let workerCwd;
   let binding = null;
@@ -291,7 +350,7 @@ export function dispatchFreshWorker({ dispatch, io, controlIssue, env = process.
   const run =
     runWorker ??
     ((prompt, { cwd } = {}) =>
-      execFileSync(argv[0], argv.slice(1), { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["pipe", "ignore", "inherit"], input: prompt, cwd, env: { ...env, LDL_WORKER_ROUTE: String(dispatch.route) } }));
+      execFileSync(argv[0], argv.slice(1), { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["pipe", "ignore", "inherit"], input: prompt, cwd, env: { ...env, LDL_WORKER_ROUTE: String(freshDispatch.route) } }));
   try {
     for (const p of prompts) run(p, { cwd: workerCwd });
   } finally {
@@ -316,7 +375,8 @@ export function buildSupervisorDeps({ controlIssue, executionIssue, stepDeps, io
 
   return {
     step: () => runLauncherStep({ controlIssue, deps: stepDeps }),
-    dispatchWorker: async (dispatch) => dispatchFreshWorker({ dispatch, io, controlIssue, env, runWorker }),
+    dispatchWorker: async (dispatch) =>
+      dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize: (v, a) => authorizeLauncherVerdict(v, a), reestablish: (fresh) => resolveOpenPath(fresh.state, fresh, stepDeps), env, runWorker }),
     now,
     sleep,
     // Canonical poller (tools/review-watch/poll.mjs) for the bounded reviewer wait: since = the
@@ -341,28 +401,39 @@ export function buildSupervisorDeps({ controlIssue, executionIssue, stepDeps, io
       const body = controlBody();
       if (isNone(parseControlBullet(body, "Founder decision"))) return null;
       const comments = readComments(controlIssue);
-      const surfaces = comments.filter((c) => String(c.body ?? "").trimStart().startsWith(DECISION_SURFACE_HEADING));
+      // The surface is execution-relevant input: only a repository writer's comment bound to THIS
+      // control issue counts; a non-writer or other-control lookalike never replaces it. The latest
+      // trusted surface must itself parse unambiguously (unique question ids, no reserved option).
+      const surfaces = comments.filter((c) => isWriterComment(c) && String(c.body ?? "").trimStart().startsWith(DECISION_SURFACE_HEADING) && parseControlRef(c.body) === controlIssue);
       const latest = surfaces[surfaces.length - 1];
-      const parsed = latest ? parseDecisionSurface(latest.body) : null;
+      const parsed = latest ? parseDecisionSurface(latest.body, { controlIssue }) : null;
       if (!parsed) return { noSurface: true };
       // Exactly one authorized continuation: the control's single current execution pointer is
       // the very execution issue this launch authorizes; anything else is zero continuations.
       const ptr = parseExecutionPointer(parseControlBullet(body, "Execution") ?? parseControlBullet(body, "Execution issue"));
       const continuations = ptr?.ok && ptr.issue === executionIssue ? [`execution#${executionIssue}`] : [];
-      return { surfaceId: parsed.surfaceId, questionIds: parsed.questionIds, comments, continuations };
+      return { surfaceId: parsed.surfaceId, questionIds: parsed.questionIds, questions: parsed.questions, comments, continuations };
     },
-    // Route the founder answers into the durable snapshot FIRST, then clear the interrupt in the
-    // same write, and prove both on read-back; an unprovable record never clears the decision.
+    // Apply the answers by meaning FIRST: the decisions the surface declares each answer resolves
+    // are written to the authoritative settled-decisions state (with generic provenance) and proved
+    // by exact read-back; only then is the interrupt cleared as a separate, final, read-back-proved
+    // projection. An answer with no deterministic projection never reaches here (resolveFounderResume
+    // keeps it pending); an unprovable application never clears the decision.
     resumeFounder: async (resolution) => {
-      const { surfaceId, answers, generalComments } = resolution ?? {};
+      const { surfaceId, answers, generalComments, decisions } = resolution ?? {};
       if (!surfaceId || !answers || Object.keys(answers).length === 0) throw new Error("resolution carries no surface id or answers to persist");
-      const next = upsertControlBullet(upsertResolvedDecisions(controlBody(), { surfaceId, answers, generalComments }), "Founder decision", "none");
-      writeControlBody(next);
+      if (!Array.isArray(decisions) || decisions.length === 0) throw new Error("resolution carries no deterministic decision projection");
+      const applied = upsertSettledDecisions(upsertResolvedDecisions(controlBody(), { surfaceId, answers, generalComments }), decisions);
+      writeControlBody(applied);
+      const mid = controlBody().split(/\r?\n/).map((l) => l.trim());
+      for (const d of decisions) {
+        if (!mid.includes(renderSettledDecisionLine(d))) throw new Error(`resolved founder decision not applied to authoritative state: ${d.key}`);
+      }
+      writeControlBody(upsertControlBullet(controlBody(), "Founder decision", "none"));
       const after = controlBody();
       if (!isNone(parseControlBullet(after, "Founder decision"))) throw new Error("cleared founder decision not provable on read-back");
-      for (const line of renderResolvedDecisionLines({ surfaceId, answers, generalComments })) {
-        if (!after.split(/\r?\n/).some((l) => l.trim() === line)) throw new Error(`resolved founder decision not provable on read-back: ${line}`);
-      }
+      const lines = after.split(/\r?\n/).map((l) => l.trim());
+      for (const d of decisions) if (!lines.includes(renderSettledDecisionLine(d))) throw new Error(`settled decision lost on read-back: ${d.key}`);
     },
     terminalInput: async (r) => {
       const body = controlBody();

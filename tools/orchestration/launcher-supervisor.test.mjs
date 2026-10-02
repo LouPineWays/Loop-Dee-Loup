@@ -6,6 +6,9 @@ import { buildDeps, buildSupervisorDeps, dispatchFreshWorker, findStage2ReportCo
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 import { renderClaimBody, parseAttemptClaims, planClaim } from "./attempt-claim.mjs";
 import { upsertControlBullet } from "./ready-dispatch-gate.mjs";
+import { authorizeLauncherVerdict } from "./launcher-step.mjs";
+const authorize = (v, a) => authorizeLauncherVerdict(v, a);
+const reestablish = async () => ({ evidence: { dispatch: { route: "r", byReference: { guidance: null } } } });
 
 // ---------------------------------------------------------------------------------------------
 // Pure supervisor routing
@@ -96,7 +99,7 @@ test("findStage2ReportCommentId derives the latest NOT CLEAN reviewer report aft
   assert.equal(findStage2ReportCommentId([comments[0], comments[1]]), null);
 });
 
-test("dispatchFreshWorker reserves the PR-head checkout for a Stage 1 findings correction, runs the worker there, and releases it", () => {
+test("dispatchFreshWorker reserves the PR-head checkout for a Stage 1 findings correction, runs the worker there, and releases it", async () => {
   const calls = [];
   const gate = { state: "STAGE1_CORRECTION_REQUIRED", pr: 826, issue: 73, controlIssue: 379, correctionReason: "findings" };
   const binding = { path: "C:/wt/pr-826", token: "efb5522c", scriptPath: "C:/s.mjs" };
@@ -110,15 +113,15 @@ test("dispatchFreshWorker reserves the PR-head checkout for a Stage 1 findings c
     },
   };
   const ran = [];
-  const dispatch = { route: "r", byReference: { state: "STAGE1_CORRECTION_REQUIRED", pr: 826 } };
-  const out = dispatchFreshWorker({ dispatch, io, controlIssue: 379, env: { LDL_WORKER_COMMAND: JSON.stringify(["w"]) }, runWorker: (p, o) => ran.push([p, o.cwd]) });
+  const dispatch = { route: "r", byReference: { state: "STAGE1_CORRECTION_REQUIRED", pr: 826, issue: 73, controlIssue: 379, correctionReason: "findings" } };
+  const out = await dispatchFreshWorker({ dispatch, io, controlIssue: 379, executionIssue: 73, authorize, reestablish, env: { LDL_WORKER_COMMAND: JSON.stringify(["w"]) }, runWorker: (p, o) => ran.push([p, o.cwd]) });
   assert.equal(out.launched, true);
   assert.deepEqual(ran, [["PROMPT", "C:/wt/pr-826"]]);
   assert.deepEqual(calls.map((c) => c[0]), ["session-entry-gate.mjs", "pr-head-checkout-preflight.mjs", "format-dispatch-prompt.mjs", "pr-head-checkout-preflight.mjs"]);
   assert.deepEqual(calls[3][1], ["--release-binding", "efb5522c"]);
   // a failed reservation fails closed before any worker runs
   const bad = { node: (f) => (f.endsWith("session-entry-gate.mjs") ? JSON.stringify(gate) : JSON.stringify({ state: "CHECKOUT_BINDING_UNVERIFIED", reason: "locked" })) };
-  assert.throws(() => dispatchFreshWorker({ dispatch, io: bad, controlIssue: 379, env: { LDL_WORKER_COMMAND: JSON.stringify(["w"]) }, runWorker: () => assert.fail("no worker") }), /reservation failed/);
+  await assert.rejects(dispatchFreshWorker({ dispatch, io: bad, controlIssue: 379, executionIssue: 73, authorize, reestablish, env: { LDL_WORKER_COMMAND: JSON.stringify(["w"]) }, runWorker: () => assert.fail("no worker") }), /reservation failed/);
 });
 
 test("upsertResolvedDecisions routes answers into one replaceable section", () => {
@@ -223,9 +226,9 @@ function fakeBinding(w, { failProjectionOnce = false } = {}) {
     gh: (args) => {
       w.calls.push(["gh", ...args]);
       const path = args[args.length - 1];
-      if (/collaborators\/.*\/permission/.test(path)) return JSON.stringify({ permission: "write" });
+      if (/collaborators\/.*\/permission/.test(path)) return JSON.stringify({ permission: path.includes("lookalike") ? "read" : "write" });
       const m = /issues\/(\d+)\/comments/.exec(path);
-      if (m) return JSON.stringify([m[1] === "379" ? w.controlComments.map((c, i) => ({ id: i + 1, body: c, user: { login: "founder" } })) : []]);
+      if (m) return JSON.stringify([m[1] === "379" ? w.controlComments.map((c, i) => ({ id: i + 1, body: typeof c === "string" ? c : c.body, user: { login: typeof c === "string" ? "founder" : c.login } })) : []]);
       throw new Error(`unexpected gh ${args.join(" ")}`);
     },
   };
@@ -310,8 +313,8 @@ test("PRODUCTION: a wrong-successor gate change never unlocks (verdict proposes 
 test("PRODUCTION: founder resolution resumes through the production path only when one continuation remains", async () => {
   const w = world({ founderPending: true });
   w.phase = 3;
-  const surface = renderDecisionSurface({ controlIssue: 379, surfaceId: "379-r1-abc123", questions: [{ id: "Q1", question: "A or B?", blocking: "scope" }] });
-  assert.deepEqual(parseDecisionSurface(surface), { surfaceId: "379-r1-abc123", questionIds: ["Q1"] });
+  const surface = renderDecisionSurface({ controlIssue: 379, surfaceId: "379-r1-abc123", questions: [{ id: "Q1", question: "A or B?", blocking: "scope", options: ["A", "B"], resolves: "scope" }] });
+  assert.deepEqual(parseDecisionSurface(surface), { surfaceId: "379-r1-abc123", questionIds: ["Q1"], questions: [{ id: "Q1", options: ["A", "B"], resolves: "scope" }], controlIssue: 379 });
   // unanswered -> WAITING, no step taken
   w.controlComments = [surface];
   let b = fakeBinding(w);
@@ -325,6 +328,7 @@ test("PRODUCTION: founder resolution resumes through the production path only wh
   assert.match(w.control, /\*\*Founder decision:\*\* none/);
   // the answer itself is durable in the snapshot, not merely the cleared interrupt
   assert.match(w.control, /\*\*Surface 379-r1-abc123 Answer Q1:\*\* A/);
+  assert.match(w.control, /### Settled decisions[^#]*- \*\*Decision scope:\*\* A/);
   assert.ok(w.calls.some((c) => c[0].endsWith("session-entry-gate.mjs")));
   // a control that names a different execution issue has zero authorized continuations
   const w2 = world({ founderPending: true });
@@ -341,10 +345,142 @@ test("PRODUCTION: duplicate/replayed triggers still cannot start a second run on
   assert.equal(planClaim(claims, {}, { attemptId: "2-1", nonce: "n1" }).action, "REPLAY");
 });
 
-test("dispatchFreshWorker refuses a stale dispatch and reports no runner when none is configured", () => {
+test("dispatchFreshWorker refuses a stale dispatch and reports no runner when none is configured", async () => {
   const io = { node: (f) => (f.endsWith("session-entry-gate.mjs") ? JSON.stringify({ state: "READY_TO_DISPATCH_PLANNING", executionIssue: 73 }) : "P") };
   const dispatch = { route: "r", byReference: { state: "READY_TO_DISPATCH", executionIssue: 73 } };
-  assert.equal(dispatchFreshWorker({ dispatch, io, controlIssue: 379, env: {} }).launched, false);
-  assert.throws(() => dispatchFreshWorker({ dispatch, io, controlIssue: 379, env: { LDL_WORKER_COMMAND: '["w"]' }, runWorker: () => {} }), /stale dispatch/);
-  assert.equal(dispatchFreshWorker({ dispatch, io, controlIssue: 379, env: { LDL_WORKER_COMMAND: "not json" } }).launched, false);
+  assert.equal((await dispatchFreshWorker({ dispatch, io, controlIssue: 379, executionIssue: 73, authorize, reestablish, env: {} })).launched, false);
+  await assert.rejects(dispatchFreshWorker({ dispatch, io, controlIssue: 379, executionIssue: 73, authorize, reestablish, env: { LDL_WORKER_COMMAND: '["w"]' }, runWorker: () => {} }), /stale dispatch/);
+  assert.equal((await dispatchFreshWorker({ dispatch, io, controlIssue: 379, executionIssue: 73, authorize, reestablish, env: { LDL_WORKER_COMMAND: "not json" } })).launched, false);
+});
+
+// ---- Stage 2 #832 corrections ----
+
+function freshDispatchHarness(fresh, want, { authorizeFn = authorize, reestablishFn = reestablish, route = "r" } = {}) {
+  const ran = [];
+  const io = { node: (f) => (f.endsWith("session-entry-gate.mjs") ? JSON.stringify(fresh) : "PROMPT") };
+  const call = () =>
+    dispatchFreshWorker({
+      dispatch: { route, byReference: want },
+      io, controlIssue: 379, executionIssue: 73, authorize: authorizeFn, reestablish: reestablishFn,
+      env: { LDL_WORKER_COMMAND: '["w"]' }, runWorker: (p) => ran.push(p),
+    });
+  return { call, ran };
+}
+
+test("fresh-worker dispatch: an unchanged, independently authorized verdict dispatches", async () => {
+  const v = { state: "READY_TO_DISPATCH_INTEGRATION", controlIssue: 379, executionIssue: 73, planIndexUrl: "u" };
+  const h = freshDispatchHarness(v, { ...v, guidance: null });
+  assert.equal((await h.call()).launched, true);
+  assert.deepEqual(h.ran, ["PROMPT"]);
+});
+
+test("fresh-worker dispatch: changing, omitting, or adding ANY dispatch-defining value blocks dispatch", async () => {
+  const base = {
+    state: "READY_TO_DISPATCH_UNITS", controlIssue: 379, executionIssue: 73, pr: 5, head: "h1", auditIssue: 9,
+    route: "r1", planIndexUrl: "p1", manifestCommentId: 11, manifestUrl: "m1", dispatchReadyUnitIds: ["A"], correctionReason: "findings",
+  };
+  for (const k of Object.keys(base).filter((x) => x !== "state")) {
+    const changed = freshDispatchHarness({ ...base, [k]: Array.isArray(base[k]) ? ["B"] : typeof base[k] === "number" ? base[k] + 1 : `${base[k]}x` }, base);
+    await assert.rejects(changed.call(), /stale dispatch|not authorized/, `changed ${k}`);
+    const { [k]: _gone, ...without } = base;
+    await assert.rejects(freshDispatchHarness(without, base).call(), /stale dispatch/, `omitted-fresh ${k}`);
+    if (k !== "controlIssue" && k !== "executionIssue") await assert.rejects(freshDispatchHarness(base, without).call(), /stale dispatch/, `omitted-want ${k}`);
+    assert.deepEqual(changed.ran, [], `no worker ran for ${k}`);
+  }
+  // a fresh verdict that is not itself authorized never dispatches, even when every reference matches
+  await assert.rejects(freshDispatchHarness(base, base, { authorizeFn: () => ({ authorized: false, reason: "no" }) }).call(), /not authorized/);
+  await assert.rejects(
+    dispatchFreshWorker({ dispatch: { route: "r", byReference: base }, io: { node: () => JSON.stringify(base) }, controlIssue: 379, executionIssue: 73, env: { LDL_WORKER_COMMAND: '["w"]' }, runWorker: () => {} }),
+    /no execution-authority check/,
+  );
+});
+
+// ---- Stage 1 #833 corrections ----
+
+test("fresh-worker dispatch: the qualified route and exact-target guidance are re-established, not reused", async () => {
+  const v = { state: "STAGE2_CORRECTION_REQUIRED", controlIssue: 379, executionIssue: 73, auditIssue: 9, pr: 5 };
+  const guidance = { commentId: 7, target: { kind: "stage2", ref: "#9", evidenceId: "e" } };
+  const want = { ...v, guidance };
+  const fresh = (route, g) => async () => ({ evidence: { dispatch: { route, byReference: { guidance: g } } } });
+  const ok = freshDispatchHarness(v, want, { reestablishFn: fresh("r", guidance) });
+  assert.equal((await ok.call()).launched, true);
+  const r2 = freshDispatchHarness(v, want, { reestablishFn: fresh("other", guidance) });
+  await assert.rejects(r2.call(), /qualified route changed/);
+  for (const g of [null, { ...guidance, commentId: 8 }, { ...guidance, target: { ...guidance.target, evidenceId: "e2" } }]) {
+    const h = freshDispatchHarness(v, want, { reestablishFn: fresh("r", g) });
+    await assert.rejects(h.call(), /Chat guidance changed/);
+    assert.deepEqual(h.ran, []);
+  }
+  const w = freshDispatchHarness(v, want, { reestablishFn: async () => ({ outcome: "WAITING", evidence: { reason: "guidance gone" } }) });
+  await assert.rejects(w.call(), /no longer yields a dispatch/);
+  await assert.rejects(freshDispatchHarness(v, want, { reestablishFn: null }).call(), /no open-path re-establishment/);
+});
+
+test("decision surface: duplicate ids, reserved option token, and wrong control are rejected; open-ended stays distinct", () => {
+  const SID = "379-r1-abc123";
+  const q = (id, extra = {}) => ({ id, question: "x?", blocking: "b", resolves: id.toLowerCase(), ...extra });
+  assert.equal(renderDecisionSurface({ controlIssue: 379, surfaceId: SID, questions: [q("Q1"), q("Q1", { resolves: "other" })] }), null);
+  assert.equal(renderDecisionSurface({ controlIssue: 379, surfaceId: SID, questions: [q("Q1", { options: ["A", "open"] })] }), null);
+  const open = renderDecisionSurface({ controlIssue: 379, surfaceId: SID, questions: [q("Q1")] });
+  assert.deepEqual(parseDecisionSurface(open, { controlIssue: 379 }).questions[0].options, []);
+  assert.equal(parseDecisionSurface(open, { controlIssue: 380 }), null);
+  const dupLine = "- **Question Q1:** y? (blocks: b; options: A | B; recommended: none; resolves: z)\n- **General comments:**";
+  assert.equal(parseDecisionSurface(open.replace("- **General comments:**", dupLine)), null);
+  assert.equal(parseDecisionSurface(open.replace("options: open", "options: A | open")), null);
+});
+
+test("PRODUCTION: only a writer-authored surface bound to this control is consumed; lookalikes cannot affect projection", async () => {
+  const SID = "379-r1-abc123";
+  const mk = (control) => renderDecisionSurface({ controlIssue: control, surfaceId: SID, questions: [{ id: "Q1", question: "A or B?", blocking: "scope", options: ["A", "B"], resolves: "scope" }] });
+  const trusted = mk(379);
+  const lookalike = trusted.replace("options: A | B", "options: A | B | Z").replace("resolves: scope", "resolves: other");
+  const answerA = "- **Surface id:** 379-r1-abc123\n- **Answer Q1:** A";
+  const run = async (comments) => {
+    const w = world({ founderPending: true });
+    w.phase = 3;
+    w.controlComments = comments;
+    const r = await runLauncherSupervisor({ deps: fakeBinding(w).deps, maxSteps: 2 });
+    return { w, r };
+  };
+  let out = await run([trusted, { body: lookalike, login: "lookalike" }, answerA]);
+  assert.match(out.w.control, /[*][*]Decision scope:[*][*] A/);
+  assert.doesNotMatch(out.w.control, /Decision other/);
+  out = await run([mk(380), answerA]);
+  assert.equal(out.r.outcome, SupervisorOutcome.WAITING);
+  assert.match(out.w.control, /[*][*]Founder decision:[*][*] pending/);
+  out = await run([{ body: trusted, login: "lookalike" }, answerA]);
+  assert.equal(out.r.outcome, SupervisorOutcome.WAITING);
+  assert.match(out.w.control, /[*][*]Founder decision:[*][*] pending/);
+  const dup = trusted.replace("- **General comments:**", "- **Question Q1:** y? (blocks: b; options: A | B; recommended: none; resolves: z)\n- **General comments:**");
+  out = await run([dup, answerA]);
+  assert.equal(out.r.outcome, SupervisorOutcome.WAITING);
+  assert.match(out.w.control, /[*][*]Founder decision:[*][*] pending/);
+});
+
+test("founder resume: an answer with no deterministic projection stays pending and leaves governing state untouched", async () => {
+  const w = world({ founderPending: true });
+  w.phase = 3;
+  const surface = renderDecisionSurface({ controlIssue: 379, surfaceId: "379-r1-abc123", questions: [{ id: "Q1", question: "A or B?", blocking: "scope" }] });
+  w.controlComments = [surface, "- **Surface id:** 379-r1-abc123\n- **Answer Q1:** A"];
+  const before = w.control;
+  const r = await runLauncherSupervisor({ deps: fakeBinding(w).deps, maxSteps: 3 });
+  assert.equal(r.outcome, SupervisorOutcome.WAITING);
+  assert.match(r.reason, /not deterministically applicable/);
+  assert.equal(w.control, before);
+  assert.match(w.control, /\*\*Founder decision:\*\* pending/);
+  assert.ok(!w.calls.some((c) => c[0].endsWith("session-entry-gate.mjs")));
+});
+
+test("founder resume: the interrupt is cleared only after the decision is applied and read back", async () => {
+  const w = world({ founderPending: true });
+  w.phase = 3;
+  const surface = renderDecisionSurface({ controlIssue: 379, surfaceId: "379-r1-abc123", questions: [{ id: "Q1", question: "A or B?", blocking: "scope", options: ["A", "B"], resolves: "scope" }] });
+  w.controlComments = [surface, "- **Surface id:** 379-r1-abc123\n- **Answer Q1:** C"];
+  assert.equal((await runLauncherSupervisor({ deps: fakeBinding(w).deps, maxSteps: 2 })).outcome, SupervisorOutcome.WAITING); // off-option
+  w.controlComments = [surface, "- **Surface id:** 379-r1-abc123\n- **Answer Q1:** B"];
+  const control = w.control;
+  await runLauncherSupervisor({ deps: fakeBinding(w).deps, maxSteps: 2 });
+  assert.match(w.control, /\*\*Decision scope:\*\* B/);
+  assert.match(w.control, /\*\*Founder decision:\*\* none/);
+  assert.notEqual(w.control, control);
 });
