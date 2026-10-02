@@ -3166,21 +3166,33 @@ function defaultGhRecordVerdictComment({ repo, auditIssue, verdict, reportEviden
   ghRestCommentIssue({ repo, auditIssue, body });
 }
 
+// Issue #852: REST close (`PATCH /repos/{repo}/issues/{n}` with `state: closed`) rather than `gh
+// issue close`, which goes through GraphQL and is blocked (HTTP 403) in the remote/cloud profile of
+// the #577 reproduction. Only the transport changes: every semantic precondition runs in the
+// callers before this is reached. The response must show the intended Issue (not a PR) closed.
+export function ghRestCloseIssue({ repo, issue }, runImpl = execFileSync) {
+  const res = ghRestJson("PATCH", `repos/${repo}/issues/${issue}`, { state: "closed", state_reason: "completed" }, runImpl);
+  assertRestIssueIdentity(res, { repo, auditIssue: issue, what: "issue close" });
+  if (String(res.state ?? "").toLowerCase() !== "closed") {
+    throw new Error(`REST issue close response for ${repo}#${issue} does not show the Issue closed (state: ${JSON.stringify(res.state)})`);
+  }
+}
+
 function defaultGhCloseAuditIssue({ repo, auditIssue }) {
-  execFileSync("gh", ["issue", "close", String(auditIssue), "--repo", repo], { encoding: "utf8" });
+  ghRestCloseIssue({ repo, issue: auditIssue });
 }
 
 function defaultGhCloseAuditComment({ repo, auditIssue, body }) {
-  execFileSync("gh", ["issue", "comment", String(auditIssue), "--repo", repo, "--body", body], { encoding: "utf8" });
+  ghRestCommentIssue({ repo, auditIssue, body });
 }
 
 function defaultGhCloseWorkIssue({ repo, workIssue }) {
-  execFileSync("gh", ["issue", "close", String(workIssue), "--repo", repo], { encoding: "utf8" });
+  ghRestCloseIssue({ repo, issue: workIssue });
 }
 
 function defaultGhCloseWorkIssueComment({ repo, workIssue, auditIssue }) {
   const body = closeWorkIssueComment({ repo, auditIssue });
-  execFileSync("gh", ["issue", "comment", String(workIssue), "--repo", repo, "--body", body], { encoding: "utf8" });
+  ghRestCommentIssue({ repo, auditIssue: workIssue, body });
 }
 
 async function main() {

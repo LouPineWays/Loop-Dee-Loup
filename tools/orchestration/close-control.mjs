@@ -56,7 +56,6 @@
 //
 // Tests: node --test tools/orchestration/close-control.test.mjs
 
-import { execFileSync } from "node:child_process";
 import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 import {
   upsertControlBullet,
@@ -70,6 +69,7 @@ import {
   parseHeadingBlock,
   describeExecutionConflict,
 } from "./ready-dispatch-gate.mjs";
+import { ghRestCloseIssue, ghRestCommentIssue } from "../review-watch/lifecycle-gate.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 
 function defaultGhIssueView({ repo, number }) {
@@ -77,11 +77,12 @@ function defaultGhIssueView({ repo, number }) {
 }
 
 function defaultGhClose({ repo, controlIssue }) {
-  execFileSync("gh", ["issue", "close", String(controlIssue), "--repo", repo], { encoding: "utf8" });
+  // Issue #852: REST (GraphQL-independent) close, verified against the intended Issue.
+  ghRestCloseIssue({ repo, issue: controlIssue });
 }
 
 function defaultGhComment({ repo, controlIssue, body }) {
-  execFileSync("gh", ["issue", "comment", String(controlIssue), "--repo", repo, "--body", body], { encoding: "utf8" });
+  ghRestCommentIssue({ repo, auditIssue: controlIssue, body });
 }
 
 // Pure. Composes the terminal control-Issue body from the current (pre-terminal) body — see
