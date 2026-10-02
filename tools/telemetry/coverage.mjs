@@ -73,7 +73,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { SESSIONS_DIR } from "./collect.mjs";
 import { reduceSession } from "./reduce.mjs";
-import { CLAIM_REQUIREMENTS, getPath, isPresent, isPositiveNumber } from "./sufficiency.mjs";
+import { CLAIM_REQUIREMENTS, assessSufficiency, getPath, isPresent, isPositiveNumber } from "./sufficiency.mjs";
 
 // Named structurally in reduce.mjs's `unknown` list (tools/telemetry/reduce.mjs) but not
 // required by any CLAIM_REQUIREMENTS claim today — real gaps, just not decision-critical
@@ -143,8 +143,19 @@ export function buildCoverageReport(records) {
   const notApplicable = STRUCTURAL_NOT_APPLICABLE.filter((name) => records.some((r) => (r.unknown ?? []).includes(name)));
   const captured = fields.filter((f) => fieldStatus[f].status === "captured");
 
+  // Issue #389 (unit 389-D): per-claim view of which evidence source (hook vs. managed-session
+  // record) made each claim answerable, so a managed-session record is visible as the source
+  // of a supported claim without altering the field-level coverage or telemetryVerdict above.
+  const claimSufficiency = {};
+  for (const claimType of Object.keys(CLAIM_REQUIREMENTS)) {
+    const bySource = { hook: 0, managed_session: 0, insufficient: 0 };
+    for (const r of records) bySource[assessSufficiency(r, claimType).evidenceSource ?? "insufficient"] += 1;
+    claimSufficiency[claimType] = bySource;
+  }
+
   return {
     sampleSize: records.length,
+    claimSufficiency,
     requiredFields: fields,
     captured,
     derivedFields: derivedFieldNames,

@@ -280,6 +280,73 @@ export function reduceEvents(events) {
   return { measured, derived, unknown };
 }
 
+const USAGE_FIELDS = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"];
+
+function sumUsage(usage) {
+  if (!usage || typeof usage !== "object") return null;
+  let total = 0;
+  for (const k of USAGE_FIELDS) {
+    if (!isNum(usage[k])) return null; // a missing field is never treated as 0
+    total += usage[k];
+  }
+  return total;
+}
+
+// Summarizes one canonical managed-session record (389-A, tools/telemetry/managed-session-record.mjs)
+// into only the facts its authoritative fields support (issue #389, unit 389-D). Nothing is
+// inferred: every field is null unless the record's own availability markers establish it, and
+// cost stays labeled as an estimated list figure, never actual billing. The Claude adapter's
+// top-level `usage` excludes subagents while `agent_tree_usage` covers the whole agent tree, so
+// the subagent portion is plain subtraction, and only when both sides are fully present and the
+// result is non-negative.
+export function summarizeManagedSession(record) {
+  if (!record || typeof record !== "object") return null;
+  const econ = record.economics ?? {};
+  const fromTerminal = econ.authority === "terminal_result" && record.terminal_result?.available === true;
+  const mainTotal = fromTerminal && econ.availability?.usage === true ? sumUsage(econ.usage) : null;
+  let treeTotal = null;
+  if (fromTerminal && econ.availability?.agent_tree_usage === true && Array.isArray(econ.agent_tree_usage)) {
+    const parts = econ.agent_tree_usage.map(sumUsage);
+    treeTotal = parts.every((p) => p !== null) ? parts.reduce((a, b) => a + b, 0) : null;
+  }
+  const subagentTotal = mainTotal !== null && treeTotal !== null && treeTotal >= mainTotal ? treeTotal - mainTotal : null;
+  return {
+    run_id: record.run_id ?? null,
+    provider_session_id: record.provider_session_id ?? null,
+    whole_run_complete: record.whole_run_complete === true,
+    economics_from_terminal_result: fromTerminal,
+    token_main_total: mainTotal,
+    token_agent_tree_total: treeTotal,
+    token_subagent_total: subagentTotal,
+    estimated_list_cost_usd:
+      fromTerminal && econ.availability?.estimated_list_cost_usd === true && isNum(econ.estimated_list_cost_usd)
+        ? econ.estimated_list_cost_usd
+        : null,
+    cost_is_estimated_list_not_billing: true,
+  };
+}
+
+// Attaches a managed-session summary beside (never merged into) the hook-derived fields, so
+// hook telemetry stays structural evidence and the two sources can never be summed or
+// double-counted: `measured.token_usage_*` and `measured.cost_usd_total` are untouched. A
+// record whose provider_session_id contradicts the reduced session's id is not attached.
+export function attachManagedSession(reduced, managedRecord) {
+  const summary = summarizeManagedSession(managedRecord);
+  if (!summary) return reduced;
+  const hookId = reduced.measured.identity.session_id;
+  if (hookId && summary.provider_session_id && hookId !== summary.provider_session_id) {
+    return { ...reduced, unknown: [...reduced.unknown, "managed_session_identity_mismatch"] };
+  }
+  return { ...reduced, measured: { ...reduced.measured, managed_session: summary } };
+}
+
+// A reduced record for a managed run with no hook telemetry at all: hook-only claims
+// (compaction, subagent pattern) stay INSUFFICIENT since hook_event_count is 0.
+export function reduceManagedSessionRecord(managedRecord) {
+  const base = { generated_at: new Date().toISOString(), ...reduceEvents([]) };
+  return attachManagedSession(base, managedRecord);
+}
+
 export function reduceSession(sessionId) {
   const events = readSessionEvents(sessionId);
   return { generated_at: new Date().toISOString(), ...reduceEvents(events) };
