@@ -14,6 +14,7 @@
 //
 // Tests: node --test tools/orchestration/launcher-readback.test.mjs
 
+import { verifyFinalizedCorrectionBody } from "./finalize-correction-breakpoint.mjs";
 import { parseControlBullet, verifyRoutedDispatchManifest } from "./ready-dispatch-gate.mjs";
 import { parseStage2Verdict } from "../review-watch/lifecycle-gate.mjs";
 import { findExistingTrigger } from "../review-watch/trigger.mjs";
@@ -184,6 +185,25 @@ export function buildReadEffect(deps) {
     return ev(target, "present", projected);
   }
 
+  // Stage 1 correction finalization (#837): the canonical disposition for exactly the verdict's
+  // reviewed/corrected pair, read back from the control Issue, while the PR is still open at the
+  // corrected head. A moved/closed PR head is wrong-target evidence (fail closed).
+  async function correctionFinalization(verdict) {
+    const pr = issueNumberOf(verdict?.pr);
+    const { reviewedHead, correctedHead } = verdict ?? {};
+    if (!pr || typeof reviewedHead !== "string" || !reviewedHead || typeof correctedHead !== "string" || !correctedHead) {
+      return bad("pr:none", "pr:none", "verdict lacks pr/reviewed/corrected heads");
+    }
+    const target = `PR#${pr}`;
+    const live = readPr({ repo: verdict.repo ?? repo, number: pr });
+    if (live?.state !== "OPEN" || String(live?.headRefOid).toLowerCase() !== correctedHead.toLowerCase()) {
+      return bad(target, target, "PR is not open at the corrected head the gate verified");
+    }
+    const { body } = await readControl();
+    const projected = verifyFinalizedCorrectionBody(body, { correctedHead, reviewedHead }).ok === true;
+    return ev(target, projected ? "present" : "absent", projected);
+  }
+
   function mergeReadback(verdict) {
     const pr = issueNumberOf(verdict?.pr);
     if (!pr) return bad("pr:none", "pr:none", "verdict names no PR");
@@ -217,6 +237,8 @@ export function buildReadEffect(deps) {
             return await stage2Prepared(verdict);
           case "STAGE2_CLOSE_READY":
             return await stage2Close(verdict);
+          case "STAGE1_CORRECTION_FINALIZATION_REQUIRED":
+            return await correctionFinalization(verdict);
           case "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION":
             return await correctionPrFinalization(verdict);
           default:

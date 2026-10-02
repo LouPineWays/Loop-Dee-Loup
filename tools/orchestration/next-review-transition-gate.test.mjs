@@ -22,6 +22,7 @@ import {
   composeStage2CorrectionFinalizeCommand,
   findMatchingOpenAuditIssues,
   reconcileExistingStage2AuditIssue,
+  verifyCorrectionProvenance,
 } from "./next-review-transition-gate.mjs";
 
 // -- parseOptionalIssueRef ------------------------------------------------------------------
@@ -1585,6 +1586,7 @@ test("runNextReviewTransitionGate: #837 -- stale 'Stage 1: requested' at a corre
       stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
       listStage1TriggerHeadsImpl: async () => [ISSUE_611_REVIEWED_HEAD],
+      readCorrectionCommitsImpl: async () => GENUINE_CORRECTION_COMMITS_437,
       checkCorrectionDeltaImpl: async (args) => {
         deltaArgs = args;
         return { exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: args.reviewedHead, correctedHead: args.correctedHead };
@@ -1609,6 +1611,66 @@ test("runNextReviewTransitionGate: #837 -- stale 'Stage 1: requested' at a corre
     mode: "bounded",
     authorizedActions: ["run-finalize-correction-breakpoint"],
   });
+});
+
+const GENUINE_CORRECTION_COMMITS_437 = [
+  { sha: "c1", parents: 1, message: "Accept only the known suffix in postcondition (#437) Co-Authored-By: x" },
+  { sha: "c2", parents: 1, message: "Reject accumulated attribution (#437)" },
+];
+
+// PR #838 Stage 1 finding (P1): findings-bearing reviewed head + strict descendant is not
+// provenance. Unrelated descendants and merge-forwards must never authorize finalization.
+async function runProvenance(commits) {
+  return runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "438" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_438_STALE_STAGE1_REQUESTED, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: ISSUE_611_CORRECTED_HEAD, state: "OPEN" }),
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      listStage1TriggerHeadsImpl: async () => [ISSUE_611_REVIEWED_HEAD],
+      checkCorrectionDeltaImpl: async (args) => ({ exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: args.reviewedHead, correctedHead: args.correctedHead }),
+      readCorrectionCommitsImpl: async () => {
+        if (commits instanceof Error) throw commits;
+        return commits;
+      },
+    },
+  );
+}
+
+test("runNextReviewTransitionGate: #837 provenance -- an unrelated descendant commit (no execution-Issue reference) never yields finalization", async () => {
+  const r = await runProvenance([{ sha: "u1", parents: 1, message: "Unrelated refactor (#999)" }]);
+  assert.equal(r.state, "NO_ACTION_YET");
+});
+
+test("runNextReviewTransitionGate: #837 provenance -- one unrelated commit among genuine correction commits fails closed", async () => {
+  const r = await runProvenance([...GENUINE_CORRECTION_COMMITS_437, { sha: "u1", parents: 1, message: "drive-by fix" }]);
+  assert.equal(r.state, "NO_ACTION_YET");
+});
+
+test("runNextReviewTransitionGate: #837 provenance -- a merge-forward commit is not a correction", async () => {
+  const r = await runProvenance([{ sha: "m1", parents: 2, message: "Merge main into branch (#437)" }]);
+  assert.equal(r.state, "NO_ACTION_YET");
+});
+
+test("runNextReviewTransitionGate: #837 provenance -- unreadable commit history fails closed to AMBIGUOUS", async () => {
+  const r = await runProvenance(new Error("compare down"));
+  assert.equal(r.state, "AMBIGUOUS");
+});
+
+test("runNextReviewTransitionGate: #837 provenance -- exact #836 shape (two single-parent commits naming #835) authorizes finalization", async () => {
+  const r = await runProvenance([
+    { sha: "dc2b65c", parents: 1, message: "Reject accumulated attribution and accept preserved trailing blank lines (#437) Co-Authored-By: Claude" },
+  ]);
+  assert.equal(r.state, "STAGE1_CORRECTION_FINALIZATION_REQUIRED");
+});
+
+test("verifyCorrectionProvenance: whole-token Issue reference only, single-parent only", () => {
+  assert.equal(verifyCorrectionProvenance([{ sha: "a", parents: 1, message: "fix (#437)" }], 437).ok, true);
+  assert.equal(verifyCorrectionProvenance([{ sha: "a", parents: 1, message: "fix (#4370)" }], 437).ok, false);
+  assert.equal(verifyCorrectionProvenance([{ sha: "a", parents: 1, message: "see o/r#437" }], 437).ok, false);
+  assert.equal(verifyCorrectionProvenance([], 437).ok, false);
+  assert.equal(verifyCorrectionProvenance([{ sha: "a", parents: 1, message: "fix (#437)" }], null).ok, false);
 });
 
 test("runNextReviewTransitionGate: #837 -- the trigger round for the current head itself is never treated as a reviewed head", async () => {

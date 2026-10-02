@@ -1035,6 +1035,7 @@ async function resolvePreMerge(
     checkCorrectionDeltaImpl,
     checkMergeConflictImpl = defaultGhPrMergeable,
     listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
+    readCorrectionCommitsImpl = defaultReadCorrectionCommits,
   },
 ) {
   let stage1;
@@ -1131,7 +1132,31 @@ async function resolvePreMerge(
         };
       }
       if (delta.state === "CORRECTION_SATISFIED") {
-        unfinalizedCorrection = { reviewedHead: delta.reviewedHead, correctedHead: delta.correctedHead };
+        // Stage 1 review finding on PR #838 (P1): head ancestry plus genuine findings at the
+        // reviewed head proves a descendant exists, not that the descendant is the authorized
+        // correction of those findings (an unrelated commit or merge-forward satisfies the same
+        // shape). Require every intervening commit to carry the execution Issue's own
+        // provenance; anything unverifiable stays NO_ACTION_YET (unrelated) or AMBIGUOUS
+        // (unreadable) -- never a finalization authorization.
+        let commits;
+        try {
+          commits = await readCorrectionCommitsImpl({ repo, base: delta.reviewedHead, head: delta.correctedHead });
+        } catch (err) {
+          return {
+            exitCode: 4,
+            state: "AMBIGUOUS",
+            stopAfter: true,
+            repo,
+            pr,
+            head,
+            issue,
+            controlIssue,
+            reason: `could not read the commits between reviewed head ${reviewedHead} and ${head} to verify correction provenance: ${err.message}`,
+          };
+        }
+        if (verifyCorrectionProvenance(commits, issue).ok) {
+          unfinalizedCorrection = { reviewedHead: delta.reviewedHead, correctedHead: delta.correctedHead };
+        }
       }
     }
   }
@@ -1790,7 +1815,7 @@ async function resolveStalePointerCorrectionRecovery(
 // the head itself, only once the Execution reference has already checked out.
 async function resolvePreMergeFromControlBody(
   { repo, body, prIssue, controlIssueNumber, head, ghPrHeadImpl },
-  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl },
+  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
 ) {
   const executionField = readExecutionBulletField(body);
   const executionRef = executionField.conflict
@@ -1821,7 +1846,7 @@ async function resolvePreMergeFromControlBody(
   const stage1Disposition = parseControlBullet(body, "Stage 1");
   return resolvePreMerge(
     { repo, pr: prIssue, head: resolvedHead, issue: executionRef.issue, stage1Disposition, controlIssue: controlIssueNumber },
-    { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl },
+    { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
   );
 }
 
@@ -1841,6 +1866,39 @@ export function defaultListStage1TriggerHeads({ repo, pr }) {
   return findTriggerRounds(comments)
     .map((r) => r.head)
     .reverse();
+}
+
+// Issue #837 / PR #838 Stage 1 correction: the commits strictly between the reviewed head and the
+// corrected head (GitHub compare API), reduced to what provenance needs. Throws on any I/O or
+// shape failure so the caller fails closed to AMBIGUOUS.
+export function defaultReadCorrectionCommits({ repo, base, head }) {
+  const raw = execFileSync(
+    "gh",
+    ["api", `repos/${repo}/compare/${base}...${head}`, "--jq", "[.commits[]|{sha:.sha,parents:(.parents|length),message:.commit.message}]"],
+    { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+  );
+  const commits = JSON.parse(raw);
+  if (!Array.isArray(commits)) throw new Error("compare API returned no commit list");
+  return commits;
+}
+
+// Pure. Correction provenance for a strict reviewed->corrected descendant: the pair is the
+// completed result of the authorized findings correction only when EVERY intervening commit is a
+// plain single-parent commit (a merge-forward is not a correction) and names the execution Issue
+// whose dispatch authorized the correction (LDL commit convention `... (#<execution>)`). The one
+// representation of correction satisfaction remains the canonical finalized disposition; this
+// only decides whether the gate may authorize writing it.
+export function verifyCorrectionProvenance(commits, executionIssue) {
+  if (!Array.isArray(commits) || commits.length === 0) return { ok: false, reason: "no intervening commits" };
+  if (!Number.isInteger(executionIssue) || executionIssue <= 0) return { ok: false, reason: "no execution Issue to bind provenance to" };
+  const ref = new RegExp(`(^|[^\\w/])#${executionIssue}(?!\\d)`);
+  for (const c of commits) {
+    if (!c || c.parents !== 1) return { ok: false, reason: `commit ${c?.sha ?? "?"} is not a single-parent commit` };
+    if (typeof c.message !== "string" || !ref.test(c.message)) {
+      return { ok: false, reason: `commit ${c.sha} does not reference execution Issue #${executionIssue}` };
+    }
+  }
+  return { ok: true };
 }
 
 function defaultGhPrHead({ repo, number }) {
@@ -1956,6 +2014,7 @@ async function runNextReviewTransitionGateCore(
     checkCorrectionDeltaImpl = checkCorrectionDelta,
     checkMergeConflictImpl = defaultGhPrMergeable,
     listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
+    readCorrectionCommitsImpl = defaultReadCorrectionCommits,
     reconcileStage2CorrectionPrImpl = reconcileStage2CorrectionPr,
     reconcileExistingStage2AuditIssueImpl = reconcileExistingStage2AuditIssue,
   } = {},
@@ -2116,7 +2175,7 @@ async function runNextReviewTransitionGateCore(
       const head = args.head || prState.headRefOid;
       return resolvePreMergeFromControlBody(
         { repo, body, prIssue: prRef.issue, controlIssueNumber, head, ghPrHeadImpl },
-        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl },
+        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
       );
     }
     // CLOSED without merging (or any other state gh might report): a genuinely contradictory
@@ -2152,7 +2211,7 @@ async function runNextReviewTransitionGateCore(
     if (args.head) {
       return resolvePreMergeFromControlBody(
         { repo, body, prIssue: prRef.issue, controlIssueNumber, head: args.head, ghPrHeadImpl },
-        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl },
+        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
       );
     }
     // No settled "Stage 2" reference exists here (the auditRef.kind === "issue" branch above
@@ -2386,7 +2445,7 @@ async function runNextReviewTransitionGateCore(
     const head = prState.headRefOid;
     return resolvePreMergeFromControlBody(
       { repo, body, prIssue: prRef.issue, controlIssueNumber, head, ghPrHeadImpl },
-      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl },
+      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
     );
   }
 

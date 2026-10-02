@@ -97,3 +97,62 @@ test("open-path verdict returns a by-reference dispatch with the gate's targets"
   assert.equal(r.evidence.dispatch.byReference.executionIssue, 73);
   assert.equal(r.evidence.dispatch.route, "claude-subagent");
 });
+
+// Issue #837 / PR #838: the launcher executes STAGE1_CORRECTION_FINALIZATION_REQUIRED by running
+// only the canonical finalizer, verifying the exact disposition by read-back, and failing closed
+// on head movement or a failed/absent projection.
+const R_HEAD = "1111111111111111111111111111111111111111";
+const C_HEAD = "2222222222222222222222222222222222222222";
+const finalizationVerdict = (over = {}) => ({
+  state: "STAGE1_CORRECTION_FINALIZATION_REQUIRED",
+  controlIssue: 379,
+  issue: 73,
+  repo: "o/r",
+  pr: 824,
+  head: C_HEAD,
+  reviewedHead: R_HEAD,
+  correctedHead: C_HEAD,
+  nextCommand: `node tools/orchestration/finalize-correction-breakpoint.mjs --control-issue 379 --execution-issue 73 --pr 824 --reviewed-head ${R_HEAD} --corrected-head ${C_HEAD}`,
+  ...over,
+});
+const stranded = "- **Lifecycle:** REVIEW\n- **PR:** #824\n- **Stage 1:** requested\n";
+const finalized = `- **Lifecycle:** REVIEW\n- **PR:** #824\n- **Stage 1:** correction-satisfied at ${C_HEAD} (reviewed ${R_HEAD})\n`;
+
+test("correction finalization verdict: runs the canonical finalizer, verifies the read-back, and advances (no 'unrecognized verdict state')", async () => {
+  let body = stranded;
+  const { io, calls, readPr } = fakeIo({ gateStates: [finalizationVerdict()], headRef: C_HEAD, prStates: ["OPEN"] });
+  const nodeFn = io.node;
+  io.node = (file, args, input) => {
+    if (file.endsWith("finalize-correction-breakpoint.mjs")) body = finalized;
+    return nodeFn(file, args, input);
+  };
+  const r = await runLauncherStep({ controlIssue: 379, deps: buildDeps({ controlIssue: 379, executionIssue: 73, readPr, readIssue: () => ({ body, state: "OPEN" }), io }) });
+  assert.equal(r.outcome, Outcome.ADVANCED);
+  assert.equal(calls.filter((c) => c[1] === "tools/orchestration/finalize-correction-breakpoint.mjs").length, 1);
+  assert.ok(!calls.some((c) => c[2] === "merge"));
+});
+
+test("correction finalization verdict: finalizer that leaves the disposition unprojected is not proof (FAIL_CLOSED)", async () => {
+  const { io, readPr } = fakeIo({ gateStates: [finalizationVerdict()], headRef: C_HEAD, prStates: ["OPEN"] });
+  const r = await runLauncherStep({ controlIssue: 379, deps: buildDeps({ controlIssue: 379, executionIssue: 73, readPr, readIssue: () => ({ body: stranded, state: "OPEN" }), io }) });
+  assert.equal(r.outcome, Outcome.FAIL_CLOSED);
+  assert.equal(r.successorEligible, false);
+});
+
+test("correction finalization verdict: a moved PR head fails closed and never runs the finalizer", async () => {
+  const { io, calls, readPr } = fakeIo({ gateStates: [finalizationVerdict()], headRef: "3333333333333333333333333333333333333333", prStates: ["OPEN"] });
+  const r = await runLauncherStep({ controlIssue: 379, deps: buildDeps({ controlIssue: 379, executionIssue: 73, readPr, readIssue: () => ({ body: stranded, state: "OPEN" }), io }) });
+  assert.equal(r.outcome, Outcome.FAIL_CLOSED);
+  assert.ok(!calls.some((c) => c[1] === "tools/orchestration/finalize-correction-breakpoint.mjs"));
+});
+
+test("correction finalization verdict: a nextCommand that is not the canonical finalizer for this launch is refused", async () => {
+  const { io, calls, readPr } = fakeIo({
+    gateStates: [finalizationVerdict({ nextCommand: `node tools/orchestration/finalize-correction-breakpoint.mjs --control-issue 379 --execution-issue 73 --pr 999 --reviewed-head ${R_HEAD} --corrected-head ${C_HEAD}` })],
+    headRef: C_HEAD,
+    prStates: ["OPEN"],
+  });
+  const r = await runLauncherStep({ controlIssue: 379, deps: buildDeps({ controlIssue: 379, executionIssue: 73, readPr, readIssue: () => ({ body: stranded, state: "OPEN" }), io }) });
+  assert.equal(r.outcome, Outcome.FAIL_CLOSED);
+  assert.ok(!calls.some((c) => c[1] === "tools/orchestration/finalize-correction-breakpoint.mjs"));
+});
