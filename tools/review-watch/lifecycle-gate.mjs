@@ -3155,8 +3155,10 @@ export function ghRestCommentIssue({ repo, auditIssue, body }, runImpl = execFil
   }
 }
 
-function defaultGhEditAuditVerdict(args) {
-  ghRestEditIssueBody(args);
+export function defaultGhEditAuditVerdict(args, runImpl = execFileSync) {
+  // Issue #842: opt in to #835's exact known-attribution equivalence (the remote Claude Code
+  // surface appends one trailing block after a durable write); every other mismatch fails closed.
+  ghRestEditIssueBody({ ...args, allowKnownAttribution: true }, runImpl);
 }
 
 function defaultGhRecordVerdictComment({ repo, auditIssue, verdict, reportEvidence, replacedMalformedVerdict = null }) {
