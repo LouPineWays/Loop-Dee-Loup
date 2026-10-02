@@ -337,10 +337,14 @@ export const FOUNDER_DECISION_STATES = Object.freeze({ NONE: "none", PENDING: "p
 const WRITER_PERMISSIONS = ["admin", "maintain", "write"];
 
 // One durable surface batching every currently known founder question on the active path.
-// questions: [{ id, question, blocking, options?: string[], recommended?: string }]
+// questions: [{ id, question, blocking, options?: string[], recommended?: string, resolves?: string }]
+// `resolves` (a decision key) declares the authoritative settled-decision field the answer
+// deterministically projects to (see planFounderProjection); a question without it cannot resume
+// autonomous execution because its effect on governing state is not deterministic.
 // surfaceId: unique identity of THIS surface (see newSurfaceId); answers bind to it so a later
 // surface that reuses an id such as Q1 never inherits an earlier answer.
 const SURFACE_ID = /^[A-Za-z0-9._-]{4,64}$/;
+export const DECISION_KEY = /^[A-Za-z0-9._-]{1,64}$/;
 
 export function newSurfaceId(controlIssue, questions, round = 1) {
   const h = createHash("sha256").update(JSON.stringify({ controlIssue, round, questions })).digest("hex").slice(0, 10);
@@ -353,8 +357,9 @@ export function renderDecisionSurface({ controlIssue, questions, surfaceId } = {
   const lines = [DECISION_SURFACE_HEADING, "", `- **Surface id:** ${surfaceId}`, `- **Control issue:** #${controlIssue}`];
   for (const q of questions) {
     if (!q?.id || !q?.question || !q?.blocking) return null;
+    if (q.resolves != null && !DECISION_KEY.test(String(q.resolves))) return null;
     lines.push(
-      `- **Question ${q.id}:** ${q.question} (blocks: ${q.blocking}; options: ${(q.options ?? []).join(" | ") || "open"}; recommended: ${q.recommended ?? "none"})`,
+      `- **Question ${q.id}:** ${q.question} (blocks: ${q.blocking}; options: ${(q.options ?? []).join(" | ") || "open"}; recommended: ${q.recommended ?? "none"}${q.resolves ? `; resolves: ${q.resolves}` : ""})`,
     );
   }
   lines.push(
@@ -372,14 +377,47 @@ export function parseDecisionSurface(body) {
   if (!text.trimStart().startsWith(DECISION_SURFACE_HEADING)) return null;
   let surfaceId = null;
   const questionIds = [];
+  const questions = [];
   for (const line of text.split(/\r?\n/)) {
     const s = /^\s*[-*]\s+\*\*Surface id:\*\*\s*(\S+)\s*$/.exec(line);
     if (s && surfaceId === null) surfaceId = s[1];
-    const q = /^\s*[-*]\s+\*\*Question ([^*:]+):\*\*/.exec(line);
-    if (q) questionIds.push(q[1].trim());
+    const q = /^\s*[-*]\s+\*\*Question ([^*:]+):\*\*(.*)$/.exec(line);
+    if (q) {
+      const id = q[1].trim();
+      questionIds.push(id);
+      const meta = /\(blocks: [^;]*; options: ([^;]*); recommended: [^;)]*(?:; resolves: ([A-Za-z0-9._-]{1,64}))?\)\s*$/.exec(q[2]);
+      const optRaw = meta ? meta[1].trim() : "";
+      const options = !meta || optRaw === "open" || optRaw === "" ? [] : optRaw.split(" | ").map((o) => o.trim());
+      questions.push({ id, options, resolves: meta?.[2] ?? null });
+    }
   }
   if (!SURFACE_ID.test(String(surfaceId ?? "")) || questionIds.length === 0) return null;
-  return { surfaceId, questionIds };
+  return { surfaceId, questionIds, questions };
+}
+
+// Pure. The deterministic projection of founder answers onto authoritative state: each question
+// must declare the decision key it resolves (`resolves`) and its answer must be one of the declared
+// options (any nonempty answer when options are open). Returns { ok, decisions:[{key,answer}] } or
+// { ok:false, reason }; never guesses a mapping for prose it cannot place.
+export function planFounderProjection({ questions, answers } = {}) {
+  const list = Array.isArray(questions) ? questions : [];
+  if (list.length === 0) return { ok: false, reason: "decision surface declares no questions to project" };
+  const decisions = [];
+  const keys = new Set();
+  for (const q of list) {
+    if (!q?.resolves || !DECISION_KEY.test(String(q.resolves))) {
+      return { ok: false, reason: `question ${q?.id} declares no decision it resolves; its answer cannot be deterministically applied` };
+    }
+    if (keys.has(q.resolves)) return { ok: false, reason: `decision ${q.resolves} is resolved by more than one question` };
+    keys.add(q.resolves);
+    const a = answers?.[q.id];
+    if (typeof a !== "string" || a.trim() === "") return { ok: false, reason: `question ${q.id} has no answer` };
+    if (Array.isArray(q.options) && q.options.length > 0 && !q.options.includes(a.trim())) {
+      return { ok: false, reason: `answer to ${q.id} is not one of the declared options` };
+    }
+    decisions.push({ key: q.resolves, answer: a.trim() });
+  }
+  return { ok: true, decisions };
 }
 
 // comments: [{ id, body, authorPermission }] in chronological order. Answers count only from
@@ -412,7 +450,7 @@ export function parseDecisionResolution(comments, questionIds, { surfaceId } = {
 
 // Resume automatically only when the decision surface is fully resolved AND exactly one authorized
 // continuation remains; zero or several is itself a founder-level stop.
-export function resolveFounderResume({ questionIds, surfaceId, comments, continuations } = {}) {
+export function resolveFounderResume({ questionIds, surfaceId, comments, continuations, questions } = {}) {
   const ids = Array.isArray(questionIds) ? questionIds : [];
   if (ids.length === 0) return { outcome: Outcome.FAIL_CLOSED, resume: false, reason: "no decision surface" };
   if (!SURFACE_ID.test(String(surfaceId ?? ""))) {
@@ -423,6 +461,12 @@ export function resolveFounderResume({ questionIds, surfaceId, comments, continu
     return { outcome: Outcome.WAITING, resume: false, founderDecision: FOUNDER_DECISION_STATES.PENDING, missing: r.missing };
   }
   const list = Array.isArray(continuations) ? continuations : [];
+  // Generically recorded answers are not an applied decision: resume requires a deterministic
+  // projection onto authoritative state, otherwise the interrupt stays pending.
+  const plan = planFounderProjection({ questions, answers: Object.fromEntries(r.answers) });
+  if (!plan.ok) {
+    return { outcome: Outcome.WAITING, resume: false, founderDecision: FOUNDER_DECISION_STATES.PENDING, reason: `founder answers not deterministically applicable: ${plan.reason}` };
+  }
   if (list.length === 1) {
     return {
       outcome: Outcome.ADVANCED,
@@ -431,6 +475,7 @@ export function resolveFounderResume({ questionIds, surfaceId, comments, continu
       founderDecision: FOUNDER_DECISION_STATES.NONE,
       answers: Object.fromEntries(r.answers),
       generalComments: r.generalComments,
+      decisions: plan.decisions,
     };
   }
   return {
