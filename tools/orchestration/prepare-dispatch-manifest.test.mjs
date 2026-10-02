@@ -1159,3 +1159,53 @@ test("CLI: missing --execution-issue fails closed", async () => {
   assert.match(result.stderr, /--execution-issue is required/);
   assert.equal(result.stdout, "");
 });
+
+// --- Issue #856: plan-level Integration/PR route rejection before manifest/unit dispatch ---
+
+test("runPrepareDispatchManifest rejects a plan whose Integration/PR route is a bare 'none' as REPLAN_REQUIRED, even on a dry run, and never posts (#856)", async () => {
+  let posted = 0;
+  const fakePlan = {
+    ok: true,
+    exitCode: 0,
+    repo: "LouPineWays/Loop-Dee-Loup",
+    executionIssue: 294,
+    plan: {
+      planIndex: { commentId: 1, url: "https://github.com/OWNER/REPO/issues/294#issuecomment-1", dispatchManifest: "none", integrationRoute: "none" },
+      units: { "294-A": unit({ unitId: "294-A", state: "PLANNED" }) },
+    },
+  };
+  for (const args of [{ executionIssue: 294 }, { executionIssue: 294, create: true }]) {
+    const result = await runPrepareDispatchManifest(args, {
+      parseExecutionPlanImpl: async () => fakePlan,
+      postImpl: async () => {
+        posted += 1;
+        return {};
+      },
+    });
+    assert.equal(result.exitCode, 3);
+    assert.equal(result.state, "REPLAN_REQUIRED");
+    assert.match(result.planLevelReason, /PR-breakpoint owner/);
+  }
+  assert.equal(posted, 0);
+});
+
+test("runPrepareDispatchManifest accepts explicit integration worker / no-pr routes and an unsupplied route (#856)", async () => {
+  for (const integrationRoute of ["integration worker", "no-pr: no repository change", undefined]) {
+    const result = await runPrepareDispatchManifest(
+      { executionIssue: 294 },
+      {
+        parseExecutionPlanImpl: async () => ({
+          ok: true,
+          exitCode: 0,
+          repo: "LouPineWays/Loop-Dee-Loup",
+          executionIssue: 294,
+          plan: {
+            planIndex: { commentId: 1, url: "https://github.com/OWNER/REPO/issues/294#issuecomment-1", dispatchManifest: "none", integrationRoute },
+            units: { "294-A": unit({ unitId: "294-A", state: "PLANNED" }) },
+          },
+        }),
+      },
+    );
+    assert.equal(result.exitCode, 0, String(integrationRoute));
+  }
+});

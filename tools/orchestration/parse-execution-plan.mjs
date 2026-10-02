@@ -98,6 +98,29 @@ export function findHeadingComments(comments, headingRegex) {
   return (comments ?? []).filter((c) => (c.body ?? "").split("\n").some((line) => headingRegex.test(line.trim())));
 }
 
+// Pure. Issue #856: classifies a Plan Index `- **Integration/PR route:**` value. Valid
+// values a plan may be authored (or dispatched) with:
+//   `integration worker`      -- a normal Integration/PR stage/worker runs after every unit is DONE.
+//   `unit-owned: <UnitID>`    -- that unit's own worker owns the PR breakpoint (Stage 1 trigger +
+//                                finalize-pr-breakpoint.mjs before it may report success).
+//   `no-pr: <reason>`         -- the execution genuinely produces no review-worthy repository change.
+// A bare `none` (the #389/#390 stranded shape), a missing value, or anything else is not a
+// mechanically consumable PR owner: `legacy-none` / `unknown` / `missing`. `undefined` (an
+// injected parser result that never supplied the field) is reported as `unsupplied` so callers
+// can skip the check for such partial fixtures; a real parse always yields a string or null.
+export function classifyIntegrationRoute(value) {
+  if (value === undefined) return { kind: "unsupplied" };
+  if (typeof value !== "string" || !value.trim()) return { kind: "missing" };
+  const v = value.trim();
+  if (/^none$/i.test(v)) return { kind: "legacy-none" };
+  if (/^integration worker(\s|$|[—-])/i.test(v)) return { kind: "integration" };
+  const owned = /^unit-owned:\s*(\S+)\s*$/i.exec(v);
+  if (owned) return { kind: "unit-owned", unitId: owned[1] };
+  const noPr = /^no-pr:\s*(\S.*)$/i.exec(v);
+  if (noPr) return { kind: "no-pr", reason: noPr[1].trim() };
+  return { kind: "unknown" };
+}
+
 // Pure. Deterministic "latest" tie-break among same-heading comments — see the module
 // comment above for why numerically-highest `id` is the correct, non-guessing choice.
 export function pickLatestComment(matchingComments) {

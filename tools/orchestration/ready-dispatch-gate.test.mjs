@@ -2194,7 +2194,7 @@ test("checkReadyDispatch: PLAN_READY with an already-verified manifest converges
   assert.equal(result.manifestUrl, "https://github.com/LouPineWays/Loop-Dee-Loup/issues/500#issuecomment-200");
   assert.equal(
     result.proposedBody,
-    "- **Lifecycle:** ROUTED\n- **Execution:** #500\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n",
+    "- **Lifecycle:** ROUTED\n- **Execution:** #500\n- **Route:** unit workers\n- **Blocker:** none\n- **Founder decision:** none\n",
   );
 });
 
@@ -2746,7 +2746,7 @@ test("checkReadyDispatch: true pre-PR negative control -- Lifecycle READY / PR n
 // Manifest-path fixture mirroring manifestFixture() above but allowing each unit's own live
 // Worker Unit Contract `state` to be specified — this reconciliation reads exactly that field
 // (parsed.plan.units[unitId].state), never the Plan Index's own possibly-stale `indexState`.
-function manifestFixtureWithUnitStates({ repo = "LouPineWays/Loop-Dee-Loup", executionIssue = 537, unitStates, manifestUnitLines }) {
+function manifestFixtureWithUnitStates({ repo = "LouPineWays/Loop-Dee-Loup", executionIssue = 537, unitStates, manifestUnitLines, integrationRoute }) {
   const planIndexUrl = `https://github.com/${repo}/issues/${executionIssue}#issuecomment-100`;
   const manifestUrl = `https://github.com/${repo}/issues/${executionIssue}#issuecomment-200`;
   const units = Object.fromEntries(Object.entries(unitStates).map(([unitId, state]) => [unitId, { state }]));
@@ -2759,7 +2759,7 @@ function manifestFixtureWithUnitStates({ repo = "LouPineWays/Loop-Dee-Loup", exe
       repo,
       executionIssue,
       plan: {
-        planIndex: { commentId: 100, url: planIndexUrl, dispatchManifest: manifestUrl },
+        planIndex: { commentId: 100, url: planIndexUrl, dispatchManifest: manifestUrl, ...(integrationRoute !== undefined ? { integrationRoute } : {}) },
         units,
       },
     }),
@@ -2898,4 +2898,132 @@ test("checkReadyDispatch: EXECUTION_COMPLETE (#444/#445's own Integration-dispat
   assert.equal(result.exitCode, 8);
   assert.equal(result.state, "READY_TO_DISPATCH_INTEGRATION");
   assert.equal(result.executionIssue, 498);
+});
+
+// --- Issue #856: durable Integration/PR continuation ------------------------------------
+const ALL_DONE_UNITS = { "389-A": { state: "DONE — merged to branch" }, "389-B": { state: "DONE" }, "389-C": { state: "DONE" } };
+const ALL_DONE_MANIFEST = [
+  "389-A: route=stronger/general worker dispatch_ready=true note=none",
+  "389-B: route=stronger/general worker dispatch_ready=false note=none",
+  "389-C: route=stronger/general worker dispatch_ready=false note=none",
+];
+const ROUTED_389_BODY =
+  "- **Lifecycle:** ROUTED\n- **Execution:** #389\n- **Route:** planning worker\n" +
+  "- **PR:** none\n- **Stage 1:** none\n- **Stage 2:** none\n- **Blocker:** none\n- **Founder decision:** none\n";
+
+async function runAllDone({ integrationRoute, prs = [], unitStates, body = ROUTED_389_BODY }) {
+  const states = unitStates ?? Object.fromEntries(Object.entries(ALL_DONE_UNITS).map(([k, v]) => [k, v.state]));
+  const fixture = manifestFixtureWithUnitStates({
+    executionIssue: 389,
+    unitStates: states,
+    manifestUnitLines: ALL_DONE_MANIFEST,
+    integrationRoute,
+  });
+  const { repo, executionIssue, ...impls } = fixture;
+  return checkReadyDispatch(
+    { repo, controlIssue: 390 },
+    { ghIssueViewImpl: async () => ({ body, state: "OPEN" }), ghPrListImpl: async () => prs, ...impls },
+  );
+}
+
+const PR_391 = {
+  number: 391,
+  url: "https://github.com/LouPineWays/Loop-Dee-Loup/pull/391",
+  state: "OPEN",
+  headRefName: "ldl-389-e",
+  body: "Addresses #389",
+};
+
+test("checkReadyDispatch: #389/#390 recurrence -- every unit DONE, Integration/PR route 'none', no PR, control still ROUTED -- reaches READY_TO_DISPATCH_INTEGRATION, never redispatches units (#856)", async () => {
+  const result = await runAllDone({ integrationRoute: "none" });
+  assert.equal(result.exitCode, 8);
+  assert.equal(result.state, "READY_TO_DISPATCH_INTEGRATION");
+  assert.equal(result.executionIssue, 389);
+  assert.equal(result.controlIssue, 390);
+  assert.equal(result.route, "integration worker");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.dispatchReadyUnitIds, undefined);
+});
+
+test("checkReadyDispatch: normal planned path -- every unit DONE with explicit 'integration worker' route -- returns READY_TO_DISPATCH_INTEGRATION (#856)", async () => {
+  const result = await runAllDone({ integrationRoute: "integration worker" });
+  assert.equal(result.exitCode, 8);
+  assert.equal(result.state, "READY_TO_DISPATCH_INTEGRATION");
+  assert.deepEqual(result.actionEnvelope, { mode: "bounded", authorizedActions: ["dispatch-integration-worker"] });
+});
+
+test("checkReadyDispatch: all units DONE but an execution-linked PR already exists -- NOT_READY toward post-PR handling, no duplicate integration dispatch (#856, #456 invariant)", async () => {
+  const result = await runAllDone({ integrationRoute: "integration worker", prs: [PR_391] });
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "NOT_READY");
+  assert.ok(result.reasons.some((r) => r.includes("already has a linked PR")));
+});
+
+test("checkReadyDispatch: unit-owned PR route with every unit DONE and no PR fails closed with a repair signal (exit 1), never redispatching (#856)", async () => {
+  const result = await runAllDone({ integrationRoute: "unit-owned: 389-C" });
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /repair/i);
+  assert.match(result.message, /389-C/);
+});
+
+test("checkReadyDispatch: unit-owned PR route whose PR exists is NOT_READY toward post-PR handling (#856)", async () => {
+  const result = await runAllDone({ integrationRoute: "unit-owned: 389-C", prs: [PR_391] });
+  assert.equal(result.state, "NOT_READY");
+});
+
+test("checkReadyDispatch: genuine no-PR route with every unit DONE does not spawn an Integration/PR stage (#856 negative control)", async () => {
+  const result = await runAllDone({ integrationRoute: "no-pr: investigation only, no repository change" });
+  assert.notEqual(result.state, "READY_TO_DISPATCH_INTEGRATION");
+});
+
+test("checkReadyDispatch: not-all-DONE still dispatches the pending unit (#856 true pre-execution)", async () => {
+  const result = await runAllDone({
+    integrationRoute: "integration worker",
+    unitStates: { "389-A": "PLANNED", "389-B": "DONE", "389-C": "DONE" },
+  });
+  assert.equal(result.state, "READY_TO_DISPATCH_UNITS");
+  assert.deepEqual(result.dispatchReadyUnitIds, ["389-A"]);
+});
+
+test("checkReadyDispatch: READY_TO_PROJECT_ROUTED projects Route away from 'planning worker' (#856)", async () => {
+  const body =
+    "- **Lifecycle:** PLAN_READY\n- **Execution:** #389\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const fixture = manifestFixtureWithUnitStates({
+    executionIssue: 389,
+    unitStates: { "389-A": "PLANNED" },
+    manifestUnitLines: ["389-A: route=stronger/general worker dispatch_ready=true note=none"],
+    integrationRoute: "integration worker",
+  });
+  const { repo, executionIssue, ...impls } = fixture;
+  const result = await checkReadyDispatch({ repo, controlIssue: 390 }, { ghIssueViewImpl: async () => ({ body, state: "OPEN" }), ...impls });
+  assert.equal(result.state, "READY_TO_PROJECT_ROUTED");
+  assert.match(result.proposedBody, /- \*\*Lifecycle:\*\* ROUTED/);
+  assert.match(result.proposedBody, /- \*\*Route:\*\* unit workers/);
+  assert.doesNotMatch(result.proposedBody, /planning worker/);
+});
+
+test("checkReadyDispatch: PLAN_READY with a bare 'none' Integration/PR route is REPLAN_REQUIRED before any manifest/unit dispatch (#856 pre-dispatch prevention)", async () => {
+  const body =
+    "- **Lifecycle:** PLAN_READY\n- **Execution:** #389\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const planIndexUrl = "https://github.com/LouPineWays/Loop-Dee-Loup/issues/389#issuecomment-100";
+  const result = await checkReadyDispatch(
+    { repo: "LouPineWays/Loop-Dee-Loup", controlIssue: 390 },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      parseExecutionPlanImpl: async () => ({
+        exitCode: 0,
+        ok: true,
+        repo: "LouPineWays/Loop-Dee-Loup",
+        executionIssue: 389,
+        plan: {
+          planIndex: { commentId: 100, url: planIndexUrl, dispatchManifest: "none", integrationRoute: "none" },
+          units: { "389-A": { state: "PLANNED" } },
+        },
+      }),
+    },
+  );
+  assert.equal(result.exitCode, 12);
+  assert.equal(result.state, "REPLAN_REQUIRED");
+  assert.deepEqual(result.replanRequiredUnitIds, ["PLAN-INDEX"]);
+  assert.match(result.reason, /PR-breakpoint owner/);
 });
