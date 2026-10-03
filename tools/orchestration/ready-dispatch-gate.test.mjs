@@ -1,3 +1,4 @@
+import fs from "node:fs";
 // Tests for tools/orchestration/ready-dispatch-gate.mjs — issue #321's deterministic
 // guard for AGENTS.md's READY immediate-dispatch gate.
 //
@@ -35,7 +36,7 @@ import {
   OPEN_PR_RECONCILIATION_LIMIT,
   defaultGhPrList,
   defaultGhOpenPrList,
-  normalizeSearchPrCandidates,
+  ALL_PR_SCAN_LIMIT,
   normalizeRestPull,
 } from "./ready-dispatch-gate.mjs";
 import { getActionEnvelope } from "./action-envelope.mjs";
@@ -2915,11 +2916,11 @@ const restPull860 = (n, o = {}) => ({
   head: { ref: `branch-${n}`, sha: `sha${n}` },
   ...o,
 });
-const searchItem860 = (n, body) => ({ number: n, html_url: `https://github.com/${R860}/pull/${n}`, body, pull_request: {} });
 const fakeRun860 = (routes) => (cmd, args) => {
   assert.equal(cmd, "gh");
   assert.ok(!args.includes("graphql") && !args.includes("pr"), `no GraphQL-backed subcommand: ${args.join(" ")}`);
-  const key = args[0] === "api" && args[1] === "search/issues" ? "search" : args.find((a) => a.startsWith("repos/"));
+  assert.ok(!args.some((a) => String(a).startsWith("search")), `no global Search API: ${args.join(" ")}`);
+  const key = args.find((a) => a.startsWith("repos/"));
   const r = routes[key];
   if (r instanceof Error) throw r;
   if (r === undefined) throw new Error(`unexpected gh call ${args.join(" ")}`);
@@ -2935,97 +2936,107 @@ test("normalizeRestPull: maps REST pull to the stable gh-pr-list shape (OPEN/MER
   assert.equal(normalizeRestPull(restPull860(7, { state: "closed" }), { repo: R860 }).state, "CLOSED");
 });
 
-test("normalizeRestPull / normalizeSearchPrCandidates: malformed, wrong-identity, and incomplete evidence throw", () => {
+test("normalizeRestPull: malformed, wrong-identity, and incomplete evidence throw", () => {
   assert.throws(() => normalizeRestPull(null, { repo: R860 }), /malformed/);
   assert.throws(() => normalizeRestPull(restPull860(5, { head: {} }), { repo: R860 }), /head ref/);
   assert.throws(() => normalizeRestPull(restPull860(5, { html_url: "https://github.com/other/repo/pull/5" }), { repo: R860 }), /identity/);
   assert.throws(() => normalizeRestPull(restPull860(5), { repo: R860, expectedNumber: 6 }), /mismatch/);
-  assert.throws(() => normalizeSearchPrCandidates({}, { repo: R860 }), /malformed/);
-  assert.throws(() => normalizeSearchPrCandidates([{ total_count: 1, incomplete_results: false, items: [{ number: 1 }] }], { repo: R860 }), /pull_request/);
-  assert.throws(() => normalizeSearchPrCandidates([{ total_count: 0, incomplete_results: true, items: [] }], { repo: R860 }), /incomplete/);
-  assert.throws(() => normalizeSearchPrCandidates([{ total_count: 3, incomplete_results: false, items: [searchItem860(1, "x")] }], { repo: R860 }), /truncated/);
-  assert.throws(
-    () => normalizeSearchPrCandidates([{ total_count: 1, incomplete_results: false, items: [{ ...searchItem860(1, "x"), html_url: "https://github.com/o/r/pull/1" }] }], { repo: R860 }),
-    /identity/,
-  );
 });
 
-test("defaultGhPrList (REST): body-linked OPEN PR is found and suppresses dispatch; unrelated bare mention is excluded", async () => {
-  const run = fakeRun860({
-    search: [{ total_count: 2, incomplete_results: false, items: [searchItem860(10, "Addresses #858"), searchItem860(11, "see also #858")] }],
-    [`repos/${R860}/pulls/10`]: restPull860(10, { body: "Addresses #858" }),
-    [`repos/${R860}/pulls/11`]: restPull860(11, { body: "see also #858" }),
-  });
+const listRoute870 = (pulls) => ({ [`repos/${R860}/pulls`]: pagesRoute860([pulls]) });
+
+test("defaultGhPrList (repo-scoped REST): body-linked OPEN PR is found and suppresses dispatch; unrelated bare mention excluded", async () => {
+  const run = fakeRun860(listRoute870([
+    restPull860(901, { body: "see also #858" }),
+    restPull860(900, { body: "Addresses #858" }),
+    restPull860(899, { body: "unrelated" }),
+  ]));
   const list = defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: run });
-  assert.deepEqual(list.map((p) => p.number), [10]);
+  assert.deepEqual(list.map((p) => p.number), [900]);
   const result = await reconcileReadyPrBreakpoint({ repo: R860, executionIssue: 858 }, { ghPrListImpl: () => list });
   assert.equal(result.crossed, true);
-  assert.equal(result.pr.number, 10);
-  assert.equal(result.pr.headRefOid, "sha10");
+  assert.equal(result.pr.headRefOid, "sha900");
 });
 
-test("defaultGhPrList (REST): only closed/merged body-linked PR still proves the boundary was crossed; none linked is not crossed", async () => {
-  const run = fakeRun860({
-    search: [{ total_count: 1, incomplete_results: false, items: [searchItem860(20, "Implements #858")] }],
-    [`repos/${R860}/pulls/20`]: restPull860(20, { state: "closed", merged_at: "2026-01-01", body: "Implements #858" }),
-  });
-  const list = defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: run });
+test("defaultGhPrList (repo-scoped REST): requests state=all newest-first and production path never uses the global Search endpoint", () => {
+  const seen = [];
+  const run = (cmd, args) => {
+    seen.push(args);
+    return JSON.stringify([]);
+  };
+  assert.deepEqual(defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: run }), []);
+  assert.equal(seen.length, 1);
+  assert.ok(seen[0].includes(`repos/${R860}/pulls`) && seen[0].includes("state=all") && seen[0].includes("direction=desc"));
+  assert.ok(!seen.flat().some((a) => /search/.test(a)));
+  const src = fs.readFileSync(new URL("./ready-dispatch-gate.mjs", import.meta.url), "utf8");
+  const body = src.slice(src.indexOf("export function defaultGhPrList("), src.indexOf("export const ALL_PR_SCAN_LIMIT"));
+  assert.ok(!/search\/issues/.test(body.replace(/\/\/.*$/gm, "")), "production path must not call search/issues");
+});
+
+test("defaultGhPrList (repo-scoped REST): only closed/merged linked PR still proves crossed; none linked is not crossed", async () => {
+  const merged = restPull860(900, { state: "closed", merged_at: "2026-01-01", body: "Implements #858" });
+  const list = defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: fakeRun860(listRoute870([merged])) });
   const r = await reconcileReadyPrBreakpoint({ repo: R860, executionIssue: 858 }, { ghPrListImpl: () => list });
   assert.equal(r.crossed, true);
   assert.equal(r.pr.state, "MERGED");
-  const none = defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: fakeRun860({ search: [{ total_count: 0, incomplete_results: false, items: [] }] }) });
+  const none = defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: fakeRun860(listRoute870([])) });
   assert.deepEqual(none, []);
   assert.equal((await reconcileReadyPrBreakpoint({ repo: R860, executionIssue: 858 }, { ghPrListImpl: () => none })).crossed, false);
 });
 
-test("defaultGhPrList (REST): wrong issue number is not linked; multiple candidates keep OPEN-then-highest tie-break", () => {
-  const run = fakeRun860({
-    search: [{ total_count: 3, incomplete_results: false, items: [searchItem860(30, "Addresses #8580"), searchItem860(31, "Addresses #858"), searchItem860(32, "Addresses #858")] }],
-    [`repos/${R860}/pulls/30`]: restPull860(30, { body: "Addresses #8580" }),
-    [`repos/${R860}/pulls/31`]: restPull860(31, { body: "Addresses #858" }),
-    [`repos/${R860}/pulls/32`]: restPull860(32, { state: "closed", body: "Addresses #858" }),
-  });
+test("defaultGhPrList (repo-scoped REST): wrong issue not linked; multiple candidates keep OPEN-then-highest tie-break", () => {
+  const list = defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: fakeRun860(listRoute870([
+    restPull860(932, { state: "closed", body: "Addresses #858" }),
+    restPull860(931, { body: "Addresses #858" }),
+    restPull860(930, { body: "Addresses #8580" }),
+  ])) });
+  assert.deepEqual(list.map((p) => p.number), [932, 931]);
+  assert.equal(findExecutionLinkedPr(list, 858).number, 931);
+});
+
+test("defaultGhPrList (repo-scoped REST): branch-only-linked PR (no body marker) is found", () => {
+  const list = defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: fakeRun860(listRoute870([restPull860(950, { head: { ref: "issue-858-fix", sha: "s" } })])) });
+  assert.deepEqual(list.map((p) => p.number), [950]);
+});
+
+test("defaultGhPrList (repo-scoped REST): walks pages until a PR below the execution Issue; older PRs are not scanned", () => {
+  const p1 = Array.from({ length: 100 }, (_, i) => restPull860(1100 - i));
+  const p2 = [restPull860(1000, { body: "Addresses #858" }), restPull860(857, { body: "Addresses #858" }), restPull860(856)];
+  let calls = 0;
+  const inner = fakeRun860({ [`repos/${R860}/pulls`]: pagesRoute860([p1, p2]) });
+  const run = (cmd, args) => {
+    calls += 1;
+    return inner(cmd, args);
+  };
   const list = defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: run });
-  assert.deepEqual(list.map((p) => p.number), [31, 32]);
-  assert.equal(findExecutionLinkedPr(list, 858).number, 31);
+  assert.deepEqual(list.map((p) => p.number), [1000]);
+  assert.equal(calls, 2);
 });
 
-test("defaultGhPrList (REST): branch-only-linked PR surfaced by title/comment (no body marker) is found via detail", () => {
-  const run = fakeRun860({
-    search: [{ total_count: 1, incomplete_results: false, items: [searchItem860(50, "")] }],
-    [`repos/${R860}/pulls/50`]: restPull860(50, { head: { ref: "issue-858-fix", sha: "s" } }),
-  });
-  assert.deepEqual(defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: run }).map((p) => p.number), [50]);
+test("defaultGhPrList (repo-scoped REST): safety bound reached before the cutoff fails closed, never 'no PR'", () => {
+  let n = 100000;
+  const run = () => JSON.stringify(Array.from({ length: 100 }, () => restPull860(n--)));
+  assert.throws(() => defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: run }), /safety bound/);
+  assert.ok(ALL_PR_SCAN_LIMIT > 0);
 });
 
-test("normalizeSearchPrCandidates: missing/non-typed completeness metadata throws", () => {
-  assert.throws(() => normalizeSearchPrCandidates([{ items: [] }], { repo: R860 }), /completeness/);
-  assert.throws(() => normalizeSearchPrCandidates([{ total_count: "0", incomplete_results: false, items: [] }], { repo: R860 }), /completeness/);
-  assert.throws(() => normalizeSearchPrCandidates([{ total_count: 0, items: [] }], { repo: R860 }), /completeness/);
-});
-
-test("normalizeSearchPrCandidates: empty page array fails closed; one-page complete zero is accepted", () => {
-  assert.throws(() => normalizeSearchPrCandidates([], { repo: R860 }), /empty page array/);
-  assert.deepEqual(normalizeSearchPrCandidates([{ total_count: 0, incomplete_results: false, items: [] }], { repo: R860 }), []);
-});
-
-test("normalizeSearchPrCandidates: inconsistent total_count across pages fails closed in either order", () => {
-  const a = { total_count: 1, incomplete_results: false, items: [searchItem860(1, "x")] };
-  const b = { total_count: 0, incomplete_results: false, items: [] };
-  assert.throws(() => normalizeSearchPrCandidates([a, b], { repo: R860 }), /inconsistent total_count/);
-  assert.throws(() => normalizeSearchPrCandidates([b, a], { repo: R860 }), /inconsistent total_count/);
-});
-
-test("normalizeSearchPrCandidates: duplicate candidate across pages fails closed", () => {
-  const p1 = { total_count: 2, incomplete_results: false, items: [searchItem860(1, "x")] };
-  const p2 = { total_count: 2, incomplete_results: false, items: [searchItem860(1, "x")] };
-  assert.throws(() => normalizeSearchPrCandidates([p1, p2], { repo: R860 }), /duplicate candidate/);
-});
-
-test("normalizeSearchPrCandidates: coherent multi-page unique response is accepted", () => {
-  const p1 = { total_count: 2, incomplete_results: false, items: [searchItem860(1, "x")] };
-  const p2 = { total_count: 2, incomplete_results: false, items: [searchItem860(2, "y")] };
-  assert.deepEqual(normalizeSearchPrCandidates([p1, p2], { repo: R860 }).map((c) => c.number), [1, 2]);
+test("defaultGhPrList (repo-scoped REST): duplicate, out-of-order, malformed, wrong-repo, and unauthorized evidence all throw", async () => {
+  const bad = (pulls) => () => defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: fakeRun860(listRoute870(pulls)) });
+  assert.throws(bad([restPull860(900), restPull860(900)]), /duplicate/);
+  assert.throws(bad([restPull860(900), restPull860(901)]), /not newest-first/);
+  assert.throws(bad([restPull860(900, { head: {} })]), /head ref/);
+  assert.throws(bad([restPull860(900, { html_url: "https://github.com/other/repo/pull/900" })]), /identity/);
+  const route = `repos/${R860}/pulls`;
+  assert.throws(() => defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: fakeRun860({ [route]: "not json" }) }), /malformed/);
+  assert.throws(() => defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: fakeRun860({ [route]: { not: "array" } }) }), /malformed/);
+  const err = new Error("HTTP 403");
+  assert.throws(() => defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: fakeRun860({ [route]: err }) }), /403/);
+  const r = await reconcileReadyPrBreakpoint(
+    { repo: R860, executionIssue: 858 },
+    { ghPrListImpl: () => defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: fakeRun860({ [route]: err }) }) },
+  );
+  assert.equal(r.operationalError, true);
+  assert.equal(r.crossed, false);
 });
 
 test("defaultGhOpenPrList (REST): stops fetching pages once the safety bound is reached", () => {
@@ -3037,23 +3048,6 @@ test("defaultGhOpenPrList (REST): stops fetching pages once the safety bound is 
   };
   assert.throws(() => defaultGhOpenPrList({ repo: R860 }, { runImpl: run }), /safety bound/);
   assert.equal(calls, OPEN_PR_RECONCILIATION_LIMIT / 100);
-});
-
-test("defaultGhPrList (REST): authorization failure, malformed JSON, and pull-detail failure throw and reconcile as operationalError", async () => {
-  const err = new Error("HTTP 403");
-  assert.throws(() => defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: fakeRun860({ search: err }) }), /403/);
-  assert.throws(() => defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: fakeRun860({ search: "not json" }) }), /malformed/);
-  const run = fakeRun860({
-    search: [{ total_count: 1, incomplete_results: false, items: [searchItem860(10, "Addresses #858")] }],
-    [`repos/${R860}/pulls/10`]: err,
-  });
-  assert.throws(() => defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: run }), /403/);
-  const r = await reconcileReadyPrBreakpoint(
-    { repo: R860, executionIssue: 858 },
-    { ghPrListImpl: () => defaultGhPrList({ repo: R860, executionIssue: 858 }, { runImpl: fakeRun860({ search: err }) }) },
-  );
-  assert.equal(r.operationalError, true);
-  assert.equal(r.crossed, false);
 });
 
 test("defaultGhOpenPrList (REST): paginates pages, finds a branch-only-linked OPEN PR, and merges with search results for Stage 2", () => {
