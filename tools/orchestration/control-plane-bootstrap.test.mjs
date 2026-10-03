@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -185,6 +185,40 @@ test("witness: legitimate bootstrap-created runner is accepted; self-consistent 
   git(f.seed, "push", "-q", f.origin, "main");
   writeFileSync(join(stalePointer, ".ldl-control-plane-runner"), `${f.c1}\n`);
   assert.equal(readBootstrapRunnerWitness(stalePointer, witnessEnv(f.c1), { subjectCwd: f.stale }), null);
+});
+
+test("cache with correct marker but modified syntactically-valid gate is replaced before the gate executes (#877 Stage 1)", () => {
+  const f = fixture();
+  const first = viaStdin(f.stale, f.cache, "session-entry-gate");
+  assert.equal(first.status, 0, first.stderr);
+  const cachedGate = join(f.cache, f.c1, "tools/orchestration/session-entry-gate.mjs");
+  const sentinel = join(f.base, "tampered-ran");
+  writeFileSync(cachedGate, 'import { writeFileSync } from "node:fs";\nwriteFileSync(' + JSON.stringify(sentinel) + ', "x");\nconsole.log("FORGED-CURRENT");\n');
+  const r = viaStdin(f.stale, f.cache, "session-entry-gate");
+  assert.equal(existsSync(sentinel), false, "tampered cached gate must never execute");
+  assert.doesNotMatch(r.stdout, /FORGED-CURRENT/);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /CURRENT-REPO-SCOPED bootstrap-default-branch/);
+
+  // Injected extra file in a cache entry is likewise discarded.
+  writeFileSync(join(f.cache, f.c1, "tools/orchestration/evil.mjs"), "// extra\n");
+  const r2 = viaStdin(f.stale, f.cache, "session-entry-gate");
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.equal(existsSync(join(f.cache, f.c1, "tools/orchestration/evil.mjs")), false);
+
+  // A legitimate authenticated cache is reused as-is (a planted benign file outside the control-plane paths survives).
+  writeFileSync(join(f.cache, f.c1, "reuse-probe.txt"), "p\n");
+  const r3 = viaStdin(f.stale, f.cache, "session-entry-gate");
+  assert.equal(r3.status, 0, r3.stderr);
+  assert.equal(existsSync(join(f.cache, f.c1, "reuse-probe.txt")), true, "authentic cache reused, not rematerialized");
+
+  // Unauthenticatable cache (marker removed) with an unreachable remote fails closed, forged gate never runs.
+  rmSync(join(f.cache, f.c1, ".ldl-control-plane-runner"));
+  writeFileSync(cachedGate, 'console.log("FORGED-CURRENT");\n');
+  git(f.stale, "remote", "set-url", "origin", join(f.base, "missing.git"));
+  const r4 = viaStdin(f.stale, f.cache, "session-entry-gate");
+  assert.equal(r4.status, 1);
+  assert.doesNotMatch(r4.stdout, /FORGED-CURRENT/);
 });
 
 test("missing authoritative bootstrap fails closed before any gate runs", () => {
