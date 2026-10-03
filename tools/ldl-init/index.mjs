@@ -745,6 +745,14 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/action-envelope-hook.mjs", dependsOnDest: "tools/orchestration/verdict-handoff.mjs" },
   { dest: "tools/orchestration/pr-head-checkout-preflight.mjs", dependsOnDest: "tools/orchestration/verdict-handoff.mjs" },
   { dest: "tools/orchestration/format-dispatch-prompt.mjs", dependsOnDest: "tools/orchestration/verdict-handoff.mjs" },
+  // Issue #883: the evidence-only Stage 2 correction evaluator hard-imports the Stage 2 audit
+  // parsers/evidence reader from lifecycle-gate.mjs, the open-PR reader from ready-dispatch-gate.mjs,
+  // and the REST PR reader from github-read.mjs; the post-audit gate hard-imports the evaluator.
+  // An unmanaged, preserved copy of any of them would fail at ESM load time.
+  { dest: "tools/orchestration/evidence-correction.mjs", dependsOnDest: "tools/review-watch/lifecycle-gate.mjs" },
+  { dest: "tools/orchestration/evidence-correction.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
+  { dest: "tools/orchestration/evidence-correction.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/next-review-transition-gate.mjs", dependsOnDest: "tools/orchestration/evidence-correction.mjs" },
 ];
 
 // Pure. Given one install/update run's final toInstall/toSkip classification, returns one

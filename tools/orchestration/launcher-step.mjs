@@ -181,7 +181,7 @@ export function verifyPostcondition(evidence) {
 export const VERDICT_REFERENCE_KEYS = Object.freeze([
   "repo", "controlIssue", "executionIssue", "route", "pr", "head", "issue", "workIssue", "auditIssue",
   "planIndexUrl", "manifestCommentId", "manifestUrl", "dispatchReadyUnitIds", "alreadyDoneUnitIds",
-  "replanRequiredUnitIds", "correctionReason",
+  "replanRequiredUnitIds", "correctionReason", "evidenceOnlyEligible",
 ]);
 
 export function extractVerdictReferences(verdict) {

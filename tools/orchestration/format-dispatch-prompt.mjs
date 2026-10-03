@@ -503,7 +503,18 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
 // the correction PR's head and reports the PR/head/work-Issue identity — a fresh invocation
 // continues via `next-review-transition-gate.mjs`'s own `--pr`/`--head`/`--issue` direct-reference
 // path, which re-derives live state without needing any control write.
-export function formatStage2CorrectionWorkerDispatchPrompt({ controlIssue = null, auditIssue }) {
+//
+// Issue #883 (live #780/#877/PR #880/Audit #881): the template above assumed every accepted
+// finding produces a correction PR. A valid NOT CLEAN whose accepted finding needs only bounded
+// proof (no source change) has no PR to open -- inventing one is exactly the ceremony #883
+// removes. `evidenceOnlyEligible` (set by next-review-transition-gate.mjs only when
+// evidence-correction.mjs's evaluator proves the lineage may still use the evidence-only route)
+// selects a variant whose first instruction is the semantic classification, reference-only into
+// docs/bounded-review-cycle.md § Stage 2 evidence-only correction (the fixed procedure lives
+// there, not restated here). Absent/false -- including every second-audit, source-defect, or
+// older verdict -- renders the unchanged PR-mandatory template above, so source correction can
+// never lose its PR/Stage 1 requirement.
+export function formatStage2CorrectionWorkerDispatchPrompt({ controlIssue = null, auditIssue, evidenceOnlyEligible = false }) {
   if (!isPositiveInteger(auditIssue)) {
     throw new Error("formatStage2CorrectionWorkerDispatchPrompt requires auditIssue to be a positive integer");
   }
@@ -519,6 +530,20 @@ export function formatStage2CorrectionWorkerDispatchPrompt({ controlIssue = null
     : `request Stage 1 at its head via trigger.mjs; verify it succeeded. No control Issue exists to ` +
       `finalize onto — skip finalize-pr-breakpoint.mjs. Report the PR number, head, and work Issue for ` +
       `a fresh invocation's direct-reference resume.`;
+  if (evidenceOnlyEligible === true) {
+    const sourceBreakpoint = hasControlIssue
+      ? "run finalize-pr-breakpoint.mjs (report PR_BREAKPOINT_UNVERIFIED, never success)"
+      : "report the PR, head, and work Issue";
+    return (
+      `Stage 2 correction worker dispatch. Audit Issue: #${auditIssue}.${controlLine}\n\n` +
+      `Read Audit Issue #${auditIssue}'s Stage 2 report from GitHub for the findings and work Issue. First ` +
+      `classify them per docs/bounded-review-cycle.md § Stage 2 evidence-only correction: if all accepted findings ` +
+      `need only bounded proof and no source change, follow that section (no PR or commit; report ` +
+      `evidence-correction.mjs verify's state verbatim) and stop. Otherwise apply one consolidated source ` +
+      `correction, open/identify one linked PR, request Stage 1 via trigger.mjs, ${sourceBreakpoint}, and stop. ` +
+      `Never re-trigger the audit.`
+    );
+  }
   return (
     `Stage 2 correction worker dispatch. Audit Issue: #${auditIssue}.${controlLine}\n\n` +
     `Read Audit Issue #${auditIssue}'s completed Stage 2 report directly from GitHub to recover the audit ` +
@@ -744,7 +769,10 @@ const TEMPLATES_BY_STATE = {
     formatter: formatStage1CorrectionWorkerDispatchPrompt,
     fields: ["controlIssue", "issue", "pr", "correctionReason", "checkoutBinding"],
   },
-  STAGE2_CORRECTION_REQUIRED: { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
+  STAGE2_CORRECTION_REQUIRED: {
+    formatter: formatStage2CorrectionWorkerDispatchPrompt,
+    fields: ["controlIssue", "auditIssue", "evidenceOnlyEligible"],
+  },
   // Issue #718: all three verdicts share the identical { controlIssue, issue, pr } context shape
   // next-review-transition-gate.mjs already attaches — see formatStage2PreparationWorkerDispatchPrompt's
   // own comment for why one formatter and field set covers every one of them. The first two also
@@ -792,7 +820,10 @@ const FORMATTERS_BY_KIND = {
     formatter: formatStage1CorrectionWorkerDispatchPrompt,
     fields: ["controlIssue", "issue", "pr", "correctionReason", "checkoutBinding"],
   },
-  "stage2-correction": { formatter: formatStage2CorrectionWorkerDispatchPrompt, fields: ["controlIssue", "auditIssue"] },
+  "stage2-correction": {
+    formatter: formatStage2CorrectionWorkerDispatchPrompt,
+    fields: ["controlIssue", "auditIssue", "evidenceOnlyEligible"],
+  },
   "stage2-preparation": {
     formatter: formatStage2PreparationWorkerDispatchPrompt,
     fields: ["controlIssue", "issue", "pr", "head"],
@@ -815,6 +846,7 @@ const CLI_FLAG_BY_FIELD = {
   correctionReason: "correction-reason",
   head: "head",
   reviewedHead: "reviewed-head",
+  evidenceOnlyEligible: "evidence-only-eligible",
 };
 
 // Pure. Reads one field's value out of an explicit-fields `args` map or a piped gate-result
@@ -842,6 +874,12 @@ function readField(field, source, { isCli }) {
     return path != null || token != null || scriptPath != null
       ? { path: path ?? null, token: token ?? null, scriptPath: scriptPath ?? null }
       : null;
+  }
+  // Issue #883: strictly boolean -- only the literal true (piped JSON) or "true" (CLI flag) opts
+  // in to the evidence-only variant; anything else is the unchanged PR-mandatory template.
+  if (field === "evidenceOnlyEligible") {
+    const raw = isCli ? source[CLI_FLAG_BY_FIELD[field]] : source[field];
+    return isCli ? raw === "true" : raw === true;
   }
   if (field === "issue") {
     const raw = isCli ? source[CLI_FLAG_BY_FIELD[field]] : source[field];

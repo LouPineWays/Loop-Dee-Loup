@@ -318,7 +318,7 @@ import {
 } from "./stage2-report.mjs";
 import { isGenuineResponse } from "./genuine-response.mjs";
 
-const DEFAULT_BOT = "chatgpt-codex-connector[bot]";
+export const DEFAULT_BOT = "chatgpt-codex-connector[bot]";
 
 export function parseArgs(argv) {
   const args = {};
@@ -603,6 +603,22 @@ export function parseCorrectsAuditRef(body) {
   return match ? Number(match[1]) : null;
 }
 
+// Pure. Issue #883: the structured provenance marker an evidence-recovery re-audit carries in its
+// own "Stage 1 inline review disposition" block -- the one bounded same-merge, no-source-change
+// fresh Stage 2 audit that may follow a valid Stage 2 NOT CLEAN whose accepted finding was
+// satisfied by evidence alone (tools/orchestration/evidence-correction.mjs). The block also
+// carries the existing "prior Stage 2 NOT CLEAN verdict on issue #N" phrase
+// (parseCorrectsAuditRef), so the established correction-chain retirement closes the preserved
+// predecessor once this audit reaches a backed CLEAN. Returns the predecessor audit issue number,
+// or null when absent. Same trust boundary as parseCorrectsAuditRef: only the controlling session
+// composes this field, before ever triggering the reviewer.
+export function parseEvidenceRecoveryRef(body) {
+  const block = parseFormFieldBlock(body, "Stage 1 inline review disposition");
+  if (!block) return null;
+  const match = /\bEvidence-recovery re-audit of audit issue #(\d+)/.exec(block);
+  return match ? Number(match[1]) : null;
+}
+
 const SHA_TOKEN_PATTERN = /\b[0-9a-f]{7,40}\b/i;
 
 // Pure. Reads the audit-control-issue template's "Exact merge commit" field — the target
@@ -770,7 +786,7 @@ const STAGE2_LEGACY_CONTRACT_CUTOFF = "2026-08-31T09:19:22Z";
 // completeness check in issue #268 finding 2 applies; omitted for the relaxed legacy-
 // compatibility evaluation, which already forgives the checklist signal entirely.
 // `ghApiImpl` is injected for tests.
-async function findStage2ReportEvidence(
+export async function findStage2ReportEvidence(
   { repo, auditIssue, bot, mergeCommit, requestedChecklist = null, reviewedHeadCommit = null },
   ghApiImpl,
   { legacyCutoff = null } = {},
@@ -2237,7 +2253,23 @@ function defaultGhIssueLastEditedAt({ repo, number }) {
 // ready" that could silently drift apart.
 export function findMatchingOpenAuditIssues(candidates, { mergeCommitOid, executionIssue }, { requirePendingState = false } = {}) {
   const expectedWorkIssue = executionIssue === "none" ? "none" : executionIssue;
+  // Issue #883: an evidence-recovery re-audit targets the SAME exact merge/work identity as the
+  // valid NOT CLEAN predecessor it follows, which stays preserved (and possibly still OPEN) as
+  // historical evidence. A predecessor that a canonical same-identity evidence-recovery successor
+  // names is superseded, never a competing "current" audit -- excluded here so the sole-match
+  // checks downstream (trigger authorization, finalization uniqueness) see exactly one candidate.
+  const supersededPredecessors = new Set();
+  for (const candidate of candidates ?? []) {
+    const body = candidate.body ?? "";
+    const predecessor = parseEvidenceRecoveryRef(body);
+    if (predecessor === null || !hasCanonicalAuditShape(body)) continue;
+    const candidateMergeCommit = parseMergeCommitRef(body);
+    if (!candidateMergeCommit || candidateMergeCommit.toLowerCase() !== String(mergeCommitOid).toLowerCase()) continue;
+    if (parseWorkIssueRef(body) !== expectedWorkIssue) continue;
+    supersededPredecessors.add(predecessor);
+  }
   return (candidates ?? []).filter((candidate) => {
+    if (supersededPredecessors.has(Number(candidate.number))) return false;
     if (candidate.state !== "OPEN") return false;
     if (!hasCanonicalAuditShape(candidate.body ?? "")) return false;
     if (requirePendingState && !checkPreAuditPendingState(candidate.body ?? "").ok) return false;
@@ -3014,7 +3046,7 @@ function defaultGhIssueView({ repo, number }) {
   return readGithubIssue({ repo, number, fields: ["body", "state", "createdAt"] });
 }
 
-function defaultGhApi(path) {
+export function defaultGhApi(path) {
   const raw = execFileSync("gh", ["api", path, "--paginate", "--slurp"], { encoding: "utf8" });
   return JSON.parse(raw).flat();
 }

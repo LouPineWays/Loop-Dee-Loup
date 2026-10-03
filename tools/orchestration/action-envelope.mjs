@@ -317,6 +317,24 @@ const ENVELOPES = {
     authorizedActions: ["run-lifecycle-gate-record-verdict"],
   },
   STAGE2_RESPONSE_UNUSABLE: { mode: ENVELOPE_MODES.NONE, authorizedActions: [] },
+  // Issue #883 (live #780/#877/PR #880/Audit #881): a valid recorded NOT CLEAN whose accepted
+  // finding was satisfied by evidence alone (tools/orchestration/evidence-correction.mjs
+  // independently verified the durable result comment). No correction PR and no worker dispatch:
+  // exactly one deterministic step -- create (or recover) the single same-merge re-audit -- then
+  // stop. A fresh gate invocation afterward resolves STAGE2_EVIDENCE_REAUDIT_READY.
+  STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["run-evidence-correction-prepare"],
+  },
+  // Issue #883: the single re-audit exists but the control Stage 2 pointer still names the
+  // preserved predecessor. The same two ordered actions STAGE2_AUDIT_ALREADY_PREPARED authorizes
+  // (finalize/project first, then the idempotent reviewer trigger -- issue #561's unchanged
+  // ordering invariant); `getActionEnvelope` narrows the first to the direct-reference
+  // verification when no control Issue is involved.
+  STAGE2_EVIDENCE_REAUDIT_READY: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["write-control-snapshot", "post-stage2-reviewer-trigger"],
+  },
   // Issue #646 (the #487/#643/#644/#645 live reproduction): reconcileStage2CorrectionPr found
   // an already-open, work-Issue-linked correction PR while re-evaluating what would otherwise
   // be STAGE2_CORRECTION_REQUIRED -- the PR boundary was already crossed by a prior (possibly
@@ -454,6 +472,18 @@ export function getActionEnvelope(state, context = {}) {
     }
     const finalizeAction = context.controlIssue != null ? "write-control-snapshot" : "verify-direct-reference-audit";
     return { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: [...base, finalizeAction, "post-stage2-reviewer-trigger"] };
+  }
+
+  // Issue #883: no thin control Issue to project onto in direct-reference mode (the verdict then
+  // carries no `controlIssue`), so the finalizer step is the direct-reference verification
+  // continuation instead of a control write -- same split STAGE2_PREPARATION_REQUIRED's
+  // AUDIT_READY continuation already makes above.
+  if (state === "STAGE2_EVIDENCE_REAUDIT_READY") {
+    const hasControl = typeof context.controlIssue === "number";
+    return {
+      mode: entry.mode,
+      authorizedActions: [hasControl ? "write-control-snapshot" : "verify-direct-reference-audit", "post-stage2-reviewer-trigger"],
+    };
   }
 
   if (state === "STAGE2_CLOSE_READY") {
@@ -681,7 +711,9 @@ export function requiresPreBoundNonIsolatedDispatch(authorizedActions) {
 // `verify-action-envelope.mjs`'s CLI wrapper below uses this list to fail closed instead of
 // certifying a spuriously empty/incomplete action list as compliant.
 export function contextSensitiveEnvelopeStates() {
-  return ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION"];
+  // Issue #883: STAGE2_EVIDENCE_REAUDIT_READY derives its finalize action from whether the verdict
+  // carries a control Issue; an omitted context would silently degrade to the direct-reference form.
+  return ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", "STAGE2_EVIDENCE_REAUDIT_READY"];
 }
 
 // Issue #858 (control #571; fresh recurrence of #761's lost-verdict failure at #457/#856/PR #857):
