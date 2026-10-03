@@ -45,7 +45,7 @@
 // Tests: node --test tools/orchestration/control-plane-bootstrap.test.mjs
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -191,7 +191,8 @@ export function materializeRunner({ root, commit, cacheDir = process.env.LDL_CON
   try {
     mkdirSync(stage, { recursive: true });
     git(["read-tree", commit], { cwd: root, env: { GIT_INDEX_FILE: indexFile } });
-    git(["checkout-index", "-a", "-f", `--prefix=${stage.replace(/\\/g, "/")}/`], {
+    // Byte-exact export (no autocrlf/eol conversion): the freshness witness verifies blob hashes.
+    git(["-c", "core.autocrlf=false", "-c", "core.eol=lf", "checkout-index", "-a", "-f", `--prefix=${stage.replace(/\\/g, "/")}/`], {
       cwd: root,
       env: { GIT_INDEX_FILE: indexFile },
     });
@@ -227,10 +228,17 @@ export function convergeBootstrap(plan, argv, { git = defaultGit, spawn = spawnS
   let authoritative;
   try {
     authoritative = git(["show", `${commit}:${BOOTSTRAP_PATH}`], { cwd: plan.root, raw: true });
-  } catch {
-    return null; // default branch predates the bootstrap: nothing authoritative to defer to
+  } catch (err) {
+    // Missing/unreadable authoritative bootstrap is unverifiable authority: fail closed, never
+    // continue with the older running bootstrap.
+    log(fail(`${plan.witness.defaultBranchRef} has no readable ${BOOTSTRAP_PATH}: ${errText(err)}`).message);
+    return 1;
   }
   if (own() === authoritative) return null;
+  if (!sourceParses(authoritative, spawn)) {
+    log(fail(`${plan.witness.defaultBranchRef} ${BOOTSTRAP_PATH} is not executable JavaScript`).message);
+    return 1;
+  }
   log(`control-plane bootstrap: deferring to ${plan.witness.defaultBranchRef}@${commit.slice(0, 12)} bootstrap.`);
   const res = spawn(process.execPath, ["-", ...argv], {
     cwd: plan.root,
@@ -239,6 +247,23 @@ export function convergeBootstrap(plan, argv, { git = defaultGit, spawn = spawnS
     env: { ...env, [CONVERGED_ENV]: commit },
   });
   return res.status ?? 1;
+}
+
+// `node --check` needs a real .mjs file (stdin is treated as CommonJS), so stage the text in a
+// private temp directory first.
+function sourceParses(text, spawn) {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-bootstrap-check-"));
+  try {
+    const file = join(dir, "candidate.mjs");
+    writeFileSync(file, text);
+    return gateParses(file, spawn);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function gateParses(script, spawn) {
+  return spawn(process.execPath, ["--check", script], { encoding: "utf8" }).status === 0;
 }
 
 export function runBootstrap(argv, { cwd = process.cwd(), git = defaultGit, spawn = spawnSync, cacheDir, log = (m) => console.error(m), own } = {}) {
@@ -263,8 +288,12 @@ export function runBootstrap(argv, { cwd = process.cwd(), git = defaultGit, spaw
     script = join(plan.root, "tools", "orchestration", `${gate}.mjs`);
     if (plan.source === "checkout-explicit") args = [...gateArgs, "--control-plane-source", "checkout"];
     if (!existsSync(script)) {
-      log(`Control-plane bootstrap: ${script} does not exist in this checkout; no gate was run.`);
-      return 2;
+      log(fail(`${gate}.mjs does not exist in this checkout`).message);
+      return 1;
+    }
+    if (!gateParses(script, spawn)) {
+      log(fail(`${gate}.mjs in this checkout is not executable JavaScript`).message);
+      return 1;
     }
   } else {
     let runnerDir;
@@ -276,8 +305,12 @@ export function runBootstrap(argv, { cwd = process.cwd(), git = defaultGit, spaw
     }
     script = join(runnerDir, "tools", "orchestration", `${gate}.mjs`);
     if (!existsSync(script)) {
-      log(`Control-plane bootstrap: ${gate}.mjs does not exist in ${plan.witness.defaultBranchRef}; no gate was run.`);
-      return 2;
+      log(fail(`${gate}.mjs does not exist in ${plan.witness.defaultBranchRef}`).message);
+      return 1;
+    }
+    if (!gateParses(script, spawn)) {
+      log(fail(`${gate}.mjs in ${plan.witness.defaultBranchRef} is not executable JavaScript`).message);
+      return 1;
     }
     // Verdict-handoff/action-envelope state belongs to the SUBJECT checkout (the one whose hooks
     // consume it), never to the shared runner cache a runner's module-relative root implies.

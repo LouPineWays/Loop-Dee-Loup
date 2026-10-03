@@ -28,7 +28,7 @@
 // Bootstrap (issue #877): control-plane-bootstrap.mjs is the dependency-free boundary that runs
 // BEFORE any checkout-local gate. When the checkout is stale/diverged it exports the authoritative
 // default-branch tree to a runner directory and sets LDL_CONTROL_PLANE_RUNNER; this checker then
-// recognizes that runner (marker file + matching commit) as CURRENT with a bootstrap witness. The
+// recognizes that runner as CURRENT with a bootstrap witness only after independent proof (remote tip + byte-identical tree); marker/env alone never suffice. The
 // ordinary stale/current comparison below remains the single authoritative mechanism otherwise.
 //
 // Fail closed: if the authoritative ref cannot be fetched/read (offline, auth failure, missing
@@ -44,7 +44,8 @@
 // Tests: node --test tools/orchestration/control-plane-freshness.test.mjs
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -84,6 +85,7 @@ export function checkControlPlaneFreshness({
   git = defaultGit,
   remote = "origin",
   env = process.env,
+  subjectCwd = process.cwd(),
 } = {}) {
   if (!SOURCES.includes(source)) {
     return {
@@ -96,7 +98,7 @@ export function checkControlPlaneFreshness({
 
   // Issue #877: a bootstrap-exported runner (control-plane-bootstrap.mjs) has no .git of its own;
   // its authority is the default-branch commit the bootstrap fetched and named in the marker file.
-  const boot = source === "default-branch" ? readBootstrapRunnerWitness(root, env) : null;
+  const boot = source === "default-branch" ? readBootstrapRunnerWitness(root, env, { git, remote, subjectCwd }) : null;
   if (boot) return { ok: true, exitCode: 0, state: "CURRENT", witness: boot };
 
   let headCommit;
@@ -214,19 +216,56 @@ export function checkControlPlaneFreshness({
   return { ok: true, exitCode: 0, state: "CURRENT", witness };
 }
 
-// Valid only when the env witness names the exact commit recorded in this root's marker file, so a
-// stray env var can never make an arbitrary checkout look current.
-export function readBootstrapRunnerWitness(root, env = process.env) {
+// Issue #877 Stage 2 correction: the env witness and marker file are caller-writable, so they are
+// only HINTS naming the commit a runner claims to be. Acceptance requires independent proof that
+// (a) that commit is the remote default branch's current tip (bounded ls-remote from the subject
+// checkout), and (b) the runner's own control-plane files are byte-for-byte that commit's tree
+// (blob hashes from git objects, no extra files). A self-consistent forged marker/env pair over
+// arbitrary checkout-local code fails (b); anything unverifiable returns null (never CURRENT).
+export function readBootstrapRunnerWitness(root, env = process.env, { git = defaultGit, remote = "origin", subjectCwd = process.cwd() } = {}) {
   const raw = env.LDL_CONTROL_PLANE_RUNNER;
   if (!raw) return null;
   try {
     const w = JSON.parse(raw);
     const marker = readFileSync(join(root, ".ldl-control-plane-runner"), "utf8").trim();
     if (!w || typeof w.runnerCommit !== "string" || w.runnerCommit !== marker || w.defaultBranchCommit !== marker) return null;
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(marker)) return null;
+    const out = git(["ls-remote", "--symref", remote, "HEAD"], { cwd: subjectCwd, timeout: FETCH_TIMEOUT_MS });
+    const tip = /^([0-9a-f]{40,64})\s+HEAD\s*$/m.exec(out);
+    if (!tip || tip[1] !== marker) return null;
+    if (!runnerTreeMatchesCommit(root, marker, git, subjectCwd)) return null;
     return { ...w, source: "bootstrap-default-branch", executedRevision: marker };
   } catch {
     return null;
   }
+}
+
+function runnerTreeMatchesCommit(root, commit, git, subjectCwd) {
+  const algo = commit.length === 64 ? "sha256" : "sha1";
+  const expected = new Map();
+  const listing = git(["ls-tree", "-r", commit, "--", ...CONTROL_PLANE_RUNNER_PATHS], { cwd: subjectCwd });
+  for (const line of listing.split(/\r?\n/).filter(Boolean)) {
+    const m = /^(\d+) blob ([0-9a-f]+)\t(.+)$/.exec(line);
+    if (m) expected.set(m[3], m[2]);
+  }
+  if (expected.size === 0) return false;
+  const actual = new Set();
+  const walk = (rel) => {
+    for (const ent of readdirSync(join(root, rel), { withFileTypes: true })) {
+      const r = `${rel}/${ent.name}`;
+      if (ent.isDirectory()) walk(r);
+      else actual.add(r);
+    }
+  };
+  for (const p of CONTROL_PLANE_RUNNER_PATHS) if (existsSync(join(root, p))) walk(p);
+  if (actual.size !== expected.size) return false;
+  for (const [path, oid] of expected) {
+    if (!actual.has(path)) return false;
+    const body = readFileSync(join(root, path));
+    const h = createHash(algo).update(`blob ${body.length}\0`).update(body).digest("hex");
+    if (h !== oid) return false;
+  }
+  return true;
 }
 
 function errText(err) {
