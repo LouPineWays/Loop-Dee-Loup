@@ -278,3 +278,30 @@ test("#858: the denied gate re-run points at the continuation and leaves the per
     t.cleanup();
   }
 });
+
+test("#858 Stage 2: getCorrectionContinuation takes --control-issue only from a positive integer number", () => {
+  for (const bad of [true, "457", 4.5, 0, -3, null, undefined, "x"]) {
+    const c = getCorrectionContinuation("STAGE1_CORRECTION_REQUIRED", { controlIssue: bad, correctionReason: "findings" });
+    assert.ok(c.steps.every((s) => !s.includes("--control-issue")), `controlIssue ${String(bad)} must be omitted`);
+  }
+  const ok = getCorrectionContinuation("STAGE1_CORRECTION_REQUIRED", { controlIssue: 457, correctionReason: "findings" });
+  assert.ok(ok.steps.every((s) => s.endsWith("--control-issue 457")));
+});
+
+test("#858 Stage 2: writeMarker persists correctionContinuation only with at least one string step", async () => {
+  const { writeMarker } = await import("./action-envelope-hook.mjs");
+  const write = (steps) => {
+    let written = null;
+    const m = writeMarker("sess-858", { actionEnvelope: { mode: "bounded", authorizedActions: ["dispatch-correction-worker"] }, state: "STAGE1_CORRECTION_REQUIRED", correctionContinuation: { steps } }, { mkdirImpl() {}, writeFileImpl(_p, d) { written = d; } });
+    return { m, written };
+  };
+  for (const steps of [[42], [], [null, {}]]) {
+    const { m, written } = write(steps);
+    assert.ok(m, "marker still written");
+    assert.equal("correctionContinuation" in m, false);
+    assert.equal(written.includes("correctionContinuation"), false);
+  }
+  const mixed = write([42, "a", null, "b"]);
+  assert.deepEqual(mixed.m.correctionContinuation, { steps: ["a", "b"] });
+  assert.deepEqual(JSON.parse(mixed.written).correctionContinuation, { steps: ["a", "b"] });
+});

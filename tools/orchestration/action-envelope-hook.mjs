@@ -452,6 +452,10 @@ export function writeMarker(
 ) {
   if (!sessionId) return null;
   mkdirImpl(STATE_DIR, { recursive: true });
+  // Issue #858 Stage 2 correction: filter first so an empty-after-validation continuation is never persisted.
+  const continuationSteps = Array.isArray(verdict.correctionContinuation?.steps)
+    ? verdict.correctionContinuation.steps.filter((x) => typeof x === "string")
+    : [];
   // Issue #764 Stage 1 correction: an already-active correction-completion obligation is
   // monotonic -- it is replaced only by a fresh correction dispatch decided by the controller
   // itself (never by a worker-originated gate observation) and is otherwise carried forward, so
@@ -477,9 +481,7 @@ export function writeMarker(
     // Issue #858 Stage 1 correction: the denial hint derives from the verdict's own
     // continuation (Stage 1 only; absent for Stage 2/other verdicts), never from the mere
     // presence of a dispatch action.
-    ...(Array.isArray(verdict.correctionContinuation?.steps) && verdict.correctionContinuation.steps.length > 0
-      ? { correctionContinuation: { steps: verdict.correctionContinuation.steps.filter((x) => typeof x === "string") } }
-      : {}),
+    ...(continuationSteps.length > 0 ? { correctionContinuation: { steps: continuationSteps } } : {}),
     ...carried,
     ts: new Date().toISOString(),
   };

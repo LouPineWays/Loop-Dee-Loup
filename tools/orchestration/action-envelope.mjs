@@ -700,8 +700,10 @@ export function getCorrectionContinuation(state, verdict = {}) {
   const isConflict = state === "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT";
   if (!isStage1Correction && !isConflict) return null;
   const needsReservation = isConflict || verdict.correctionReason !== "closing-reference";
-  const n = Number(verdict.controlIssue);
-  const control = Number.isInteger(n) && n > 0 ? ` --control-issue ${n}` : "";
+  // Issue #858 Stage 2 correction: only an actual positive integer number qualifies; never
+  // coerce booleans/strings/etc. into a valid-looking control identity.
+  const n = verdict.controlIssue;
+  const control = typeof n === "number" && Number.isInteger(n) && n > 0 ? ` --control-issue ${n}` : "";
   const format = `node tools/orchestration/format-dispatch-prompt.mjs --from-handoff${control}`;
   const steps = needsReservation
     ? [`node tools/orchestration/pr-head-checkout-preflight.mjs --reserve-from-gate --from-handoff${control}`, format]
