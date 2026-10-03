@@ -50,6 +50,7 @@
 // Tests: node --test tools/orchestration/evidence-correction.test.mjs
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { resolveRepoIdentity, findOpenExecutionLinkedPr, defaultGhOpenPrList } from "./ready-dispatch-gate.mjs";
 import { readGithubPr } from "./github-read.mjs";
 import {
@@ -105,12 +106,29 @@ export function formatEvidenceCorrectionResult({ auditIssue, workIssue, pr, merg
   );
 }
 
-const COMMENT_URL = /^https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/(?:issues|pull)\/(\d+)#issuecomment-(\d+)$/;
+const DEFAULT_HOST = "github.com";
+const escapeRegExp = (t) => String(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// Issue #883 Stage 1 correction: the permalink host is the configured GitHub host (the host GitHub
+// itself reports for the audit Issue), not a hard-coded github.com, so GitHub Enterprise checkouts
+// work. Only the host source is generalized; repo/comment identity rules are unchanged.
+const commentUrlPattern = (host = DEFAULT_HOST) =>
+  new RegExp(`^https://${escapeRegExp(host)}/([^/\\s]+/[^/\\s]+)/(?:issues|pull)/(\\d+)#issuecomment-(\\d+)$`, "i");
+
+const hostOf = (htmlUrl) => {
+  try {
+    return new URL(String(htmlUrl)).host.toLowerCase() || DEFAULT_HOST;
+  } catch {
+    return DEFAULT_HOST;
+  }
+};
+const sha256 = (t) => createHash("sha256").update(String(t ?? "")).digest("hex");
 
 // Pure. Parses a result comment. Returns { ok: true, fields } or { ok: false, errors, auditIssue }
 // where auditIssue (when recoverable) lets the caller tell "a malformed result for THIS audit"
 // apart from "a result for some other audit".
-export function parseEvidenceCorrectionResult(body) {
+export function parseEvidenceCorrectionResult(body, { host = DEFAULT_HOST } = {}) {
+  const COMMENT_URL = commentUrlPattern(host);
   const text = normalizeEol(body).trim();
   if (!text.startsWith(RESULT_HEADING)) return { ok: false, errors: ["missing result heading"], auditIssue: null };
   const lines = text.slice(RESULT_HEADING.length).split("\n");
@@ -259,6 +277,7 @@ async function readIssueRest(io, repo, number) {
   }
   return {
     number: payload.number,
+    host: hostOf(payload.html_url),
     body: normalizeEol(payload.body ?? ""),
     state: payload.state === "open" ? "OPEN" : "CLOSED",
     createdAt: payload.created_at,
@@ -279,8 +298,8 @@ function parseMergedPrNumber(body) {
 
 // Verifies one cited evidence comment against the trust/ordering rules. Returns null when valid,
 // else the reason it is not.
-async function verifyEvidenceComment(io, { repo, url, trustedLogin, afterMs }) {
-  const m = COMMENT_URL.exec(url);
+async function verifyEvidenceComment(io, { repo, url, trustedLogin, afterMs, workIssue, host }) {
+  const m = commentUrlPattern(host).exec(url);
   if (!m || m[1].toLowerCase() !== repo.toLowerCase()) return `${url} is not an issue-comment URL in ${repo}`;
   let comment;
   try {
@@ -291,6 +310,7 @@ async function verifyEvidenceComment(io, { repo, url, trustedLogin, afterMs }) {
   if (!comment || String(comment.id) !== m[3]) return `${url} did not resolve to that comment`;
   const issueNumber = /\/issues\/(\d+)$/.exec(String(comment.issue_url ?? ""))?.[1];
   if (issueNumber !== m[2]) return `${url} belongs to a different Issue than its URL names`;
+  if (String(workIssue) !== issueNumber) return `${url} is not on the authoritative work Issue #${workIssue}`;
   if (comment.user?.login !== trustedLogin) {
     return `${url} is authored by ${JSON.stringify(comment.user?.login ?? null)}, not the audit's controlling account ${JSON.stringify(trustedLogin)}`;
   }
@@ -353,6 +373,10 @@ export async function evaluateEvidenceCorrection({ repo, auditIssue }, io = defa
   const sameTarget = recent.filter((c) => {
     if (Number(c.number) === Number(auditIssue)) return false;
     if (!hasCanonicalAuditShape(c.body ?? "")) return false;
+    // Only the audit's own controlling account can author a candidate that counts as lineage
+    // authority; an untrusted copy of the canonical headings is ignored here (and later fails closed
+    // in the finalize-time uniqueness revalidation if it duplicates the real one).
+    if (c.author !== audit.author) return false;
     const cm = parseMergeCommitRef(c.body ?? "");
     return cm && cm.toLowerCase() === mergeCommit.toLowerCase() && parseWorkIssueRef(c.body ?? "") === workIssue;
   });
@@ -376,14 +400,14 @@ export async function evaluateEvidenceCorrection({ repo, auditIssue }, io = defa
   for (const comment of workComments) {
     const text = normalizeEol(comment.body ?? "").trim();
     if (!text.startsWith(RESULT_HEADING)) continue;
-    const parsed = parseEvidenceCorrectionResult(text);
+    const parsed = parseEvidenceCorrectionResult(text, { host: audit.host });
     const namedAudit = parsed.ok ? parsed.fields.auditIssue : parsed.auditIssue;
     if (namedAudit !== Number(auditIssue)) continue;
     ours.push({ comment, parsed });
   }
   ours.sort((a, b) => new Date(a.comment.created_at).getTime() - new Date(b.comment.created_at).getTime());
   const latest = ours.at(-1);
-  const base = { auditIssue: Number(auditIssue), workIssue, pr, mergeCommit, reportUrl, trustedLogin: audit.author };
+  const base = { auditIssue: Number(auditIssue), workIssue, pr, mergeCommit, reportUrl, trustedLogin: audit.author, auditBodyHash: sha256(body), host: audit.host };
   const replacement = replacements[0] ?? null;
 
   if (!latest) {
@@ -421,7 +445,7 @@ export async function evaluateEvidenceCorrection({ repo, auditIssue }, io = defa
     return refuse(Status.INCOMPLETE, "result comment predates the NOT CLEAN report it claims to answer", base);
   }
   for (const url of f.evidenceUrls) {
-    const problem = await verifyEvidenceComment(io, { repo, url, trustedLogin: audit.author, afterMs: reportMs });
+    const problem = await verifyEvidenceComment(io, { repo, url, trustedLogin: audit.author, afterMs: reportMs, workIssue, host: audit.host });
     if (problem) return refuse(Status.INCOMPLETE, `evidence not verified: ${problem}`, base);
   }
 
@@ -430,6 +454,15 @@ export async function evaluateEvidenceCorrection({ repo, auditIssue }, io = defa
 
   if (replacement.state !== "OPEN") {
     return refuse(Status.AMBIGUOUS, `re-audit #${replacement.number} exists but is ${replacement.state}`, { ...base, resultUrl });
+  }
+  // Bind the replacement's provenance to THIS verified result: it must cite the result comment and
+  // have been created after it.
+  if (!String(replacement.body ?? "").includes(resultUrl) || !(new Date(replacement.createdAt).getTime() > new Date(comment.created_at).getTime())) {
+    return refuse(
+      Status.AMBIGUOUS,
+      `re-audit #${replacement.number} is not bound to the verified evidence result ${resultUrl} (it must cite it and postdate it)`,
+      { ...base, resultUrl },
+    );
   }
   return {
     status: Status.SATISFIED,
@@ -463,15 +496,15 @@ export async function runRecord({ repo, auditIssue, evidence }, io = defaultIo) 
   if (before.status !== Status.NO_RESULT && before.status !== Status.INCOMPLETE) {
     return { exitCode: 2, state: `EVIDENCE_${before.status}`, ...before };
   }
-  if (urls.length === 0) return { exitCode: 2, state: "EVIDENCE_NOT_SATISFIED", reason: "no --evidence comment URL supplied", ...before };
+  if (urls.length === 0) return { exitCode: 2, state: "EVIDENCE_NOT_SATISFIED", ...before, reason: "no --evidence comment URL supplied" };
 
   // Verify every cited comment BEFORE posting, so a bad citation never becomes durable.
   const reportMs = new Date(
     (await io.ghApi(`repos/${repo}/issues/${auditIssue}/comments`)).find((c) => c.html_url === before.reportUrl)?.created_at ?? NaN,
   ).getTime();
   for (const url of urls) {
-    const problem = await verifyEvidenceComment(io, { repo, url, trustedLogin: before.trustedLogin, afterMs: reportMs });
-    if (problem) return { exitCode: 2, state: "EVIDENCE_NOT_SATISFIED", reason: `evidence not verified: ${problem}`, ...before };
+    const problem = await verifyEvidenceComment(io, { repo, url, trustedLogin: before.trustedLogin, afterMs: reportMs, workIssue: before.workIssue, host: before.host });
+    if (problem) return { exitCode: 2, state: "EVIDENCE_NOT_SATISFIED", ...before, reason: `evidence not verified: ${problem}` };
   }
   const commentBody = formatEvidenceCorrectionResult({
     auditIssue: Number(auditIssue),
@@ -505,6 +538,16 @@ export async function runPrepare({ repo, auditIssue, dryRun = false }, io = defa
     };
   }
   const predecessor = await readIssueRest(io, repo, auditIssue);
+  // Issue #883 Stage 1 correction: the predecessor must be exactly the body the evaluation proved
+  // authority from; an edit between evaluation and cloning fails closed rather than mixing authority.
+  if (sha256(predecessor.body) !== evaluated.auditBodyHash) {
+    return {
+      exitCode: 2,
+      state: "EVIDENCE_AMBIGUOUS",
+      reason: `predecessor audit #${auditIssue} changed after the evidence correction was evaluated; refusing to clone mixed authority`,
+      auditIssue: Number(auditIssue),
+    };
+  }
   const body = composeReplacementAuditBody(predecessor.body, {
     predecessor: Number(auditIssue),
     workIssue: evaluated.workIssue,
@@ -526,6 +569,17 @@ export async function runPrepare({ repo, auditIssue, dryRun = false }, io = defa
   const title = `[Audit] Evidence-recovery re-audit of PR #${evaluated.pr} (${evaluated.mergeCommit}) after Audit #${auditIssue} NOT CLEAN`;
   if (dryRun) return { exitCode: 0, state: "REAUDIT_DRY_RUN", auditIssue: Number(auditIssue), title, body };
 
+  // Re-prove the whole lineage immediately before the mutation: still satisfied, still no
+  // replacement, and the predecessor body is unchanged.
+  const recheck = await evaluateEvidenceCorrection({ repo, auditIssue }, io);
+  if (recheck.status !== Status.SATISFIED || recheck.replacement || recheck.auditBodyHash !== evaluated.auditBodyHash) {
+    return {
+      exitCode: 2,
+      state: "EVIDENCE_AMBIGUOUS",
+      reason: `lineage changed before the re-audit could be created (${recheck.status}: ${recheck.reason})`,
+      auditIssue: Number(auditIssue),
+    };
+  }
   const created = await io.ghPost(`repos/${repo}/issues`, { title, body });
   const number = Number(created?.number);
   if (!isPositiveInteger(number) || created.pull_request) {

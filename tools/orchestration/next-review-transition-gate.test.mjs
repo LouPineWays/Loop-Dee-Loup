@@ -3817,7 +3817,7 @@ test("#883 gate: satisfied evidence with the one re-audit present projects it on
   assert.equal(
     result.nextCommand,
     "node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue 322 --execution-issue 375 --pr 376 " +
-      "--audit-issue 390 --stale-audit-issue 378 && node tools/review-watch/trigger.mjs --repo o/r --kind issue --number 390",
+      "--audit-issue 390 --stale-audit-issue 378 --revalidate-uniqueness true && node tools/review-watch/trigger.mjs --repo o/r --kind issue --number 390",
   );
   assert.deepEqual(result.actionEnvelope.authorizedActions, ["write-control-snapshot", "post-stage2-reviewer-trigger"]);
 });
@@ -3833,7 +3833,7 @@ test("#883 gate: direct-reference mode (no control) verifies then triggers the r
   assert.equal(result.state, "STAGE2_EVIDENCE_REAUDIT_READY");
   assert.equal(
     result.nextCommand,
-    "node tools/orchestration/finalize-audit-breakpoint.mjs --execution-issue 375 --pr 376 --audit-issue 390 && " +
+    "node tools/orchestration/finalize-audit-breakpoint.mjs --execution-issue 375 --pr 376 --audit-issue 390 --revalidate-uniqueness true && " +
       "node tools/review-watch/trigger.mjs --repo o/r --kind issue --number 390",
   );
   assert.deepEqual(result.actionEnvelope.authorizedActions, ["verify-direct-reference-audit", "post-stage2-reviewer-trigger"]);

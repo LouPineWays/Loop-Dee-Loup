@@ -1587,9 +1587,9 @@ async function resolveEvidenceOnlyRouting({ repo, context, postAudit, verdict },
         typeof context.controlIssue === "number"
           ? `node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue ${context.controlIssue} ` +
             `--execution-issue ${evaluated.workIssue} --pr ${evaluated.pr} --audit-issue ${replacement} ` +
-            `--stale-audit-issue ${context.auditIssue}`
+            `--stale-audit-issue ${context.auditIssue} --revalidate-uniqueness true`
           : `node tools/orchestration/finalize-audit-breakpoint.mjs --execution-issue ${evaluated.workIssue} ` +
-            `--pr ${evaluated.pr} --audit-issue ${replacement}`;
+            `--pr ${evaluated.pr} --audit-issue ${replacement} --revalidate-uniqueness true`;
       return {
         state: "STAGE2_EVIDENCE_REAUDIT_READY",
         stopAfter: true,

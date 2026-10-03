@@ -1135,3 +1135,30 @@ test("run() (#788): first finalization (control still REVIEW) of the #787 shape 
   assert.equal(result.state, "AUDIT_BREAKPOINT_UNVERIFIED");
   assert.equal(wrote, false);
 });
+
+test("runDirectReferenceVerification(): revalidateUniqueness true refuses when a second matching OPEN Audit Issue exists (#883 Stage 1 correction)", async () => {
+  const deps = {
+    ghPrViewImpl: async () => MERGED_PR_VIEW,
+    ghAuditIssueViewImpl: async () => MATCHING_AUDIT_VIEW,
+  };
+  const args = { repo: "o/r", executionIssue: 440, pr: 558, auditIssue: 559, revalidateUniqueness: true };
+  const dup = await runDirectReferenceVerification(args, {
+    ...deps,
+    ghIssueListImpl: async () => [{ number: 559, ...MATCHING_AUDIT_VIEW }, { number: 560, ...MATCHING_AUDIT_VIEW }],
+  });
+  assert.equal(dup.state, "AUDIT_BREAKPOINT_UNVERIFIED");
+  assert.match(dup.reason, /more than one OPEN canonical Audit Issue/);
+  const unique = await runDirectReferenceVerification(args, {
+    ...deps,
+    ghIssueListImpl: async () => [{ number: 559, ...MATCHING_AUDIT_VIEW }],
+  });
+  assert.equal(unique.state, "AUDIT_VERIFIED");
+  // Default stays off: the list is never consulted.
+  const off = await runDirectReferenceVerification({ ...args, revalidateUniqueness: false }, {
+    ...deps,
+    ghIssueListImpl: async () => {
+      throw new Error("must not be called");
+    },
+  });
+  assert.equal(off.state, "AUDIT_VERIFIED");
+});

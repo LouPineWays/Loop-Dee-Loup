@@ -182,6 +182,7 @@ function makeIo(world) {
         body: i.body,
         state: i.state,
         createdAt: i.created_at,
+        author: i.author,
       })),
   };
 }
@@ -652,10 +653,139 @@ test("#883 end-to-end: NOT CLEAN -> correction (eligible) -> record -> prepare-r
   assert.equal(
     third.nextCommand,
     `node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue 780 --execution-issue ${WORK} --pr ${PR} ` +
-      `--audit-issue 900 --stale-audit-issue ${AUDIT} && node tools/review-watch/trigger.mjs --repo ${REPO} --kind issue --number 900`,
+      `--audit-issue 900 --stale-audit-issue ${AUDIT} --revalidate-uniqueness true && node tools/review-watch/trigger.mjs --repo ${REPO} --kind issue --number 900`,
   );
   assert.equal((await gate()).state, "STAGE2_EVIDENCE_REAUDIT_READY");
   // Exactly one result comment and one replacement were ever created.
   assert.equal(world.posts.filter((p) => p.path.endsWith("/comments")).length, 1);
   assert.equal(world.posts.filter((p) => p.path === "repos/o/r/issues").length, 1);
+});
+
+// -- Stage 1 correction on PR #884 ------------------------------------------------------------
+
+test("evidence on another Issue (even by the trusted account, after the report) cannot satisfy record or verify", async () => {
+  const world = makeWorld();
+  world.issues[999] = { number: 999, body: "unrelated", state: "OPEN", created_at: ts(0), author: FOUNDER };
+  const other = addEvidence(world, { id: 777, issue: 999 });
+  const rec = await runRecord({ repo: REPO, auditIssue: AUDIT, evidence: [other] }, makeIo(world));
+  assert.equal(rec.exitCode, 2);
+  assert.match(rec.reason, /not on the authoritative work Issue/);
+  assert.equal(world.posts.length, 0);
+  // A result comment already on the work issue that cites it is INCOMPLETE, never SATISFIED.
+  addResult(world, {}, { evidence: [other] });
+  assert.equal((await evaluate(world)).status, Status.INCOMPLETE);
+});
+
+test("a spoofed (non-controlling-account) replacement audit is not authority: it neither blocks nor becomes the replacement", async () => {
+  const world = makeWorld();
+  const { id } = addResult(world);
+  world.issues[900] = {
+    number: 900,
+    body: composeReplacementAuditBody(auditBody(), { predecessor: AUDIT, workIssue: WORK, mergeCommit: MERGE, resultUrl: commentUrl(WORK, id) }),
+    state: "OPEN",
+    created_at: ts(50),
+    author: "mallory",
+  };
+  const result = await evaluate(world);
+  assert.equal(result.status, Status.SATISFIED);
+  assert.equal(result.replacement, null);
+});
+
+test("a controlling-account replacement not bound to the verified result (wrong URL, or created before it) fails closed", async () => {
+  let world = makeWorld();
+  addResult(world);
+  world.issues[900] = {
+    number: 900,
+    body: composeReplacementAuditBody(auditBody(), { predecessor: AUDIT, workIssue: WORK, mergeCommit: MERGE, resultUrl: commentUrl(WORK, 4242) }),
+    state: "OPEN",
+    created_at: ts(50),
+    author: FOUNDER,
+  };
+  assert.equal((await evaluate(world)).status, Status.AMBIGUOUS);
+
+  world = makeWorld();
+  const { id } = addResult(world, {}, { created: ts(40) });
+  world.issues[900] = {
+    number: 900,
+    body: composeReplacementAuditBody(auditBody(), { predecessor: AUDIT, workIssue: WORK, mergeCommit: MERGE, resultUrl: commentUrl(WORK, id) }),
+    state: "OPEN",
+    created_at: ts(39),
+    author: FOUNDER,
+  };
+  assert.equal((await evaluate(world)).status, Status.AMBIGUOUS);
+});
+
+test("prepare: editing the predecessor between evaluation and cloning fails closed without creating anything", async () => {
+  const world = makeWorld();
+  addResult(world);
+  const io = makeIo(world);
+  const realGet = io.ghGet;
+  let auditReads = 0;
+  io.ghGet = async (path) => {
+    const out = await realGet(path);
+    // The evaluation reads the audit once; the clone read is the second. Edit before the second.
+    if (path === `repos/${REPO}/issues/${AUDIT}` && ++auditReads === 1) world.issues[AUDIT].body = auditBody({ extraDisposition: " EDITED." });
+    return out;
+  };
+  const result = await runPrepare({ repo: REPO, auditIssue: AUDIT }, io);
+  assert.equal(result.exitCode, 2);
+  assert.match(result.reason, /changed after the evidence correction was evaluated/);
+  assert.equal(world.posts.length, 0);
+});
+
+test("prepare: a duplicate replacement appearing immediately before creation fails closed without a second create", async () => {
+  const world = makeWorld();
+  const { id } = addResult(world);
+  const io = makeIo(world);
+  const realList = io.listIssuesSince;
+  let lists = 0;
+  io.listIssuesSince = async (a) => {
+    // Second listing is the pre-create recheck: a concurrent preparer has already created one.
+    if (++lists === 2) {
+      world.issues[880] = {
+        number: 880,
+        body: composeReplacementAuditBody(auditBody(), { predecessor: AUDIT, workIssue: WORK, mergeCommit: MERGE, resultUrl: commentUrl(WORK, id) }),
+        state: "OPEN",
+        created_at: ts(55),
+        author: FOUNDER,
+      };
+    }
+    return realList(a);
+  };
+  const result = await runPrepare({ repo: REPO, auditIssue: AUDIT }, io);
+  assert.equal(result.exitCode, 2);
+  assert.equal(world.posts.filter((p) => p.path === "repos/o/r/issues").length, 0);
+});
+
+test("configured non-github.com host: permalinks are accepted when repo/comment identity is valid; wrong host is rejected", async () => {
+  const HOST = "ghe.example.com";
+  const world = makeWorld();
+  const io = makeIo(world);
+  const toHost = (u) => u.replace("https://github.com/", `https://${HOST}/`);
+  const realGet = io.ghGet;
+  io.ghGet = async (path) => {
+    const out = await realGet(path);
+    if (path === `repos/${REPO}/issues/${AUDIT}`) return { ...out, html_url: `https://${HOST}/${REPO}/issues/${AUDIT}` };
+    return out;
+  };
+  const realApi = io.ghApi;
+  io.ghApi = async (path) => (await realApi(path)).map((c) => ({ ...c, html_url: toHost(c.html_url) }));
+  const reportUrl = toHost(commentUrl(AUDIT, 2));
+  const body = formatEvidenceCorrectionResult({
+    auditIssue: AUDIT, workIssue: WORK, pr: PR, mergeCommit: MERGE, findingUrl: reportUrl, evidenceUrls: [toHost(commentUrl(WORK, 100))],
+  });
+  world.comments[WORK].push({ id: 4000, body, created_at: ts(40), user: { login: FOUNDER } });
+  const ok = await evaluateEvidenceCorrection({ repo: REPO, auditIssue: AUDIT }, io);
+  assert.equal(ok.status, Status.SATISFIED);
+  // Wrong-host evidence on a GHE audit is rejected.
+  world.comments[WORK].pop();
+  world.comments[WORK].push({
+    id: 4001,
+    body: formatEvidenceCorrectionResult({ auditIssue: AUDIT, workIssue: WORK, pr: PR, mergeCommit: MERGE, findingUrl: reportUrl, evidenceUrls: [commentUrl(WORK, 100)] }),
+    created_at: ts(41),
+    user: { login: FOUNDER },
+  });
+  assert.equal((await evaluateEvidenceCorrection({ repo: REPO, auditIssue: AUDIT }, io)).status, Status.INCOMPLETE);
+  assert.equal(parseEvidenceCorrectionResult(body, { host: HOST }).ok, true);
+  assert.equal(parseEvidenceCorrectionResult(body).ok, false);
 });
