@@ -17,7 +17,7 @@ import {
   readVerdictHandoff,
 } from "./verdict-handoff.mjs";
 import { decidePreToolUse } from "./action-envelope-hook.mjs";
-import { getActionEnvelope } from "./action-envelope.mjs";
+import { getActionEnvelope, getCorrectionContinuation } from "./action-envelope.mjs";
 
 const FORMAT = fileURLToPath(new URL("./format-dispatch-prompt.mjs", import.meta.url));
 const PREFLIGHT = fileURLToPath(new URL("./pr-head-checkout-preflight.mjs", import.meta.url));
@@ -244,12 +244,31 @@ test("#858: the bounded correction verdict carries one exact continuation consum
   assert.equal(getCorrectionContinuation("STAGE2_CORRECTION_REQUIRED", { controlIssue: 457 }), null);
 });
 
+function denialFor(state, authorizedActions, verdict) {
+  const marker = { mode: "bounded", state, authorizedActions, correctionContinuation: getCorrectionContinuation(state, verdict) || undefined };
+  return decidePreToolUse(marker, { toolName: "Bash", command: "node tools/orchestration/session-entry-gate.mjs --control-issue 398" });
+}
+
+test("#858: denial hint is derived per verdict: findings/conflict reserve, closing-reference formatter-only, Stage 2 none", () => {
+  const findings = denialFor("STAGE1_CORRECTION_REQUIRED", ["reserve-correction-checkout", "dispatch-correction-worker"], { controlIssue: 398, correctionReason: "findings" });
+  assert.match(findings.permissionDecisionReason, /--reserve-from-gate --from-handoff/);
+  assert.match(findings.permissionDecisionReason, /format-dispatch-prompt.mjs --from-handoff/);
+  const conflict = denialFor("STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT", ["reserve-correction-checkout", "dispatch-conflict-recovery-worker"], { controlIssue: 398 });
+  assert.match(conflict.permissionDecisionReason, /--reserve-from-gate --from-handoff/);
+  const closing = denialFor("STAGE1_CORRECTION_REQUIRED", ["dispatch-correction-worker"], { controlIssue: 398, correctionReason: "closing-reference" });
+  assert.match(closing.permissionDecisionReason, /format-dispatch-prompt.mjs --from-handoff/);
+  assert.doesNotMatch(closing.permissionDecisionReason, /reserve/);
+  const stage2 = denialFor("STAGE2_CORRECTION_REQUIRED", ["dispatch-correction-worker"], { controlIssue: 398 });
+  assert.equal(stage2.permissionDecision, "deny");
+  assert.doesNotMatch(stage2.permissionDecisionReason, /correctionContinuation|--from-handoff|reserve/);
+});
+
 test("#858: the denied gate re-run points at the continuation and leaves the persisted handoff untouched", () => {
   const t = tmp();
   try {
     seed(t.dir, GATE);
     const before = readFileSync(t.path, "utf8");
-    const marker = { mode: "bounded", state: "STAGE1_CORRECTION_REQUIRED", authorizedActions: GATE.actionEnvelope.authorizedActions };
+    const marker = { mode: "bounded", state: "STAGE1_CORRECTION_REQUIRED", authorizedActions: GATE.actionEnvelope.authorizedActions, correctionContinuation: getCorrectionContinuation("STAGE1_CORRECTION_REQUIRED", { controlIssue: 398, correctionReason: "findings" }) };
     const d = decidePreToolUse(marker, { toolName: "Bash", command: "node tools/orchestration/session-entry-gate.mjs --control-issue 398" });
     assert.equal(d.permissionDecision, "deny");
     assert.match(d.permissionDecisionReason, /correctionContinuation/);

@@ -474,6 +474,12 @@ export function writeMarker(
     // verdict shape, which is exactly the "wave size 1" default those helpers already apply.
     dispatchReadyUnitIds: Array.isArray(verdict.dispatchReadyUnitIds) ? verdict.dispatchReadyUnitIds : [],
     dispatchStartsConsumed: 0,
+    // Issue #858 Stage 1 correction: the denial hint derives from the verdict's own
+    // continuation (Stage 1 only; absent for Stage 2/other verdicts), never from the mere
+    // presence of a dispatch action.
+    ...(Array.isArray(verdict.correctionContinuation?.steps) && verdict.correctionContinuation.steps.length > 0
+      ? { correctionContinuation: { steps: verdict.correctionContinuation.steps.filter((x) => typeof x === "string") } }
+      : {}),
     ...carried,
     ts: new Date().toISOString(),
   };
@@ -671,10 +677,11 @@ export function decidePreToolUse(marker, toolCall = {}) {
         "bounded envelope never authorizes re-running a lifecycle gate — the named action(s) above are the " +
         "exclusive next step. Do not retry this call; perform the authorized action if it has not run yet, " +
         "or end this turn with the concise handoff if it already has." +
-        (authorized.includes("reserve-correction-checkout") || authorized.includes("dispatch-correction-worker")
+        (Array.isArray(marker.correctionContinuation?.steps) && marker.correctionContinuation.steps.length > 0
           ? " The verdict's persisted handoff is intact (this denial does not touch it): continue with the " +
-            "verdict's own `correctionContinuation` steps (`pr-head-checkout-preflight.mjs --reserve-from-gate " +
-            "--from-handoff`, then `format-dispatch-prompt.mjs --from-handoff`) -- never hand-built JSON."
+            "verdict's own `correctionContinuation` steps, in order (" +
+            marker.correctionContinuation.steps.join("; then ") +
+            ") -- never hand-built JSON."
           : ""),
     };
   }
