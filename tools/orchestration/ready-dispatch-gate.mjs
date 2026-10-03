@@ -1415,15 +1415,18 @@ export function defaultGhPrList({ repo, executionIssue }, { runImpl = execFileSy
     { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 },
   );
   const candidates = normalizeSearchPrCandidates(parseRestJson(raw, "search/issues"), { repo });
+  // Fetch REST detail for EVERY surfaced candidate before applying the linkage predicate: a
+  // branch-only-linked PR (`issue-<N>-...`, no body marker) can be surfaced by title/comment
+  // text, and only its detail carries `headRefName`, which `referencesExecutionIssue` needs.
   return candidates
-    .filter((c) => referencesExecutionIssue({ body: c.body }, executionIssue))
     .map((c) => {
       const detail = parseRestJson(
         runImpl("gh", ["api", `repos/${repo}/pulls/${c.number}`], { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 }),
         `pulls/${c.number}`,
       );
       return normalizeRestPull(detail, { repo, expectedNumber: c.number });
-    });
+    })
+    .filter((pr) => referencesExecutionIssue(pr, executionIssue));
 }
 
 function parseRestJson(raw, what) {
@@ -1444,6 +1447,9 @@ export function normalizeSearchPrCandidates(pages, { repo } = {}) {
     if (!page || typeof page !== "object" || !Array.isArray(page.items)) {
       throw new Error("malformed REST search response: page has no items array");
     }
+    if (typeof page.incomplete_results !== "boolean" || !Number.isInteger(page.total_count)) {
+      throw new Error("malformed REST search response: missing or non-typed incomplete_results/total_count completeness metadata");
+    }
     if (page.incomplete_results === true) {
       throw new Error("REST search reported incomplete_results -- refusing to treat it as exhaustive");
     }
@@ -1459,7 +1465,7 @@ export function normalizeSearchPrCandidates(pages, { repo } = {}) {
     }
   }
   const total = pages.length > 0 ? pages[0].total_count : 0;
-  if (Number.isInteger(total) && total > out.length) {
+  if (total > out.length) {
     throw new Error(`REST search total_count ${total} exceeds the ${out.length} candidates retrieved -- refusing a truncated listing`);
   }
   return out;
@@ -1563,25 +1569,28 @@ export function assertOpenPrListNotTruncated(parsedList, limit = OPEN_PR_RECONCI
   return parsedList;
 }
 
-export function defaultGhOpenPrList({ repo }, { runImpl = execFileSync } = {}) {
-  // Issue #860: REST `GET /repos/{repo}/pulls?state=open`, paginated to exhaustion, not
-  // GraphQL-backed `gh pr list`. The reconciliation safety bound and its fail-closed truncation
-  // check are unchanged.
-  const raw = runImpl(
-    "gh",
-    ["api", "-X", "GET", `repos/${repo}/pulls`, "-f", "state=open", "-f", "per_page=100", "--paginate", "--slurp"],
-    { encoding: "utf8", maxBuffer: 50 * 1024 * 1024 },
-  );
-  const pages = parseRestJson(raw, "pulls?state=open");
-  if (!Array.isArray(pages) || pages.some((p) => !Array.isArray(p))) {
-    throw new Error("malformed REST pulls response: expected a slurped array of page arrays");
+export function defaultGhOpenPrList({ repo }, { runImpl = execFileSync, limit = OPEN_PR_RECONCILIATION_LIMIT } = {}) {
+  // Issue #860: REST `GET /repos/{repo}/pulls?state=open`, not GraphQL-backed `gh pr list`.
+  // Pages are fetched one at a time (not `--paginate`) so acquisition stops as soon as the
+  // reconciliation safety bound is reached; the fail-closed truncation check is unchanged.
+  const perPage = 100;
+  const list = [];
+  for (let page = 1; ; page += 1) {
+    const raw = runImpl(
+      "gh",
+      ["api", "-X", "GET", `repos/${repo}/pulls`, "-f", "state=open", "-f", `per_page=${perPage}`, "-f", `page=${page}`],
+      { encoding: "utf8", maxBuffer: 50 * 1024 * 1024 },
+    );
+    const pulls = parseRestJson(raw, "pulls?state=open");
+    if (!Array.isArray(pulls)) throw new Error("malformed REST pulls response: expected an array page");
+    for (const pull of pulls) {
+      const n = normalizeRestPull(pull, { repo });
+      if (n.state !== "OPEN") throw new Error(`REST open-pulls listing returned non-open PR #${n.number}`);
+      list.push(n);
+    }
+    if (list.length >= limit || pulls.length < perPage) break;
   }
-  const list = pages.flat().map((pull) => {
-    const n = normalizeRestPull(pull, { repo });
-    if (n.state !== "OPEN") throw new Error(`REST open-pulls listing returned non-open PR #${n.number}`);
-    return n;
-  });
-  return assertOpenPrListNotTruncated(list);
+  return assertOpenPrListNotTruncated(list, limit);
 }
 
 // Issue #456 unit 456-B (the #447/#448/#453 live reproduction): before authorizing
