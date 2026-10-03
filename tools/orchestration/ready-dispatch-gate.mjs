@@ -1377,7 +1377,7 @@ function defaultGhCommentView({ repo, commentId }) {
   return JSON.parse(raw);
 }
 
-// Issue #456 unit 456-B: the one narrow, repo-scoped `gh pr list` this Shared Contract
+// Issue #456 unit 456-B (transport since rewritten, issue #870): the one narrow, repo-scoped PR lookup this Shared Contract
 // authorizes as the READY-lifecycle recovery path's own evidence source — a single search
 // keyed to the exact execution Issue about to be dispatched, never an unscoped scan. GitHub's
 // PR search matches title/body text for a bare query term, so searching the literal
@@ -1392,42 +1392,58 @@ function defaultGhCommentView({ repo, commentId }) {
 // the requested JSON fields for that same reuse: the reconciliation path needs the linked PR's
 // live head to compose a Stage 1 trigger/finalize command, and `defaultGhPrView`-style callers
 // already trust `gh pr view`'s own `headRefOid` field name for this.
-export function defaultGhPrList({ repo, executionIssue }, { runImpl = execFileSync } = {}) {
-  // Issue #860: REST Search API (`gh api search/issues`) plus per-candidate REST pull detail,
-  // not GraphQL-backed `gh pr list` (HTTP 403 in the GraphQL-blocked remote/cloud profile of
-  // #571/#858). Search output is candidate enumeration only; `referencesExecutionIssue` stays the
-  // linkage authority and is re-applied by every caller. Any REST/shape failure throws -- never
-  // "no PR exists".
-  const raw = runImpl(
-    "gh",
-    [
-      "api",
-      "search/issues",
-      "-X",
-      "GET",
-      "-f",
-      `q=#${executionIssue} repo:${repo} is:pr`,
-      "-f",
-      "per_page=100",
-      "--paginate",
-      "--slurp",
-    ],
-    { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 },
-  );
-  const candidates = normalizeSearchPrCandidates(parseRestJson(raw, "search/issues"), { repo });
-  // Fetch REST detail for EVERY surfaced candidate before applying the linkage predicate: a
-  // branch-only-linked PR (`issue-<N>-...`, no body marker) can be surfaced by title/comment
-  // text, and only its detail carries `headRefName`, which `referencesExecutionIssue` needs.
-  return candidates
-    .map((c) => {
-      const detail = parseRestJson(
-        runImpl("gh", ["api", `repos/${repo}/pulls/${c.number}`], { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 }),
-        `pulls/${c.number}`,
+export function defaultGhPrList({ repo, executionIssue }, { runImpl = execFileSync, limit = ALL_PR_SCAN_LIMIT } = {}) {
+  // Issue #870: repository-scoped REST only (`GET /repos/{repo}/pulls?state=all`). Issue #860's
+  // global `search/issues` call is rejected with HTTP 403 in a repository-bound remote session
+  // (#571/#858), and GraphQL-backed `gh pr list` before it. The listing is newest-first and
+  // candidate acquisition only; `referencesExecutionIssue` stays the linkage authority and is
+  // re-applied here and by every caller (body marker or `issue-<N>-` head branch). Issues and PRs
+  // share one number sequence, so a PR can only link an execution Issue created before it: the
+  // scan is exhaustive once it reaches a PR numbered below the execution Issue. Hitting the safety
+  // bound first, a contradictory ordering, or any REST/shape failure throws -- never "no PR exists".
+  const perPage = 100;
+  const seen = new Set();
+  const linked = [];
+  let scanned = 0;
+  let previous = Infinity;
+  for (let page = 1; ; page += 1) {
+    const raw = runImpl(
+      "gh",
+      [
+        "api", "-X", "GET", `repos/${repo}/pulls`,
+        "-f", "state=all", "-f", "sort=created", "-f", "direction=desc",
+        "-f", `per_page=${perPage}`, "-f", `page=${page}`,
+      ],
+      { encoding: "utf8", maxBuffer: 50 * 1024 * 1024 },
+    );
+    const pulls = parseRestJson(raw, "pulls?state=all");
+    if (!Array.isArray(pulls)) throw new Error("malformed REST pulls response: expected an array page");
+    let reachedCutoff = false;
+    for (const pull of pulls) {
+      const pr = normalizeRestPull(pull, { repo });
+      if (seen.has(pr.number)) throw new Error(`REST pulls listing returned duplicate PR #${pr.number} -- refusing contradictory pagination evidence`);
+      if (pr.number > previous) throw new Error(`REST pulls listing is not newest-first (#${pr.number} after #${previous}) -- refusing contradictory ordering evidence`);
+      seen.add(pr.number);
+      previous = pr.number;
+      scanned += 1;
+      if (pr.number < executionIssue) {
+        reachedCutoff = true;
+        break;
+      }
+      if (referencesExecutionIssue(pr, executionIssue)) linked.push(pr);
+    }
+    if (reachedCutoff || pulls.length < perPage) return linked;
+    if (scanned >= limit) {
+      throw new Error(
+        `REST pulls listing scanned ${scanned} PRs without reaching PR #${executionIssue}, at the ${limit}-PR safety bound -- ` +
+          "refusing to treat a possibly-truncated PR listing as exhaustive",
       );
-      return normalizeRestPull(detail, { repo, expectedNumber: c.number });
-    })
-    .filter((pr) => referencesExecutionIssue(pr, executionIssue));
+    }
+  }
 }
+
+// Safety bound (PRs scanned) for `defaultGhPrList`'s newest-first walk; see its comment.
+export const ALL_PR_SCAN_LIMIT = 2000;
 
 function parseRestJson(raw, what) {
   try {
@@ -1435,52 +1451,6 @@ function parseRestJson(raw, what) {
   } catch {
     throw new Error(`malformed (non-JSON) REST response from ${what}`);
   }
-}
-
-// Pure. Flattens `gh api search/issues --paginate --slurp` pages into `{ number, body }` PR
-// candidates. Fails closed (throws) on a non-array/malformed page, `incomplete_results`, a
-// `total_count` the pages did not fully deliver, or a candidate with no usable number/PR marker.
-export function normalizeSearchPrCandidates(pages, { repo } = {}) {
-  if (!Array.isArray(pages)) throw new Error("malformed REST search response: expected a slurped page array");
-  if (pages.length === 0) throw new Error("malformed REST search response: empty page array carries no total_count/incomplete_results completeness evidence");
-  const out = [];
-  const seen = new Set();
-  for (const page of pages) {
-    if (!page || typeof page !== "object" || !Array.isArray(page.items)) {
-      throw new Error("malformed REST search response: page has no items array");
-    }
-    if (typeof page.incomplete_results !== "boolean" || !Number.isInteger(page.total_count)) {
-      throw new Error("malformed REST search response: missing or non-typed incomplete_results/total_count completeness metadata");
-    }
-    if (page.incomplete_results === true) {
-      throw new Error("REST search reported incomplete_results -- refusing to treat it as exhaustive");
-    }
-    for (const item of page.items) {
-      if (!item || !Number.isInteger(item.number) || !item.pull_request) {
-        throw new Error("malformed REST search response: candidate lacks a PR number/pull_request marker");
-      }
-      const url = String(item.html_url ?? "");
-      if (repo && !url.toLowerCase().endsWith(`/${repo}/pull/${item.number}`.toLowerCase())) {
-        throw new Error(`REST search candidate identity does not match ${repo}#${item.number}`);
-      }
-      if (seen.has(item.number)) {
-        throw new Error(`REST search returned duplicate candidate #${item.number} across pages -- refusing contradictory pagination evidence`);
-      }
-      seen.add(item.number);
-      out.push({ number: item.number, body: typeof item.body === "string" ? item.body : "" });
-    }
-  }
-  const total = pages[0].total_count;
-  if (pages.some((page) => page.total_count !== total)) {
-    throw new Error("REST search pages report inconsistent total_count -- refusing contradictory pagination evidence");
-  }
-  if (total > out.length) {
-    throw new Error(`REST search total_count ${total} exceeds the ${out.length} candidates retrieved -- refusing a truncated listing`);
-  }
-  if (total !== out.length) {
-    throw new Error(`REST search total_count ${total} does not equal the ${out.length} unique candidates retrieved -- refusing contradictory pagination evidence`);
-  }
-  return out;
 }
 
 // Pure. Normalizes one REST pull object (`GET /repos/{repo}/pulls/{n}` or a `pulls` list entry)
