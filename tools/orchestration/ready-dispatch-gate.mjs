@@ -1392,26 +1392,110 @@ function defaultGhCommentView({ repo, commentId }) {
 // the requested JSON fields for that same reuse: the reconciliation path needs the linked PR's
 // live head to compose a Stage 1 trigger/finalize command, and `defaultGhPrView`-style callers
 // already trust `gh pr view`'s own `headRefOid` field name for this.
-export function defaultGhPrList({ repo, executionIssue }) {
-  const raw = execFileSync(
+export function defaultGhPrList({ repo, executionIssue }, { runImpl = execFileSync } = {}) {
+  // Issue #860: REST Search API (`gh api search/issues`) plus per-candidate REST pull detail,
+  // not GraphQL-backed `gh pr list` (HTTP 403 in the GraphQL-blocked remote/cloud profile of
+  // #571/#858). Search output is candidate enumeration only; `referencesExecutionIssue` stays the
+  // linkage authority and is re-applied by every caller. Any REST/shape failure throws -- never
+  // "no PR exists".
+  const raw = runImpl(
     "gh",
     [
-      "pr",
-      "list",
-      "--repo",
-      repo,
-      "--search",
-      `#${executionIssue}`,
-      "--state",
-      "all",
-      "--json",
-      "number,url,state,headRefName,headRefOid,body",
-      "--limit",
-      "30",
+      "api",
+      "search/issues",
+      "-X",
+      "GET",
+      "-f",
+      `q=#${executionIssue} repo:${repo} is:pr`,
+      "-f",
+      "per_page=100",
+      "--paginate",
+      "--slurp",
     ],
-    { encoding: "utf8" },
+    { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 },
   );
-  return JSON.parse(raw);
+  const candidates = normalizeSearchPrCandidates(parseRestJson(raw, "search/issues"), { repo });
+  return candidates
+    .filter((c) => referencesExecutionIssue({ body: c.body }, executionIssue))
+    .map((c) => {
+      const detail = parseRestJson(
+        runImpl("gh", ["api", `repos/${repo}/pulls/${c.number}`], { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 }),
+        `pulls/${c.number}`,
+      );
+      return normalizeRestPull(detail, { repo, expectedNumber: c.number });
+    });
+}
+
+function parseRestJson(raw, what) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error(`malformed (non-JSON) REST response from ${what}`);
+  }
+}
+
+// Pure. Flattens `gh api search/issues --paginate --slurp` pages into `{ number, body }` PR
+// candidates. Fails closed (throws) on a non-array/malformed page, `incomplete_results`, a
+// `total_count` the pages did not fully deliver, or a candidate with no usable number/PR marker.
+export function normalizeSearchPrCandidates(pages, { repo } = {}) {
+  if (!Array.isArray(pages)) throw new Error("malformed REST search response: expected a slurped page array");
+  const out = [];
+  for (const page of pages) {
+    if (!page || typeof page !== "object" || !Array.isArray(page.items)) {
+      throw new Error("malformed REST search response: page has no items array");
+    }
+    if (page.incomplete_results === true) {
+      throw new Error("REST search reported incomplete_results -- refusing to treat it as exhaustive");
+    }
+    for (const item of page.items) {
+      if (!item || !Number.isInteger(item.number) || !item.pull_request) {
+        throw new Error("malformed REST search response: candidate lacks a PR number/pull_request marker");
+      }
+      const url = String(item.html_url ?? "");
+      if (repo && !url.toLowerCase().endsWith(`/${repo}/pull/${item.number}`.toLowerCase())) {
+        throw new Error(`REST search candidate identity does not match ${repo}#${item.number}`);
+      }
+      out.push({ number: item.number, body: typeof item.body === "string" ? item.body : "" });
+    }
+  }
+  const total = pages.length > 0 ? pages[0].total_count : 0;
+  if (Number.isInteger(total) && total > out.length) {
+    throw new Error(`REST search total_count ${total} exceeds the ${out.length} candidates retrieved -- refusing a truncated listing`);
+  }
+  return out;
+}
+
+// Pure. Normalizes one REST pull object (`GET /repos/{repo}/pulls/{n}` or a `pulls` list entry)
+// to the stable `{ number, url, state, headRefName, headRefOid, body }` shape the linkage and
+// reconciliation functions consume (state OPEN/CLOSED/MERGED, as `gh pr list --json` spelled it).
+export function normalizeRestPull(pull, { repo, expectedNumber } = {}) {
+  if (!pull || typeof pull !== "object" || !Number.isInteger(pull.number)) {
+    throw new Error("malformed REST pull response: missing number");
+  }
+  if (expectedNumber !== undefined && pull.number !== expectedNumber) {
+    throw new Error(`REST pull response identity mismatch: expected #${expectedNumber}, got #${pull.number}`);
+  }
+  const url = String(pull.html_url ?? "");
+  if (repo && !url.toLowerCase().endsWith(`/${repo}/pull/${pull.number}`.toLowerCase())) {
+    throw new Error(`REST pull response identity does not match ${repo}#${pull.number}`);
+  }
+  const ref = pull.head?.ref;
+  const sha = pull.head?.sha;
+  if (typeof ref !== "string" || !ref || typeof sha !== "string" || !sha) {
+    throw new Error(`malformed REST pull response for #${pull.number}: missing head ref/sha`);
+  }
+  if (pull.state !== "open" && pull.state !== "closed") {
+    throw new Error(`malformed REST pull response for #${pull.number}: unrecognized state`);
+  }
+  const state = pull.state === "open" ? "OPEN" : pull.merged_at ? "MERGED" : "CLOSED";
+  return {
+    number: pull.number,
+    url,
+    state,
+    headRefName: ref,
+    headRefOid: sha,
+    body: typeof pull.body === "string" ? pull.body : "",
+  };
 }
 
 // Stage 1 review finding on PR #647 (issue #646, P1): GitHub's PR search (what `defaultGhPrList`
@@ -1472,31 +1556,32 @@ export const OPEN_PR_RECONCILIATION_LIMIT = 500;
 export function assertOpenPrListNotTruncated(parsedList, limit = OPEN_PR_RECONCILIATION_LIMIT) {
   if (Array.isArray(parsedList) && parsedList.length >= limit) {
     throw new Error(
-      `gh pr list --state open returned ${parsedList.length} PRs, at or over the ${limit}-PR reconciliation ` +
+      `REST open-PR listing returned ${parsedList.length} PRs, at or over the ${limit}-PR reconciliation ` +
         "safety bound -- refusing to treat a possibly-truncated open-PR listing as exhaustive",
     );
   }
   return parsedList;
 }
 
-function defaultGhOpenPrList({ repo }) {
-  const raw = execFileSync(
+export function defaultGhOpenPrList({ repo }, { runImpl = execFileSync } = {}) {
+  // Issue #860: REST `GET /repos/{repo}/pulls?state=open`, paginated to exhaustion, not
+  // GraphQL-backed `gh pr list`. The reconciliation safety bound and its fail-closed truncation
+  // check are unchanged.
+  const raw = runImpl(
     "gh",
-    [
-      "pr",
-      "list",
-      "--repo",
-      repo,
-      "--state",
-      "open",
-      "--json",
-      "number,url,state,headRefName,headRefOid,body",
-      "--limit",
-      String(OPEN_PR_RECONCILIATION_LIMIT),
-    ],
-    { encoding: "utf8" },
+    ["api", "-X", "GET", `repos/${repo}/pulls`, "-f", "state=open", "-f", "per_page=100", "--paginate", "--slurp"],
+    { encoding: "utf8", maxBuffer: 50 * 1024 * 1024 },
   );
-  return assertOpenPrListNotTruncated(JSON.parse(raw));
+  const pages = parseRestJson(raw, "pulls?state=open");
+  if (!Array.isArray(pages) || pages.some((p) => !Array.isArray(p))) {
+    throw new Error("malformed REST pulls response: expected a slurped array of page arrays");
+  }
+  const list = pages.flat().map((pull) => {
+    const n = normalizeRestPull(pull, { repo });
+    if (n.state !== "OPEN") throw new Error(`REST open-pulls listing returned non-open PR #${n.number}`);
+    return n;
+  });
+  return assertOpenPrListNotTruncated(list);
 }
 
 // Issue #456 unit 456-B (the #447/#448/#453 live reproduction): before authorizing
