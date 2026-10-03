@@ -166,7 +166,7 @@ export function buildDeps({
   verifyManifest,
 }) {
   const gate = async () => {
-    const out = io.node("tools/orchestration/session-entry-gate.mjs", ["--control-issue", String(controlIssue)]);
+    const out = io.node("tools/orchestration/control-plane-bootstrap.mjs", ["session-entry-gate", "--control-issue", String(controlIssue)]);
     return JSON.parse(out);
   };
   const prState = (verdict) => readPr({ repo: verdict.repo ?? repo, number: verdict.pr });
@@ -310,7 +310,7 @@ export async function dispatchFreshWorker({ dispatch, io, controlIssue, executio
   if (!Array.isArray(argv) || argv.length === 0 || !argv.every((a) => typeof a === "string" && a !== "")) {
     return { launched: false, reason: "LDL_WORKER_COMMAND is not a non-empty string argv array" };
   }
-  const freshRaw = io.node("tools/orchestration/session-entry-gate.mjs", ["--control-issue", String(controlIssue)]);
+  const freshRaw = io.node("tools/orchestration/control-plane-bootstrap.mjs", ["session-entry-gate", "--control-issue", String(controlIssue)]);
   const fresh = JSON.parse(freshRaw);
   const want = dispatch.byReference ?? {};
   if (fresh?.state !== want.state) throw new Error(`stale dispatch: gate now reports ${fresh?.state}, dispatch was for ${want.state}`);

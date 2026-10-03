@@ -169,3 +169,47 @@ test("argument parsing and gate-name validation", () => {
   assert.equal(runBootstrap(["../evil"], { log: (m) => logs.push(m) }), 2);
   assert.equal(runBootstrap([], { log: (m) => logs.push(m) }), 2);
 });
+
+test("stale bootstrap converges: the default branch's corrected bootstrap governs before the gate runs (#877 Stage 1)", () => {
+  const f = fixture();
+  // Stale checkout carries an OLD bootstrap that would launch the gate directly.
+  const OLD_BOOT = BOOTSTRAP_SRC + "\n// OLD-BOOTSTRAP-MARKER\n";
+  write(f.stale, "tools/orchestration/control-plane-bootstrap.mjs", OLD_BOOT);
+  git(f.stale, "add", "-A");
+  git(f.stale, "commit", "-q", "-m", "old bootstrap");
+  // Default branch carries the corrected bootstrap, which tags the gate environment.
+  const NEW_BOOT = BOOTSTRAP_SRC + "\n// CORRECTED-BOOTSTRAP-MARKER\n";
+  write(f.seed, "tools/orchestration/control-plane-bootstrap.mjs", NEW_BOOT);
+  write(f.seed, "tools/orchestration/session-entry-gate.mjs", NEW_GATE + `console.log("CONVERGED=" + process.env.LDL_CONTROL_PLANE_BOOTSTRAP_CONVERGED);\n`);
+  git(f.seed, "add", "-A");
+  git(f.seed, "commit", "-q", "-m", "c2");
+  git(f.seed, "push", "-q", f.origin, "main");
+  const c2 = git(f.seed, "rev-parse", "HEAD");
+  const r = spawnSync(process.execPath, [join(f.stale, "tools/orchestration/control-plane-bootstrap.mjs"), "session-entry-gate", "--control-issue", "5"], {
+    cwd: f.stale,
+    encoding: "utf8",
+    env: { ...process.env, LDL_CONTROL_PLANE_RUNNER_CACHE: f.cache },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /deferring to origin\/main/);
+  assert.match(r.stdout, new RegExp(`CONVERGED=${c2}`), "the authoritative bootstrap (with the guard set) ran the gate");
+  assert.match(r.stdout, /CURRENT-REPO-SCOPED bootstrap-default-branch/);
+});
+
+test("runner execution points verdict-handoff state at the subject checkout; two subjects never collide", () => {
+  const f = fixture();
+  write(f.seed, "tools/orchestration/session-entry-gate.mjs", NEW_GATE + `console.log("STATE=" + process.env.LDL_ACTION_ENVELOPE_STATE_DIR);\n`);
+  git(f.seed, "commit", "-qam", "c2");
+  git(f.seed, "push", "-q", f.origin, "main");
+  const other = join(f.base, "other");
+  git(f.base, "clone", "-q", f.origin, other);
+  git(other, "reset", "-q", "--hard", f.c0); // second stale subject, same runner commit
+  const a = viaStdin(f.stale, f.cache, "session-entry-gate");
+  const b = viaStdin(other, f.cache, "session-entry-gate");
+  const stateOf = (r) => /STATE=(.*)/.exec(r.stdout)[1].trim();
+  const norm = (p) => p.split(String.fromCharCode(92)).join("/").toLowerCase();
+  assert.equal(norm(stateOf(a)), norm(join(git(f.stale, "rev-parse", "--show-toplevel"), ".claude", "action-envelope-state")));
+  assert.equal(norm(stateOf(b)), norm(join(git(other, "rev-parse", "--show-toplevel"), ".claude", "action-envelope-state")));
+  assert.notEqual(norm(stateOf(a)), norm(stateOf(b)));
+  assert.ok(!norm(stateOf(a)).startsWith(norm(f.cache)), "state is not inside the shared runner cache");
+});

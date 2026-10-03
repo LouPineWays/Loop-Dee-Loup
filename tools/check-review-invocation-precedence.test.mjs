@@ -183,3 +183,13 @@ test("the derived consumer AGENTS.md (via ldl-init's own deriveConsumerAgents, n
     "Derived consumer AGENTS.md lost the narrowed Stage 1 reviewer reference."
   );
 });
+
+test("`## Code Review Rules` excludes the `control-plane-bootstrap.mjs` entrypoint too (issue #877)", () => {
+  // Stage 1 review finding on PR #878: the bootstrap is now an advertised executor entrypoint that
+  // fronts session-entry-gate.mjs, so a `@codex review` invocation reaching for it would reopen the
+  // exact #625 failure class. Removing this exclusion from AGENTS.md must fail this test.
+  const re = /nor `node tools\/orchestration\/control-plane-bootstrap\.mjs <gate>`/;
+  assert.match(codeReviewRules, re, "Code Review Rules no longer excludes the control-plane bootstrap entrypoint.");
+  assert.match(codeReviewRules, /all four entrypoints/, "Code Review Rules no longer states the exclusion covers every entrypoint identically.");
+  assert.doesNotMatch(codeReviewRules.replace(re, ""), /nor `node tools\/orchestration\/control-plane-bootstrap\.mjs/);
+});

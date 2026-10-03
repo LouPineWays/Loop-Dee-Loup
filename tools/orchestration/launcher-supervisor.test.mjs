@@ -106,7 +106,7 @@ test("dispatchFreshWorker reserves the PR-head checkout for a Stage 1 findings c
   const io = {
     node: (f, a, input) => {
       calls.push([f.split("/").pop(), a]);
-      if (f.endsWith("session-entry-gate.mjs")) return JSON.stringify(gate);
+      if (f.endsWith("control-plane-bootstrap.mjs")) return JSON.stringify(gate);
       if (f.endsWith("pr-head-checkout-preflight.mjs") && a[0] === "--reserve-from-gate") return JSON.stringify({ ...gate, checkoutBinding: binding });
       if (f.endsWith("format-dispatch-prompt.mjs")) return input.includes("checkoutBinding") ? "PROMPT" : "NO-BINDING";
       return "";
@@ -117,10 +117,10 @@ test("dispatchFreshWorker reserves the PR-head checkout for a Stage 1 findings c
   const out = await dispatchFreshWorker({ dispatch, io, controlIssue: 379, executionIssue: 73, authorize, reestablish, env: { LDL_WORKER_COMMAND: JSON.stringify(["w"]) }, runWorker: (p, o) => ran.push([p, o.cwd]) });
   assert.equal(out.launched, true);
   assert.deepEqual(ran, [["PROMPT", "C:/wt/pr-826"]]);
-  assert.deepEqual(calls.map((c) => c[0]), ["session-entry-gate.mjs", "pr-head-checkout-preflight.mjs", "format-dispatch-prompt.mjs", "pr-head-checkout-preflight.mjs"]);
+  assert.deepEqual(calls.map((c) => c[0]), ["control-plane-bootstrap.mjs", "pr-head-checkout-preflight.mjs", "format-dispatch-prompt.mjs", "pr-head-checkout-preflight.mjs"]);
   assert.deepEqual(calls[3][1], ["--release-binding", "efb5522c"]);
   // a failed reservation fails closed before any worker runs
-  const bad = { node: (f) => (f.endsWith("session-entry-gate.mjs") ? JSON.stringify(gate) : JSON.stringify({ state: "CHECKOUT_BINDING_UNVERIFIED", reason: "locked" })) };
+  const bad = { node: (f) => (f.endsWith("control-plane-bootstrap.mjs") ? JSON.stringify(gate) : JSON.stringify({ state: "CHECKOUT_BINDING_UNVERIFIED", reason: "locked" })) };
   await assert.rejects(dispatchFreshWorker({ dispatch, io: bad, controlIssue: 379, executionIssue: 73, authorize, reestablish, env: { LDL_WORKER_COMMAND: JSON.stringify(["w"]) }, runWorker: () => assert.fail("no worker") }), /reservation failed/);
 });
 
@@ -193,7 +193,7 @@ function fakeBinding(w, { failProjectionOnce = false } = {}) {
   const io = {
     node: (file, args, input) => {
       w.calls.push([file, ...args]);
-      if (file.endsWith("session-entry-gate.mjs")) return JSON.stringify(gateFor(w));
+      if (file.endsWith("control-plane-bootstrap.mjs")) return JSON.stringify(gateFor(w));
       if (file.endsWith("format-dispatch-prompt.mjs")) return "PROMPT";
       if (file.endsWith("prepare-dispatch-manifest.mjs")) {
         w.manifest = true;
@@ -300,7 +300,7 @@ test("PRODUCTION: a wrong-successor gate change never unlocks (verdict proposes 
   const { deps, io } = fakeBinding(w);
   const orig = io.node;
   io.node = (file, ...rest) => {
-    if (file.endsWith("session-entry-gate.mjs")) {
+    if (file.endsWith("control-plane-bootstrap.mjs")) {
       return JSON.stringify({ ...gateFor(w), proposedBody: upsertControlBullet(w.control, "Lifecycle", "EXECUTING") });
     }
     return orig(file, ...rest);
@@ -320,7 +320,7 @@ test("PRODUCTION: founder resolution resumes through the production path only wh
   let b = fakeBinding(w);
   let r = await runLauncherSupervisor({ deps: b.deps });
   assert.equal(r.outcome, SupervisorOutcome.WAITING);
-  assert.ok(!w.calls.some((c) => c[0].endsWith("session-entry-gate.mjs")));
+  assert.ok(!w.calls.some((c) => c[0].endsWith("control-plane-bootstrap.mjs")));
   // answered by a writer -> the cleared decision is durable, then the gate step runs
   w.controlComments = [surface, "- **Surface id:** 379-r1-abc123\n- **Answer Q1:** A"];
   b = fakeBinding(w);
@@ -329,7 +329,7 @@ test("PRODUCTION: founder resolution resumes through the production path only wh
   // the answer itself is durable in the snapshot, not merely the cleared interrupt
   assert.match(w.control, /\*\*Surface 379-r1-abc123 Answer Q1:\*\* A/);
   assert.match(w.control, /### Settled decisions[^#]*- \*\*Decision scope:\*\* A/);
-  assert.ok(w.calls.some((c) => c[0].endsWith("session-entry-gate.mjs")));
+  assert.ok(w.calls.some((c) => c[0].endsWith("control-plane-bootstrap.mjs")));
   // a control that names a different execution issue has zero authorized continuations
   const w2 = world({ founderPending: true });
   w2.control = upsertControlBullet(w2.control, "Execution", "#99");
@@ -346,7 +346,7 @@ test("PRODUCTION: duplicate/replayed triggers still cannot start a second run on
 });
 
 test("dispatchFreshWorker refuses a stale dispatch and reports no runner when none is configured", async () => {
-  const io = { node: (f) => (f.endsWith("session-entry-gate.mjs") ? JSON.stringify({ state: "READY_TO_DISPATCH_PLANNING", executionIssue: 73 }) : "P") };
+  const io = { node: (f) => (f.endsWith("control-plane-bootstrap.mjs") ? JSON.stringify({ state: "READY_TO_DISPATCH_PLANNING", executionIssue: 73 }) : "P") };
   const dispatch = { route: "r", byReference: { state: "READY_TO_DISPATCH", executionIssue: 73 } };
   assert.equal((await dispatchFreshWorker({ dispatch, io, controlIssue: 379, executionIssue: 73, authorize, reestablish, env: {} })).launched, false);
   await assert.rejects(dispatchFreshWorker({ dispatch, io, controlIssue: 379, executionIssue: 73, authorize, reestablish, env: { LDL_WORKER_COMMAND: '["w"]' }, runWorker: () => {} }), /stale dispatch/);
@@ -357,7 +357,7 @@ test("dispatchFreshWorker refuses a stale dispatch and reports no runner when no
 
 function freshDispatchHarness(fresh, want, { authorizeFn = authorize, reestablishFn = reestablish, route = "r" } = {}) {
   const ran = [];
-  const io = { node: (f) => (f.endsWith("session-entry-gate.mjs") ? JSON.stringify(fresh) : "PROMPT") };
+  const io = { node: (f) => (f.endsWith("control-plane-bootstrap.mjs") ? JSON.stringify(fresh) : "PROMPT") };
   const call = () =>
     dispatchFreshWorker({
       dispatch: { route, byReference: want },
@@ -468,7 +468,7 @@ test("founder resume: an answer with no deterministic projection stays pending a
   assert.match(r.reason, /not deterministically applicable/);
   assert.equal(w.control, before);
   assert.match(w.control, /\*\*Founder decision:\*\* pending/);
-  assert.ok(!w.calls.some((c) => c[0].endsWith("session-entry-gate.mjs")));
+  assert.ok(!w.calls.some((c) => c[0].endsWith("control-plane-bootstrap.mjs")));
 });
 
 test("founder resume: the interrupt is cleared only after the decision is applied and read back", async () => {

@@ -48,21 +48,29 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const RUNNER_MARKER = ".ldl-control-plane-runner";
 export const RUNNER_ENV = "LDL_CONTROL_PLANE_RUNNER";
+// Set (to the authoritative commit) on the re-executed default-branch bootstrap so it never
+// converges again: exactly one hop, no loop.
+export const CONVERGED_ENV = "LDL_CONTROL_PLANE_BOOTSTRAP_CONVERGED";
+export const STATE_DIR_ENV = "LDL_ACTION_ENVELOPE_STATE_DIR";
+const BOOTSTRAP_PATH = "tools/orchestration/control-plane-bootstrap.mjs";
 const CONTROL_PLANE_PATHS = ["tools/orchestration", "tools/review-watch"];
 const NETWORK_TIMEOUT_MS = 20000;
 const GATE_NAME = /^[a-z0-9][a-z0-9-]*$/;
 
-function defaultGit(args, { cwd, timeout, env } = {}) {
-  return execFileSync("git", args, {
+function defaultGit(args, { cwd, timeout, env, raw } = {}) {
+  const out = execFileSync("git", args, {
     cwd,
     env: env ? { ...process.env, ...env } : process.env,
     encoding: "utf8",
     timeout,
+    maxBuffer: 16 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
+  });
+  return raw ? out : out.trim();
 }
 
 function errText(err) {
@@ -201,7 +209,39 @@ export function materializeRunner({ root, commit, cacheDir = process.env.LDL_CON
   return finalDir;
 }
 
-export function runBootstrap(argv, { cwd = process.cwd(), git = defaultGit, spawn = spawnSync, cacheDir, log = (m) => console.error(m) } = {}) {
+function ownSource() {
+  try {
+    return readFileSync(fileURLToPath(import.meta.url), "utf8");
+  } catch {
+    return null; // e.g. piped via `node -`: provenance unknown, so converge
+  }
+}
+
+// The running bootstrap is itself checkout-local code (or whatever copy was piped in). Before it
+// runs any gate it must defer to the selected default-branch revision's bootstrap: if that differs
+// from (or cannot be compared with) the running one, re-execute the authoritative copy once.
+// Returns the child's exit status, or null when no re-execution is needed.
+export function convergeBootstrap(plan, argv, { git = defaultGit, spawn = spawnSync, env = process.env, own = ownSource, log = () => {} } = {}) {
+  if (plan.source !== "default-branch" || env[CONVERGED_ENV]) return null;
+  const commit = plan.witness.defaultBranchCommit;
+  let authoritative;
+  try {
+    authoritative = git(["show", `${commit}:${BOOTSTRAP_PATH}`], { cwd: plan.root, raw: true });
+  } catch {
+    return null; // default branch predates the bootstrap: nothing authoritative to defer to
+  }
+  if (own() === authoritative) return null;
+  log(`control-plane bootstrap: deferring to ${plan.witness.defaultBranchRef}@${commit.slice(0, 12)} bootstrap.`);
+  const res = spawn(process.execPath, ["-", ...argv], {
+    cwd: plan.root,
+    input: authoritative,
+    stdio: ["pipe", "inherit", "inherit"],
+    env: { ...env, [CONVERGED_ENV]: commit },
+  });
+  return res.status ?? 1;
+}
+
+export function runBootstrap(argv, { cwd = process.cwd(), git = defaultGit, spawn = spawnSync, cacheDir, log = (m) => console.error(m), own } = {}) {
   const { source, gate, gateArgs } = parseBootstrapArgs(argv);
   if (!gate || !GATE_NAME.test(gate)) {
     log("Usage: control-plane-bootstrap.mjs [--control-plane-source default-branch|checkout] <gate-name> [gate args...]");
@@ -212,6 +252,9 @@ export function runBootstrap(argv, { cwd = process.cwd(), git = defaultGit, spaw
     log(plan.message);
     return plan.exitCode;
   }
+
+  const converged = convergeBootstrap(plan, argv, { git, spawn, own, log });
+  if (converged !== null) return converged;
 
   let script;
   let args = gateArgs;
@@ -236,7 +279,13 @@ export function runBootstrap(argv, { cwd = process.cwd(), git = defaultGit, spaw
       log(`Control-plane bootstrap: ${gate}.mjs does not exist in ${plan.witness.defaultBranchRef}; no gate was run.`);
       return 2;
     }
-    env = { ...process.env, [RUNNER_ENV]: JSON.stringify({ ...plan.witness, runnerCommit: plan.runnerCommit }) };
+    // Verdict-handoff/action-envelope state belongs to the SUBJECT checkout (the one whose hooks
+    // consume it), never to the shared runner cache a runner's module-relative root implies.
+    env = {
+      ...process.env,
+      [RUNNER_ENV]: JSON.stringify({ ...plan.witness, runnerCommit: plan.runnerCommit }),
+      [STATE_DIR_ENV]: process.env[STATE_DIR_ENV] || join(plan.root, ".claude", "action-envelope-state"),
+    };
     log(
       `control-plane bootstrap: running ${gate} from ${plan.witness.defaultBranchRef}@${plan.runnerCommit.slice(0, 12)} ` +
         `(checkout HEAD ${plan.witness.subjectHead.slice(0, 12)}: ${plan.reason}); subject checkout untouched.`,
