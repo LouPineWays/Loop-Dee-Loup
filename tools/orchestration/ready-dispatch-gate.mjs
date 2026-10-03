@@ -1443,6 +1443,7 @@ function parseRestJson(raw, what) {
 export function normalizeSearchPrCandidates(pages, { repo } = {}) {
   if (!Array.isArray(pages)) throw new Error("malformed REST search response: expected a slurped page array");
   const out = [];
+  const seen = new Set();
   for (const page of pages) {
     if (!page || typeof page !== "object" || !Array.isArray(page.items)) {
       throw new Error("malformed REST search response: page has no items array");
@@ -1461,12 +1462,22 @@ export function normalizeSearchPrCandidates(pages, { repo } = {}) {
       if (repo && !url.toLowerCase().endsWith(`/${repo}/pull/${item.number}`.toLowerCase())) {
         throw new Error(`REST search candidate identity does not match ${repo}#${item.number}`);
       }
+      if (seen.has(item.number)) {
+        throw new Error(`REST search returned duplicate candidate #${item.number} across pages -- refusing contradictory pagination evidence`);
+      }
+      seen.add(item.number);
       out.push({ number: item.number, body: typeof item.body === "string" ? item.body : "" });
     }
   }
   const total = pages.length > 0 ? pages[0].total_count : 0;
+  if (pages.some((page) => page.total_count !== total)) {
+    throw new Error("REST search pages report inconsistent total_count -- refusing contradictory pagination evidence");
+  }
   if (total > out.length) {
     throw new Error(`REST search total_count ${total} exceeds the ${out.length} candidates retrieved -- refusing a truncated listing`);
+  }
+  if (total !== out.length) {
+    throw new Error(`REST search total_count ${total} does not equal the ${out.length} unique candidates retrieved -- refusing contradictory pagination evidence`);
   }
   return out;
 }

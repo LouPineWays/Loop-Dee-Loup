@@ -3004,6 +3004,25 @@ test("normalizeSearchPrCandidates: missing/non-typed completeness metadata throw
   assert.throws(() => normalizeSearchPrCandidates([{ total_count: 0, items: [] }], { repo: R860 }), /completeness/);
 });
 
+test("normalizeSearchPrCandidates: inconsistent total_count across pages fails closed in either order", () => {
+  const a = { total_count: 1, incomplete_results: false, items: [searchItem860(1, "x")] };
+  const b = { total_count: 0, incomplete_results: false, items: [] };
+  assert.throws(() => normalizeSearchPrCandidates([a, b], { repo: R860 }), /inconsistent total_count/);
+  assert.throws(() => normalizeSearchPrCandidates([b, a], { repo: R860 }), /inconsistent total_count/);
+});
+
+test("normalizeSearchPrCandidates: duplicate candidate across pages fails closed", () => {
+  const p1 = { total_count: 2, incomplete_results: false, items: [searchItem860(1, "x")] };
+  const p2 = { total_count: 2, incomplete_results: false, items: [searchItem860(1, "x")] };
+  assert.throws(() => normalizeSearchPrCandidates([p1, p2], { repo: R860 }), /duplicate candidate/);
+});
+
+test("normalizeSearchPrCandidates: coherent multi-page unique response is accepted", () => {
+  const p1 = { total_count: 2, incomplete_results: false, items: [searchItem860(1, "x")] };
+  const p2 = { total_count: 2, incomplete_results: false, items: [searchItem860(2, "y")] };
+  assert.deepEqual(normalizeSearchPrCandidates([p1, p2], { repo: R860 }).map((c) => c.number), [1, 2]);
+});
+
 test("defaultGhOpenPrList (REST): stops fetching pages once the safety bound is reached", () => {
   let calls = 0;
   const run = (cmd, args) => {
