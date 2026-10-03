@@ -683,3 +683,32 @@ export function requiresPreBoundNonIsolatedDispatch(authorizedActions) {
 export function contextSensitiveEnvelopeStates() {
   return ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION"];
 }
+
+// Issue #858 (control #571; fresh recurrence of #761's lost-verdict failure at #457/#856/PR #857):
+// the bounded Stage 1 correction verdicts authorize reserve -> dispatch but never named HOW the
+// controller carries the verdict between those steps, so a controller that had not saved the gate
+// JSON re-ran the (forbidden) gate to capture it, then hand-built JSON. The persisted
+// `verdict-handoff.mjs` copy already makes the correct path possible; this makes it the one
+// mechanically explicit continuation carried on the verdict itself. Pure data, no authority: the
+// verdict's own `state`/`actionEnvelope` still govern, and every step fails closed on a
+// missing/stale/wrong-control handoff (verdict-handoff.mjs). Returns null for any other state.
+//
+// Findings corrections and merge-conflict recovery reserve the exact PR-head checkout first;
+// the closing-reference repair needs no checkout, so its continuation is the formatter alone.
+export function getCorrectionContinuation(state, verdict = {}) {
+  const isStage1Correction = state === "STAGE1_CORRECTION_REQUIRED";
+  const isConflict = state === "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT";
+  if (!isStage1Correction && !isConflict) return null;
+  const needsReservation = isConflict || verdict.correctionReason !== "closing-reference";
+  const n = Number(verdict.controlIssue);
+  const control = Number.isInteger(n) && n > 0 ? ` --control-issue ${n}` : "";
+  const format = `node tools/orchestration/format-dispatch-prompt.mjs --from-handoff${control}`;
+  const steps = needsReservation
+    ? [`node tools/orchestration/pr-head-checkout-preflight.mjs --reserve-from-gate --from-handoff${control}`, format]
+    : [format];
+  return {
+    transport: "persisted-verdict-handoff",
+    steps,
+    note: "Do not re-run any lifecycle gate or retype/save this verdict's JSON: run each step in order (each reads the handoff the gate persisted), then dispatch the formatter's stdout verbatim as the single correction worker, and stop.",
+  };
+}
