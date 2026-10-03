@@ -3,12 +3,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseBootstrapArgs, runBootstrap } from "./control-plane-bootstrap.mjs";
-import { readBootstrapRunnerWitness } from "./control-plane-freshness.mjs";
+import { readBootstrapRunnerWitness, checkControlPlaneFreshness } from "./control-plane-freshness.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BOOTSTRAP_SRC = readFileSync(join(HERE, "control-plane-bootstrap.mjs"), "utf8");
@@ -49,6 +49,7 @@ function fixture() {
   git(base, "clone", "-q", origin, stale);
   write(seed, "tools/orchestration/session-entry-gate.mjs", NEW_GATE);
   write(seed, "tools/orchestration/control-plane-freshness.mjs", FRESHNESS_SRC);
+  write(seed, "tools/orchestration/control-plane-bootstrap.mjs", BOOTSTRAP_SRC);
   git(seed, "add", "-A");
   git(seed, "commit", "-q", "-m", "c1");
   git(seed, "push", "-q", origin, "main");
@@ -148,15 +149,117 @@ test("runner export preserves exact-head: subject HEAD unchanged and not a regis
   assert.deepEqual(readdirSync(f.cache), [f.c1]);
 });
 
-test("runner witness requires the marker file and matching commit", () => {
+test("witness: legitimate bootstrap-created runner is accepted; self-consistent forgery is rejected (#877 Stage 2)", () => {
+  const f = fixture();
+  const witnessEnv = (commit) => ({ LDL_CONTROL_PLANE_RUNNER: JSON.stringify({ runnerCommit: commit, defaultBranchCommit: commit }) });
+  // Legitimate: materialized from the authoritative commit.
+  const r = viaStdin(f.stale, f.cache, "session-entry-gate");
+  assert.equal(r.status, 0, r.stderr);
+  const runnerDir = join(f.cache, f.c1);
+  assert.equal(readBootstrapRunnerWitness(runnerDir, witnessEnv(f.c1), { subjectCwd: f.stale }).source, "bootstrap-default-branch");
+  assert.equal(checkControlPlaneFreshness({ root: runnerDir, env: witnessEnv(f.c1), subjectCwd: f.stale }).state, "CURRENT");
+
+  // Forgery 1: arbitrary dir with a matching marker/env pair (the old literal "abc" shape).
   const dir = mkdtempSync(join(tmpdir(), "ldl-marker-"));
-  const env = { LDL_CONTROL_PLANE_RUNNER: JSON.stringify({ runnerCommit: "abc", defaultBranchCommit: "abc" }) };
-  assert.equal(readBootstrapRunnerWitness(dir, env), null);
   writeFileSync(join(dir, ".ldl-control-plane-runner"), "abc\n");
-  assert.equal(readBootstrapRunnerWitness(dir, env).source, "bootstrap-default-branch");
-  writeFileSync(join(dir, ".ldl-control-plane-runner"), "other\n");
-  assert.equal(readBootstrapRunnerWitness(dir, env), null);
-  assert.equal(readBootstrapRunnerWitness(dir, {}), null);
+  assert.equal(readBootstrapRunnerWitness(dir, witnessEnv("abc"), { subjectCwd: f.stale }), null);
+
+  // Forgery 2: valid-looking authoritative commit, but checkout-local code in the runner root.
+  const forged = mkdtempSync(join(tmpdir(), "ldl-forged-"));
+  write(forged, "tools/orchestration/session-entry-gate.mjs", OLD_GATE);
+  write(forged, "tools/orchestration/control-plane-freshness.mjs", FRESHNESS_SRC);
+  writeFileSync(join(forged, ".ldl-control-plane-runner"), `${f.c1}\n`);
+  assert.equal(readBootstrapRunnerWitness(forged, witnessEnv(f.c1), { subjectCwd: f.stale }), null);
+  assert.notEqual(checkControlPlaneFreshness({ root: forged, env: witnessEnv(f.c1), subjectCwd: f.stale }).state, "CURRENT");
+
+  // Forgery 3: authoritative bytes plus an injected extra file.
+  write(runnerDir, "tools/orchestration/evil.mjs", "// extra\n");
+  assert.equal(readBootstrapRunnerWitness(runnerDir, witnessEnv(f.c1), { subjectCwd: f.stale }), null);
+
+  // Mismatched marker / no env / non-tip commit are rejected.
+  writeFileSync(join(runnerDir, ".ldl-control-plane-runner"), "other\n");
+  assert.equal(readBootstrapRunnerWitness(runnerDir, witnessEnv(f.c1), { subjectCwd: f.stale }), null);
+  assert.equal(readBootstrapRunnerWitness(runnerDir, {}, { subjectCwd: f.stale }), null);
+  const stalePointer = mkdtempSync(join(tmpdir(), "ldl-oldtip-"));
+  git(f.seed, "commit", "-q", "--allow-empty", "-m", "c2");
+  git(f.seed, "push", "-q", f.origin, "main");
+  writeFileSync(join(stalePointer, ".ldl-control-plane-runner"), `${f.c1}\n`);
+  assert.equal(readBootstrapRunnerWitness(stalePointer, witnessEnv(f.c1), { subjectCwd: f.stale }), null);
+});
+
+test("cache with correct marker but modified syntactically-valid gate is replaced before the gate executes (#877 Stage 1)", () => {
+  const f = fixture();
+  const first = viaStdin(f.stale, f.cache, "session-entry-gate");
+  assert.equal(first.status, 0, first.stderr);
+  const cachedGate = join(f.cache, f.c1, "tools/orchestration/session-entry-gate.mjs");
+  const sentinel = join(f.base, "tampered-ran");
+  writeFileSync(cachedGate, 'import { writeFileSync } from "node:fs";\nwriteFileSync(' + JSON.stringify(sentinel) + ', "x");\nconsole.log("FORGED-CURRENT");\n');
+  const r = viaStdin(f.stale, f.cache, "session-entry-gate");
+  assert.equal(existsSync(sentinel), false, "tampered cached gate must never execute");
+  assert.doesNotMatch(r.stdout, /FORGED-CURRENT/);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /CURRENT-REPO-SCOPED bootstrap-default-branch/);
+
+  // Injected extra file in a cache entry is likewise discarded.
+  writeFileSync(join(f.cache, f.c1, "tools/orchestration/evil.mjs"), "// extra\n");
+  const r2 = viaStdin(f.stale, f.cache, "session-entry-gate");
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.equal(existsSync(join(f.cache, f.c1, "tools/orchestration/evil.mjs")), false);
+
+  // A legitimate authenticated cache is reused as-is (a planted benign file outside the control-plane paths survives).
+  writeFileSync(join(f.cache, f.c1, "reuse-probe.txt"), "p\n");
+  const r3 = viaStdin(f.stale, f.cache, "session-entry-gate");
+  assert.equal(r3.status, 0, r3.stderr);
+  assert.equal(existsSync(join(f.cache, f.c1, "reuse-probe.txt")), true, "authentic cache reused, not rematerialized");
+
+  // Unauthenticatable cache (marker removed) with an unreachable remote fails closed, forged gate never runs.
+  rmSync(join(f.cache, f.c1, ".ldl-control-plane-runner"));
+  writeFileSync(cachedGate, 'console.log("FORGED-CURRENT");\n');
+  git(f.stale, "remote", "set-url", "origin", join(f.base, "missing.git"));
+  const r4 = viaStdin(f.stale, f.cache, "session-entry-gate");
+  assert.equal(r4.status, 1);
+  assert.doesNotMatch(r4.stdout, /FORGED-CURRENT/);
+});
+
+test("missing authoritative bootstrap fails closed before any gate runs", () => {
+  const f = fixture();
+  git(f.seed, "rm", "-q", "tools/orchestration/control-plane-bootstrap.mjs");
+  git(f.seed, "commit", "-q", "-m", "drop bootstrap");
+  git(f.seed, "push", "-q", f.origin, "main");
+  const r = viaStdin(f.stale, f.cache, "session-entry-gate");
+  assert.equal(r.status, 1);
+  assert.equal(r.stdout, "");
+  assert.match(r.stderr, /not a lifecycle verdict; no gate was run/);
+});
+
+test("malformed authoritative bootstrap fails closed with the bounded recovery, before any gate runs", () => {
+  const f = fixture();
+  write(f.seed, "tools/orchestration/control-plane-bootstrap.mjs", "const = ;\n");
+  git(f.seed, "commit", "-qam", "malformed bootstrap");
+  git(f.seed, "push", "-q", f.origin, "main");
+  const r = viaStdin(f.stale, f.cache, "session-entry-gate");
+  assert.equal(r.status, 1);
+  assert.equal(r.stdout, "");
+  assert.match(r.stderr, /not a lifecycle verdict; no gate was run/);
+  assert.match(r.stderr, /--control-plane-source checkout/);
+});
+
+test("missing or malformed requested gate fails closed through the same bounded path", () => {
+  const f = fixture();
+  const missing = viaStdin(f.stale, f.cache, "no-such-gate");
+  assert.equal(missing.status, 1);
+  assert.equal(missing.stdout, "");
+  assert.match(missing.stderr, /not a lifecycle verdict; no gate was run/);
+  assert.match(missing.stderr, /no-such-gate\.mjs does not exist/);
+
+  write(f.seed, "tools/orchestration/session-entry-gate.mjs", "const = ;\n");
+  git(f.seed, "commit", "-qam", "malformed gate");
+  git(f.seed, "push", "-q", f.origin, "main");
+  const bad = viaStdin(f.stale, f.cache, "session-entry-gate");
+  assert.equal(bad.status, 1);
+  assert.equal(bad.stdout, "");
+  assert.match(bad.stderr, /not executable JavaScript/);
+  assert.match(bad.stderr, /not a lifecycle verdict; no gate was run/);
 });
 
 test("argument parsing and gate-name validation", () => {

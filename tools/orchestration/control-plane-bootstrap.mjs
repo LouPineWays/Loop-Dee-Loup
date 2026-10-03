@@ -45,7 +45,8 @@
 // Tests: node --test tools/orchestration/control-plane-bootstrap.test.mjs
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -178,12 +179,52 @@ export function planBootstrap({ cwd = process.cwd(), source = "default-branch", 
   };
 }
 
+// The marker file only names a commit; it is cache metadata, not proof of cache contents. Before a
+// cached (or freshly exported) runner may execute anything, the TRUSTED bootstrap itself proves its
+// control-plane files are byte-for-byte the authoritative commit's tree (blob hashes from git
+// objects, no extra files). Never delegates this to code inside the runner being authenticated.
+export function runnerTreeAuthentic(dir, commit, { root, git = defaultGit } = {}) {
+  try {
+    const marker = join(dir, RUNNER_MARKER);
+    if (!existsSync(marker) || readFileSync(marker, "utf8").trim() !== commit) return false;
+    const algo = commit.length === 64 ? "sha256" : "sha1";
+    const expected = new Map();
+    const listing = git(["ls-tree", "-r", commit, "--", ...CONTROL_PLANE_PATHS], { cwd: root });
+    for (const line of listing.split(/\r?\n/).filter(Boolean)) {
+      const m = /^(\d+) blob ([0-9a-f]+)\t(.+)$/.exec(line);
+      if (m) expected.set(m[3], m[2]);
+    }
+    if (expected.size === 0) return false;
+    const actual = new Set();
+    const walk = (rel) => {
+      for (const ent of readdirSync(join(dir, rel), { withFileTypes: true })) {
+        const r = rel + "/" + ent.name;
+        if (ent.isDirectory()) walk(r);
+        else actual.add(r);
+      }
+    };
+    for (const p of CONTROL_PLANE_PATHS) if (existsSync(join(dir, p))) walk(p);
+    if (actual.size !== expected.size) return false;
+    for (const [path, oid] of expected) {
+      if (!actual.has(path)) return false;
+      const body = readFileSync(join(dir, path));
+      if (createHash(algo).update("blob " + body.length + "\0").update(body).digest("hex") !== oid) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Exports the authoritative commit's tree into <cacheDir>/<sha> without touching the subject
-// checkout's HEAD/index/working tree. Idempotent; atomic via rename.
+// checkout's HEAD/index/working tree. A cache entry is reused only after authentication; an entry
+// that cannot be authenticated is discarded and rematerialized. Atomic via rename.
 export function materializeRunner({ root, commit, cacheDir = process.env.LDL_CONTROL_PLANE_RUNNER_CACHE || join(tmpdir(), "ldl-control-plane-runners"), git = defaultGit }) {
   const finalDir = join(cacheDir, commit);
-  const marker = join(finalDir, RUNNER_MARKER);
-  if (existsSync(marker) && readFileSync(marker, "utf8").trim() === commit) return finalDir;
+  if (existsSync(finalDir)) {
+    if (runnerTreeAuthentic(finalDir, commit, { root, git })) return finalDir;
+    rmSync(finalDir, { recursive: true, force: true });
+  }
 
   mkdirSync(cacheDir, { recursive: true });
   const stage = join(cacheDir, `${commit}.tmp-${process.pid}-${Date.now()}`);
@@ -191,16 +232,18 @@ export function materializeRunner({ root, commit, cacheDir = process.env.LDL_CON
   try {
     mkdirSync(stage, { recursive: true });
     git(["read-tree", commit], { cwd: root, env: { GIT_INDEX_FILE: indexFile } });
-    git(["checkout-index", "-a", "-f", `--prefix=${stage.replace(/\\/g, "/")}/`], {
+    // Byte-exact export (no autocrlf/eol conversion): authentication verifies blob hashes.
+    git(["-c", "core.autocrlf=false", "-c", "core.eol=lf", "checkout-index", "-a", "-f", `--prefix=${stage.replace(/\\/g, "/")}/`], {
       cwd: root,
       env: { GIT_INDEX_FILE: indexFile },
     });
     writeFileSync(join(stage, RUNNER_MARKER), `${commit}\n`);
+    if (!runnerTreeAuthentic(stage, commit, { root, git })) throw new Error("exported runner tree does not match the authoritative commit");
     try {
       renameSync(stage, finalDir);
     } catch (err) {
-      // A concurrent bootstrap won the race; accept its copy only if complete.
-      if (!(existsSync(marker) && readFileSync(marker, "utf8").trim() === commit)) throw err;
+      // A concurrent bootstrap won the race; accept its copy only if authentic.
+      if (!runnerTreeAuthentic(finalDir, commit, { root, git })) throw err;
     }
   } finally {
     rmSync(indexFile, { force: true });
@@ -227,10 +270,17 @@ export function convergeBootstrap(plan, argv, { git = defaultGit, spawn = spawnS
   let authoritative;
   try {
     authoritative = git(["show", `${commit}:${BOOTSTRAP_PATH}`], { cwd: plan.root, raw: true });
-  } catch {
-    return null; // default branch predates the bootstrap: nothing authoritative to defer to
+  } catch (err) {
+    // Missing/unreadable authoritative bootstrap is unverifiable authority: fail closed, never
+    // continue with the older running bootstrap.
+    log(fail(`${plan.witness.defaultBranchRef} has no readable ${BOOTSTRAP_PATH}: ${errText(err)}`).message);
+    return 1;
   }
   if (own() === authoritative) return null;
+  if (!sourceParses(authoritative, spawn)) {
+    log(fail(`${plan.witness.defaultBranchRef} ${BOOTSTRAP_PATH} is not executable JavaScript`).message);
+    return 1;
+  }
   log(`control-plane bootstrap: deferring to ${plan.witness.defaultBranchRef}@${commit.slice(0, 12)} bootstrap.`);
   const res = spawn(process.execPath, ["-", ...argv], {
     cwd: plan.root,
@@ -239,6 +289,23 @@ export function convergeBootstrap(plan, argv, { git = defaultGit, spawn = spawnS
     env: { ...env, [CONVERGED_ENV]: commit },
   });
   return res.status ?? 1;
+}
+
+// `node --check` needs a real .mjs file (stdin is treated as CommonJS), so stage the text in a
+// private temp directory first.
+function sourceParses(text, spawn) {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-bootstrap-check-"));
+  try {
+    const file = join(dir, "candidate.mjs");
+    writeFileSync(file, text);
+    return gateParses(file, spawn);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function gateParses(script, spawn) {
+  return spawn(process.execPath, ["--check", script], { encoding: "utf8" }).status === 0;
 }
 
 export function runBootstrap(argv, { cwd = process.cwd(), git = defaultGit, spawn = spawnSync, cacheDir, log = (m) => console.error(m), own } = {}) {
@@ -263,8 +330,12 @@ export function runBootstrap(argv, { cwd = process.cwd(), git = defaultGit, spaw
     script = join(plan.root, "tools", "orchestration", `${gate}.mjs`);
     if (plan.source === "checkout-explicit") args = [...gateArgs, "--control-plane-source", "checkout"];
     if (!existsSync(script)) {
-      log(`Control-plane bootstrap: ${script} does not exist in this checkout; no gate was run.`);
-      return 2;
+      log(fail(`${gate}.mjs does not exist in this checkout`).message);
+      return 1;
+    }
+    if (!gateParses(script, spawn)) {
+      log(fail(`${gate}.mjs in this checkout is not executable JavaScript`).message);
+      return 1;
     }
   } else {
     let runnerDir;
@@ -276,8 +347,12 @@ export function runBootstrap(argv, { cwd = process.cwd(), git = defaultGit, spaw
     }
     script = join(runnerDir, "tools", "orchestration", `${gate}.mjs`);
     if (!existsSync(script)) {
-      log(`Control-plane bootstrap: ${gate}.mjs does not exist in ${plan.witness.defaultBranchRef}; no gate was run.`);
-      return 2;
+      log(fail(`${gate}.mjs does not exist in ${plan.witness.defaultBranchRef}`).message);
+      return 1;
+    }
+    if (!gateParses(script, spawn)) {
+      log(fail(`${gate}.mjs in ${plan.witness.defaultBranchRef} is not executable JavaScript`).message);
+      return 1;
     }
     // Verdict-handoff/action-envelope state belongs to the SUBJECT checkout (the one whose hooks
     // consume it), never to the shared runner cache a runner's module-relative root implies.
