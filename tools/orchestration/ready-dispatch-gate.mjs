@@ -1442,6 +1442,7 @@ function parseRestJson(raw, what) {
 // `total_count` the pages did not fully deliver, or a candidate with no usable number/PR marker.
 export function normalizeSearchPrCandidates(pages, { repo } = {}) {
   if (!Array.isArray(pages)) throw new Error("malformed REST search response: expected a slurped page array");
+  if (pages.length === 0) throw new Error("malformed REST search response: empty page array carries no total_count/incomplete_results completeness evidence");
   const out = [];
   const seen = new Set();
   for (const page of pages) {
@@ -1469,7 +1470,7 @@ export function normalizeSearchPrCandidates(pages, { repo } = {}) {
       out.push({ number: item.number, body: typeof item.body === "string" ? item.body : "" });
     }
   }
-  const total = pages.length > 0 ? pages[0].total_count : 0;
+  const total = pages[0].total_count;
   if (pages.some((page) => page.total_count !== total)) {
     throw new Error("REST search pages report inconsistent total_count -- refusing contradictory pagination evidence");
   }

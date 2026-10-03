@@ -3004,6 +3004,11 @@ test("normalizeSearchPrCandidates: missing/non-typed completeness metadata throw
   assert.throws(() => normalizeSearchPrCandidates([{ total_count: 0, items: [] }], { repo: R860 }), /completeness/);
 });
 
+test("normalizeSearchPrCandidates: empty page array fails closed; one-page complete zero is accepted", () => {
+  assert.throws(() => normalizeSearchPrCandidates([], { repo: R860 }), /empty page array/);
+  assert.deepEqual(normalizeSearchPrCandidates([{ total_count: 0, incomplete_results: false, items: [] }], { repo: R860 }), []);
+});
+
 test("normalizeSearchPrCandidates: inconsistent total_count across pages fails closed in either order", () => {
   const a = { total_count: 1, incomplete_results: false, items: [searchItem860(1, "x")] };
   const b = { total_count: 0, incomplete_results: false, items: [] };
