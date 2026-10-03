@@ -225,3 +225,37 @@ test("reserve --from-handoff rejects a malformed --control-issue instead of disa
     t.cleanup();
   }
 });
+
+// Issue #858 (control #571): the #457/#856/PR #857 recurrence -- the controller held no gate JSON.
+test("#858: the bounded correction verdict carries one exact continuation consuming the persisted handoff", async () => {
+  const { getCorrectionContinuation } = await import("./action-envelope.mjs");
+  const c = getCorrectionContinuation("STAGE1_CORRECTION_REQUIRED", { controlIssue: 457, correctionReason: "findings" });
+  assert.equal(c.transport, "persisted-verdict-handoff");
+  assert.deepEqual(c.steps, [
+    "node tools/orchestration/pr-head-checkout-preflight.mjs --reserve-from-gate --from-handoff --control-issue 457",
+    "node tools/orchestration/format-dispatch-prompt.mjs --from-handoff --control-issue 457",
+  ]);
+  const conflict = getCorrectionContinuation("STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT", { controlIssue: 457 });
+  assert.equal(conflict.steps.length, 2);
+  // Closing-reference repair needs no checkout: formatter-only, semantics unchanged.
+  const closing = getCorrectionContinuation("STAGE1_CORRECTION_REQUIRED", { controlIssue: 457, correctionReason: "closing-reference" });
+  assert.deepEqual(closing.steps, ["node tools/orchestration/format-dispatch-prompt.mjs --from-handoff --control-issue 457"]);
+  assert.equal(getCorrectionContinuation("NO_ACTION_YET", { controlIssue: 457 }), null);
+  assert.equal(getCorrectionContinuation("STAGE2_CORRECTION_REQUIRED", { controlIssue: 457 }), null);
+});
+
+test("#858: the denied gate re-run points at the continuation and leaves the persisted handoff untouched", () => {
+  const t = tmp();
+  try {
+    seed(t.dir, GATE);
+    const before = readFileSync(t.path, "utf8");
+    const marker = { mode: "bounded", state: "STAGE1_CORRECTION_REQUIRED", authorizedActions: GATE.actionEnvelope.authorizedActions };
+    const d = decidePreToolUse(marker, { toolName: "Bash", command: "node tools/orchestration/session-entry-gate.mjs --control-issue 398" });
+    assert.equal(d.permissionDecision, "deny");
+    assert.match(d.permissionDecisionReason, /correctionContinuation/);
+    assert.equal(readFileSync(t.path, "utf8"), before);
+    assert.equal(readVerdictHandoff({ path: t.path, controlIssue: 398 }).ok, true);
+  } finally {
+    t.cleanup();
+  }
+});

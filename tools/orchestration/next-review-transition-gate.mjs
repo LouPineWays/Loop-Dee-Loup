@@ -327,7 +327,7 @@ import {
 // so this remains safe under ESM's live-binding semantics regardless of load order.
 import { combineMergeReadyResult } from "../review-watch/merge-ready-gate.mjs";
 // Issue #486: the deterministic action-envelope table every verdict below is stamped with.
-import { getActionEnvelope } from "./action-envelope.mjs";
+import { getActionEnvelope, getCorrectionContinuation } from "./action-envelope.mjs";
 // Issue #678 Stage 1 correction (PR #714, finding 1): persists this gate's own verdict to a
 // side channel at the exact moment main() is about to print it, so action-envelope-hook.mjs
 // can still observe a bounded/none verdict when a downstream pipeline stage (e.g.
@@ -2489,7 +2489,12 @@ async function runNextReviewTransitionGateCore(
 export async function runNextReviewTransitionGate(args, impls) {
   const result = await runNextReviewTransitionGateCore(args, impls);
   if (typeof result.state !== "string") return result;
-  return { ...result, actionEnvelope: getActionEnvelope(result.state, result) };
+  const correctionContinuation = getCorrectionContinuation(result.state, result);
+  return {
+    ...result,
+    actionEnvelope: getActionEnvelope(result.state, result),
+    ...(correctionContinuation ? { correctionContinuation } : {}),
+  };
 }
 
 function parseArgs(argv) {

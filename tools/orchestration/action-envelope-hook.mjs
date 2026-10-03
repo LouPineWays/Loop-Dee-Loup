@@ -670,7 +670,12 @@ export function decidePreToolUse(marker, toolCall = {}) {
         "Session execution and docs/operating-model.md § Action envelope enforcement (issue #486/#678), a " +
         "bounded envelope never authorizes re-running a lifecycle gate — the named action(s) above are the " +
         "exclusive next step. Do not retry this call; perform the authorized action if it has not run yet, " +
-        "or end this turn with the concise handoff if it already has.",
+        "or end this turn with the concise handoff if it already has." +
+        (authorized.includes("reserve-correction-checkout") || authorized.includes("dispatch-correction-worker")
+          ? " The verdict's persisted handoff is intact (this denial does not touch it): continue with the " +
+            "verdict's own `correctionContinuation` steps (`pr-head-checkout-preflight.mjs --reserve-from-gate " +
+            "--from-handoff`, then `format-dispatch-prompt.mjs --from-handoff`) -- never hand-built JSON."
+          : ""),
     };
   }
 
