@@ -25,6 +25,12 @@
 //     staleness comparison (and the network) but still emits a witness naming the source, so the
 //     choice is explicit and diagnosable rather than silently preferring old or new code.
 //
+// Bootstrap (issue #877): control-plane-bootstrap.mjs is the dependency-free boundary that runs
+// BEFORE any checkout-local gate. When the checkout is stale/diverged it exports the authoritative
+// default-branch tree to a runner directory and sets LDL_CONTROL_PLANE_RUNNER; this checker then
+// recognizes that runner (marker file + matching commit) as CURRENT with a bootstrap witness. The
+// ordinary stale/current comparison below remains the single authoritative mechanism otherwise.
+//
 // Fail closed: if the authoritative ref cannot be fetched/read (offline, auth failure, missing
 // ref, no merge-base) the result is an operational freshness error (`UNVERIFIABLE`), never a
 // domain lifecycle verdict.
@@ -38,6 +44,7 @@
 // Tests: node --test tools/orchestration/control-plane-freshness.test.mjs
 
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -76,6 +83,7 @@ export function checkControlPlaneFreshness({
   source = "default-branch",
   git = defaultGit,
   remote = "origin",
+  env = process.env,
 } = {}) {
   if (!SOURCES.includes(source)) {
     return {
@@ -85,6 +93,11 @@ export function checkControlPlaneFreshness({
       message: `Unknown --control-plane-source "${source}" (expected one of: ${SOURCES.join(", ")}).`,
     };
   }
+
+  // Issue #877: a bootstrap-exported runner (control-plane-bootstrap.mjs) has no .git of its own;
+  // its authority is the default-branch commit the bootstrap fetched and named in the marker file.
+  const boot = source === "default-branch" ? readBootstrapRunnerWitness(root, env) : null;
+  if (boot) return { ok: true, exitCode: 0, state: "CURRENT", witness: boot };
 
   let headCommit;
   try {
@@ -199,6 +212,21 @@ export function checkControlPlaneFreshness({
   }
 
   return { ok: true, exitCode: 0, state: "CURRENT", witness };
+}
+
+// Valid only when the env witness names the exact commit recorded in this root's marker file, so a
+// stray env var can never make an arbitrary checkout look current.
+export function readBootstrapRunnerWitness(root, env = process.env) {
+  const raw = env.LDL_CONTROL_PLANE_RUNNER;
+  if (!raw) return null;
+  try {
+    const w = JSON.parse(raw);
+    const marker = readFileSync(join(root, ".ldl-control-plane-runner"), "utf8").trim();
+    if (!w || typeof w.runnerCommit !== "string" || w.runnerCommit !== marker || w.defaultBranchCommit !== marker) return null;
+    return { ...w, source: "bootstrap-default-branch", executedRevision: marker };
+  } catch {
+    return null;
+  }
 }
 
 function errText(err) {

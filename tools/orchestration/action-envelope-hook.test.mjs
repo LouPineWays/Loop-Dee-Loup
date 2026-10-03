@@ -1107,3 +1107,19 @@ test("#398/#735/PR #736 reproduction: a conflicting isolation spawn is denied be
   rmSync(dir, { recursive: true, force: true });
   delete process.env.LDL_ACTION_ENVELOPE_STATE_DIR;
 });
+
+// Issue #877: the bootstrap wrapper execs the gate, so it must stay recognized as a gate invocation.
+test("invokedGateScriptBasenames: recognizes gates invoked through control-plane-bootstrap (file and stdin forms)", async () => {
+  const { invokedGateScriptBasenames } = await import("./action-envelope-hook.mjs");
+  assert.deepEqual(
+    invokedGateScriptBasenames("node tools/orchestration/control-plane-bootstrap.mjs session-entry-gate --control-issue 571"),
+    ["session-entry-gate.mjs"],
+  );
+  assert.deepEqual(
+    invokedGateScriptBasenames(
+      "git fetch -q origin main && git show origin/main:tools/orchestration/control-plane-bootstrap.mjs | node - --control-plane-source checkout ready-dispatch-gate --control-issue 5",
+    ),
+    ["ready-dispatch-gate.mjs"],
+  );
+  assert.deepEqual(invokedGateScriptBasenames("node tools/orchestration/control-plane-bootstrap.mjs worktree-preflight"), []);
+});

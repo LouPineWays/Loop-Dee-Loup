@@ -357,7 +357,15 @@ export function invokedGateScriptBasenames(command) {
     const nodeIdx = tokens.indexOf("node");
     if (nodeIdx === -1) continue;
     const scriptPath = stripSurroundingQuotes(tokens[nodeIdx + 1] ?? "");
-    const basename = scriptPath.split(/[\\/]/).pop() ?? "";
+    let basename = scriptPath.split(/[\\/]/).pop() ?? "";
+    // Issue #877: the control-plane bootstrap (a file path, or `node -` fed from the default
+    // branch) execs the named gate as a child, so the gate is the first positional after any
+    // `--control-plane-source <src>` — still a gate invocation for live envelope enforcement.
+    if (basename === "control-plane-bootstrap.mjs" || scriptPath === "-") {
+      let i = nodeIdx + 2;
+      while (tokens[i] === "--control-plane-source") i += 2;
+      basename = `${stripSurroundingQuotes(tokens[i] ?? "")}.mjs`;
+    }
     if (GATE_SCRIPT_BASENAMES.has(basename)) found.push(basename);
   }
   return found;
