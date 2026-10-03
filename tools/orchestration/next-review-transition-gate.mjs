@@ -171,6 +171,21 @@
 //       branch's `nextCommand` also chains `close-control.mjs` last in control-Issue mode,
 //       exactly like the `READY_TO_CLOSE`/`ACCEPTED_NO_WORK_ISSUE` branch above)
 //     - lifecycle-gate post-audit OK with rawVerdict "NOT CLEAN"           -> STAGE2_CORRECTION_REQUIRED
+//         ...unless the evidence-only correction path applies (issue #883, live #780/#877/PR #880/
+//         Audit #881: a valid recorded NOT CLEAN whose accepted finding needs only bounded proof,
+//         no source change). tools/orchestration/evidence-correction.mjs independently re-derives
+//         the evidence-correction state from GitHub alone; no reviewer prose is ever keyword-
+//         parsed here (the source-vs-evidence classification stays in the correction worker):
+//           - not eligible (not a backed exact-merge NOT CLEAN, the audit is itself an
+//             evidence-recovery re-audit, the lineage's one re-audit is spent, an open correction
+//             PR exists)                          -> STAGE2_CORRECTION_REQUIRED, evidenceOnlyEligible: false
+//           - eligible, no/incomplete result      -> STAGE2_CORRECTION_REQUIRED, evidenceOnlyEligible: true
+//           - result durably satisfied, no re-audit yet
+//                                                  -> STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED
+//           - result satisfied, the one re-audit exists, control/trigger not yet projected
+//                                                  -> STAGE2_EVIDENCE_REAUDIT_READY
+//           - contradictory/ambiguous evidence-correction state -> AMBIGUOUS (no pointer mutation,
+//             no new audit)
 //     - lifecycle-gate post-audit REPORT_READY_TO_RECORD (issue #439: a completed Stage 2
 //       report already exists on the thread, of either verdict, but the audit issue's own
 //       durable Verdict field is still PENDING/malformed — the live #408/#436 gap, where a
@@ -328,6 +343,8 @@ import {
 import { combineMergeReadyResult } from "../review-watch/merge-ready-gate.mjs";
 // Issue #486: the deterministic action-envelope table every verdict below is stamped with.
 import { getActionEnvelope, getCorrectionContinuation } from "./action-envelope.mjs";
+// Issue #883: the deterministic evidence-only Stage 2 correction evaluator.
+import { evaluateEvidenceCorrection, Status as EvidenceStatus } from "./evidence-correction.mjs";
 // Issue #678 Stage 1 correction (PR #714, finding 1): persists this gate's own verdict to a
 // side channel at the exact moment main() is about to print it, so action-envelope-hook.mjs
 // can still observe a bounded/none verdict when a downstream pipeline stage (e.g.
@@ -1001,6 +1018,11 @@ function exitCodeFor(state) {
     // "authorizes proceeding" bucket as its STAGE2_REPORT_READY_TO_RECORD/
     // STAGE2_AUDIT_ALREADY_PREPARED siblings, never an error or an outstanding correction.
     case "STAGE2_TRIGGER_REQUIRED":
+    // Issue #883: both evidence-recovery verdicts name one concrete required next command
+    // (prepare the single re-audit; project + trigger it) -- same "authorizes proceeding" bucket
+    // as STAGE2_TRIGGER_REQUIRED, never an outstanding source correction.
+    case "STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED":
+    case "STAGE2_EVIDENCE_REAUDIT_READY":
       return 0;
     case "STAGE1_CORRECTION_REQUIRED":
     // Issue #837: names the one concrete, non-blocking finalize step a stranded corrected head
@@ -1253,6 +1275,7 @@ async function resolvePostMerge(
     ghIssueViewImpl = defaultGhIssueView,
     reconcileExistingStage2AuditIssueImpl = reconcileExistingStage2AuditIssue,
     checkCorrectionDeltaImpl = checkCorrectionDelta,
+    evaluateEvidenceCorrectionImpl = evaluateEvidenceCorrection,
   },
 ) {
   let postAudit;
@@ -1493,7 +1516,94 @@ async function resolvePostMerge(
     }
   }
 
+  // Issue #883: no correction PR exists, so this NOT CLEAN is either a source defect awaiting
+  // the ordinary correction PR, or an evidence-only finding. Resolve which routing applies.
+  if (verdict.state === "STAGE2_CORRECTION_REQUIRED" && typeof verdict.workIssue === "number") {
+    const routed = await resolveEvidenceOnlyRouting({ repo, context, postAudit, verdict }, { evaluateEvidenceCorrectionImpl });
+    return { exitCode: exitCodeFor(routed.state), ...routed };
+  }
+
   return { exitCode: exitCodeFor(verdict.state), ...verdict };
+}
+
+// Issue #883: routes a recorded NOT CLEAN (no correction PR) through the evidence-only recovery
+// evaluation. Source-defect and not-yet-evidenced cases stay STAGE2_CORRECTION_REQUIRED (the
+// correction worker classifies semantically and, for evidence-only, ends at `evidence-
+// correction.mjs record` with no PR); only a durably verified, provenance-checked result
+// authorizes the single same-merge re-audit. Any operational failure or contradictory/ambiguous
+// state fails closed to AMBIGUOUS -- never a pointer mutation, a new audit, or a guessed route.
+async function resolveEvidenceOnlyRouting({ repo, context, postAudit, verdict }, { evaluateEvidenceCorrectionImpl }) {
+  const ambiguous = (reason) => ({ state: "AMBIGUOUS", stopAfter: true, ...context, postAudit, reason });
+  let evaluated;
+  try {
+    evaluated = await evaluateEvidenceCorrectionImpl({ repo, auditIssue: context.auditIssue });
+  } catch (err) {
+    return ambiguous(
+      "evidence-only correction evaluation failed operationally, refusing to authorize either a source-correction " +
+        `dispatch or a re-audit on unverified state: ${err.message}`,
+    );
+  }
+  switch (evaluated?.status) {
+    case EvidenceStatus.NOT_ELIGIBLE:
+      return {
+        ...verdict,
+        evidenceOnlyEligible: false,
+        evidenceCorrection: { status: evaluated.status, reason: evaluated.reason },
+      };
+    case EvidenceStatus.NO_RESULT:
+      return { ...verdict, evidenceOnlyEligible: true };
+    case EvidenceStatus.INCOMPLETE:
+      return {
+        ...verdict,
+        evidenceOnlyEligible: true,
+        evidenceCorrection: { status: evaluated.status, reason: evaluated.reason },
+      };
+    case EvidenceStatus.SATISFIED: {
+      const base = {
+        ...context,
+        workIssue: evaluated.workIssue,
+        pr: evaluated.pr,
+        mergeCommit: evaluated.mergeCommit,
+        predecessorAuditIssue: context.auditIssue,
+        evidenceResultUrl: evaluated.resultUrl,
+      };
+      if (!evaluated.replacement) {
+        return {
+          state: "STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED",
+          stopAfter: true,
+          ...base,
+          nextCommand: `node tools/orchestration/evidence-correction.mjs prepare --repo ${repo} --audit-issue ${context.auditIssue}`,
+        };
+      }
+      if (!evaluated.replacement.pending) {
+        return ambiguous(
+          `evidence-recovery re-audit #${evaluated.replacement.number} already carries a non-pending verdict while the ` +
+            `current Stage 2 pointer still names predecessor #${context.auditIssue}; refusing to project or trigger it`,
+        );
+      }
+      const replacement = evaluated.replacement.number;
+      const triggerCommand = `node tools/review-watch/trigger.mjs --repo ${repo} --kind issue --number ${replacement}`;
+      const finalizeCommand =
+        typeof context.controlIssue === "number"
+          ? `node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue ${context.controlIssue} ` +
+            `--execution-issue ${evaluated.workIssue} --pr ${evaluated.pr} --audit-issue ${replacement} ` +
+            `--stale-audit-issue ${context.auditIssue} --revalidate-uniqueness true`
+          : `node tools/orchestration/finalize-audit-breakpoint.mjs --execution-issue ${evaluated.workIssue} ` +
+            `--pr ${evaluated.pr} --audit-issue ${replacement} --revalidate-uniqueness true`;
+      return {
+        state: "STAGE2_EVIDENCE_REAUDIT_READY",
+        stopAfter: true,
+        ...base,
+        replacementAuditIssue: replacement,
+        nextCommand: `${finalizeCommand} && ${triggerCommand}`,
+      };
+    }
+    default:
+      return ambiguous(
+        `evidence-only correction state is ${JSON.stringify(evaluated?.status ?? null)}: ${evaluated?.reason ?? "no reason reported"} -- ` +
+          "contradictory or ambiguous evidence-correction state fails closed; no pointer mutation, no new audit",
+      );
+  }
 }
 
 // Pure. Resolves a `readExecutionBulletField` result to either a positive-integer execution
@@ -1567,6 +1677,7 @@ async function resolveMergedPrWithSettledStage2(
     reconcileStage2CorrectionPrImpl,
     checkCorrectionDeltaImpl,
     ghPrStateImpl = defaultGhPrState,
+    evaluateEvidenceCorrectionImpl,
   },
 ) {
   // No merge commit at all (an unexpected `gh`/test-double response shape): there is no evidence
@@ -1576,7 +1687,7 @@ async function resolveMergedPrWithSettledStage2(
   if (typeof mergeCommitOid !== "string" || !mergeCommitOid.trim()) {
     return resolvePostMerge(
       { repo, auditIssue, controlIssue: controlIssueNumber },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, evaluateEvidenceCorrectionImpl },
     );
   }
 
@@ -1625,7 +1736,7 @@ async function resolveMergedPrWithSettledStage2(
     // own merge, so it owns the transition unchanged.
     return resolvePostMerge(
       { repo, auditIssue, controlIssue: controlIssueNumber },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, evaluateEvidenceCorrectionImpl },
     );
   }
 
@@ -2034,6 +2145,7 @@ async function runNextReviewTransitionGateCore(
     readCorrectionCommitsImpl = defaultReadCorrectionCommits,
     reconcileStage2CorrectionPrImpl = reconcileStage2CorrectionPr,
     reconcileExistingStage2AuditIssueImpl = reconcileExistingStage2AuditIssue,
+    evaluateEvidenceCorrectionImpl = evaluateEvidenceCorrection,
   } = {},
 ) {
   let repo = args.repo;
@@ -2053,7 +2165,7 @@ async function runNextReviewTransitionGateCore(
   if (args.auditIssue) {
     return resolvePostMerge(
       { repo, auditIssue: args.auditIssue, controlIssue: null },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, evaluateEvidenceCorrectionImpl },
     );
   }
   if (args.pr) {
@@ -2181,7 +2293,7 @@ async function runNextReviewTransitionGateCore(
           mergeCommitOid: prState.mergeCommit?.oid,
           headRefOid: prState.headRefOid,
         },
-        { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl, checkCorrectionDeltaImpl, ghPrStateImpl },
+        { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl, checkCorrectionDeltaImpl, ghPrStateImpl, evaluateEvidenceCorrectionImpl },
       );
     }
     if (prState.state === "OPEN") {
@@ -2217,7 +2329,7 @@ async function runNextReviewTransitionGateCore(
     // Stage 2 reference remains the only active post-review pointer, exactly as before #537.
     return resolvePostMerge(
       { repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, evaluateEvidenceCorrectionImpl },
     );
   }
 

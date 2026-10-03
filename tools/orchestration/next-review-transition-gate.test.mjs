@@ -3733,12 +3733,166 @@ test("runNextReviewTransitionGate: NOT CLEAN with a real work Issue and no exist
         reconcileCalledWith = args;
         return { crossed: false };
       },
+      // Issue #883: the evidence-only evaluator is faked like every other composed check.
+      evaluateEvidenceCorrectionImpl: async () => ({ status: "NOT_ELIGIBLE", reason: "fixture" }),
     },
   );
   assert.deepEqual(reconcileCalledWith, { repo: "o/r", workIssue: 375 });
   assert.equal(result.exitCode, 3);
   assert.equal(result.state, "STAGE2_CORRECTION_REQUIRED");
   assert.equal(result.workIssue, 375);
+  assert.equal(result.evidenceOnlyEligible, false);
+});
+
+// -- issue #883: evidence-only Stage 2 correction routing ------------------------------------
+
+const EVIDENCE_GATE_BASE = {
+  ghIssueViewImpl: async () => ({ body: CONTROL_BODY_POST_MERGE, state: "OPEN" }),
+  ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+  checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 375, auditIssue: 378 }),
+  reconcileStage2CorrectionPrImpl: async () => ({ crossed: false }),
+};
+const evidenceSatisfied = (replacement = null) => ({
+  status: "SATISFIED",
+  workIssue: 375,
+  pr: 376,
+  mergeCommit: "a".repeat(40),
+  resultUrl: "https://github.com/o/r/issues/375#issuecomment-9",
+  replacement,
+});
+
+test("#883 gate: eligible NOT CLEAN with no recorded result stays STAGE2_CORRECTION_REQUIRED and marks evidence-only eligible", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    { ...EVIDENCE_GATE_BASE, evaluateEvidenceCorrectionImpl: async () => ({ status: "NO_RESULT", reason: "none yet" }) },
+  );
+  assert.equal(result.state, "STAGE2_CORRECTION_REQUIRED");
+  assert.equal(result.evidenceOnlyEligible, true);
+  assert.equal(result.evidenceCorrection, undefined);
+});
+
+test("#883 gate: an incomplete result keeps STAGE2_CORRECTION_REQUIRED, no replacement, reason surfaced", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    { ...EVIDENCE_GATE_BASE, evaluateEvidenceCorrectionImpl: async () => ({ status: "INCOMPLETE", reason: "evidence not verified" }) },
+  );
+  assert.equal(result.state, "STAGE2_CORRECTION_REQUIRED");
+  assert.equal(result.evidenceOnlyEligible, true);
+  assert.deepEqual(result.evidenceCorrection, { status: "INCOMPLETE", reason: "evidence not verified" });
+});
+
+test("#883 gate: source-defect / spent-lineage (NOT_ELIGIBLE) keeps the ordinary correction route with the evidence-only route unavailable", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    { ...EVIDENCE_GATE_BASE, evaluateEvidenceCorrectionImpl: async () => ({ status: "NOT_ELIGIBLE", reason: "audit is itself an evidence-recovery re-audit" }) },
+  );
+  assert.equal(result.state, "STAGE2_CORRECTION_REQUIRED");
+  assert.equal(result.evidenceOnlyEligible, false);
+  assert.equal(result.exitCode, 3);
+});
+
+test("#883 gate: satisfied evidence and no re-audit yet authorizes exactly the prepare command", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    { ...EVIDENCE_GATE_BASE, evaluateEvidenceCorrectionImpl: async () => evidenceSatisfied(null) },
+  );
+  assert.equal(result.state, "STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED");
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.nextCommand, "node tools/orchestration/evidence-correction.mjs prepare --repo o/r --audit-issue 378");
+  assert.equal(result.actionEnvelope.mode, "bounded");
+  assert.deepEqual(result.actionEnvelope.authorizedActions, ["run-evidence-correction-prepare"]);
+});
+
+test("#883 gate: satisfied evidence with the one re-audit present projects it onto the control (stale predecessor) then triggers it", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ...EVIDENCE_GATE_BASE,
+      evaluateEvidenceCorrectionImpl: async () => evidenceSatisfied({ number: 390, state: "OPEN", pending: true }),
+    },
+  );
+  assert.equal(result.state, "STAGE2_EVIDENCE_REAUDIT_READY");
+  assert.equal(result.replacementAuditIssue, 390);
+  assert.equal(
+    result.nextCommand,
+    "node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue 322 --execution-issue 375 --pr 376 " +
+      "--audit-issue 390 --stale-audit-issue 378 --revalidate-uniqueness true && node tools/review-watch/trigger.mjs --repo o/r --kind issue --number 390",
+  );
+  assert.deepEqual(result.actionEnvelope.authorizedActions, ["write-control-snapshot", "post-stage2-reviewer-trigger"]);
+});
+
+test("#883 gate: direct-reference mode (no control) verifies then triggers the re-audit, no control write authorized", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", auditIssue: "378" },
+    {
+      ...EVIDENCE_GATE_BASE,
+      evaluateEvidenceCorrectionImpl: async () => evidenceSatisfied({ number: 390, state: "OPEN", pending: true }),
+    },
+  );
+  assert.equal(result.state, "STAGE2_EVIDENCE_REAUDIT_READY");
+  assert.equal(
+    result.nextCommand,
+    "node tools/orchestration/finalize-audit-breakpoint.mjs --execution-issue 375 --pr 376 --audit-issue 390 --revalidate-uniqueness true && " +
+      "node tools/review-watch/trigger.mjs --repo o/r --kind issue --number 390",
+  );
+  assert.deepEqual(result.actionEnvelope.authorizedActions, ["verify-direct-reference-audit", "post-stage2-reviewer-trigger"]);
+});
+
+test("#883 gate: a non-pending re-audit, provenance mismatch, ambiguity, or an evaluator crash all fail closed to AMBIGUOUS", async () => {
+  const cases = [
+    async () => evidenceSatisfied({ number: 390, state: "OPEN", pending: false }),
+    async () => ({ status: "PROVENANCE_MISMATCH", reason: "result names another merge" }),
+    async () => ({ status: "AMBIGUOUS", reason: "two re-audits" }),
+    async () => {
+      throw new Error("REST 500");
+    },
+  ];
+  for (const evaluateEvidenceCorrectionImpl of cases) {
+    const result = await runNextReviewTransitionGate(
+      { repo: "o/r", controlIssue: "322" },
+      { ...EVIDENCE_GATE_BASE, evaluateEvidenceCorrectionImpl },
+    );
+    assert.equal(result.state, "AMBIGUOUS");
+    assert.equal(result.exitCode, 4);
+    assert.equal(result.nextCommand, undefined);
+  }
+});
+
+test("#883 gate: an open correction PR (source correction underway) is reconciled BEFORE any evidence-only evaluation", async () => {
+  let evaluated = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ...EVIDENCE_GATE_BASE,
+      reconcileStage2CorrectionPrImpl: async () => ({ crossed: true, pr: { number: 644, headRefOid: "correctionhead", state: "OPEN" } }),
+      ghPrStateImpl: async ({ number }) =>
+        number === 644 ? { headRefOid: "correctionhead", state: "OPEN" } : { headRefOid: "mergedhead", state: "MERGED" },
+      evaluateEvidenceCorrectionImpl: async () => {
+        evaluated += 1;
+        return evidenceSatisfied(null);
+      },
+    },
+  );
+  assert.equal(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.equal(evaluated, 0);
+});
+
+test("#883 gate: no work issue (issue #190 state) never reaches the evidence-only evaluation", async () => {
+  let evaluated = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ...EVIDENCE_GATE_BASE,
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: null, auditIssue: 378 }),
+      evaluateEvidenceCorrectionImpl: async () => {
+        evaluated += 1;
+        return evidenceSatisfied(null);
+      },
+    },
+  );
+  assert.equal(result.state, "STAGE2_CORRECTION_REQUIRED");
+  assert.equal(evaluated, 0);
 });
 
 test("runNextReviewTransitionGate: NOT CLEAN with no resolvable work Issue never spends a reconciliation lookup at all (issue #190 no-work-issue state)", async () => {
