@@ -210,6 +210,13 @@
 //       re-resolves to the same verdict; a later genuine, complete bot response resolves
 //       normally through REPORT_READY_TO_RECORD/STAGE2_CLOSE_READY/STAGE2_CORRECTION_REQUIRED
 //       above on the very next invocation, with no special "recovery" transition of its own.
+//       Issue #868 (live #859/#866) refines this in control-Issue mode only (see
+//       planUnusableAuditRecovery): the FIRST unusable response of an exact PR/work/merge target
+//       resolves to STAGE2_REPLACEMENT_AUDIT_REQUIRED (one bounded replace-unusable-audit.mjs
+//       create-or-reuse + control projection; the evidence verdict itself is unchanged); a
+//       replacement that is itself unusable stays STAGE2_RESPONSE_UNUSABLE (recovery EXHAUSTED);
+//       conflicting replacement provenance -> AMBIGUOUS; any other provenance gap keeps
+//       STAGE2_RESPONSE_UNUSABLE (recovery UNAVAILABLE). Direct --audit-issue mode is unchanged.
 //     - anything else (PREMATURE_CLOSURE, an operational error, or a state
 //       this gate does not recognize)                                      -> AMBIGUOUS
 //
@@ -280,6 +287,7 @@ import { execFileSync } from "node:child_process";
 import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 import {
   parseControlBullet,
+  parseHeadingField,
   parseExecutionPointer,
   isNoneSentinel,
   isLegacyStage2NotStartedSentinel,
@@ -299,6 +307,12 @@ import {
   defaultGhIssueList as defaultGhAuditIssueSearchList,
   parseMergeCommitRef,
   parseWorkIssueRef,
+  parseFormField,
+  parseSupersedesAuditRef,
+  classifyAuditReplacements,
+  checkPreAuditPendingState,
+  hasCanonicalAuditShape,
+  listIssuesCreatedSince,
 } from "../review-watch/lifecycle-gate.mjs";
 import { isCleanStage1Response } from "../review-watch/consumer-sync-gate.mjs";
 import { isFindingsBearingResponse, isFormalReviewEndpoint } from "../review-watch/stage1-findings.mjs";
@@ -1001,6 +1015,9 @@ function exitCodeFor(state) {
     // "authorizes proceeding" bucket as its STAGE2_REPORT_READY_TO_RECORD/
     // STAGE2_AUDIT_ALREADY_PREPARED siblings, never an error or an outstanding correction.
     case "STAGE2_TRIGGER_REQUIRED":
+    // Issue #868: names the one required, non-blocking replacement-audit create/finalize action --
+    // the same "authorizes proceeding" bucket as its STAGE2_TRIGGER_REQUIRED sibling.
+    case "STAGE2_REPLACEMENT_AUDIT_REQUIRED":
       return 0;
     case "STAGE1_CORRECTION_REQUIRED":
     // Issue #837: names the one concrete, non-blocking finalize step a stranded corrected head
@@ -1244,6 +1261,144 @@ export function composeStage2CorrectionFinalizeCommand({ repo, controlIssue, wor
   );
 }
 
+// Issue #868 (live #859/#866 reproduction): the bounded one-replacement recovery for a FIRST
+// genuine-but-unusable Stage 2 response. `resolvePostMergeVerdict` still reports
+// STAGE2_RESPONSE_UNUSABLE for the evidence itself (the parser/evidence verdict is deliberately
+// unchanged -- #866's response is NOT reclassified as a completed report); this control-Issue-mode
+// refinement decides whether the one allowed recovery transition applies, from structured durable
+// evidence only (never issue-number recency, wording, or conversation history):
+//   - the unusable audit is itself a replacement (carries "Supersedes audit")  -> EXHAUSTED: the
+//     verdict stays STAGE2_RESPONSE_UNUSABLE, a compact founder interrupt naming BOTH audits; no
+//     third audit is ever created or authorized;
+//   - it is a canonical, pending, non-replacement audit whose exact merge/work identity matches the
+//     live merged PR and the control Issue's own Execution/PR/Stage 2 pointers, and the REST scan
+//     finds no (NONE) or exactly one well-formed (FOUND) replacement -> STAGE2_REPLACEMENT_AUDIT_
+//     REQUIRED, whose nextCommand is the one idempotent create-or-reuse + finalize script;
+//   - any provenance gap (a malformed marker, identity mismatch, an unreadable scan) -> the original
+//     unusable verdict annotated UNAVAILABLE; a conflicting replacement set (competing, closed,
+//     wrong-predecessor) -> AMBIGUOUS: fail closed, never mutating the control Issue's current
+//     Stage 2 authority.
+// Never reached in direct --audit-issue mode (no control Issue to project a replacement onto): that
+// mode keeps the existing founder-interrupt verdict unchanged.
+async function planUnusableAuditRecovery(
+  { repo, controlIssue, auditIssue, verdict },
+  { ghIssueViewImpl, ghPrStateImpl, listAuditCandidatesImpl },
+) {
+  if (controlIssue === null || controlIssue === undefined) return verdict;
+  const unavailable = (reason) => ({ ...verdict, recovery: { status: "UNAVAILABLE", reason } });
+
+  let audit;
+  let control;
+  try {
+    audit = await ghIssueViewImpl({ repo, number: auditIssue });
+    control = await ghIssueViewImpl({ repo, number: controlIssue });
+  } catch (err) {
+    return unavailable(`could not read the unusable audit/control Issue to evaluate replacement recovery: ${err.message}`);
+  }
+  const auditBody = audit?.body ?? "";
+  const controlBody = control?.body ?? "";
+
+  const supersedes = parseSupersedesAuditRef(auditBody);
+  if (supersedes !== null) {
+    return {
+      ...verdict,
+      recovery: {
+        status: "EXHAUSTED",
+        supersededAudit: supersedes,
+        replacementAudit: Number(auditIssue),
+        reason:
+          `Audit #${auditIssue} is itself the one automatic replacement for superseded audit #${supersedes} and its ` +
+          "genuine response is also not a completed Stage 2 report; no third audit is created automatically. " +
+          "Founder interrupt: both audits are preserved unchanged as historical evidence.",
+      },
+    };
+  }
+  if (parseFormField(auditBody, "Supersedes audit") !== null) {
+    return unavailable(`Audit #${auditIssue} carries a malformed "Supersedes audit" field; replacement provenance cannot be proven`);
+  }
+  if (!hasCanonicalAuditShape(auditBody)) {
+    return unavailable(`Audit #${auditIssue} does not carry the complete canonical audit shape`);
+  }
+  const pending = checkPreAuditPendingState(auditBody);
+  if (!pending.ok) {
+    return unavailable(`Audit #${auditIssue} is not in the canonical pending initial state (${pending.errors.join("; ")})`);
+  }
+
+  // Same Lifecycle source finalize-audit-breakpoint.mjs reads: the ad hoc bullet, else the shipped
+  // parent-execution template's "### State" heading field (live control #859 carries only the latter).
+  const lifecycle = (parseControlBullet(controlBody, "Lifecycle") ?? parseHeadingField(controlBody, "State") ?? "").trim();
+  if (lifecycle !== "AUDIT") {
+    return unavailable(`control Issue #${controlIssue} Lifecycle is ${JSON.stringify(lifecycle)}, not "AUDIT"`);
+  }
+  const stage2 = parseOptionalIssueRefGuarded(controlBody, "Stage 2");
+  if (stage2.kind !== "issue" || stage2.issue !== Number(auditIssue)) {
+    return unavailable(`control Issue #${controlIssue}'s Stage 2 pointer does not exactly name the unusable audit #${auditIssue}`);
+  }
+  const prRef = parseOptionalIssueRefGuarded(controlBody, "PR");
+  if (prRef.kind !== "issue") return unavailable(`control Issue #${controlIssue} has no settled PR pointer`);
+  const executionRef = resolveExecutionPointerOrNone(readExecutionBulletField(controlBody));
+  if (!executionRef.ok) return unavailable(`control Issue Execution pointer is malformed: ${executionRef.reason}`);
+  const auditWork = parseWorkIssueRef(auditBody);
+  if (auditWork !== executionRef.issue) {
+    return unavailable(
+      `Audit #${auditIssue} names work issue ${JSON.stringify(auditWork)}, but the control Issue's Execution pointer is ${JSON.stringify(executionRef.issue)}`,
+    );
+  }
+  const auditMerge = parseMergeCommitRef(auditBody);
+  let prState;
+  try {
+    prState = await ghPrStateImpl({ repo, number: prRef.issue });
+  } catch (err) {
+    return unavailable(`could not read PR #${prRef.issue} to verify the audit's exact merge identity: ${err.message}`);
+  }
+  const prMerge = prState?.mergeCommit?.oid;
+  if (prState?.state !== "MERGED" || typeof prMerge !== "string" || !auditMerge || prMerge.toLowerCase() !== auditMerge.toLowerCase()) {
+    return unavailable(
+      `Audit #${auditIssue}'s exact merge commit ${JSON.stringify(auditMerge)} does not match merged PR #${prRef.issue} (${JSON.stringify(prMerge ?? null)})`,
+    );
+  }
+
+  let candidates;
+  try {
+    candidates = await listAuditCandidatesImpl({ repo, sinceIso: audit.createdAt });
+  } catch (err) {
+    return unavailable(`could not complete the replacement-audit scan: ${err.message}`);
+  }
+  const replacement = classifyAuditReplacements(candidates, {
+    predecessorNumber: Number(auditIssue),
+    predecessorCreatedAt: audit.createdAt,
+    mergeCommitOid: auditMerge,
+    executionIssue: executionRef.issue,
+  });
+  if (replacement.kind === "AMBIGUOUS") {
+    return {
+      state: "AMBIGUOUS",
+      stopAfter: true,
+      repo,
+      controlIssue,
+      auditIssue: Number(auditIssue),
+      reason:
+        `unusable Stage 2 audit #${auditIssue} cannot be automatically replaced: ${replacement.reason}. ` +
+        "Founder interrupt: no further audit is created and the control Issue's Stage 2 pointer is unchanged.",
+      replacementCandidates: replacement.candidates,
+    };
+  }
+  return {
+    state: "STAGE2_REPLACEMENT_AUDIT_REQUIRED",
+    stopAfter: true,
+    repo,
+    controlIssue,
+    pr: prRef.issue,
+    issue: executionRef.issue,
+    auditIssue: Number(auditIssue),
+    replacementAudit: replacement.kind === "FOUND" ? replacement.auditIssue : null,
+    postAudit: verdict.postAudit,
+    nextCommand:
+      `node tools/orchestration/replace-unusable-audit.mjs --control-issue ${controlIssue} ` +
+      `--execution-issue ${executionRef.issue} --pr ${prRef.issue} --audit-issue ${auditIssue}`,
+  };
+}
+
 async function resolvePostMerge(
   { repo, auditIssue, controlIssue },
   {
@@ -1253,6 +1408,7 @@ async function resolvePostMerge(
     ghIssueViewImpl = defaultGhIssueView,
     reconcileExistingStage2AuditIssueImpl = reconcileExistingStage2AuditIssue,
     checkCorrectionDeltaImpl = checkCorrectionDelta,
+    listAuditCandidatesImpl = listIssuesCreatedSince,
   },
 ) {
   let postAudit;
@@ -1286,6 +1442,15 @@ async function resolvePostMerge(
     ...(effectiveControlIssue != null ? { controlIssue: effectiveControlIssue } : {}),
   };
   const verdict = resolvePostMergeVerdict({ postAudit }, context);
+
+  // Issue #868: the first unusable genuine response may authorize one bounded replacement audit.
+  if (verdict.state === "STAGE2_RESPONSE_UNUSABLE") {
+    const recovered = await planUnusableAuditRecovery(
+      { repo, controlIssue: context.controlIssue ?? null, auditIssue: context.auditIssue, verdict },
+      { ghIssueViewImpl, ghPrStateImpl, listAuditCandidatesImpl },
+    );
+    return { exitCode: exitCodeFor(recovered.state), ...recovered };
+  }
 
   // Issue #646: STAGE2_CORRECTION_REQUIRED is the one verdict this reconciliation step can
   // still override -- every other verdict above is left exactly as resolvePostMergeVerdict
@@ -1567,6 +1732,7 @@ async function resolveMergedPrWithSettledStage2(
     reconcileStage2CorrectionPrImpl,
     checkCorrectionDeltaImpl,
     ghPrStateImpl = defaultGhPrState,
+    listAuditCandidatesImpl,
   },
 ) {
   // No merge commit at all (an unexpected `gh`/test-double response shape): there is no evidence
@@ -1576,7 +1742,7 @@ async function resolveMergedPrWithSettledStage2(
   if (typeof mergeCommitOid !== "string" || !mergeCommitOid.trim()) {
     return resolvePostMerge(
       { repo, auditIssue, controlIssue: controlIssueNumber },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, listAuditCandidatesImpl },
     );
   }
 
@@ -1625,7 +1791,7 @@ async function resolveMergedPrWithSettledStage2(
     // own merge, so it owns the transition unchanged.
     return resolvePostMerge(
       { repo, auditIssue, controlIssue: controlIssueNumber },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, listAuditCandidatesImpl },
     );
   }
 
@@ -1851,7 +2017,8 @@ async function resolvePreMergeFromControlBody(
 }
 
 function defaultGhIssueView({ repo, number }) {
-  return readGithubIssue({ repo, number, fields: ["body", "state"] });
+  // Issue #868: `createdAt` is the lower bound of the replacement-audit REST scan.
+  return readGithubIssue({ repo, number, fields: ["body", "state", "createdAt"] });
 }
 
 // Issue #837: the heads of every Stage 1 trigger round on the PR, most recent first. Reuses
@@ -2034,6 +2201,7 @@ async function runNextReviewTransitionGateCore(
     readCorrectionCommitsImpl = defaultReadCorrectionCommits,
     reconcileStage2CorrectionPrImpl = reconcileStage2CorrectionPr,
     reconcileExistingStage2AuditIssueImpl = reconcileExistingStage2AuditIssue,
+    listAuditCandidatesImpl = listIssuesCreatedSince,
   } = {},
 ) {
   let repo = args.repo;
@@ -2053,7 +2221,7 @@ async function runNextReviewTransitionGateCore(
   if (args.auditIssue) {
     return resolvePostMerge(
       { repo, auditIssue: args.auditIssue, controlIssue: null },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, listAuditCandidatesImpl },
     );
   }
   if (args.pr) {
@@ -2181,7 +2349,7 @@ async function runNextReviewTransitionGateCore(
           mergeCommitOid: prState.mergeCommit?.oid,
           headRefOid: prState.headRefOid,
         },
-        { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl, checkCorrectionDeltaImpl, ghPrStateImpl },
+        { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl, checkCorrectionDeltaImpl, ghPrStateImpl, listAuditCandidatesImpl },
       );
     }
     if (prState.state === "OPEN") {
@@ -2217,7 +2385,7 @@ async function runNextReviewTransitionGateCore(
     // Stage 2 reference remains the only active post-review pointer, exactly as before #537.
     return resolvePostMerge(
       { repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, listAuditCandidatesImpl },
     );
   }
 
