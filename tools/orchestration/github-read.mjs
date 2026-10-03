@@ -72,6 +72,12 @@ export function readGithubIssue({ repo, number, fields = ["body", "state"], exec
         throw new Error(`GitHub REST response for ${path} has a malformed or missing "state" field`);
       }
       out.state = payload.state.toUpperCase();
+    } else if (field === "title") {
+      // Issue #868: the replacement-audit composer needs the superseded audit's own title.
+      if (typeof payload.title !== "string") {
+        throw new Error(`GitHub REST response for ${path} has a malformed or missing "title" field`);
+      }
+      out.title = payload.title;
     } else if (field === "createdAt") {
       if (typeof payload.created_at !== "string" || payload.created_at === "") {
         throw new Error(`GitHub REST response for ${path} has a malformed or missing "created_at" field`);

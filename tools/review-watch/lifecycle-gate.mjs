@@ -603,6 +603,90 @@ export function parseCorrectsAuditRef(body) {
   return match ? Number(match[1]) : null;
 }
 
+// Pure. Issue #868 (live #859/#866 reproduction): the optional replacement-audit provenance field.
+// A fresh Stage 2 Audit Issue created to replace ONE unusable first audit of the same exact
+// PR/work/merge target carries a leading "### Supersedes audit" section whose first non-blank line
+// is exactly `#<predecessor>`. Like parseCorrectsAuditRef this is controller-authored pre-trigger
+// content (the reviewer-only boundary means the reviewer can never edit an issue body to plant it).
+// Strict on purpose: anything but a bare `#N` first line is "not a replacement" (null), never a
+// heuristic match. Presence of this field is also the deterministic marker that an audit IS a
+// replacement, which is what bounds automatic recovery to one replacement per target.
+export function parseSupersedesAuditRef(body) {
+  const value = parseFormField(body, "Supersedes audit");
+  if (value === null) return null;
+  const match = /^#(\d+)$/.exec(value.trim());
+  return match ? Number(match[1]) : null;
+}
+
+// Pure. The replacement body: a leading provenance section, then the superseded audit's own body
+// byte-for-byte (so Merged PR / Work issue / Exact merge commit / disposition / scope / checklist
+// are identical, and the canonical pending Findings/Verdict/Next fields are preserved). The caller
+// must already have proven the predecessor is a canonical, still-pending, non-replacement audit.
+export function composeReplacementAuditBody(predecessorBody, predecessorNumber) {
+  return `### Supersedes audit\n\n#${predecessorNumber}\n\n${String(predecessorBody ?? "").replace(/^\s+/, "")}`;
+}
+
+export function composeReplacementAuditTitle(predecessorTitle, predecessorNumber) {
+  const base = String(predecessorTitle ?? "").trim();
+  const prefixed = /^\[Audit\]/i.test(base) ? base : `[Audit] ${base}`.trim();
+  return `${prefixed} (replaces #${predecessorNumber})`;
+}
+
+const createdMsOf = (candidate) => new Date(candidate?.createdAt ?? NaN).getTime();
+
+// Pure. Classifies every audit candidate that claims to replace an audit of the same exact
+// merge/work target, for the "first unusable response -> exactly one replacement" rule.
+// `candidates` is the `{ number, body, state, createdAt }` shape. A candidate is replacement-bearing
+// for the target when it has the complete canonical audit shape, the same exact merge commit and
+// work issue, and a parseable "Supersedes audit" field (any state, any named predecessor) -- any
+// such candidate consumes the one-replacement bound, open or closed, correct or not.
+//   NONE       -- no replacement-bearing candidate exists: creating one is authorized.
+//   FOUND      -- exactly one exists, it names exactly `predecessorNumber`, is OPEN, was created
+//                 strictly after the predecessor, and carries the canonical pending initial state:
+//                 reuse it (never create another).
+//   AMBIGUOUS  -- anything else (more than one; one naming a different predecessor; closed;
+//                 no-longer-pending; not created after the predecessor): fail closed, no creation.
+export function classifyAuditReplacements(candidates, { predecessorNumber, predecessorCreatedAt, mergeCommitOid, executionIssue }) {
+  const expectedWork = executionIssue === "none" ? "none" : executionIssue;
+  const claimants = (candidates ?? []).filter((candidate) => {
+    if (Number(candidate.number) === Number(predecessorNumber)) return false;
+    const body = candidate.body ?? "";
+    if (!hasCanonicalAuditShape(body)) return false;
+    const merge = parseMergeCommitRef(body);
+    if (!merge || merge.toLowerCase() !== String(mergeCommitOid).toLowerCase()) return false;
+    if (parseWorkIssueRef(body) !== expectedWork) return false;
+    // Any non-blank "Supersedes audit" field is a claim, even an unparseable one: a malformed
+    // marker must consume the bound rather than read as "not a replacement".
+    return parseFormField(body, "Supersedes audit") !== null;
+  });
+  if (claimants.length === 0) return { kind: "NONE" };
+  const numbers = claimants.map((c) => Number(c.number)).sort((a, b) => a - b);
+  if (claimants.length > 1) {
+    return {
+      kind: "AMBIGUOUS",
+      candidates: numbers,
+      reason: `more than one audit already claims to replace an audit of this exact target (${numbers.map((n) => `#${n}`).join(", ")}); the one-replacement bound is exhausted`,
+    };
+  }
+  const only = claimants[0];
+  const number = Number(only.number);
+  const named = parseSupersedesAuditRef(only.body ?? "");
+  if (named !== Number(predecessorNumber)) {
+    return { kind: "AMBIGUOUS", candidates: [number], reason: `#${number} claims to replace #${named}, not #${predecessorNumber}; replacement provenance is not unambiguous` };
+  }
+  if (only.state !== "OPEN") {
+    return { kind: "AMBIGUOUS", candidates: [number], reason: `the existing replacement #${number} is not OPEN; the one-replacement bound is exhausted` };
+  }
+  if (!(createdMsOf(only) > new Date(predecessorCreatedAt ?? NaN).getTime())) {
+    return { kind: "AMBIGUOUS", candidates: [number], reason: `the replacement #${number} was not created strictly after the superseded audit #${predecessorNumber}; contradictory provenance` };
+  }
+  const pending = checkPreAuditPendingState(only.body ?? "");
+  if (!pending.ok) {
+    return { kind: "AMBIGUOUS", candidates: [number], reason: `the existing replacement #${number} is not in the canonical pending initial state (${pending.errors.join("; ")})` };
+  }
+  return { kind: "FOUND", auditIssue: number };
+}
+
 const SHA_TOKEN_PATTERN = /\b[0-9a-f]{7,40}\b/i;
 
 // Pure. Reads the audit-control-issue template's "Exact merge commit" field — the target
@@ -2237,7 +2321,7 @@ function defaultGhIssueLastEditedAt({ repo, number }) {
 // ready" that could silently drift apart.
 export function findMatchingOpenAuditIssues(candidates, { mergeCommitOid, executionIssue }, { requirePendingState = false } = {}) {
   const expectedWorkIssue = executionIssue === "none" ? "none" : executionIssue;
-  return (candidates ?? []).filter((candidate) => {
+  const matches = (candidates ?? []).filter((candidate) => {
     if (candidate.state !== "OPEN") return false;
     if (!hasCanonicalAuditShape(candidate.body ?? "")) return false;
     if (requirePendingState && !checkPreAuditPendingState(candidate.body ?? "").ok) return false;
@@ -2245,6 +2329,20 @@ export function findMatchingOpenAuditIssues(candidates, { mergeCommitOid, execut
     if (!candidateMergeCommit || candidateMergeCommit.toLowerCase() !== String(mergeCommitOid).toLowerCase()) return false;
     return parseWorkIssueRef(candidate.body ?? "") === expectedWorkIssue;
   });
+  // Issue #868: an OPEN audit that another matching OPEN audit (created strictly later) names in
+  // its "Supersedes audit" field is a superseded historical predecessor, not a second current
+  // candidate -- without this a one-replacement recovery would make every uniqueness check
+  // (reconciliation, finalize --revalidate-uniqueness, trigger authorization) report ambiguity.
+  // Only a mutual, same-target, strictly-later claim excludes; anything unprovable stays a match.
+  return matches.filter(
+    (candidate) =>
+      !matches.some(
+        (other) =>
+          other !== candidate &&
+          parseSupersedesAuditRef(other.body ?? "") === Number(candidate.number) &&
+          createdMsOf(other) > createdMsOf(candidate),
+      ),
+  );
 }
 
 // Walks the `correctsAuditRef` chain backward from an audit issue this same `checkCloseAudit`
@@ -3176,6 +3274,65 @@ export function ghRestCloseIssue({ repo, issue }, runImpl = execFileSync) {
   if (String(res.state ?? "").toLowerCase() !== "closed") {
     throw new Error(`REST issue close response for ${repo}#${issue} does not show the Issue closed (state: ${JSON.stringify(res.state)})`);
   }
+}
+
+// Issue #868: REST creation of the one replacement Audit Issue (never GraphQL `gh issue create`,
+// blocked in the remote/cloud profile). The response must show the intended new, OPEN Issue (not a PR)
+// in this repository carrying exactly the title/body written (the one known trailing attribution
+// decoration is tolerated, as for every other REST body write here).
+export function ghRestCreateIssue({ repo, title, body }, runImpl = execFileSync) {
+  const res = ghRestJson("POST", `repos/${repo}/issues`, { title, body }, runImpl);
+  if (!res || typeof res !== "object") throw new Error("malformed REST issue create response");
+  if (res.pull_request) throw new Error("REST issue create response describes a pull request, not an Issue");
+  const number = Number(res.number);
+  const url = String(res.html_url ?? "");
+  if (!Number.isInteger(number) || number <= 0 || !url.toLowerCase().endsWith(`/${repo}/issues/${number}`.toLowerCase())) {
+    throw new Error(`REST issue create response identity does not belong to ${repo}`);
+  }
+  if (String(res.state ?? "").toLowerCase() !== "open") throw new Error("REST issue create response does not show the Issue open");
+  if (res.title !== title) throw new Error("REST issue create response title does not match the title written");
+  if (!(normalizeEol(res.body) === normalizeEol(body) || isKnownAttributionDecoration(body, res.body))) {
+    throw new Error("REST issue create response body does not match the body written");
+  }
+  return { number, createdAt: typeof res.created_at === "string" ? res.created_at : null };
+}
+
+// Issue #868: immediately-consistent REST listing (never the search index, whose indexing lag would
+// let a re-entry after an interrupted create miss the replacement it just made) of every Issue
+// created at or after `sinceIso`, newest first, normalized to the `{ number, title, body, state,
+// createdAt }` candidate shape. Fails closed (throws) on a malformed page or when the page budget is
+// exhausted before reaching `sinceIso` -- a truncated scan must never read as "no replacement".
+export function listIssuesCreatedSince({ repo, sinceIso, maxPages = 20 }, runImpl = execFileSync) {
+  const sinceMs = new Date(sinceIso ?? NaN).getTime();
+  if (!Number.isFinite(sinceMs)) throw new Error("listIssuesCreatedSince requires a parseable sinceIso");
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const raw = runImpl(
+      "gh",
+      ["api", "-X", "GET", `repos/${repo}/issues`, "-f", "state=all", "-f", "sort=created", "-f", "direction=desc", "-f", "per_page=100", "-f", `page=${page}`],
+      { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 },
+    );
+    let items;
+    try {
+      items = JSON.parse(raw);
+    } catch {
+      throw new Error("malformed (non-JSON) REST issues list response");
+    }
+    if (!Array.isArray(items)) throw new Error("REST issues list response is not an array");
+    let reachedSince = items.length < 100;
+    for (const item of items) {
+      const createdMs = new Date(item?.created_at ?? NaN).getTime();
+      if (!Number.isFinite(createdMs)) throw new Error("REST issues list item has no parseable created_at");
+      if (createdMs < sinceMs) {
+        reachedSince = true;
+        continue;
+      }
+      if (item.pull_request) continue;
+      out.push({ number: item.number, title: item.title, body: item.body ?? "", state: item.state === "open" ? "OPEN" : "CLOSED", createdAt: item.created_at });
+    }
+    if (reachedSince) return out;
+  }
+  throw new Error(`REST issues list did not reach ${sinceIso} within ${maxPages} pages; refusing to treat a truncated scan as complete`);
 }
 
 function defaultGhCloseAuditIssue({ repo, auditIssue }) {

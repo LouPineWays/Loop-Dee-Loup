@@ -317,6 +317,15 @@ const ENVELOPES = {
     authorizedActions: ["run-lifecycle-gate-record-verdict"],
   },
   STAGE2_RESPONSE_UNUSABLE: { mode: ENVELOPE_MODES.NONE, authorizedActions: [] },
+  // Issue #868 (live #859/#866 reproduction): the FIRST genuine-but-unusable Stage 2 response of an
+  // exact PR/work/merge target authorizes exactly one bounded recovery action -- the idempotent
+  // `replace-unusable-audit.mjs` create-or-reuse + control-projection (finalize-audit-breakpoint)
+  // script this verdict's own `nextCommand` names. Never a reviewer trigger on either audit, a
+  // same-thread retrigger, coaching, or a second gate invocation in the same context: the
+  // replacement's one ordinary trigger is a LATER fresh invocation's STAGE2_TRIGGER_REQUIRED. A
+  // second unusable response (or any provenance gap) stays STAGE2_RESPONSE_UNUSABLE/AMBIGUOUS, mode
+  // "none" above.
+  STAGE2_REPLACEMENT_AUDIT_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["run-replace-unusable-audit"] },
   // Issue #646 (the #487/#643/#644/#645 live reproduction): reconcileStage2CorrectionPr found
   // an already-open, work-Issue-linked correction PR while re-evaluating what would otherwise
   // be STAGE2_CORRECTION_REQUIRED -- the PR boundary was already crossed by a prior (possibly

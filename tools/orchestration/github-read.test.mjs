@@ -37,6 +37,12 @@ test("readGithubIssue output matches the gh --json shape the gates consume, unch
   assert.equal(parseControlBullet(out.body, "Lifecycle"), "READY");
 });
 
+test("readGithubIssue supports the title field (issue #868) and fails closed on a malformed one", () => {
+  const out = readGithubIssue({ repo: "o/r", number: 725, fields: ["title", "body"], execFileImpl: fakeExec(restIssue({ title: "[Audit] x" })) });
+  assert.deepEqual(out, { title: "[Audit] x", body: restIssue().body });
+  assert.throws(() => readGithubIssue({ repo: "o/r", number: 725, fields: ["title"], execFileImpl: fakeExec(restIssue({ title: 5 })) }), /title/);
+});
+
 test("readGithubIssue with no repo relies on gh's own current-repo placeholders", () => {
   const calls = [];
   readGithubIssue({ number: 5, fields: ["body"], execFileImpl: fakeExec(restIssue({ number: 5 }), calls) });
