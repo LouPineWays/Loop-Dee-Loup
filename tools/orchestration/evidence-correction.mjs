@@ -407,8 +407,13 @@ export async function evaluateEvidenceCorrection({ repo, auditIssue }, io = defa
   }
   ours.sort((a, b) => new Date(a.comment.created_at).getTime() - new Date(b.comment.created_at).getTime());
   const latest = ours.at(-1);
-  const base = { auditIssue: Number(auditIssue), workIssue, pr, mergeCommit, reportUrl, trustedLogin: audit.author, auditBodyHash: sha256(body), host: audit.host };
   const replacement = replacements[0] ?? null;
+  // reportBodyHash binds the matched report's content (a same-permalink edit changes it);
+  // replacementNumber exposes the re-audit lineage even on early INCOMPLETE returns.
+  const base = {
+    auditIssue: Number(auditIssue), workIssue, pr, mergeCommit, reportUrl, trustedLogin: audit.author, auditBodyHash: sha256(body),
+    reportBodyHash: sha256(reportComment?.body ?? ""), replacementNumber: replacement ? Number(replacement.number) : null, host: audit.host,
+  };
 
   if (!latest) {
     if (replacement) {
@@ -519,10 +524,13 @@ export async function runRecord({ repo, auditIssue, evidence }, io = defaultIo) 
   // reach the POST. Same audit/work/PR/merge/report identity, unchanged audit body, no correction PR
   // and an unspent re-audit allowance (the evaluator reports each of those as a non-recordable status).
   const fresh = await evaluateEvidenceCorrection({ repo, auditIssue }, io);
+  const authorityKeys = ["auditIssue", "workIssue", "pr", "mergeCommit", "reportUrl", "trustedLogin", "auditBodyHash", "reportBodyHash"];
+  const sameBase = authorityKeys.every((k) => fresh[k] === before[k]);
+  // Another authorized invocation already recorded and the evaluator independently verified it for
+  // the unchanged authority: converge idempotently, never POST a duplicate.
+  if (fresh.status === Status.SATISFIED && sameBase) return { exitCode: 0, state: "EVIDENCE_RECORDED", alreadyRecorded: true, ...fresh };
   const recordable = fresh.status === Status.NO_RESULT || fresh.status === Status.INCOMPLETE;
-  const sameAuthority =
-    recordable &&
-    ["auditIssue", "workIssue", "pr", "mergeCommit", "reportUrl", "trustedLogin", "auditBodyHash"].every((k) => fresh[k] === before[k]);
+  const sameAuthority = recordable && sameBase && fresh.replacementNumber === null && before.replacementNumber === null;
   if (!sameAuthority) {
     return {
       exitCode: 2,

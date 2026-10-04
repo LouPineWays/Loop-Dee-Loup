@@ -546,6 +546,42 @@ test("record: authority changing between initial evaluation and the POST prevent
   assert.equal((await runVerify({ repo: REPO, auditIssue: AUDIT }, makeIo(stable))).exitCode, 0);
 });
 
+test("record: report content edit at the same permalink prevents the POST", async () => {
+  const world = makeWorld();
+  const result = await runRecord({ repo: REPO, auditIssue: AUDIT, evidence: [commentUrl(WORK, 100)] }, racingIo(world, (w) => {
+    w.comments[AUDIT][1].body += " edited after initial evaluation";
+  }));
+  assert.equal(result.exitCode, 2);
+  assert.equal(world.posts.length, 0);
+});
+
+test("record: malformed result plus a newly created replacement (consumed slot hidden behind INCOMPLETE) prevents the POST", async () => {
+  const world = makeWorld();
+  const result = await runRecord({ repo: REPO, auditIssue: AUDIT, evidence: [commentUrl(WORK, 100)] }, racingIo(world, (w) => {
+    w.comments[WORK].push({ id: 7001, body: RESULT_HEADING + " malformed", created_at: ts(41), user: { login: FOUNDER } });
+    w.issues[900] = {
+      number: 900,
+      body: composeReplacementAuditBody(auditBody(), { predecessor: AUDIT, workIssue: WORK, mergeCommit: MERGE, resultUrl: "u" }),
+      state: "OPEN",
+      created_at: ts(50),
+      author: FOUNDER,
+    };
+  }));
+  assert.equal(result.exitCode, 2);
+  assert.equal(world.posts.length, 0);
+});
+
+test("record: a concurrent authorized record between evaluation and recheck converges idempotently with no duplicate POST", async () => {
+  const world = makeWorld();
+  const result = await runRecord({ repo: REPO, auditIssue: AUDIT, evidence: [commentUrl(WORK, 100)] }, racingIo(world, (w) => {
+    addResult(w);
+  }));
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "EVIDENCE_RECORDED");
+  assert.equal(result.alreadyRecorded, true);
+  assert.equal(world.posts.length, 0);
+});
+
 // -- prepare ----------------------------------------------------------------------------------
 
 test("prepare: refuses (no creation) when evidence is not durably satisfied", async () => {
