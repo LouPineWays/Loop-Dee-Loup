@@ -514,6 +514,23 @@ export async function runRecord({ repo, auditIssue, evidence }, io = defaultIo) 
     findingUrl: before.reportUrl,
     evidenceUrls: urls,
   });
+  // Re-prove the complete authority and lineage immediately before the durable mutation: a posted
+  // result cannot be retracted by the later (fail-closed) evaluation, so a stale decision must never
+  // reach the POST. Same audit/work/PR/merge/report identity, unchanged audit body, no correction PR
+  // and an unspent re-audit allowance (the evaluator reports each of those as a non-recordable status).
+  const fresh = await evaluateEvidenceCorrection({ repo, auditIssue }, io);
+  const recordable = fresh.status === Status.NO_RESULT || fresh.status === Status.INCOMPLETE;
+  const sameAuthority =
+    recordable &&
+    ["auditIssue", "workIssue", "pr", "mergeCommit", "reportUrl", "trustedLogin", "auditBodyHash"].every((k) => fresh[k] === before[k]);
+  if (!sameAuthority) {
+    return {
+      exitCode: 2,
+      state: "EVIDENCE_AMBIGUOUS",
+      auditIssue: Number(auditIssue),
+      reason: `authority changed before the evidence-correction result could be posted (${fresh.status}: ${fresh.reason}); nothing was posted`,
+    };
+  }
   const posted = await io.ghPost(`repos/${repo}/issues/${before.workIssue}/comments`, { body: commentBody });
   if (!String(posted?.html_url ?? "").toLowerCase().includes(`/${repo}/issues/${before.workIssue}#issuecomment-`.toLowerCase())) {
     return { exitCode: 1, message: `result comment POST response identity does not match ${repo}#${before.workIssue}` };
