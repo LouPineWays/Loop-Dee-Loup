@@ -505,6 +505,83 @@ test("record: a non-eligible audit (source-defect control / spent lineage) is re
   assert.equal(world.posts.length, 0);
 });
 
+// Race: mutate the world as the SECOND evaluation (the freshness re-proof just before the POST)
+// begins, i.e. after record's initial evaluation and evidence verification.
+function racingIo(world, mutate) {
+  const io = makeIo(world);
+  let auditReads = 0;
+  const inner = io.ghGet;
+  io.ghGet = async (path) => {
+    if (path === `repos/o/r/issues/${AUDIT}` && ++auditReads === 2) mutate(world);
+    return inner(path);
+  };
+  return io;
+}
+
+test("record: authority changing between initial evaluation and the POST prevents the POST (audit edit, correction PR, consumed re-audit allowance)", async () => {
+  const mutations = {
+    "audit edit": (w) => { w.issues[AUDIT].body += "\nedited"; },
+    "correction PR": (w) => { w.openPrs = [{ number: 901, state: "OPEN", headRefName: `fix/issue-${WORK}-correction`, body: "", title: "" }]; },
+    "consumed re-audit": (w) => {
+      w.issues[900] = {
+        number: 900,
+        body: composeReplacementAuditBody(auditBody(), { predecessor: AUDIT, workIssue: WORK, mergeCommit: MERGE, resultUrl: "u" }),
+        state: "OPEN",
+        created_at: ts(50),
+        author: FOUNDER,
+      };
+    },
+  };
+  for (const [name, mutate] of Object.entries(mutations)) {
+    const world = makeWorld();
+    const result = await runRecord({ repo: REPO, auditIssue: AUDIT, evidence: [commentUrl(WORK, 100)] }, racingIo(world, mutate));
+    assert.equal(result.exitCode, 2, name);
+    assert.equal(world.posts.length, 0, `${name}: nothing may be posted`);
+  }
+  // Stable positive control.
+  const stable = makeWorld();
+  const ok = await runRecord({ repo: REPO, auditIssue: AUDIT, evidence: [commentUrl(WORK, 100)] }, racingIo(stable, () => {}));
+  assert.equal(ok.exitCode, 0);
+  assert.equal(stable.posts.length, 1);
+  assert.equal((await runVerify({ repo: REPO, auditIssue: AUDIT }, makeIo(stable))).exitCode, 0);
+});
+
+test("record: report content edit at the same permalink prevents the POST", async () => {
+  const world = makeWorld();
+  const result = await runRecord({ repo: REPO, auditIssue: AUDIT, evidence: [commentUrl(WORK, 100)] }, racingIo(world, (w) => {
+    w.comments[AUDIT][1].body += " edited after initial evaluation";
+  }));
+  assert.equal(result.exitCode, 2);
+  assert.equal(world.posts.length, 0);
+});
+
+test("record: malformed result plus a newly created replacement (consumed slot hidden behind INCOMPLETE) prevents the POST", async () => {
+  const world = makeWorld();
+  const result = await runRecord({ repo: REPO, auditIssue: AUDIT, evidence: [commentUrl(WORK, 100)] }, racingIo(world, (w) => {
+    w.comments[WORK].push({ id: 7001, body: RESULT_HEADING + " malformed", created_at: ts(41), user: { login: FOUNDER } });
+    w.issues[900] = {
+      number: 900,
+      body: composeReplacementAuditBody(auditBody(), { predecessor: AUDIT, workIssue: WORK, mergeCommit: MERGE, resultUrl: "u" }),
+      state: "OPEN",
+      created_at: ts(50),
+      author: FOUNDER,
+    };
+  }));
+  assert.equal(result.exitCode, 2);
+  assert.equal(world.posts.length, 0);
+});
+
+test("record: a concurrent authorized record between evaluation and recheck converges idempotently with no duplicate POST", async () => {
+  const world = makeWorld();
+  const result = await runRecord({ repo: REPO, auditIssue: AUDIT, evidence: [commentUrl(WORK, 100)] }, racingIo(world, (w) => {
+    addResult(w);
+  }));
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "EVIDENCE_RECORDED");
+  assert.equal(result.alreadyRecorded, true);
+  assert.equal(world.posts.length, 0);
+});
+
 // -- prepare ----------------------------------------------------------------------------------
 
 test("prepare: refuses (no creation) when evidence is not durably satisfied", async () => {

@@ -407,8 +407,13 @@ export async function evaluateEvidenceCorrection({ repo, auditIssue }, io = defa
   }
   ours.sort((a, b) => new Date(a.comment.created_at).getTime() - new Date(b.comment.created_at).getTime());
   const latest = ours.at(-1);
-  const base = { auditIssue: Number(auditIssue), workIssue, pr, mergeCommit, reportUrl, trustedLogin: audit.author, auditBodyHash: sha256(body), host: audit.host };
   const replacement = replacements[0] ?? null;
+  // reportBodyHash binds the matched report's content (a same-permalink edit changes it);
+  // replacementNumber exposes the re-audit lineage even on early INCOMPLETE returns.
+  const base = {
+    auditIssue: Number(auditIssue), workIssue, pr, mergeCommit, reportUrl, trustedLogin: audit.author, auditBodyHash: sha256(body),
+    reportBodyHash: sha256(reportComment?.body ?? ""), replacementNumber: replacement ? Number(replacement.number) : null, host: audit.host,
+  };
 
   if (!latest) {
     if (replacement) {
@@ -514,6 +519,26 @@ export async function runRecord({ repo, auditIssue, evidence }, io = defaultIo) 
     findingUrl: before.reportUrl,
     evidenceUrls: urls,
   });
+  // Re-prove the complete authority and lineage immediately before the durable mutation: a posted
+  // result cannot be retracted by the later (fail-closed) evaluation, so a stale decision must never
+  // reach the POST. Same audit/work/PR/merge/report identity, unchanged audit body, no correction PR
+  // and an unspent re-audit allowance (the evaluator reports each of those as a non-recordable status).
+  const fresh = await evaluateEvidenceCorrection({ repo, auditIssue }, io);
+  const authorityKeys = ["auditIssue", "workIssue", "pr", "mergeCommit", "reportUrl", "trustedLogin", "auditBodyHash", "reportBodyHash"];
+  const sameBase = authorityKeys.every((k) => fresh[k] === before[k]);
+  // Another authorized invocation already recorded and the evaluator independently verified it for
+  // the unchanged authority: converge idempotently, never POST a duplicate.
+  if (fresh.status === Status.SATISFIED && sameBase) return { exitCode: 0, state: "EVIDENCE_RECORDED", alreadyRecorded: true, ...fresh };
+  const recordable = fresh.status === Status.NO_RESULT || fresh.status === Status.INCOMPLETE;
+  const sameAuthority = recordable && sameBase && fresh.replacementNumber === null && before.replacementNumber === null;
+  if (!sameAuthority) {
+    return {
+      exitCode: 2,
+      state: "EVIDENCE_AMBIGUOUS",
+      auditIssue: Number(auditIssue),
+      reason: `authority changed before the evidence-correction result could be posted (${fresh.status}: ${fresh.reason}); nothing was posted`,
+    };
+  }
   const posted = await io.ghPost(`repos/${repo}/issues/${before.workIssue}/comments`, { body: commentBody });
   if (!String(posted?.html_url ?? "").toLowerCase().includes(`/${repo}/issues/${before.workIssue}#issuecomment-`.toLowerCase())) {
     return { exitCode: 1, message: `result comment POST response identity does not match ${repo}#${before.workIssue}` };
