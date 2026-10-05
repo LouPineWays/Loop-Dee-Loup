@@ -364,7 +364,11 @@ export function invokedGateScriptBasenames(command) {
     if (basename === "control-plane-bootstrap.mjs" || scriptPath === "-") {
       let i = nodeIdx + 2;
       while (tokens[i] === "--control-plane-source") i += 2;
-      basename = `${stripSurroundingQuotes(tokens[i] ?? "")}.mjs`;
+      const positional = stripSurroundingQuotes(tokens[i] ?? "");
+      // Issue #901: a runner-bound continuation names the exact script path, not a gate name.
+      basename = /^tools\/(?:orchestration|review-watch)\/[A-Za-z0-9_.-]+\.mjs$/.test(positional)
+        ? positional.split("/").pop()
+        : `${positional}.mjs`;
     }
     if (GATE_SCRIPT_BASENAMES.has(basename)) found.push(basename);
   }

@@ -343,6 +343,7 @@ import {
 import { combineMergeReadyResult } from "../review-watch/merge-ready-gate.mjs";
 // Issue #486: the deterministic action-envelope table every verdict below is stamped with.
 import { getActionEnvelope, getCorrectionContinuation } from "./action-envelope.mjs";
+import { bindVerdictContinuation } from "./control-plane-continuation.mjs";
 // Issue #883: the deterministic evidence-only Stage 2 correction evaluator.
 import { evaluateEvidenceCorrection, Status as EvidenceStatus } from "./evidence-correction.mjs";
 // Issue #678 Stage 1 correction (PR #714, finding 1): persists this gate's own verdict to a
@@ -2644,8 +2645,10 @@ async function main() {
   }
   // Issue #678 Stage 1 correction, finding 1: persist the verdict to the side channel at the
   // exact point it is emitted, before any downstream pipeline stage can transform stdout.
-  persistLastGateVerdict(result);
-  console.log(JSON.stringify(result));
+  // Issue #901: machine-authored continuations stay bound to the authenticated runner.
+  const emitted = bindVerdictContinuation(result);
+  persistLastGateVerdict(emitted);
+  console.log(JSON.stringify(emitted));
   process.exit(result.exitCode);
 }
 

@@ -753,6 +753,14 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/evidence-correction.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
   { dest: "tools/orchestration/evidence-correction.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/orchestration/next-review-transition-gate.mjs", dependsOnDest: "tools/orchestration/evidence-correction.mjs" },
+  // Issue #901: runner-bound continuations. The three gate entrypoints, action-envelope.mjs,
+  // launcher-run.mjs hard-import control-plane-continuation.mjs; an unmanaged preserved copy would
+  // fail at ESM load time.
+  { dest: "tools/orchestration/ready-dispatch-gate.mjs", dependsOnDest: "tools/orchestration/control-plane-continuation.mjs" },
+  { dest: "tools/orchestration/next-review-transition-gate.mjs", dependsOnDest: "tools/orchestration/control-plane-continuation.mjs" },
+  { dest: "tools/orchestration/session-entry-gate.mjs", dependsOnDest: "tools/orchestration/control-plane-continuation.mjs" },
+  { dest: "tools/orchestration/action-envelope.mjs", dependsOnDest: "tools/orchestration/control-plane-continuation.mjs" },
+  { dest: "tools/orchestration/launcher-run.mjs", dependsOnDest: "tools/orchestration/control-plane-continuation.mjs" },
 ];
 
 // Pure. Given one install/update run's final toInstall/toSkip classification, returns one

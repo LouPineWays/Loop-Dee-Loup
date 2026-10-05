@@ -61,6 +61,14 @@ const BOOTSTRAP_PATH = "tools/orchestration/control-plane-bootstrap.mjs";
 const CONTROL_PLANE_PATHS = ["tools/orchestration", "tools/review-watch"];
 const NETWORK_TIMEOUT_MS = 20000;
 const GATE_NAME = /^[a-z0-9][a-z0-9-]*$/;
+// Issue #901: a machine-authored continuation re-enters through this bootstrap naming the exact
+// control-plane script (`tools/orchestration/x.mjs` | `tools/review-watch/x.mjs`) instead of a gate.
+const SCRIPT_PATH = /^tools\/(?:orchestration|review-watch)\/[A-Za-z0-9_.-]+\.mjs$/;
+export function resolveScriptRel(gate) {
+  if (GATE_NAME.test(gate)) return `tools/orchestration/${gate}.mjs`;
+  if (SCRIPT_PATH.test(gate) && !gate.includes("..")) return gate;
+  return null;
+}
 
 function defaultGit(args, { cwd, timeout, env, raw } = {}) {
   const out = execFileSync("git", args, {
@@ -310,8 +318,9 @@ function gateParses(script, spawn) {
 
 export function runBootstrap(argv, { cwd = process.cwd(), git = defaultGit, spawn = spawnSync, cacheDir, log = (m) => console.error(m), own } = {}) {
   const { source, gate, gateArgs } = parseBootstrapArgs(argv);
-  if (!gate || !GATE_NAME.test(gate)) {
-    log("Usage: control-plane-bootstrap.mjs [--control-plane-source default-branch|checkout] <gate-name> [gate args...]");
+  const scriptRel = gate ? resolveScriptRel(gate) : null;
+  if (!scriptRel) {
+    log("Usage: control-plane-bootstrap.mjs [--control-plane-source default-branch|checkout] <gate-name|tools/<orchestration|review-watch>/script.mjs> [args...]");
     return 2;
   }
   const plan = planBootstrap({ cwd, source, git });
@@ -327,14 +336,14 @@ export function runBootstrap(argv, { cwd = process.cwd(), git = defaultGit, spaw
   let args = gateArgs;
   let env = process.env;
   if (plan.mode === "local") {
-    script = join(plan.root, "tools", "orchestration", `${gate}.mjs`);
-    if (plan.source === "checkout-explicit") args = [...gateArgs, "--control-plane-source", "checkout"];
+    script = join(plan.root, ...scriptRel.split("/"));
+    if (plan.source === "checkout-explicit" && GATE_NAME.test(gate)) args = [...gateArgs, "--control-plane-source", "checkout"];
     if (!existsSync(script)) {
-      log(fail(`${gate}.mjs does not exist in this checkout`).message);
+      log(fail(`${scriptRel} does not exist in this checkout`).message);
       return 1;
     }
     if (!gateParses(script, spawn)) {
-      log(fail(`${gate}.mjs in this checkout is not executable JavaScript`).message);
+      log(fail(`${scriptRel} in this checkout is not executable JavaScript`).message);
       return 1;
     }
   } else {
@@ -345,13 +354,13 @@ export function runBootstrap(argv, { cwd = process.cwd(), git = defaultGit, spaw
       log(fail(`could not export the control-plane runner for ${plan.witness.defaultBranchRef}: ${errText(err)}`).message);
       return 1;
     }
-    script = join(runnerDir, "tools", "orchestration", `${gate}.mjs`);
+    script = join(runnerDir, ...scriptRel.split("/"));
     if (!existsSync(script)) {
-      log(fail(`${gate}.mjs does not exist in ${plan.witness.defaultBranchRef}`).message);
+      log(fail(`${scriptRel} does not exist in ${plan.witness.defaultBranchRef}`).message);
       return 1;
     }
     if (!gateParses(script, spawn)) {
-      log(fail(`${gate}.mjs in ${plan.witness.defaultBranchRef} is not executable JavaScript`).message);
+      log(fail(`${scriptRel} in ${plan.witness.defaultBranchRef} is not executable JavaScript`).message);
       return 1;
     }
     // Verdict-handoff/action-envelope state belongs to the SUBJECT checkout (the one whose hooks
@@ -362,7 +371,7 @@ export function runBootstrap(argv, { cwd = process.cwd(), git = defaultGit, spaw
       [STATE_DIR_ENV]: process.env[STATE_DIR_ENV] || join(plan.root, ".claude", "action-envelope-state"),
     };
     log(
-      `control-plane bootstrap: running ${gate} from ${plan.witness.defaultBranchRef}@${plan.runnerCommit.slice(0, 12)} ` +
+      `control-plane bootstrap: running ${scriptRel} from ${plan.witness.defaultBranchRef}@${plan.runnerCommit.slice(0, 12)} ` +
         `(checkout HEAD ${plan.witness.subjectHead.slice(0, 12)}: ${plan.reason}); subject checkout untouched.`,
     );
   }
