@@ -113,12 +113,12 @@ test("a Merged PR URL from a different repository with the same PR number is rej
   assert.equal((await run(args, deps(auditBody().replace("https://github.com/o/r/pull/738", "#738")))).exitCode, 0);
 });
 
-test("a freshly created valid Audit Issue succeeds even when Search has not indexed it yet", async () => {
+test("a freshly created valid Audit Issue succeeds even when repository listing has not indexed it yet", async () => {
   const r = await run(args, deps(auditBody(), { list: [] }));
   assert.equal(r.message, "AUDIT_READY #739");
 });
 
-test("a Search failure still fails closed", async () => {
+test("a candidate-enumeration failure still fails closed", async () => {
   const d = deps(auditBody());
   const r = await run(args, { ...d, ghIssueListImpl: async () => { throw new Error("boom"); } });
   assert.match(r.message, /^AUDIT_PREPARATION_FAILED /);

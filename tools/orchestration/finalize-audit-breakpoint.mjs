@@ -283,7 +283,7 @@ export function verifyAuditIssueMatches(auditView, { mergeCommitOid, executionIs
 // Reuses `findMatchingOpenAuditIssues` — the exact same matching semantics the initial
 // reconciliation search already applied — rather than a second, competing definition of "audit
 // ready." `candidates` is the same `{ number, title, body, state, createdAt }` shape
-// `defaultGhIssueList`'s "[Audit] in:title" search returns.
+// `defaultGhIssueList`'s "[Audit]"-titled repository-issue enumeration returns.
 export function verifyAuditIssueStillUnique(candidates, { mergeCommitOid, executionIssue, auditIssue }) {
   const matches = findMatchingOpenAuditIssues(candidates, { mergeCommitOid, executionIssue });
   const numbers = matches.map((m) => Number(m.number)).sort((a, b) => a - b);
@@ -423,7 +423,7 @@ function unverified({ controlIssue, executionIssue, pr, auditIssue, reason }) {
 // discovery search a race can land behind. Left `false` by default so the ordinary
 // preparation-worker-authored finalize call, which already knows the Audit Issue it just created
 // is the only one, never pays for (or risks a spurious failure from) an extra "[Audit] in:title"
-// GitHub Search API query subject to brief indexing lag.
+// repository-issues enumeration (issue #895: repository-scoped REST, no global Search).
 export async function run(
   { repo, controlIssue, executionIssue, pr, auditIssue, revalidateUniqueness = false, staleAuditIssue = null },
   {
