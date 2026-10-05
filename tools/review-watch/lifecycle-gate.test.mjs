@@ -29,7 +29,8 @@ import {
   hasCanonicalAuditShape,
   isNoWorkIssueSentinel,
   normalizeIssueNumber,
-  normalizeSearchIssuesPage,
+  normalizeRestIssueCandidate,
+  defaultGhIssueList,
   parseArgs,
   parseCorrectsAuditRef,
   parseFormField,
@@ -3963,39 +3964,91 @@ test("checkCloseAudit: the shared-Work-issue sweep cites a candidate's own CLEAN
   assert.doesNotMatch(predecessorComment.body, /not backed/, "must never falsely claim #901's own verdict is not backed CLEAN");
 });
 
-// -- normalizeSearchIssuesPage (Stage 1 review finding on PR #435: real pagination for
-// defaultGhIssueList's candidate-successor search, replacing a fixed 200-issue --limit that
-// silently dropped candidates past it) ------------------------------------------------------
+// -- defaultGhIssueList / normalizeRestIssueCandidate (issue #895: repository-scoped REST candidate
+// discovery replacing the global `search/issues` call rejected in repository-bound remote sessions) --
 
-test("normalizeSearchIssuesPage: maps REST Search API items to the { number, title, body, state, createdAt } shape checkCloseAudit's candidate walk expects", () => {
-  const page = {
-    total_count: 2,
-    items: [
-      { number: 396, title: "[Audit] #306", body: "body 396", state: "closed", created_at: "2026-09-05T09:59:55Z" },
-      { number: 406, title: "[Audit] #306", body: "body 406", state: "open", created_at: "2026-09-05T14:00:00Z" },
-    ],
+const REPO = "owner/repo";
+const restIssue = (number, title, extra = {}) => ({
+  number,
+  title,
+  body: `body ${number}`,
+  state: "open",
+  created_at: "2026-09-05T09:59:55Z",
+  html_url: `https://github.com/${REPO}/issues/${number}`,
+  ...extra,
+});
+const restPr = (number, title, extra = {}) => ({
+  ...restIssue(number, title, extra),
+  html_url: `https://github.com/${REPO}/pull/${number}`,
+  pull_request: { url: `https://api.github.com/repos/${REPO}/pulls/${number}` },
+});
+// Fake `gh` runner serving descending-number pages of the given full listing.
+function fakeRunner(all, calls = []) {
+  return (cmd, args) => {
+    calls.push([cmd, ...args]);
+    const fields = Object.fromEntries(
+      args.flatMap((a, i) => (a === "-f" ? [args[i + 1].split(/=(.*)/s).slice(0, 2)] : [])),
+    );
+    const per = Number(fields.per_page);
+    const page = Number(fields.page);
+    return JSON.stringify(all.slice((page - 1) * per, page * per));
   };
-  assert.deepEqual(normalizeSearchIssuesPage(page), [
-    { number: 396, title: "[Audit] #306", body: "body 396", state: "CLOSED", createdAt: "2026-09-05T09:59:55Z" },
-    { number: 406, title: "[Audit] #306", body: "body 406", state: "OPEN", createdAt: "2026-09-05T14:00:00Z" },
-  ]);
+}
+
+test("normalizeRestIssueCandidate: maps REST items to the { number, title, body, state, createdAt } shape checkCloseAudit's candidate walk expects", () => {
+  assert.deepEqual(normalizeRestIssueCandidate(restIssue(396, "[Audit] #306", { state: "closed" }), { repo: REPO }), {
+    number: 396, title: "[Audit] #306", body: "body 396", state: "CLOSED", createdAt: "2026-09-05T09:59:55Z",
+  });
+  assert.equal(normalizeRestIssueCandidate(restIssue(406, "[Audit] #306"), { repo: REPO }).state, "OPEN");
 });
 
-test("normalizeSearchIssuesPage: filters out pull requests matching the same search text (the Search API returns both issues and PRs)", () => {
-  const page = {
-    items: [
-      { number: 9001, title: "[Audit] pr mention", body: "a PR, not an audit issue", state: "open", created_at: "2026-09-05T09:00:00Z", pull_request: { url: "https://api.github.com/repos/owner/repo/pulls/9001" } },
-      { number: 396, title: "[Audit] #306", body: "body 396", state: "closed", created_at: "2026-09-05T09:59:55Z" },
-    ],
-  };
-  const result = normalizeSearchIssuesPage(page);
-  assert.equal(result.length, 1);
-  assert.equal(result[0].number, 396);
+test("normalizeRestIssueCandidate: a pull request entry normalizes to null; malformed or wrong-repository entries throw", () => {
+  assert.equal(normalizeRestIssueCandidate(restPr(9001, "[Audit] pr mention"), { repo: REPO }), null);
+  assert.throws(() => normalizeRestIssueCandidate({ title: "x", state: "open" }, { repo: REPO }), /missing integer number/);
+  assert.throws(() => normalizeRestIssueCandidate(restIssue(5, "x", { state: "weird" }), { repo: REPO }), /missing title\/state/);
+  assert.throws(
+    () => normalizeRestIssueCandidate(restIssue(5, "[Audit] x", { html_url: "https://github.com/other/repo/issues/5" }), { repo: REPO }),
+    /does not belong to owner\/repo/,
+  );
 });
 
-test("normalizeSearchIssuesPage: an empty or missing items array normalizes to an empty array", () => {
-  assert.deepEqual(normalizeSearchIssuesPage({ items: [] }), []);
-  assert.deepEqual(normalizeSearchIssuesPage({}), []);
+test("defaultGhIssueList: repository-scoped REST only -- never invokes the global search/issues endpoint", () => {
+  const calls = [];
+  defaultGhIssueList({ repo: REPO }, { runImpl: fakeRunner([restIssue(3, "[Audit] #1")], calls) });
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].includes(`repos/${REPO}/issues`));
+  assert.ok(!calls.flat().some((a) => /search/.test(a)), "must not call the global Search API");
+});
+
+test("defaultGhIssueList: positive/negative candidate filtering -- keeps [Audit] issues (open and closed), drops PRs and non-audit titles", () => {
+  const all = [
+    restPr(30, "[Audit] pr contamination"),
+    restIssue(29, "[Audit] #20", { state: "closed" }),
+    restIssue(28, "Unrelated work"),
+    restIssue(27, "[audit] lowercase tag"),
+  ];
+  const result = defaultGhIssueList({ repo: REPO }, { runImpl: fakeRunner(all) });
+  assert.deepEqual(result.map((c) => [c.number, c.state]), [[29, "CLOSED"], [27, "OPEN"]]);
+});
+
+test("defaultGhIssueList: candidates spanning multiple repository pages are all returned (no silent truncation)", () => {
+  const all = [];
+  for (let n = 250; n >= 1; n -= 1) all.push(restIssue(n, n % 50 === 0 ? `[Audit] #${n}` : `Issue ${n}`));
+  const calls = [];
+  const result = defaultGhIssueList({ repo: REPO }, { runImpl: fakeRunner(all, calls) });
+  assert.deepEqual(result.map((c) => c.number), [250, 200, 150, 100, 50]);
+  assert.equal(calls.length, 3, "250 items at 100/page: pages 1-3, the short third page ends the walk");
+});
+
+test("defaultGhIssueList: fails closed on the safety bound, malformed pages, duplicate or mis-ordered evidence", () => {
+  const all = [];
+  for (let n = 300; n >= 1; n -= 1) all.push(restIssue(n, `Issue ${n}`));
+  assert.throws(() => defaultGhIssueList({ repo: REPO }, { runImpl: fakeRunner(all), limit: 200 }), /safety bound/);
+  assert.throws(() => defaultGhIssueList({ repo: REPO }, { runImpl: () => "not json" }), /non-JSON/);
+  assert.throws(() => defaultGhIssueList({ repo: REPO }, { runImpl: () => JSON.stringify({ message: "Forbidden" }) }), /expected an array page/);
+  assert.throws(() => defaultGhIssueList({ repo: REPO }, { runImpl: () => JSON.stringify([restIssue(5, "a"), restIssue(5, "b")]) }), /duplicate #5/);
+  assert.throws(() => defaultGhIssueList({ repo: REPO }, { runImpl: () => JSON.stringify([restIssue(5, "a"), restIssue(6, "b")]) }), /not newest-first/);
+  assert.throws(() => defaultGhIssueList({ repo: REPO }, { runImpl: () => { throw new Error("HTTP 403"); } }), /HTTP 403/);
 });
 
 // -- checkCloseWorkIssue (Stage 1 review finding on PR #435: STAGE2_CLOSE_READY's own

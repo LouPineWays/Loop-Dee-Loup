@@ -254,7 +254,10 @@ for an already-existing, still-`OPEN` Audit Issue whose own structured `Exact me
 carries the complete canonical audit-control-issue shape (`tools/review-watch/lifecycle-gate.mjs`'s
 shared `hasCanonicalAuditShape`/`findMatchingOpenAuditIssues`, Stage 1 review finding P1 on
 PR #730: a two-field-only shell left behind by an interrupted preparation attempt must never
-authorize a trigger) — the identical `[Audit] in:title` candidate search
+authorize a trigger) — the identical `[Audit]`-titled candidate enumeration (repository-scoped
+`GET /repos/{repo}/issues?state=all`, walked to exhaustion, PRs excluded, fail-closed on malformed/contradictory
+pages or the safety bound; issue #895 — never the global `search/issues`, which a repository-bound remote session
+rejects with HTTP 403)
 `tools/review-watch/lifecycle-gate.mjs`'s `checkCloseAudit` already uses for its own supersession
 search, and the identical matching semantics `finalize-audit-breakpoint.mjs`'s
 `verifyAuditIssueMatches` independently re-verifies before ever projecting control state — never
