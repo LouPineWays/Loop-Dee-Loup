@@ -131,7 +131,17 @@ export function parseEvidenceCorrectionResult(body, { host = DEFAULT_HOST } = {}
   const COMMENT_URL = commentUrlPattern(host);
   const text = normalizeEol(body).trim();
   if (!text.startsWith(RESULT_HEADING)) return { ok: false, errors: ["missing result heading"], auditIssue: null };
-  const lines = text.slice(RESULT_HEADING.length).split("\n");
+  // Issue #891: the canonical payload is the heading plus the single contiguous block of field lines
+  // that follows it (the writer never emits a blank line inside it). The first blank line after the
+  // fields ends the payload; anything after is non-authoritative presentation metadata appended by
+  // the posting surface (e.g. an attribution footer) and is never parsed, so it cannot add,
+  // override, or duplicate a canonical field. Non-blank text inside the block still fails closed.
+  const allLines = text.slice(RESULT_HEADING.length).split("\n");
+  let start = 0;
+  while (start < allLines.length && allLines[start].trim() === "") start++;
+  let end = start;
+  while (end < allLines.length && allLines[end].trim() !== "") end++;
+  const lines = allLines.slice(start, end);
   const labeled = new Map();
   const errors = [];
   let current = null;
