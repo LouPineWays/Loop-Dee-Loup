@@ -3108,19 +3108,39 @@ export const AUDIT_CANDIDATE_SCAN_LIMIT = 20000;
 // session (the #882/#891/PR #892/Audit #893 reproduction; same finding as #870 for PR discovery).
 // The listing is walked page by page (newest-first, 100 per page) to exhaustion -- a short page
 // ends it -- so no candidate is silently dropped, unlike the original fixed `--limit 200` (PR #435
-// finding). Issues and PRs share one number sequence, so strictly descending numbers are
-// verified; a duplicate, an ordering contradiction, a non-array page, a wrong-repository entry, or
+// finding). Created-time descending order is verified (ties allowed) and the walk is repeated and must match
+// exactly (mid-scan deletion/transfer protection); a duplicate, an ordering contradiction, a non-array page, a wrong-repository entry, or
 // reaching the safety bound before exhaustion throws rather than returning a possibly-incomplete
 // list as if it were complete. Title matching is a case-insensitive "[Audit]" substring filter
 // (the superset the Search query matched); pull requests are excluded.
 // Exported (issue #729) so next-review-transition-gate.mjs and verify-audit-ready.mjs reuse this
 // exact candidate discovery rather than duplicating a second enumeration.
-export function defaultGhIssueList({ repo }, { runImpl = execFileSync, limit = AUDIT_CANDIDATE_SCAN_LIMIT } = {}) {
+export function defaultGhIssueList({ repo }, { runImpl = execFileSync, limit = AUDIT_CANDIDATE_SCAN_LIMIT, maxAttempts = 3 } = {}) {
+  // Page-number pagination over a mutable listing is not a stable snapshot: a deletion/transfer in an
+  // already-read page shifts unseen entries left past the cursor, silently omitting them. Walk the
+  // listing, then walk it again and require the identical ordered number sequence; any difference
+  // means the listing mutated mid-scan, so retry (bounded) and otherwise fail closed.
+  for (let attempt = 1; ; attempt += 1) {
+    const first = walkRepoIssuesOnce({ repo, runImpl, limit });
+    const second = walkRepoIssuesOnce({ repo, runImpl, limit });
+    if (first.numbers.length === second.numbers.length && first.numbers.every((n, i) => n === second.numbers[i])) {
+      return second.candidates;
+    }
+    if (attempt >= maxAttempts) {
+      throw new Error(
+        `REST issues listing changed between consecutive complete scans in ${maxAttempts} attempts -- ` +
+          "refusing to treat a possibly-incomplete candidate list as complete",
+      );
+    }
+  }
+}
+
+function walkRepoIssuesOnce({ repo, runImpl, limit }) {
   const perPage = 100;
   const seen = new Set();
+  const numbers = [];
   const candidates = [];
-  let scanned = 0;
-  let previous = Infinity;
+  let previousTime = Infinity;
   for (let page = 1; ; page += 1) {
     const raw = runImpl(
       "gh",
@@ -3142,16 +3162,19 @@ export function defaultGhIssueList({ repo }, { runImpl = execFileSync, limit = A
     for (const item of items) {
       const candidate = normalizeRestIssueCandidate(item, { repo });
       if (seen.has(item.number)) throw new Error(`REST issues listing returned duplicate #${item.number} -- refusing contradictory pagination evidence`);
-      if (item.number > previous) throw new Error(`REST issues listing is not newest-first (#${item.number} after #${previous}) -- refusing contradictory ordering evidence`);
+      // Ordering follows the requested sort key (created time, descending); ties are allowed.
+      const time = Date.parse(item.created_at);
+      if (Number.isNaN(time)) throw new Error(`malformed REST issues response: entry #${item.number} has no parseable created_at`);
+      if (time > previousTime) throw new Error(`REST issues listing is not newest-first by created_at (#${item.number} after an older entry) -- refusing contradictory ordering evidence`);
       seen.add(item.number);
-      previous = item.number;
-      scanned += 1;
+      numbers.push(item.number);
+      previousTime = time;
       if (candidate && /\[audit\]/i.test(candidate.title)) candidates.push(candidate);
     }
-    if (items.length < perPage) return candidates;
-    if (scanned >= limit) {
+    if (items.length < perPage) return { numbers, candidates };
+    if (numbers.length >= limit) {
       throw new Error(
-        `REST issues listing scanned ${scanned} items without reaching the end, at the ${limit}-item safety bound -- ` +
+        `REST issues listing scanned ${numbers.length} items without reaching the end, at the ${limit}-item safety bound -- ` +
           "refusing to treat a possibly-truncated candidate list as complete",
       );
     }

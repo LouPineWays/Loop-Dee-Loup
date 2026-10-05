@@ -4015,7 +4015,7 @@ test("normalizeRestIssueCandidate: a pull request entry normalizes to null; malf
 test("defaultGhIssueList: repository-scoped REST only -- never invokes the global search/issues endpoint", () => {
   const calls = [];
   defaultGhIssueList({ repo: REPO }, { runImpl: fakeRunner([restIssue(3, "[Audit] #1")], calls) });
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2, "one walk plus one stability re-walk");
   assert.ok(calls[0].includes(`repos/${REPO}/issues`));
   assert.ok(!calls.flat().some((a) => /search/.test(a)), "must not call the global Search API");
 });
@@ -4037,7 +4037,7 @@ test("defaultGhIssueList: candidates spanning multiple repository pages are all 
   const calls = [];
   const result = defaultGhIssueList({ repo: REPO }, { runImpl: fakeRunner(all, calls) });
   assert.deepEqual(result.map((c) => c.number), [250, 200, 150, 100, 50]);
-  assert.equal(calls.length, 3, "250 items at 100/page: pages 1-3, the short third page ends the walk");
+  assert.equal(calls.length, 6, "250 items at 100/page: 3 pages per walk, walked twice for stability");
 });
 
 test("defaultGhIssueList: fails closed on the safety bound, malformed pages, duplicate or mis-ordered evidence", () => {
@@ -4047,7 +4047,10 @@ test("defaultGhIssueList: fails closed on the safety bound, malformed pages, dup
   assert.throws(() => defaultGhIssueList({ repo: REPO }, { runImpl: () => "not json" }), /non-JSON/);
   assert.throws(() => defaultGhIssueList({ repo: REPO }, { runImpl: () => JSON.stringify({ message: "Forbidden" }) }), /expected an array page/);
   assert.throws(() => defaultGhIssueList({ repo: REPO }, { runImpl: () => JSON.stringify([restIssue(5, "a"), restIssue(5, "b")]) }), /duplicate #5/);
-  assert.throws(() => defaultGhIssueList({ repo: REPO }, { runImpl: () => JSON.stringify([restIssue(5, "a"), restIssue(6, "b")]) }), /not newest-first/);
+  assert.throws(
+    () => defaultGhIssueList({ repo: REPO }, { runImpl: () => JSON.stringify([restIssue(5, "a"), restIssue(6, "b", { created_at: "2026-09-06T09:59:55Z" })]) }),
+    /not newest-first/,
+  );
   assert.throws(() => defaultGhIssueList({ repo: REPO }, { runImpl: () => { throw new Error("HTTP 403"); } }), /HTTP 403/);
 });
 
@@ -4543,4 +4546,37 @@ test("#852 close-work-issue closes via REST transport, is idempotent on CLOSED, 
     { ghIssueViewImpl: view, ghCloseImpl: ({ repo, workIssue }) => ghRestCloseIssue({ repo, issue: workIssue }, fakeRun(closedReply(7, { state: "open" }))), ghCommentImpl: async () => {} },
   );
   assert.equal(bad.exitCode, 1);
+});
+
+test("defaultGhIssueList: equal created_at ties in either issue-number order are accepted", () => {
+  const same = (n, t) => restIssue(n, t, { created_at: "2026-09-05T09:59:55Z" });
+  const a = defaultGhIssueList({ repo: REPO }, { runImpl: fakeRunner([same(6, "[Audit] a"), same(5, "[Audit] b")]) });
+  const b = defaultGhIssueList({ repo: REPO }, { runImpl: fakeRunner([same(5, "[Audit] a"), same(6, "[Audit] b")]) });
+  assert.equal(a.length, 2);
+  assert.equal(b.length, 2);
+});
+
+test("defaultGhIssueList: a mid-scan deletion that shifts unseen entries across a page boundary is detected, never silently accepted", () => {
+  const build = (skip) => {
+    const all = [];
+    for (let n = 150; n >= 1; n -= 1) {
+      if (n !== skip) all.push(restIssue(n, n === 40 ? "[Audit] #1" : `Issue ${n}`, { created_at: new Date(Date.UTC(2026, 0, 1) + n * 1000).toISOString() }));
+    }
+    return all;
+  };
+  const pageOf = (args) => Number(args.find((a) => /^page=/.test(a)).slice(5));
+  // Listing keeps shrinking between walks: never stabilizes -> fails closed.
+  let walks = 0;
+  const shrinking = (cmd, args) => {
+    if (pageOf(args) === 1) walks += 1;
+    return fakeRunner(build(walks === 1 ? null : 150 - walks))(cmd, args);
+  };
+  assert.throws(() => defaultGhIssueList({ repo: REPO }, { runImpl: shrinking, maxAttempts: 2 }), /changed between consecutive complete scans/);
+  // A one-time shrink during the first walk is recovered by retry and still finds the candidate.
+  let w2 = 0;
+  const once = (cmd, args) => {
+    if (pageOf(args) === 1) w2 += 1;
+    return fakeRunner(build(w2 === 1 ? null : 149))(cmd, args);
+  };
+  assert.deepEqual(defaultGhIssueList({ repo: REPO }, { runImpl: once }).map((c) => c.number), [40]);
 });
