@@ -127,6 +127,9 @@ export function upsertSettledDecisions(body, decisions) {
 }
 
 const SAFE_TOKEN = /^[A-Za-z0-9_.\/=:#@-]+$/;
+// Issue #901 (PR #902 Stage 1): the runner-bootstrap path token uses the same grammar the binder
+// (control-plane-continuation.mjs SAFE_ROOT) emits, so an emitted bound command is always executable.
+const SAFE_RUNNER_TOKEN = /^[A-Za-z0-9_.\/:@+-]+$/;
 
 // Pure. A verdict's `nextCommand` is composed by the gate itself; before executing it, require
 // that every `&&`-chained segment is `node tools/<script> <plain tokens>` so it can be run without
@@ -139,7 +142,7 @@ export function parseNextCommand(nextCommand) {
     // exactly as bound (through the authenticated runner's bootstrap), never as the relative copy.
     const bound = unwrapBoundSegment(tokens);
     if (bound) {
-      if (!bound.rest.every((t) => SAFE_TOKEN.test(t)) || !SAFE_TOKEN.test(tokens[tokens.indexOf("node") + 1])) {
+      if (!bound.rest.every((t) => SAFE_TOKEN.test(t)) || !SAFE_RUNNER_TOKEN.test(tokens[tokens.indexOf("node") + 1])) {
         throw new Error(`refusing unsafe token in command segment: ${seg}`);
       }
       return { file: tokens[tokens.indexOf("node") + 1], args: [bound.script, ...bound.rest], canonical: bound.script, canonicalArgs: bound.rest };

@@ -208,3 +208,43 @@ test("launcher parseNextCommand and the live hook recognize bound segments as th
   const hookCmd = "node /cache/x/tools/orchestration/control-plane-bootstrap.mjs tools/orchestration/next-review-transition-gate.mjs --control-issue 1";
   assert.deepEqual(invokedGateScriptBasenames(hookCmd), ["next-review-transition-gate.mjs"]);
 });
+
+// PR #902 Stage 1 correction: runner-path grammar must be one end-to-end contract.
+test("runner path containing '+' binds and is accepted by the launcher; genuinely unsafe paths fail closed", () => {
+  const sha = "f".repeat(40);
+  const mk = (root) => ({ env: { LDL_CONTROL_PLANE_RUNNER: JSON.stringify({ runnerCommit: sha }) }, root, readMarker: () => sha });
+  const plus = bindContinuationCommand(CANON, mk("/c++/cache/" + sha));
+  assert.equal(plus.bound, true);
+  const segs = parseNextCommand(plus.command);
+  assert.deepEqual(segs.map((s) => s.canonical), ["tools/orchestration/evidence-correction.mjs", "tools/review-watch/trigger.mjs"]);
+  assert.deepEqual(segs[0].canonicalArgs, ["prepare", "--repo", "o/r", "--audit-issue", "881"]);
+  assert.ok(segs[0].file.startsWith("/c++/cache/"));
+  // '+' is NOT widened for ordinary command tokens.
+  assert.throws(() => parseNextCommand("node tools/orchestration/x.mjs a+b"));
+  assert.throws(() => parseNextCommand(`node /r/control-plane-bootstrap.mjs tools/orchestration/x.mjs a+b`));
+  // Out-of-contract runner characters still fail closed at bind and at launcher.
+  const bad = bindContinuationCommand(CANON, mk("/c ache;rm/" + sha));
+  assert.equal(bad.ok, false);
+  assert.throws(() => parseNextCommand("node /r;x/control-plane-bootstrap.mjs tools/orchestration/x.mjs"));
+});
+
+test("explicit checkout source: exact gate path forwards the same authority as the short name; other exact scripts do not", () => {
+  const f = fixture();
+  const echo = `console.log(JSON.stringify(process.argv.slice(2)));\n`;
+  write(f.stale, "tools/orchestration/ready-dispatch-gate.mjs", echo);
+  write(f.stale, "tools/orchestration/evidence-correction.mjs", echo);
+  const run = (entry) => {
+    const r = spawnSync(process.execPath, ["-", "--control-plane-source", "checkout", entry, "--control-issue", "780"], {
+      cwd: f.stale,
+      input: BOOTSTRAP_SRC,
+      encoding: "utf8",
+      env: env(f.cache),
+    });
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout.trim().split("\n").pop());
+  };
+  const want = ["--control-issue", "780", "--control-plane-source", "checkout"];
+  assert.deepEqual(run("ready-dispatch-gate"), want);
+  assert.deepEqual(run("tools/orchestration/ready-dispatch-gate.mjs"), want);
+  assert.deepEqual(run("tools/orchestration/evidence-correction.mjs"), ["--control-issue", "780"]);
+});

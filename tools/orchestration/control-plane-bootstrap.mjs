@@ -64,6 +64,12 @@ const GATE_NAME = /^[a-z0-9][a-z0-9-]*$/;
 // Issue #901: a machine-authored continuation re-enters through this bootstrap naming the exact
 // control-plane script (`tools/orchestration/x.mjs` | `tools/review-watch/x.mjs`) instead of a gate.
 const SCRIPT_PATH = /^tools\/(?:orchestration|review-watch)\/[A-Za-z0-9_.-]+\.mjs$/;
+// Issue #901 (PR #902 Stage 1): the gate entrypoints that parse `--control-plane-source`. An exact-path
+// invocation of one of these keeps the same explicit-checkout authority as its short gate name;
+// any other exact script never receives gate-only authority.
+export const GATE_SCRIPT_RELS = new Set(
+  ["ready-dispatch-gate", "next-review-transition-gate", "session-entry-gate"].map((n) => `tools/orchestration/${n}.mjs`),
+);
 export function resolveScriptRel(gate) {
   if (GATE_NAME.test(gate)) return `tools/orchestration/${gate}.mjs`;
   if (SCRIPT_PATH.test(gate) && !gate.includes("..")) return gate;
@@ -337,7 +343,7 @@ export function runBootstrap(argv, { cwd = process.cwd(), git = defaultGit, spaw
   let env = process.env;
   if (plan.mode === "local") {
     script = join(plan.root, ...scriptRel.split("/"));
-    if (plan.source === "checkout-explicit" && GATE_NAME.test(gate)) args = [...gateArgs, "--control-plane-source", "checkout"];
+    if (plan.source === "checkout-explicit" && (GATE_NAME.test(gate) || GATE_SCRIPT_RELS.has(scriptRel))) args = [...gateArgs, "--control-plane-source", "checkout"];
     if (!existsSync(script)) {
       log(fail(`${scriptRel} does not exist in this checkout`).message);
       return 1;
