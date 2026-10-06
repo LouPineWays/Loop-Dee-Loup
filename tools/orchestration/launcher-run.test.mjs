@@ -160,3 +160,32 @@ test("correction finalization verdict: a nextCommand that is not the canonical f
   assert.equal(r.outcome, Outcome.FAIL_CLOSED);
   assert.ok(!calls.some((c) => c[1] === "tools/orchestration/finalize-correction-breakpoint.mjs"));
 });
+
+// Issue #913: a PR already MERGED at exactly the corrected head (the #702/#910/PR #909 recurrence)
+// finalizes through the same canonical finalizer and read-back; the merged state alone is not an
+// invalidation, and no merge action is ever issued.
+test("correction finalization verdict: a PR merged at the corrected head finalizes via the canonical finalizer and advances", async () => {
+  let body = stranded;
+  const { io, calls, readPr } = fakeIo({ gateStates: [finalizationVerdict({ prState: "MERGED" })], headRef: C_HEAD, prStates: ["MERGED"] });
+  const nodeFn = io.node;
+  io.node = (file, args, input) => {
+    if (file.endsWith("finalize-correction-breakpoint.mjs")) body = finalized;
+    return nodeFn(file, args, input);
+  };
+  const r = await runLauncherStep({ controlIssue: 379, deps: buildDeps({ controlIssue: 379, executionIssue: 73, readPr, readIssue: () => ({ body, state: "OPEN" }), io }) });
+  assert.equal(r.outcome, Outcome.ADVANCED);
+  assert.equal(calls.filter((c) => c[1] === "tools/orchestration/finalize-correction-breakpoint.mjs").length, 1);
+  assert.ok(!calls.some((c) => c[2] === "merge"));
+});
+
+test("correction finalization verdict: a PR closed without merge still fails closed", async () => {
+  let body = stranded;
+  const { io, readPr } = fakeIo({ gateStates: [finalizationVerdict()], headRef: C_HEAD, prStates: ["CLOSED"] });
+  const nodeFn = io.node;
+  io.node = (file, args, input) => {
+    if (file.endsWith("finalize-correction-breakpoint.mjs")) body = finalized;
+    return nodeFn(file, args, input);
+  };
+  const r = await runLauncherStep({ controlIssue: 379, deps: buildDeps({ controlIssue: 379, executionIssue: 73, readPr, readIssue: () => ({ body, state: "OPEN" }), io }) });
+  assert.equal(r.outcome, Outcome.FAIL_CLOSED);
+});
