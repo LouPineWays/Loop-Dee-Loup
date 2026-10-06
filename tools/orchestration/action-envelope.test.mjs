@@ -42,6 +42,8 @@ test("getActionEnvelope: every ready-dispatch-gate.mjs and next-review-transitio
     "STAGE2_RESPONSE_UNUSABLE",
     "STAGE2_TRIGGER_REQUIRED",
     "STAGE2_REPLACEMENT_AUDIT_REQUIRED",
+    "STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED",
+    "STAGE2_EVIDENCE_REAUDIT_READY",
   ];
   const known = knownEnvelopeStates();
   for (const state of expected) assert.ok(known.includes(state), `missing envelope for ${state}`);
@@ -52,10 +54,10 @@ test("getActionEnvelope: every ready-dispatch-gate.mjs and next-review-transitio
 // actions above are derived from `context.nextCommand` rather than a fixed table row --
 // `verify-action-envelope.mjs`'s CLI uses this list to fail closed when that context is missing,
 // instead of silently classifying against an absent nextCommand.
-test("contextSensitiveEnvelopeStates: names exactly the two nextCommand-derived states", () => {
+test("contextSensitiveEnvelopeStates: names exactly the context-derived states", () => {
   assert.deepEqual(
     [...contextSensitiveEnvelopeStates()].sort(),
-    ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION"].sort(),
+    ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", "STAGE2_EVIDENCE_REAUDIT_READY"].sort(),
   );
 });
 
@@ -1089,4 +1091,43 @@ test("requiresPreBoundNonIsolatedDispatch: false for every other bounded envelop
   assert.equal(requiresPreBoundNonIsolatedDispatch(undefined), false);
   assert.equal(requiresPreBoundNonIsolatedDispatch(null), false);
   assert.equal(requiresPreBoundNonIsolatedDispatch("dispatch-correction-worker"), false);
+});
+
+// -- issue #883: evidence-only Stage 2 correction verdicts -------------------------------------
+
+test("#883 STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED authorizes exactly the prepare command, never a correction worker or PR", () => {
+  const envelope = getActionEnvelope("STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED");
+  assert.equal(envelope.mode, ENVELOPE_MODES.BOUNDED);
+  assert.deepEqual(envelope.authorizedActions, ["run-evidence-correction-prepare"]);
+  assert.equal(classifyEnvelopeCompliance("STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED", ["run-evidence-correction-prepare"]).status, "compliant");
+  assert.equal(classifyEnvelopeCompliance("STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED", ["dispatch-correction-worker"]).status, "violation");
+  assert.equal(
+    classifyEnvelopeCompliance("STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED", ["run-evidence-correction-prepare", "rerun-gate"]).status,
+    "violation",
+  );
+});
+
+test("#883 STAGE2_EVIDENCE_REAUDIT_READY: finalize/project then trigger in control mode; direct verification then trigger without a control Issue", () => {
+  assert.deepEqual(getActionEnvelope("STAGE2_EVIDENCE_REAUDIT_READY", { controlIssue: 780 }).authorizedActions, [
+    "write-control-snapshot",
+    "post-stage2-reviewer-trigger",
+  ]);
+  assert.deepEqual(getActionEnvelope("STAGE2_EVIDENCE_REAUDIT_READY", {}).authorizedActions, [
+    "verify-direct-reference-audit",
+    "post-stage2-reviewer-trigger",
+  ]);
+  const verdict = { controlIssue: 780 };
+  assert.equal(
+    classifyEnvelopeCompliance("STAGE2_EVIDENCE_REAUDIT_READY", ["write-control-snapshot", "post-stage2-reviewer-trigger"], verdict).status,
+    "compliant",
+  );
+  // The trigger may not race ahead of the durable control projection (issue #561's invariant).
+  assert.equal(
+    classifyEnvelopeCompliance("STAGE2_EVIDENCE_REAUDIT_READY", ["post-stage2-reviewer-trigger", "write-control-snapshot"], verdict).status,
+    "violation",
+  );
+  assert.equal(
+    classifyEnvelopeCompliance("STAGE2_EVIDENCE_REAUDIT_READY", ["dispatch-correction-worker"], verdict).status,
+    "violation",
+  );
 });

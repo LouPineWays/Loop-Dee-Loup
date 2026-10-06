@@ -86,6 +86,24 @@ export const TRANSITIONS = Object.freeze({
     postcondition: "control Issue reads Lifecycle AUDIT with Stage 2 naming this audit AND exactly the reviewer trigger exists on the audit thread",
     invalidation: ["audit Issue closed or superseded", "trigger comment deleted"],
   },
+  // Issue #883: a recorded NOT CLEAN satisfied by evidence alone. Prepare the one same-merge
+  // replacement audit (idempotent; evidence-correction.mjs re-proves the lineage itself).
+  STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED: {
+    preState: "STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED",
+    action: "prepare-evidence-reaudit",
+    verifier: "evidence-reaudit-replacement-readback",
+    postcondition: "exactly one OPEN pending evidence-recovery replacement audit bound to the verified evidence result exists",
+    invalidation: ["predecessor audit changed", "replacement audit closed or superseded"],
+  },
+  // Issue #883: project the prepared replacement audit onto the control Issue, then post the one
+  // idempotent reviewer trigger (same completion contract as STAGE2_AUDIT_ALREADY_PREPARED).
+  STAGE2_EVIDENCE_REAUDIT_READY: {
+    preState: "STAGE2_EVIDENCE_REAUDIT_READY",
+    action: "finalize-audit-breakpoint-then-post-stage2-reviewer-trigger",
+    verifier: "evidence-reaudit-projection-and-trigger-readback",
+    postcondition: "control Issue reads Lifecycle AUDIT with Stage 2 naming the replacement audit AND exactly the reviewer trigger exists on it",
+    invalidation: ["replacement audit closed or no longer unique", "trigger comment deleted"],
+  },
   STAGE2_CLOSE_READY: {
     preState: "STAGE2_CLOSE_READY",
     action: "close-audit",
@@ -193,7 +211,7 @@ export function verifyPostcondition(evidence) {
 export const VERDICT_REFERENCE_KEYS = Object.freeze([
   "repo", "controlIssue", "executionIssue", "route", "pr", "head", "issue", "workIssue", "auditIssue",
   "planIndexUrl", "manifestCommentId", "manifestUrl", "dispatchReadyUnitIds", "alreadyDoneUnitIds",
-  "replanRequiredUnitIds", "correctionReason",
+  "replanRequiredUnitIds", "correctionReason", "evidenceOnlyEligible",
 ]);
 
 export function extractVerdictReferences(verdict) {

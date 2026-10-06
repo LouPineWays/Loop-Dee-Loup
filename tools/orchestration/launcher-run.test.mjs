@@ -25,7 +25,7 @@ function fakeIo({ gateStates, prStates = ["OPEN", "MERGED"], headRef = "h1" }) {
     io: {
       node: (file, args, input) => {
         calls.push(["node", file, ...args]);
-        if (file.endsWith("session-entry-gate.mjs")) return JSON.stringify(gateStates[Math.min(g++, gateStates.length - 1)]);
+        if (file.endsWith("control-plane-bootstrap.mjs")) return JSON.stringify(gateStates[Math.min(g++, gateStates.length - 1)]);
         return "";
       },
       gh: (args) => {
@@ -50,6 +50,10 @@ test("claimed launch advances: a projection runs the verdict's own body and is v
   const r = await runLauncherStep({ controlIssue: 379, deps: buildDeps({ controlIssue: 379, executionIssue: 73, readPr, readIssue, io }) });
   assert.equal(r.outcome, Outcome.ADVANCED);
   assert.ok(calls.some((c) => c[1] === "tools/orchestration/write-control-snapshot.mjs"));
+  // Issue #877: every launcher lifecycle read traverses the bootstrap, never a direct checkout-local gate.
+  const gateReads = calls.filter((c) => c[1]?.endsWith("control-plane-bootstrap.mjs"));
+  assert.ok(gateReads.length >= 1 && gateReads.every((c) => c[2] === "session-entry-gate"));
+  assert.ok(!calls.some((c) => c[1]?.endsWith("/session-entry-gate.mjs")));
 });
 
 test("a write that leaves the control body on the wrong successor is not proof: FAIL_CLOSED, no unlock", async () => {

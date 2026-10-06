@@ -181,6 +181,7 @@ test("#868 check 6/7: a valid replacement CLEAN report flows through ordinary re
     postAudit: { exitCode: 0, state: "OK", workIssue: 860, auditIssue: REPL, rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssueState: "OPEN" },
   });
   notClean.impls.reconcileStage2CorrectionPrImpl = async () => ({ crossed: false });
+  notClean.impls.evaluateEvidenceCorrectionImpl = async () => ({ status: "NOT_ELIGIBLE", reason: "fixture" });
   const correction = await gate(notClean);
   assert.equal(correction.state, "STAGE2_CORRECTION_REQUIRED");
   assert.equal(correction.auditIssue, REPL);

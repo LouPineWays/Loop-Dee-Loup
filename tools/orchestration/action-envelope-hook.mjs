@@ -357,7 +357,19 @@ export function invokedGateScriptBasenames(command) {
     const nodeIdx = tokens.indexOf("node");
     if (nodeIdx === -1) continue;
     const scriptPath = stripSurroundingQuotes(tokens[nodeIdx + 1] ?? "");
-    const basename = scriptPath.split(/[\\/]/).pop() ?? "";
+    let basename = scriptPath.split(/[\\/]/).pop() ?? "";
+    // Issue #877: the control-plane bootstrap (a file path, or `node -` fed from the default
+    // branch) execs the named gate as a child, so the gate is the first positional after any
+    // `--control-plane-source <src>` — still a gate invocation for live envelope enforcement.
+    if (basename === "control-plane-bootstrap.mjs" || scriptPath === "-") {
+      let i = nodeIdx + 2;
+      while (tokens[i] === "--control-plane-source") i += 2;
+      const positional = stripSurroundingQuotes(tokens[i] ?? "");
+      // Issue #901: a runner-bound continuation names the exact script path, not a gate name.
+      basename = /^tools\/(?:orchestration|review-watch)\/[A-Za-z0-9_.-]+\.mjs$/.test(positional)
+        ? positional.split("/").pop()
+        : `${positional}.mjs`;
+    }
     if (GATE_SCRIPT_BASENAMES.has(basename)) found.push(basename);
   }
   return found;
@@ -452,6 +464,10 @@ export function writeMarker(
 ) {
   if (!sessionId) return null;
   mkdirImpl(STATE_DIR, { recursive: true });
+  // Issue #858 Stage 2 correction: filter first so an empty-after-validation continuation is never persisted.
+  const continuationSteps = Array.isArray(verdict.correctionContinuation?.steps)
+    ? verdict.correctionContinuation.steps.filter((x) => typeof x === "string")
+    : [];
   // Issue #764 Stage 1 correction: an already-active correction-completion obligation is
   // monotonic -- it is replaced only by a fresh correction dispatch decided by the controller
   // itself (never by a worker-originated gate observation) and is otherwise carried forward, so
@@ -474,6 +490,10 @@ export function writeMarker(
     // verdict shape, which is exactly the "wave size 1" default those helpers already apply.
     dispatchReadyUnitIds: Array.isArray(verdict.dispatchReadyUnitIds) ? verdict.dispatchReadyUnitIds : [],
     dispatchStartsConsumed: 0,
+    // Issue #858 Stage 1 correction: the denial hint derives from the verdict's own
+    // continuation (Stage 1 only; absent for Stage 2/other verdicts), never from the mere
+    // presence of a dispatch action.
+    ...(continuationSteps.length > 0 ? { correctionContinuation: { steps: continuationSteps } } : {}),
     ...carried,
     ts: new Date().toISOString(),
   };
@@ -670,7 +690,13 @@ export function decidePreToolUse(marker, toolCall = {}) {
         "Session execution and docs/operating-model.md § Action envelope enforcement (issue #486/#678), a " +
         "bounded envelope never authorizes re-running a lifecycle gate — the named action(s) above are the " +
         "exclusive next step. Do not retry this call; perform the authorized action if it has not run yet, " +
-        "or end this turn with the concise handoff if it already has.",
+        "or end this turn with the concise handoff if it already has." +
+        (Array.isArray(marker.correctionContinuation?.steps) && marker.correctionContinuation.steps.length > 0
+          ? " The verdict's persisted handoff is intact (this denial does not touch it): continue with the " +
+            "verdict's own `correctionContinuation` steps, in order (" +
+            marker.correctionContinuation.steps.join("; then ") +
+            ") -- never hand-built JSON."
+          : ""),
     };
   }
 

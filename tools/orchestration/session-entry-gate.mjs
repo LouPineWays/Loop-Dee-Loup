@@ -91,6 +91,7 @@ import { runNextReviewTransitionGate } from "./next-review-transition-gate.mjs";
 import { checkReconcileControlBlocker } from "./reconcile-control-blocker.mjs";
 import { checkControlPlaneFreshness } from "./control-plane-freshness.mjs";
 import { clearLastGateVerdict, persistLastGateVerdict } from "./action-envelope-hook.mjs";
+import { bindVerdictContinuation } from "./control-plane-continuation.mjs";
 
 // Fail-closed circuit breaker against an unbounded chain loop — never expected in practice
 // (today's longest real chain is two hops: BLOCKED -> reconcile -> fresh ready-dispatch-gate),
@@ -335,8 +336,10 @@ async function main() {
     process.exit(1);
     return;
   }
-  persistLastGateVerdict(result);
-  console.log(JSON.stringify(result));
+  // Issue #901: machine-authored continuations stay bound to the authenticated runner.
+  const emitted = bindVerdictContinuation(result);
+  persistLastGateVerdict(emitted);
+  console.log(JSON.stringify(emitted));
   // Operational execution status only: a domain verdict was successfully derived, regardless of
   // the verdict's own historical `exitCode` field (preserved inside the JSON for diagnostics) or
   // how far down the lifecycle it stops the calling session.

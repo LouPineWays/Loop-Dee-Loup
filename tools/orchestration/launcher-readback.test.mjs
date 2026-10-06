@@ -161,3 +161,49 @@ test("replacement read-back (#868): pointer on the superseded audit is not-yet-p
   assert.equal(cls(await make({ control: "- **Lifecycle:** AUDIT\n- **Stage 2:** none\n" })(t, v)), EffectClass.AMBIGUOUS);
   assert.equal(cls(await make({ control: "- **Lifecycle:** REVIEW\n- **Stage 2:** #867\n", issues: { 867: { body: supersedes(866), state: "OPEN" } } })(t, v)), EffectClass.AMBIGUOUS);
 });
+
+// -- Issue #883 Stage 1 correction: evidence re-audit states are first-class launcher transitions --
+
+function makeEvidence({ evidence, issues = {}, comments = {}, control = "- **Lifecycle:** AUDIT\n- **Stage 2:** #381\n" } = {}) {
+  return buildReadEffect({
+    repo: "o/r",
+    controlIssue: 379,
+    executionIssue: 73,
+    readIssue: ({ number }) => (number === 379 ? { body: control, state: "OPEN" } : issues[number]),
+    readComments: (n) => comments[n] ?? [],
+    readPr: () => null,
+    verifyManifest: async () => ({ ok: true }),
+    readEvidenceCorrection: async () => evidence,
+  }).readEffect;
+}
+
+test("evidence re-audit preparation: no replacement -> NOT_COMPLETED (re-run prepare); one pending replacement -> PROVED; other states fail closed", async () => {
+  const t = TRANSITIONS.STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED;
+  const v = { auditIssue: 381, predecessorAuditIssue: 381 };
+  assert.equal(cls(await makeEvidence({ evidence: { status: "SATISFIED", replacement: null } })(t, v)), EffectClass.NOT_COMPLETED);
+  assert.equal(
+    cls(await makeEvidence({ evidence: { status: "SATISFIED", replacement: { number: 390, state: "OPEN", pending: true } } })(t, v)),
+    "PROVED",
+  );
+  assert.equal(
+    cls(await makeEvidence({ evidence: { status: "SATISFIED", replacement: { number: 390, state: "OPEN", pending: false } } })(t, v)),
+    EffectClass.AMBIGUOUS,
+  );
+  assert.equal(cls(await makeEvidence({ evidence: { status: "AMBIGUOUS" } })(t, v)), EffectClass.AMBIGUOUS);
+});
+
+test("evidence re-audit ready: PROVED only with projection + trigger on the single evidence-bound replacement; halves reconcile alone; non-unique/unbound fails closed", async () => {
+  const t = TRANSITIONS.STAGE2_EVIDENCE_REAUDIT_READY;
+  const v = { auditIssue: 381, predecessorAuditIssue: 381, replacementAuditIssue: 390 };
+  const open = { 390: { body: "", state: "OPEN" } };
+  const trig = { id: 1, body: "@codex review", created_at: "2026-10-01T00:00:00Z" };
+  const ok = { status: "SATISFIED", replacement: { number: 390, state: "OPEN", pending: true } };
+  const projected = "- **Lifecycle:** AUDIT\n- **Stage 2:** #390\n";
+  const review = "- **Lifecycle:** AUDIT\n- **Stage 2:** #381\n";
+  assert.equal(cls(await makeEvidence({ evidence: ok, issues: open, comments: { 390: [trig] }, control: projected })(t, v)), "PROVED");
+  assert.equal(cls(await makeEvidence({ evidence: ok, issues: open, comments: { 390: [trig] }, control: review })(t, v)), EffectClass.COMPLETED_UNPROJECTED);
+  assert.equal(cls(await makeEvidence({ evidence: ok, issues: open, control: review })(t, v)), EffectClass.NOT_COMPLETED);
+  const other = { status: "SATISFIED", replacement: { number: 391, state: "OPEN", pending: true } };
+  assert.equal(cls(await makeEvidence({ evidence: other, issues: open, comments: { 390: [trig] }, control: projected })(t, v)), EffectClass.AMBIGUOUS);
+  assert.equal(cls(await makeEvidence({ evidence: { status: "AMBIGUOUS" }, issues: open, comments: { 390: [trig] }, control: projected })(t, v)), EffectClass.AMBIGUOUS);
+});

@@ -1323,3 +1323,47 @@ test("formatStage2PreparationWorkerDispatchPrompt sources the merge commit and A
   assert.match(prompt, /never the pre-merge CI head/);
   assert.match(prompt, /stage2-control-plane-ci-head\.mjs --control-issue 322/);
 });
+
+// -- issue #883: evidence-only variant of the Stage 2 correction template ----------------------
+
+test("#883 formatStage2CorrectionWorkerDispatchPrompt: evidenceOnlyEligible selects the classify-first variant, reference-only into the contract doc, under the threshold", () => {
+  for (const controlIssue of [445, null]) {
+    const prompt = formatStage2CorrectionWorkerDispatchPrompt({ controlIssue, auditIssue: 559, evidenceOnlyEligible: true });
+    assert.match(prompt, /^Stage 2 correction worker dispatch\./);
+    assert.match(prompt, /docs\/bounded-review-cycle\.md § Stage 2 evidence-only correction/);
+    assert.match(prompt, /no PR or commit/);
+    assert.match(prompt, /evidence-correction\.mjs verify/);
+    // Source correction keeps its PR/Stage 1 requirement inside the same variant.
+    assert.match(prompt, /open\/identify one linked PR, request Stage 1 via trigger\.mjs/);
+    assert.ok(prompt.length < 700, `expected < 700 chars, got ${prompt.length}`);
+  }
+  assert.match(formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: 559, evidenceOnlyEligible: true }), /finalize-pr-breakpoint\.mjs/);
+  assert.doesNotMatch(formatStage2CorrectionWorkerDispatchPrompt({ auditIssue: 559, evidenceOnlyEligible: true }), /finalize-pr-breakpoint\.mjs/);
+});
+
+test("#883 formatStage2CorrectionWorkerDispatchPrompt: absent/false/non-true evidenceOnlyEligible renders the unchanged PR-mandatory template", () => {
+  const base = formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: 559 });
+  for (const value of [false, undefined, null, "true", 1]) {
+    assert.equal(formatStage2CorrectionWorkerDispatchPrompt({ controlIssue: 445, auditIssue: 559, evidenceOnlyEligible: value }), base);
+  }
+  assert.doesNotMatch(base, /evidence-only/);
+  assert.match(base, /open\/identify one correction PR linked to the work Issue/);
+});
+
+test("#883 CLI: piped STAGE2_CORRECTION_REQUIRED carries evidenceOnlyEligible through to the variant; only literal true opts in", async () => {
+  const verdict = {
+    state: "STAGE2_CORRECTION_REQUIRED",
+    stopAfter: true,
+    auditIssue: 559,
+    controlIssue: 445,
+    actionEnvelope: { mode: "bounded", authorizedActions: ["dispatch-correction-worker"] },
+  };
+  const eligible = await runCli({ ...verdict, evidenceOnlyEligible: true });
+  assert.equal(eligible.status, 0);
+  assert.match(eligible.stdout, /Stage 2 evidence-only correction/);
+  const ineligible = await runCli({ ...verdict, evidenceOnlyEligible: false });
+  assert.equal(ineligible.status, 0);
+  assert.doesNotMatch(ineligible.stdout, /evidence-only/);
+  const stringly = await runCli({ ...verdict, evidenceOnlyEligible: "true" });
+  assert.doesNotMatch(stringly.stdout, /evidence-only/);
+});

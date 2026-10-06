@@ -17,7 +17,7 @@ import {
   readVerdictHandoff,
 } from "./verdict-handoff.mjs";
 import { decidePreToolUse } from "./action-envelope-hook.mjs";
-import { getActionEnvelope } from "./action-envelope.mjs";
+import { getActionEnvelope, getCorrectionContinuation } from "./action-envelope.mjs";
 
 const FORMAT = fileURLToPath(new URL("./format-dispatch-prompt.mjs", import.meta.url));
 const PREFLIGHT = fileURLToPath(new URL("./pr-head-checkout-preflight.mjs", import.meta.url));
@@ -224,4 +224,84 @@ test("reserve --from-handoff rejects a malformed --control-issue instead of disa
   } finally {
     t.cleanup();
   }
+});
+
+// Issue #858 (control #571): the #457/#856/PR #857 recurrence -- the controller held no gate JSON.
+test("#858: the bounded correction verdict carries one exact continuation consuming the persisted handoff", async () => {
+  const { getCorrectionContinuation } = await import("./action-envelope.mjs");
+  const c = getCorrectionContinuation("STAGE1_CORRECTION_REQUIRED", { controlIssue: 457, correctionReason: "findings" });
+  assert.equal(c.transport, "persisted-verdict-handoff");
+  assert.deepEqual(c.steps, [
+    "node tools/orchestration/pr-head-checkout-preflight.mjs --reserve-from-gate --from-handoff --control-issue 457",
+    "node tools/orchestration/format-dispatch-prompt.mjs --from-handoff --control-issue 457",
+  ]);
+  const conflict = getCorrectionContinuation("STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT", { controlIssue: 457 });
+  assert.equal(conflict.steps.length, 2);
+  // Closing-reference repair needs no checkout: formatter-only, semantics unchanged.
+  const closing = getCorrectionContinuation("STAGE1_CORRECTION_REQUIRED", { controlIssue: 457, correctionReason: "closing-reference" });
+  assert.deepEqual(closing.steps, ["node tools/orchestration/format-dispatch-prompt.mjs --from-handoff --control-issue 457"]);
+  assert.equal(getCorrectionContinuation("NO_ACTION_YET", { controlIssue: 457 }), null);
+  assert.equal(getCorrectionContinuation("STAGE2_CORRECTION_REQUIRED", { controlIssue: 457 }), null);
+});
+
+function denialFor(state, authorizedActions, verdict) {
+  const marker = { mode: "bounded", state, authorizedActions, correctionContinuation: getCorrectionContinuation(state, verdict) || undefined };
+  return decidePreToolUse(marker, { toolName: "Bash", command: "node tools/orchestration/session-entry-gate.mjs --control-issue 398" });
+}
+
+test("#858: denial hint is derived per verdict: findings/conflict reserve, closing-reference formatter-only, Stage 2 none", () => {
+  const findings = denialFor("STAGE1_CORRECTION_REQUIRED", ["reserve-correction-checkout", "dispatch-correction-worker"], { controlIssue: 398, correctionReason: "findings" });
+  assert.match(findings.permissionDecisionReason, /--reserve-from-gate --from-handoff/);
+  assert.match(findings.permissionDecisionReason, /format-dispatch-prompt.mjs --from-handoff/);
+  const conflict = denialFor("STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT", ["reserve-correction-checkout", "dispatch-conflict-recovery-worker"], { controlIssue: 398 });
+  assert.match(conflict.permissionDecisionReason, /--reserve-from-gate --from-handoff/);
+  const closing = denialFor("STAGE1_CORRECTION_REQUIRED", ["dispatch-correction-worker"], { controlIssue: 398, correctionReason: "closing-reference" });
+  assert.match(closing.permissionDecisionReason, /format-dispatch-prompt.mjs --from-handoff/);
+  assert.doesNotMatch(closing.permissionDecisionReason, /reserve/);
+  const stage2 = denialFor("STAGE2_CORRECTION_REQUIRED", ["dispatch-correction-worker"], { controlIssue: 398 });
+  assert.equal(stage2.permissionDecision, "deny");
+  assert.doesNotMatch(stage2.permissionDecisionReason, /correctionContinuation|--from-handoff|reserve/);
+});
+
+test("#858: the denied gate re-run points at the continuation and leaves the persisted handoff untouched", () => {
+  const t = tmp();
+  try {
+    seed(t.dir, GATE);
+    const before = readFileSync(t.path, "utf8");
+    const marker = { mode: "bounded", state: "STAGE1_CORRECTION_REQUIRED", authorizedActions: GATE.actionEnvelope.authorizedActions, correctionContinuation: getCorrectionContinuation("STAGE1_CORRECTION_REQUIRED", { controlIssue: 398, correctionReason: "findings" }) };
+    const d = decidePreToolUse(marker, { toolName: "Bash", command: "node tools/orchestration/session-entry-gate.mjs --control-issue 398" });
+    assert.equal(d.permissionDecision, "deny");
+    assert.match(d.permissionDecisionReason, /correctionContinuation/);
+    assert.equal(readFileSync(t.path, "utf8"), before);
+    assert.equal(readVerdictHandoff({ path: t.path, controlIssue: 398 }).ok, true);
+  } finally {
+    t.cleanup();
+  }
+});
+
+test("#858 Stage 2: getCorrectionContinuation takes --control-issue only from a positive integer number", () => {
+  for (const bad of [true, "457", 4.5, 0, -3, null, undefined, "x"]) {
+    const c = getCorrectionContinuation("STAGE1_CORRECTION_REQUIRED", { controlIssue: bad, correctionReason: "findings" });
+    assert.ok(c.steps.every((s) => !s.includes("--control-issue")), `controlIssue ${String(bad)} must be omitted`);
+  }
+  const ok = getCorrectionContinuation("STAGE1_CORRECTION_REQUIRED", { controlIssue: 457, correctionReason: "findings" });
+  assert.ok(ok.steps.every((s) => s.endsWith("--control-issue 457")));
+});
+
+test("#858 Stage 2: writeMarker persists correctionContinuation only with at least one string step", async () => {
+  const { writeMarker } = await import("./action-envelope-hook.mjs");
+  const write = (steps) => {
+    let written = null;
+    const m = writeMarker("sess-858", { actionEnvelope: { mode: "bounded", authorizedActions: ["dispatch-correction-worker"] }, state: "STAGE1_CORRECTION_REQUIRED", correctionContinuation: { steps } }, { mkdirImpl() {}, writeFileImpl(_p, d) { written = d; } });
+    return { m, written };
+  };
+  for (const steps of [[42], [], [null, {}]]) {
+    const { m, written } = write(steps);
+    assert.ok(m, "marker still written");
+    assert.equal("correctionContinuation" in m, false);
+    assert.equal(written.includes("correctionContinuation"), false);
+  }
+  const mixed = write([42, "a", null, "b"]);
+  assert.deepEqual(mixed.m.correctionContinuation, { steps: ["a", "b"] });
+  assert.deepEqual(JSON.parse(mixed.written).correctionContinuation, { steps: ["a", "b"] });
 });

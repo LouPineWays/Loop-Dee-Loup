@@ -18,6 +18,7 @@ import { verifyFinalizedCorrectionBody } from "./finalize-correction-breakpoint.
 import { parseControlBullet, parseHeadingField, verifyRoutedDispatchManifest } from "./ready-dispatch-gate.mjs";
 import { parseStage2Verdict, parseSupersedesAuditRef } from "../review-watch/lifecycle-gate.mjs";
 import { findExistingTrigger } from "../review-watch/trigger.mjs";
+import { evaluateEvidenceCorrection, Status as EvidenceStatus } from "./evidence-correction.mjs";
 const NO_MANIFEST_POINTER = "Execution Plan Index has no settled Dispatch manifest pointer";
 
 const MERGE_STATES = new Set(["STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2"]);
@@ -67,6 +68,7 @@ export function projectionExpectation(state, verdict) {
 export function buildReadEffect(deps) {
   const { repo, controlIssue, executionIssue, readIssue, readComments, readPr } = deps;
   const verifyManifest = deps.verifyManifest ?? ((a) => verifyRoutedDispatchManifest(a));
+  const readEvidenceCorrection = deps.readEvidenceCorrection ?? ((a) => evaluateEvidenceCorrection(a));
 
   async function readControl() {
     return readIssue({ repo, number: controlIssue });
@@ -147,6 +149,38 @@ export function buildReadEffect(deps) {
     const projected = singlePointer(parseControlBullet(body, "Stage 2")) === audit && parseControlBullet(body, "Lifecycle") === "AUDIT";
     if (!trigger) return ev(target, "absent", false);
     return ev(target, "present", projected);
+  }
+
+  // Issue #883: evidence re-audit preparation. Effect present only when the evidence-correction
+  // evaluator (the authoritative lineage proof) reports exactly one OPEN pending replacement
+  // bound to the verified result; no replacement yet is absent (prepare is idempotent); any
+  // other evaluator state is non-authoritative evidence and fails closed.
+  async function evidenceReauditPreparation(verdict) {
+    const predecessor = issueNumberOf(verdict?.predecessorAuditIssue ?? verdict?.auditIssue);
+    if (!predecessor) return bad("audit:none", "audit:none", "verdict names no predecessor audit issue");
+    const target = `audit#${predecessor}`;
+    const state = await readEvidenceCorrection({ repo, auditIssue: predecessor });
+    if (state?.status !== EvidenceStatus.SATISFIED) return bad(target, target, `evidence correction read-back is ${state?.status ?? "unreadable"}`);
+    if (!state.replacement) return ev(target, "absent", false);
+    if (state.replacement.state !== "OPEN" || state.replacement.pending !== true) {
+      return bad(target, target, "evidence re-audit replacement is not an OPEN pending audit");
+    }
+    return ev(target, "present", true, { replacementAuditIssue: state.replacement.number });
+  }
+
+  // Issue #883: evidence re-audit projection + trigger. Same completion contract as the prepared
+  // audit, but the replacement is additionally re-proven by the evidence-correction evaluator as
+  // the single authoritative replacement of the predecessor immediately before it is read as done.
+  async function evidenceReauditReady(verdict) {
+    const replacement = issueNumberOf(verdict?.replacementAuditIssue);
+    const predecessor = issueNumberOf(verdict?.predecessorAuditIssue);
+    if (!replacement || !predecessor) return bad("audit:none", "audit:none", "verdict names no replacement/predecessor audit issue");
+    const target = `audit#${replacement}`;
+    const proof = await readEvidenceCorrection({ repo, auditIssue: predecessor });
+    if (proof?.status !== EvidenceStatus.SATISFIED || proof.replacement?.number !== replacement) {
+      return bad(target, target, "replacement audit is not the single evidence-correction-bound successor of the predecessor");
+    }
+    return stage2Prepared({ auditIssue: replacement });
   }
 
   async function stage2Close(verdict) {
@@ -261,6 +295,10 @@ export function buildReadEffect(deps) {
             return await stage2Trigger(verdict);
           case "STAGE2_AUDIT_ALREADY_PREPARED":
             return await stage2Prepared(verdict);
+          case "STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED":
+            return await evidenceReauditPreparation(verdict);
+          case "STAGE2_EVIDENCE_REAUDIT_READY":
+            return await evidenceReauditReady(verdict);
           case "STAGE2_CLOSE_READY":
             return await stage2Close(verdict);
           case "STAGE1_CORRECTION_FINALIZATION_REQUIRED":

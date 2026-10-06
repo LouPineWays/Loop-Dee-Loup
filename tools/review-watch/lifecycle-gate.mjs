@@ -318,7 +318,7 @@ import {
 } from "./stage2-report.mjs";
 import { isGenuineResponse } from "./genuine-response.mjs";
 
-const DEFAULT_BOT = "chatgpt-codex-connector[bot]";
+export const DEFAULT_BOT = "chatgpt-codex-connector[bot]";
 
 export function parseArgs(argv) {
   const args = {};
@@ -718,6 +718,22 @@ export function classifyAuditReplacements(candidates, { predecessorNumber, prede
   return { kind: "FOUND", auditIssue: number };
 }
 
+// Pure. Issue #883: the structured provenance marker an evidence-recovery re-audit carries in its
+// own "Stage 1 inline review disposition" block -- the one bounded same-merge, no-source-change
+// fresh Stage 2 audit that may follow a valid Stage 2 NOT CLEAN whose accepted finding was
+// satisfied by evidence alone (tools/orchestration/evidence-correction.mjs). The block also
+// carries the existing "prior Stage 2 NOT CLEAN verdict on issue #N" phrase
+// (parseCorrectsAuditRef), so the established correction-chain retirement closes the preserved
+// predecessor once this audit reaches a backed CLEAN. Returns the predecessor audit issue number,
+// or null when absent. Same trust boundary as parseCorrectsAuditRef: only the controlling session
+// composes this field, before ever triggering the reviewer.
+export function parseEvidenceRecoveryRef(body) {
+  const block = parseFormFieldBlock(body, "Stage 1 inline review disposition");
+  if (!block) return null;
+  const match = /\bEvidence-recovery re-audit of audit issue #(\d+)/.exec(block);
+  return match ? Number(match[1]) : null;
+}
+
 const SHA_TOKEN_PATTERN = /\b[0-9a-f]{7,40}\b/i;
 
 // Pure. Reads the audit-control-issue template's "Exact merge commit" field — the target
@@ -885,7 +901,7 @@ const STAGE2_LEGACY_CONTRACT_CUTOFF = "2026-08-31T09:19:22Z";
 // completeness check in issue #268 finding 2 applies; omitted for the relaxed legacy-
 // compatibility evaluation, which already forgives the checklist signal entirely.
 // `ghApiImpl` is injected for tests.
-async function findStage2ReportEvidence(
+export async function findStage2ReportEvidence(
   { repo, auditIssue, bot, mergeCommit, requestedChecklist = null, reviewedHeadCommit = null },
   ghApiImpl,
   { legacyCutoff = null } = {},
@@ -2362,7 +2378,23 @@ function defaultGhIssueLastEditedAt({ repo, number }) {
 // ready" that could silently drift apart.
 export function findMatchingOpenAuditIssues(candidates, { mergeCommitOid, executionIssue }, { requirePendingState = false } = {}) {
   const expectedWorkIssue = executionIssue === "none" ? "none" : executionIssue;
+  // Issue #883: an evidence-recovery re-audit targets the SAME exact merge/work identity as the
+  // valid NOT CLEAN predecessor it follows, which stays preserved (and possibly still OPEN) as
+  // historical evidence. A predecessor that a canonical same-identity evidence-recovery successor
+  // names is superseded, never a competing "current" audit -- excluded here so the sole-match
+  // checks downstream (trigger authorization, finalization uniqueness) see exactly one candidate.
+  const supersededPredecessors = new Set();
+  for (const candidate of candidates ?? []) {
+    const body = candidate.body ?? "";
+    const predecessor = parseEvidenceRecoveryRef(body);
+    if (predecessor === null || !hasCanonicalAuditShape(body)) continue;
+    const candidateMergeCommit = parseMergeCommitRef(body);
+    if (!candidateMergeCommit || candidateMergeCommit.toLowerCase() !== String(mergeCommitOid).toLowerCase()) continue;
+    if (parseWorkIssueRef(body) !== expectedWorkIssue) continue;
+    supersededPredecessors.add(predecessor);
+  }
   const matches = (candidates ?? []).filter((candidate) => {
+    if (supersededPredecessors.has(Number(candidate.number))) return false;
     if (candidate.state !== "OPEN") return false;
     if (!hasCanonicalAuditShape(candidate.body ?? "")) return false;
     if (requirePendingState && !checkPreAuditPendingState(candidate.body ?? "").ok) return false;
@@ -3174,7 +3206,7 @@ function defaultGhIssueView({ repo, number }) {
   return readGithubIssue({ repo, number, fields: ["body", "state", "createdAt"] });
 }
 
-function defaultGhApi(path) {
+export function defaultGhApi(path) {
   const raw = execFileSync("gh", ["api", path, "--paginate", "--slurp"], { encoding: "utf8" });
   return JSON.parse(raw).flat();
 }
@@ -3191,64 +3223,122 @@ function defaultGhComment({ repo, workIssue, auditIssue }) {
   execFileSync("gh", ["issue", "comment", String(workIssue), "--repo", repo, "--body", body], { encoding: "utf8" });
 }
 
-// Pure. Normalizes one page of the REST Search API's `/search/issues` response shape (`{
-// total_count, incomplete_results, items: [...] }`, each item's fields in GitHub's REST
-// snake_case with a lowercase "open"/"closed" state) into the same { number, title, body,
+// Pure. Normalizes one repository-issues REST entry (`GET /repos/{repo}/issues`, fields in GitHub's
+// REST snake_case with a lowercase "open"/"closed" state) into the same { number, title, body,
 // state, createdAt } shape `gh issue list --json` produces, which checkCloseAudit's candidate
 // walk (parseWorkIssueRef(candidate.body), candidate.createdAt, candidate.number) already
-// expects. The Search API's result set can include pull requests matching the same query
-// text; `pull_request` is present only on those, so filtering it out keeps candidates to
-// actual issues, matching what `gh issue list` itself would have returned.
-export function normalizeSearchIssuesPage(page) {
-  return (page?.items ?? [])
-    .filter((item) => !item.pull_request)
-    .map((item) => ({
-      number: item.number,
-      title: item.title,
-      body: item.body,
-      state: item.state === "open" ? "OPEN" : "CLOSED",
-      createdAt: item.created_at,
-    }));
+// expects. Returns null for a pull request (`pull_request` is present only on those; the issues
+// endpoint lists PRs alongside issues) so candidates stay actual Issues. A malformed entry or one
+// whose `html_url` does not name the expected repository throws -- an operational failure, never
+// silently skipped or treated as a lifecycle verdict.
+export function normalizeRestIssueCandidate(item, { repo } = {}) {
+  if (!item || typeof item !== "object" || !Number.isInteger(item.number)) {
+    throw new Error("malformed REST issues response: entry missing integer number");
+  }
+  if (typeof item.title !== "string" || (item.state !== "open" && item.state !== "closed")) {
+    throw new Error(`malformed REST issues response: entry #${item.number} missing title/state`);
+  }
+  if (repo) {
+    const url = String(item.html_url ?? "");
+    const tail = item.pull_request ? `/pull/${item.number}` : `/issues/${item.number}`;
+    if (!url.toLowerCase().endsWith(`/${repo}${tail}`.toLowerCase())) {
+      throw new Error(`REST issues response entry #${item.number} does not belong to ${repo}`);
+    }
+  }
+  if (item.pull_request) return null;
+  return {
+    number: item.number,
+    title: item.title,
+    body: item.body ?? "",
+    state: item.state === "open" ? "OPEN" : "CLOSED",
+    createdAt: item.created_at,
+  };
 }
 
+// Safety bound (issues + PRs scanned) for `defaultGhIssueList`'s walk; see its comment.
+export const AUDIT_CANDIDATE_SCAN_LIMIT = 20000;
+
 // Candidate-discovery only (Shared Contract item 7): the "[Audit]" title prefix enumerates
-// candidate successor issues for checkCloseAudit's supersession search. The literal title text
-// never itself authorizes a close — every candidate found this way is still independently
-// re-evaluated through evaluateAuditCloseReadiness against its own structured fields.
+// candidate successor issues for checkCloseAudit's supersession search and the Stage 2 uniqueness
+// checks. The literal title text never itself authorizes a close or an AUDIT_READY -- every
+// candidate found this way is still independently re-evaluated against its own structured fields.
 //
-// Stage 1 review finding on PR #435: `gh issue list --limit 200` silently drops every
-// candidate past the 200th once a repository's own `[Audit]`-titled corpus grows beyond that —
-// `gh issue list --help` documents `--limit` as "Maximum number of issues to fetch," a hard
-// truncation, not a page size, and sorting the returned array afterward cannot recover an
-// omitted issue. Fetches the REST Search API directly instead (`gh api search/issues`, the
-// same `--paginate --slurp` idiom `defaultGhApi` above already uses for issue-comments pages),
-// which follows the response's own `Link: rel="next"` header until exhausted rather than
-// stopping at one fixed page — recovering every candidate up to GitHub Search's own
-// documented 1,000-result ceiling, a platform limit this script cannot raise, rather than an
-// arbitrary client-side cap chosen without evidence of the real corpus size.
-// Exported (issue #729) so tools/orchestration/next-review-transition-gate.mjs can reuse this
-// exact "[Audit] in:title" candidate-discovery search for its own deterministic Stage 2
-// preparation-result reconciliation, rather than duplicating a second `gh api search/issues`
-// invocation. Candidate discovery only, unchanged from checkCloseAudit's own use above — every
-// candidate found this way still requires its own structured-field verification by the caller.
-export function defaultGhIssueList({ repo }) {
-  const raw = execFileSync(
-    "gh",
-    [
-      "api", "search/issues",
-      // `-X GET` is required: `gh api` defaults to POST once any `-f` field is present, but
-      // `search/issues` only accepts `q` as a GET query parameter.
-      "-X", "GET",
-      "-f", `q=[Audit] in:title repo:${repo}`,
-      "-f", "per_page=100",
-      "--paginate", "--slurp",
-    ],
-    // Same rationale as issue #407's own maxBuffer fix above: full issue `body` text across a
-    // multi-page `[Audit]` corpus can exceed Node's 1 MiB execFileSync default.
-    { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 },
-  );
-  const pages = JSON.parse(raw);
-  return pages.flatMap((page) => normalizeSearchIssuesPage(page));
+// Issue #895: repository-scoped REST only (`GET /repos/{repo}/issues?state=all`). The previous
+// global `gh api search/issues` call is rejected with HTTP 403 in a repository-bound remote/cloud
+// session (the #882/#891/PR #892/Audit #893 reproduction; same finding as #870 for PR discovery).
+// The listing is walked page by page (newest-first, 100 per page) to exhaustion -- a short page
+// ends it -- so no candidate is silently dropped, unlike the original fixed `--limit 200` (PR #435
+// finding). Created-time descending order is verified (ties allowed) and the walk is repeated and must match
+// exactly (mid-scan deletion/transfer protection); a duplicate, an ordering contradiction, a non-array page, a wrong-repository entry, or
+// reaching the safety bound before exhaustion throws rather than returning a possibly-incomplete
+// list as if it were complete. Title matching is a case-insensitive "[Audit]" substring filter
+// (the superset the Search query matched); pull requests are excluded.
+// Exported (issue #729) so next-review-transition-gate.mjs and verify-audit-ready.mjs reuse this
+// exact candidate discovery rather than duplicating a second enumeration.
+export function defaultGhIssueList({ repo }, { runImpl = execFileSync, limit = AUDIT_CANDIDATE_SCAN_LIMIT, maxAttempts = 3 } = {}) {
+  // Page-number pagination over a mutable listing is not a stable snapshot: a deletion/transfer in an
+  // already-read page shifts unseen entries left past the cursor, silently omitting them. Walk the
+  // listing, then walk it again and require the identical ordered number sequence; any difference
+  // means the listing mutated mid-scan, so retry (bounded) and otherwise fail closed.
+  for (let attempt = 1; ; attempt += 1) {
+    const first = walkRepoIssuesOnce({ repo, runImpl, limit });
+    const second = walkRepoIssuesOnce({ repo, runImpl, limit });
+    if (first.numbers.length === second.numbers.length && first.numbers.every((n, i) => n === second.numbers[i])) {
+      return second.candidates;
+    }
+    if (attempt >= maxAttempts) {
+      throw new Error(
+        `REST issues listing changed between consecutive complete scans in ${maxAttempts} attempts -- ` +
+          "refusing to treat a possibly-incomplete candidate list as complete",
+      );
+    }
+  }
+}
+
+function walkRepoIssuesOnce({ repo, runImpl, limit }) {
+  const perPage = 100;
+  const seen = new Set();
+  const numbers = [];
+  const candidates = [];
+  let previousTime = Infinity;
+  for (let page = 1; ; page += 1) {
+    const raw = runImpl(
+      "gh",
+      [
+        "api", "-X", "GET", `repos/${repo}/issues`,
+        "-f", "state=all", "-f", "sort=created", "-f", "direction=desc",
+        "-f", `per_page=${perPage}`, "-f", `page=${page}`,
+      ],
+      // Full issue `body` text across a page can exceed Node's 1 MiB execFileSync default.
+      { encoding: "utf8", maxBuffer: 50 * 1024 * 1024 },
+    );
+    let items;
+    try {
+      items = JSON.parse(raw);
+    } catch {
+      throw new Error("malformed (non-JSON) REST response from issues?state=all");
+    }
+    if (!Array.isArray(items)) throw new Error("malformed REST issues response: expected an array page");
+    for (const item of items) {
+      const candidate = normalizeRestIssueCandidate(item, { repo });
+      if (seen.has(item.number)) throw new Error(`REST issues listing returned duplicate #${item.number} -- refusing contradictory pagination evidence`);
+      // Ordering follows the requested sort key (created time, descending); ties are allowed.
+      const time = Date.parse(item.created_at);
+      if (Number.isNaN(time)) throw new Error(`malformed REST issues response: entry #${item.number} has no parseable created_at`);
+      if (time > previousTime) throw new Error(`REST issues listing is not newest-first by created_at (#${item.number} after an older entry) -- refusing contradictory ordering evidence`);
+      seen.add(item.number);
+      numbers.push(item.number);
+      previousTime = time;
+      if (candidate && /\[audit\]/i.test(candidate.title)) candidates.push(candidate);
+    }
+    if (items.length < perPage) return { numbers, candidates };
+    if (numbers.length >= limit) {
+      throw new Error(
+        `REST issues listing scanned ${numbers.length} items without reaching the end, at the ${limit}-item safety bound -- ` +
+          "refusing to treat a possibly-truncated candidate list as complete",
+      );
+    }
+  }
 }
 
 // Issue #808: REST (`PATCH /repos/{repo}/issues/{n}`, `POST .../comments`) rather than `gh issue

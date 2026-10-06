@@ -326,6 +326,24 @@ const ENVELOPES = {
   // second unusable response (or any provenance gap) stays STAGE2_RESPONSE_UNUSABLE/AMBIGUOUS, mode
   // "none" above.
   STAGE2_REPLACEMENT_AUDIT_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["run-replace-unusable-audit"] },
+  // Issue #883 (live #780/#877/PR #880/Audit #881): a valid recorded NOT CLEAN whose accepted
+  // finding was satisfied by evidence alone (tools/orchestration/evidence-correction.mjs
+  // independently verified the durable result comment). No correction PR and no worker dispatch:
+  // exactly one deterministic step -- create (or recover) the single same-merge re-audit -- then
+  // stop. A fresh gate invocation afterward resolves STAGE2_EVIDENCE_REAUDIT_READY.
+  STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["run-evidence-correction-prepare"],
+  },
+  // Issue #883: the single re-audit exists but the control Stage 2 pointer still names the
+  // preserved predecessor. The same two ordered actions STAGE2_AUDIT_ALREADY_PREPARED authorizes
+  // (finalize/project first, then the idempotent reviewer trigger -- issue #561's unchanged
+  // ordering invariant); `getActionEnvelope` narrows the first to the direct-reference
+  // verification when no control Issue is involved.
+  STAGE2_EVIDENCE_REAUDIT_READY: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["write-control-snapshot", "post-stage2-reviewer-trigger"],
+  },
   // Issue #646 (the #487/#643/#644/#645 live reproduction): reconcileStage2CorrectionPr found
   // an already-open, work-Issue-linked correction PR while re-evaluating what would otherwise
   // be STAGE2_CORRECTION_REQUIRED -- the PR boundary was already crossed by a prior (possibly
@@ -348,6 +366,8 @@ const ENVELOPES = {
 // treats as a verdict at all; AGENTS.md § Session execution: "a script error ... must never be
 // treated as the same permission"). Never widen this by guessing at intent from the shape of
 // an unrecognized state string.
+import { unwrapBoundSegment } from "./control-plane-continuation.mjs";
+
 const FAIL_CLOSED_DEFAULT = Object.freeze({
   mode: ENVELOPE_MODES.NONE,
   authorizedActions: [],
@@ -368,7 +388,11 @@ const FAIL_CLOSED_DEFAULT = Object.freeze({
 function parseChainedCommands(commandText) {
   if (typeof commandText !== "string" || commandText.length === 0) return [];
   return commandText.split("&&").map((segment) => {
-    const tokens = segment.trim().split(/\s+/).filter(Boolean);
+    let tokens = segment.trim().split(/\s+/).filter(Boolean);
+    // Issue #901: a runner-bound continuation (`node <runner>/control-plane-bootstrap.mjs <script>
+    // args`) carries exactly the same authority as its canonical `node <script> args` form.
+    const bound = unwrapBoundSegment(tokens);
+    if (bound) tokens = ["node", bound.script, ...bound.rest];
     const nodeIdx = tokens.indexOf("node");
     const scriptPath = nodeIdx !== -1 ? tokens[nodeIdx + 1] ?? "" : "";
     const scriptName = scriptPath.split(/[\\/]/).pop() ?? "";
@@ -463,6 +487,18 @@ export function getActionEnvelope(state, context = {}) {
     }
     const finalizeAction = context.controlIssue != null ? "write-control-snapshot" : "verify-direct-reference-audit";
     return { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: [...base, finalizeAction, "post-stage2-reviewer-trigger"] };
+  }
+
+  // Issue #883: no thin control Issue to project onto in direct-reference mode (the verdict then
+  // carries no `controlIssue`), so the finalizer step is the direct-reference verification
+  // continuation instead of a control write -- same split STAGE2_PREPARATION_REQUIRED's
+  // AUDIT_READY continuation already makes above.
+  if (state === "STAGE2_EVIDENCE_REAUDIT_READY") {
+    const hasControl = typeof context.controlIssue === "number";
+    return {
+      mode: entry.mode,
+      authorizedActions: [hasControl ? "write-control-snapshot" : "verify-direct-reference-audit", "post-stage2-reviewer-trigger"],
+    };
   }
 
   if (state === "STAGE2_CLOSE_READY") {
@@ -690,5 +726,38 @@ export function requiresPreBoundNonIsolatedDispatch(authorizedActions) {
 // `verify-action-envelope.mjs`'s CLI wrapper below uses this list to fail closed instead of
 // certifying a spuriously empty/incomplete action list as compliant.
 export function contextSensitiveEnvelopeStates() {
-  return ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION"];
+  // Issue #883: STAGE2_EVIDENCE_REAUDIT_READY derives its finalize action from whether the verdict
+  // carries a control Issue; an omitted context would silently degrade to the direct-reference form.
+  return ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", "STAGE2_EVIDENCE_REAUDIT_READY"];
+}
+
+// Issue #858 (control #571; fresh recurrence of #761's lost-verdict failure at #457/#856/PR #857):
+// the bounded Stage 1 correction verdicts authorize reserve -> dispatch but never named HOW the
+// controller carries the verdict between those steps, so a controller that had not saved the gate
+// JSON re-ran the (forbidden) gate to capture it, then hand-built JSON. The persisted
+// `verdict-handoff.mjs` copy already makes the correct path possible; this makes it the one
+// mechanically explicit continuation carried on the verdict itself. Pure data, no authority: the
+// verdict's own `state`/`actionEnvelope` still govern, and every step fails closed on a
+// missing/stale/wrong-control handoff (verdict-handoff.mjs). Returns null for any other state.
+//
+// Findings corrections and merge-conflict recovery reserve the exact PR-head checkout first;
+// the closing-reference repair needs no checkout, so its continuation is the formatter alone.
+export function getCorrectionContinuation(state, verdict = {}) {
+  const isStage1Correction = state === "STAGE1_CORRECTION_REQUIRED";
+  const isConflict = state === "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT";
+  if (!isStage1Correction && !isConflict) return null;
+  const needsReservation = isConflict || verdict.correctionReason !== "closing-reference";
+  // Issue #858 Stage 2 correction: only an actual positive integer number qualifies; never
+  // coerce booleans/strings/etc. into a valid-looking control identity.
+  const n = verdict.controlIssue;
+  const control = typeof n === "number" && Number.isInteger(n) && n > 0 ? ` --control-issue ${n}` : "";
+  const format = `node tools/orchestration/format-dispatch-prompt.mjs --from-handoff${control}`;
+  const steps = needsReservation
+    ? [`node tools/orchestration/pr-head-checkout-preflight.mjs --reserve-from-gate --from-handoff${control}`, format]
+    : [format];
+  return {
+    transport: "persisted-verdict-handoff",
+    steps,
+    note: "Do not re-run any lifecycle gate or retype/save this verdict's JSON: run each step in order (each reads the handoff the gate persisted), then dispatch the formatter's stdout verbatim as the single correction worker, and stop.",
+  };
 }
