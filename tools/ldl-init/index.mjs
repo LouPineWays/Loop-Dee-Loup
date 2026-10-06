@@ -711,6 +711,12 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/replace-unusable-audit.mjs", dependsOnDest: "tools/review-watch/lifecycle-gate.mjs" },
   { dest: "tools/orchestration/replace-unusable-audit.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
   { dest: "tools/orchestration/replace-unusable-audit.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  // Issue #868 Stage 1 correction: STAGE2_REPLACEMENT_AUDIT_REQUIRED's nextCommand operationally
+  // requires the managed replace-unusable-audit.mjs (the same operational-edge shape as
+  // format-dispatch-prompt.mjs -> verify-audit-ready.mjs). Without this edge an unmanaged, preserved
+  // (or incompatible) command target would let install/update report success while the gate-authorized
+  // recovery command fails or behaves differently.
+  { dest: "tools/orchestration/next-review-transition-gate.mjs", dependsOnDest: "tools/orchestration/replace-unusable-audit.mjs" },
   // Issue #725 Stage 1 review finding (P2, on PR #763): every importer of the new shared
   // github-read.mjs REST boundary hard-imports readGithubIssue/readGithubPr. Without these edges an
   // unmanaged, preserved tools/orchestration/github-read.mjs lets install/update report success

@@ -50,15 +50,17 @@ import {
   verifyControlPrMatches,
   verifyPrMerged,
   verifyAuditIssueMatches,
+  parseStage2PointerIssue,
 } from "./finalize-audit-breakpoint.mjs";
 import {
   checkPostAudit,
   parseFormField,
-  parseSupersedesAuditRef,
+  hasSupersedesAuditHeading,
   classifyAuditReplacements,
   composeReplacementAuditBody,
   composeReplacementAuditTitle,
   ghRestCreateIssue,
+  ghRestCloseIssue,
   listIssuesCreatedSince,
 } from "../review-watch/lifecycle-gate.mjs";
 
@@ -89,6 +91,7 @@ export async function run(
     checkPostAuditImpl = checkPostAudit,
     listCandidatesImpl = listIssuesCreatedSince,
     createIssueImpl = ghRestCreateIssue,
+    closeIssueImpl = ghRestCloseIssue,
     finalizeImpl = finalizeAuditRun,
   } = {},
 ) {
@@ -114,7 +117,8 @@ export async function run(
   if (lifecycle !== "AUDIT") {
     return unverified({ ...id, reason: `control Issue's Lifecycle is ${JSON.stringify(lifecycle)}, not "AUDIT"` });
   }
-  const stage2Pointer = (parseControlBullet(controlBody, "Stage 2") ?? "").trim();
+  // Canonical pointer reading shared with the gate planner and the finalizer (never a raw string).
+  const stage2Pointer = parseStage2PointerIssue(controlBody);
 
   let prView;
   try {
@@ -132,11 +136,13 @@ export async function run(
     return unverified({ ...id, reason: `gh issue view failed for Audit Issue #${auditIssue}: ${err.message}` });
   }
   const predecessorBody = predecessor.body ?? "";
-  if (parseFormField(predecessorBody, "Supersedes audit") !== null) {
+  // Any "Supersedes audit" heading -- even a blank/malformed one -- means this is (or claims to be) a
+  // replacement: refuse rather than treat malformed provenance as "not a replacement".
+  if (hasSupersedesAuditHeading(predecessorBody)) {
     return unverified({
       ...id,
       reason:
-        `Audit #${auditIssue} is itself a replacement (it carries a "Supersedes audit" field): the one automatic ` +
+        `Audit #${auditIssue} is itself a replacement (it carries a "Supersedes audit" section): the one automatic ` +
         "replacement per exact target is exhausted -- no third audit is created",
     });
   }
@@ -179,11 +185,11 @@ export async function run(
   let created = false;
   if (existing.kind === "FOUND") {
     replacementAudit = existing.auditIssue;
-    if (stage2Pointer !== `#${auditIssue}` && stage2Pointer !== `#${replacementAudit}`) {
+    if (stage2Pointer !== auditIssue && stage2Pointer !== replacementAudit) {
       return unverified({ ...id, replacementAudit, reason: `control Issue's Stage 2 pointer is ${JSON.stringify(stage2Pointer)}, neither the superseded #${auditIssue} nor its replacement #${replacementAudit}` });
     }
   } else {
-    if (stage2Pointer !== `#${auditIssue}`) {
+    if (stage2Pointer !== auditIssue) {
       return unverified({ ...id, reason: `control Issue's Stage 2 pointer is ${JSON.stringify(stage2Pointer)}, not the superseded #${auditIssue}; refusing to create a replacement` });
     }
     try {
@@ -197,12 +203,38 @@ export async function run(
     } catch (err) {
       return unverified({ ...id, reason: `creating the replacement Audit Issue failed (re-run to retry; the scan above found none): ${err.message}` });
     }
-    // Prove the new issue is the sole replacement before anything is projected.
+    // Prove the new issue is the sole current replacement before anything is projected. An ordinary
+    // controller race (another controller scanned NONE and created its own replacement too) is
+    // reconciled deterministically: Issue numbers are allocated atomically, so the LOWEST-numbered
+    // claimant is the one canonical replacement. A run that created a higher-numbered duplicate closes
+    // ONLY the issue it just created (never the winner, never the predecessor) and reports unverified;
+    // a fresh invocation then converges on the winner via the FOUND (reuse) path. A run whose own
+    // issue is the lowest, but which still sees a live competing duplicate, also refuses to project
+    // until that duplicate retires itself. No path ever creates a third audit.
     let rescan;
     try {
-      rescan = classifyAuditReplacements(await listCandidatesImpl({ repo, sinceIso: predecessor.createdAt }), classifyArgs);
+      rescan = classifyAuditReplacements(await listCandidatesImpl({ repo, sinceIso: predecessor.createdAt }), {
+        ...classifyArgs,
+        racingDuplicate: replacementAudit,
+      });
     } catch (err) {
       return unverified({ ...id, replacementAudit, reason: `post-create replacement scan failed for created #${replacementAudit}: ${err.message}` });
+    }
+    if (rescan.kind === "FOUND" && rescan.auditIssue !== replacementAudit) {
+      try {
+        await closeIssueImpl({ repo, issue: replacementAudit });
+      } catch (err) {
+        return unverified({
+          ...id,
+          replacementAudit,
+          reason: `lost the replacement race to #${rescan.auditIssue} but could not close the duplicate #${replacementAudit} this run created (${err.message}); not projecting`,
+        });
+      }
+      return unverified({
+        ...id,
+        replacementAudit: rescan.auditIssue,
+        reason: `another controller's replacement #${rescan.auditIssue} (lower-numbered) is the canonical replacement; closed this run's duplicate #${replacementAudit}; re-run to converge on #${rescan.auditIssue}`,
+      });
     }
     if (rescan.kind !== "FOUND" || rescan.auditIssue !== replacementAudit) {
       return unverified({

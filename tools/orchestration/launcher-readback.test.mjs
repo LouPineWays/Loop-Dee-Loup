@@ -144,3 +144,20 @@ test("prepared-audit continuation: complete only with the control projection AND
   assert.equal(cls(await make({ issues: open, control: projected })(t, v)), EffectClass.NOT_COMPLETED);
   assert.equal(cls(await make({ issues: { 825: { body: "", state: "CLOSED" } }, comments: { 825: [trig] }, control: projected })(t, v)), EffectClass.AMBIGUOUS);
 });
+
+test("replacement read-back (#868): pointer on the superseded audit is not-yet-projected; an OPEN replacement that supersedes it is proof; anything else is ambiguous", async () => {
+  const t = TRANSITIONS.STAGE2_REPLACEMENT_AUDIT_REQUIRED;
+  const v = { auditIssue: 866, replacementAudit: null };
+  const before = "- **Lifecycle:** AUDIT\n- **Stage 2:** #866\n";
+  const after = "- **Lifecycle:** AUDIT\n- **Stage 2:** #867\n";
+  const supersedes = (n) => `### Supersedes audit\n\n#${n}\n\n### Merged PR\n\nx\n`;
+  assert.equal(cls(await make({ control: before })(t, v)), EffectClass.NOT_COMPLETED);
+  assert.equal(cls(await make({ control: before })(t, { ...v, replacementAudit: 867 })), EffectClass.COMPLETED_UNPROJECTED);
+  assert.equal(cls(await make({ control: after, issues: { 867: { body: supersedes(866), state: "OPEN" } } })(t, v)), "PROVED");
+  // wrong predecessor named, closed replacement, blank provenance, or an unrelated pointer: fail closed
+  assert.equal(cls(await make({ control: after, issues: { 867: { body: supersedes(700), state: "OPEN" } } })(t, v)), EffectClass.AMBIGUOUS);
+  assert.equal(cls(await make({ control: after, issues: { 867: { body: supersedes(866), state: "CLOSED" } } })(t, v)), EffectClass.AMBIGUOUS);
+  assert.equal(cls(await make({ control: after, issues: { 867: { body: "### Supersedes audit\n\n\n### Merged PR\n", state: "OPEN" } } })(t, v)), EffectClass.AMBIGUOUS);
+  assert.equal(cls(await make({ control: "- **Lifecycle:** AUDIT\n- **Stage 2:** none\n" })(t, v)), EffectClass.AMBIGUOUS);
+  assert.equal(cls(await make({ control: "- **Lifecycle:** REVIEW\n- **Stage 2:** #867\n", issues: { 867: { body: supersedes(866), state: "OPEN" } } })(t, v)), EffectClass.AMBIGUOUS);
+});

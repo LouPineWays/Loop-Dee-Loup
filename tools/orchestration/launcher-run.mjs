@@ -150,7 +150,22 @@ const NEXT_COMMAND_STATES = new Set([
   "STAGE2_AUDIT_ALREADY_PREPARED",
   "STAGE2_CLOSE_READY",
   "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
+  "STAGE2_REPLACEMENT_AUDIT_REQUIRED",
 ]);
+
+// Issue #868: the replacement verdict's nextCommand must be exactly the canonical, single
+// replace-unusable-audit.mjs invocation for THIS launch's control/execution issue and the verdict's
+// own PR/audit identity -- never any other command a malformed verdict might carry.
+function replacementCommand(verdict, { controlIssue, executionIssue }) {
+  const { pr, auditIssue } = verdict;
+  if (!Number.isInteger(pr) || !Number.isInteger(auditIssue)) throw new Error("replacement verdict lacks pr/auditIssue");
+  const segs = parseNextCommand(verdict.nextCommand);
+  const want = ["--control-issue", String(controlIssue), "--execution-issue", String(executionIssue), "--pr", String(pr), "--audit-issue", String(auditIssue)];
+  if (segs.length !== 1 || segs[0].file !== "tools/orchestration/replace-unusable-audit.mjs" || JSON.stringify(segs[0].args) !== JSON.stringify(want)) {
+    throw new Error("replacement verdict nextCommand is not the canonical replace-unusable-audit command for this launch");
+  }
+  return segs[0];
+}
 
 // io: { node(file, args, input?) -> stdout, gh(args, input?) -> stdout } (injectable for tests).
 // readPr({ repo, number }) -> { state, headRefOid } and readIssue({ repo, number }) -> { body, state }
@@ -213,6 +228,9 @@ export function buildDeps({
         // two leaves manifest-present/unprojected, which the next read-back reconciles (finalize).
         io.node("tools/orchestration/prepare-dispatch-manifest.mjs", ["--execution-issue", String(verdict.executionIssue ?? executionIssue), "--create"]);
         await projectRoutedFromFreshGate();
+      } else if (state === "STAGE2_REPLACEMENT_AUDIT_REQUIRED") {
+        const c = replacementCommand(verdict, { controlIssue, executionIssue });
+        io.node(c.file, c.args);
       } else if (NEXT_COMMAND_STATES.has(state)) {
         for (const c of parseNextCommand(verdict.nextCommand)) io.node(c.file, c.args);
       } else if (state === "STAGE1_CORRECTION_FINALIZATION_REQUIRED") {
@@ -262,6 +280,12 @@ export function buildDeps({
       if (state === "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION") {
         for (const c of parseNextCommand(verdict.nextCommand)) io.node(c.file, c.args);
         return undefined;
+      }
+      if (state === "STAGE2_REPLACEMENT_AUDIT_REQUIRED") {
+        // Replacement exists, projection missing: the same idempotent command reuses it (never a
+        // second create) and projects it.
+        const c = replacementCommand(verdict, { controlIssue, executionIssue });
+        return io.node(c.file, c.args);
       }
       throw new Error(`no reconciliation defined for ${state}`);
     },

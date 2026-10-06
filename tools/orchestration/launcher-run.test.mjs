@@ -156,3 +156,78 @@ test("correction finalization verdict: a nextCommand that is not the canonical f
   assert.equal(r.outcome, Outcome.FAIL_CLOSED);
   assert.ok(!calls.some((c) => c[1] === "tools/orchestration/finalize-correction-breakpoint.mjs"));
 });
+
+// Issue #868 Stage 1 correction: the launcher executes STAGE2_REPLACEMENT_AUDIT_REQUIRED -- running
+// only the canonical replace-unusable-audit command and validating the projection by read-back --
+// instead of rejecting the gate's own authorized transition as an unrecognized state.
+const REPL_SUPERSEDED = 866;
+const REPL_NEW = 867;
+const replacementVerdict = (over = {}) => ({
+  state: "STAGE2_REPLACEMENT_AUDIT_REQUIRED",
+  controlIssue: 379,
+  issue: 73,
+  repo: "o/r",
+  pr: 865,
+  auditIssue: REPL_SUPERSEDED,
+  replacementAudit: null,
+  nextCommand: "node tools/orchestration/replace-unusable-audit.mjs --control-issue 379 --execution-issue 73 --pr 865 --audit-issue 866",
+  actionEnvelope: { mode: "bounded", authorizedActions: ["run-replace-unusable-audit"] },
+  ...over,
+});
+const unprojectedControl = "- **Lifecycle:** AUDIT\n- **PR:** #865\n- **Stage 2:** #866\n";
+const projectedControl = "- **Lifecycle:** AUDIT\n- **PR:** #865\n- **Stage 2:** #867\n";
+const replacementBody = `### Supersedes audit\n\n#${REPL_SUPERSEDED}\n\n### Merged PR\n\nx\n`;
+
+function replacementDeps(verdict, { control, run }) {
+  let body = control;
+  const { io, calls, readPr } = fakeIo({ gateStates: [verdict] });
+  const nodeFn = io.node;
+  io.node = (file, args, input) => {
+    if (file.endsWith("replace-unusable-audit.mjs")) body = run?.(body) ?? body;
+    return nodeFn(file, args, input);
+  };
+  const readIssue = ({ number }) => (number === 379 ? { body, state: "OPEN" } : { body: replacementBody, state: "OPEN" });
+  return { calls, deps: buildDeps({ controlIssue: 379, executionIssue: 73, readPr, readIssue, io }) };
+}
+
+test("replacement verdict: executes the canonical replace-unusable-audit command once, verifies the projected replacement by read-back, and advances", async () => {
+  const { calls, deps } = replacementDeps(replacementVerdict(), { control: unprojectedControl, run: () => projectedControl });
+  const r = await runLauncherStep({ controlIssue: 379, deps });
+  assert.equal(r.outcome, Outcome.ADVANCED);
+  assert.equal(calls.filter((c) => c[1] === "tools/orchestration/replace-unusable-audit.mjs").length, 1);
+  assert.ok(!calls.some((c) => String(c[1]).includes("trigger")), "the launcher never posts a reviewer trigger for this transition");
+});
+
+test("replacement verdict: an executed command that leaves the pointer on the superseded audit is not proof (FAIL_CLOSED)", async () => {
+  const { deps } = replacementDeps(replacementVerdict(), { control: unprojectedControl, run: () => unprojectedControl });
+  const r = await runLauncherStep({ controlIssue: 379, deps });
+  assert.equal(r.outcome, Outcome.FAIL_CLOSED);
+  assert.equal(r.successorEligible, false);
+});
+
+test("replacement verdict: a replacement that exists but is unprojected re-runs only the idempotent command (finalize path), never a second create", async () => {
+  const { calls, deps } = replacementDeps(replacementVerdict({ replacementAudit: REPL_NEW }), { control: unprojectedControl, run: () => projectedControl });
+  const r = await runLauncherStep({ controlIssue: 379, deps });
+  assert.equal(r.outcome, Outcome.ADVANCED);
+  assert.equal(calls.filter((c) => c[1] === "tools/orchestration/replace-unusable-audit.mjs").length, 1);
+});
+
+test("replacement verdict: a nextCommand that is not the canonical replacement command for this launch is refused before any mutation", async () => {
+  for (const nextCommand of [
+    "node tools/orchestration/replace-unusable-audit.mjs --control-issue 379 --execution-issue 73 --pr 999 --audit-issue 866",
+    "node tools/orchestration/replace-unusable-audit.mjs --control-issue 379 --execution-issue 73 --pr 865 --audit-issue 866 && node tools/review-watch/trigger.mjs --kind issue --number 866",
+    "node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue 379 --execution-issue 73 --pr 865 --audit-issue 866",
+  ]) {
+    const { calls, deps } = replacementDeps(replacementVerdict({ nextCommand }), { control: unprojectedControl, run: () => projectedControl });
+    const r = await runLauncherStep({ controlIssue: 379, deps });
+    assert.equal(r.outcome, Outcome.FAIL_CLOSED, nextCommand);
+    assert.ok(!calls.some((c) => c[1] === "tools/orchestration/replace-unusable-audit.mjs"), nextCommand);
+  }
+});
+
+test("replacement verdict: a verdict for a different execution issue is refused by the authority check", async () => {
+  const { calls, deps } = replacementDeps(replacementVerdict({ issue: 74 }), { control: unprojectedControl, run: () => projectedControl });
+  const r = await runLauncherStep({ controlIssue: 379, deps });
+  assert.equal(r.outcome, Outcome.FAIL_CLOSED);
+  assert.ok(!calls.some((c) => c[1] === "tools/orchestration/replace-unusable-audit.mjs"));
+});

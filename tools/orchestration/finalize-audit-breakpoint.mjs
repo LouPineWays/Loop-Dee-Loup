@@ -344,6 +344,18 @@ export function verifyAuditIssueStillUnique(candidates, { mergeCommitOid, execut
 // (the ordinary REVIEW->AUDIT finalize, and the #729 recovery/revalidation nextCommand for a
 // genuinely current pointer), which keeps the original strict "already-recorded audit issue"
 // refusal completely unchanged for every pointer that has not been proven stale.
+// Pure. Issue #868 Stage 1 correction: the ONE canonical reading of the control Issue's "Stage 2"
+// pointer shared by the gate planner, replace-unusable-audit.mjs, and this finalizer -- the same
+// parseExecutionPointer reading the gate already accepts (a bare #N or an issues/PRs URL naming
+// exactly one reference), never a second raw-string contract. Returns the issue number, or null when
+// the bullet is absent, a none sentinel, malformed, or names more than one reference.
+export function parseStage2PointerIssue(body) {
+  const raw = parseControlBullet(body, "Stage 2");
+  if (raw === null || isNoneSentinel(raw)) return null;
+  const parsed = parseExecutionPointer(raw);
+  return parsed.ok ? parsed.issue : null;
+}
+
 export function composeAuditFinalizedControlBody(body, { auditIssue, executionIssue, pr, staleAuditIssue = null }) {
   const executionCheck = verifyExecutionMatchesAudit(body, executionIssue);
   if (!executionCheck.ok) {
@@ -365,9 +377,9 @@ export function composeAuditFinalizedControlBody(body, { auditIssue, executionIs
   }
   if (currentLifecycle.trim() === "AUDIT") {
     const stage2Field = parseControlBullet(body, "Stage 2");
-    const alreadyMatches = stage2Field !== null && stage2Field.trim() === `#${auditIssue}`;
-    const authorizedStaleReplacement =
-      !alreadyMatches && staleAuditIssue != null && stage2Field !== null && stage2Field.trim() === `#${staleAuditIssue}`;
+    const stage2Issue = parseStage2PointerIssue(body);
+    const alreadyMatches = stage2Issue === auditIssue;
+    const authorizedStaleReplacement = !alreadyMatches && staleAuditIssue != null && stage2Issue === staleAuditIssue;
     if (!alreadyMatches && !authorizedStaleReplacement) {
       return {
         ok: false,

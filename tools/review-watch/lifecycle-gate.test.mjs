@@ -4491,3 +4491,45 @@ test("#852 close-work-issue closes via REST transport, is idempotent on CLOSED, 
   );
   assert.equal(bad.exitCode, 1);
 });
+
+// -- issue #868 Stage 1 correction: validated "Supersedes audit" provenance retires the superseded
+// unusable predecessor on the replacement's CLEAN close even when `Work issue: none` (the supported
+// no-work shape the shared-Work-issue sweep deliberately never searches) ------------------------
+
+test("checkCloseAudit: a CLEAN replacement with Work issue none retires its validated Supersedes-audit predecessor; a mismatched predecessor is never closed", async () => {
+  const pred = misplacedCorrectsAuditFixture({ workIssue: "none", verdict: "PENDING", createdAt: "2026-10-02T09:00:00Z" });
+  const repl = misplacedCorrectsAuditFixture({ workIssue: "none", verdict: "CLEAN", createdAt: "2026-10-02T10:00:00Z" });
+  repl.body = `### Supersedes audit\n\n#900\n\n${repl.body}`;
+  const run = async (chain) => {
+    const closed = [];
+    const comments = [];
+    const result = await checkCloseAudit(
+      { repo: "owner/repo", "audit-issue": 901 },
+      {
+        ghIssueViewImpl: async ({ number }) => chain[number],
+        ghIssueListImpl: async () => [],
+        ghApiImpl: ghApiForThreads({ 901: completedAuditThread({ verdict: "CLEAN" }) }),
+        ghCloseImpl: async (a) => closed.push(a.auditIssue),
+        ghCommentImpl: async (a) => comments.push(a),
+      },
+    );
+    return { result, closed, comments };
+  };
+
+  const ok = await run({ 900: pred, 901: repl });
+  assert.equal(ok.result.state, "CLOSED");
+  assert.deepEqual(ok.closed, [901, 900], "the superseded unusable audit is retired even with no work issue");
+  assert.deepEqual(ok.result.retiredPredecessors.map((r) => r.auditIssue), [900]);
+  assert.match(ok.comments.find((c) => c.auditIssue === 900).body, /bounded replacement audit/);
+
+  // A predecessor of a DIFFERENT exact merge commit is never closed on the strength of the pointer.
+  const wrongMerge = misplacedCorrectsAuditFixture({ workIssue: "none", verdict: "PENDING", createdAt: "2026-10-02T09:00:00Z", commit: "c".repeat(40) });
+  const bad = await run({ 900: wrongMerge, 901: repl });
+  assert.deepEqual(bad.closed, [901]);
+  assert.equal(bad.result.retiredPredecessors.length, 0);
+
+  // A blank/malformed Supersedes heading is not a provenance pointer at all: nothing is retired.
+  const blank = { ...repl, body: repl.body.replace("#900", "") };
+  const none = await run({ 900: pred, 901: blank });
+  assert.deepEqual(none.closed, [901]);
+});

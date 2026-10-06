@@ -10,7 +10,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { resolvePostMergeVerdict, runNextReviewTransitionGate } from "./next-review-transition-gate.mjs";
 import { run as replaceRun } from "./replace-unusable-audit.mjs";
-import { composeReplacementAuditBody, composeReplacementAuditTitle, parseSupersedesAuditRef } from "../review-watch/lifecycle-gate.mjs";
+import { composeReplacementAuditBody, composeReplacementAuditTitle, parseSupersedesAuditRef, hasSupersedesAuditHeading } from "../review-watch/lifecycle-gate.mjs";
+import { composeAuditFinalizedControlBody, parseStage2PointerIssue } from "./finalize-audit-breakpoint.mjs";
 import { getActionEnvelope, classifyEnvelopeCompliance } from "./action-envelope.mjs";
 
 const REPO = "o/r";
@@ -290,7 +291,7 @@ test("#868 action envelope: the one bounded action is compliant; a reviewer trig
 // -- script side ------------------------------------------------------------------------------
 
 function scriptWorld({ control = controlBody(), pred = PRED_ISSUE, existing = [], postAudit = UNUSABLE(PRED), failFinalize = false, rescanHides = false, createFails = false } = {}) {
-  const w = { control, created: [], finalized: [], store: [...existing], scans: 0 };
+  const w = { control, created: [], finalized: [], closed: [], store: [...existing], scans: 0, onCreate: null };
   w.deps = {
     ghControlViewImpl: async () => ({ body: w.control }),
     ghPrViewImpl: async () => ({ state: "MERGED", mergeCommit: { oid: MERGE } }),
@@ -305,7 +306,14 @@ function scriptWorld({ control = controlBody(), pred = PRED_ISSUE, existing = []
       const number = 900 + w.created.length;
       w.created.push({ number, title, body });
       w.store.push({ number, title, body, state: "OPEN", createdAt: T_REPL });
+      // Race hook: another controller's creation becomes visible between this create and its rescan.
+      w.onCreate?.(w, number);
       return { number };
+    },
+    closeIssueImpl: async ({ issue }) => {
+      w.closed.push(issue);
+      const found = w.store.find((c) => c.number === issue);
+      if (found) found.state = "CLOSED";
     },
     finalizeImpl: async (args) => {
       w.finalized.push(args);
@@ -334,9 +342,11 @@ test("#868 script: initial unusable -> creates exactly one replacement (preserve
     repo: REPO, controlIssue: 859, executionIssue: 860, pr: 865, auditIssue: result.replacementAudit,
     revalidateUniqueness: false, staleAuditIssue: PRED,
   });
-  // The injected dependency surface has no comment/close/edit/trigger operation at all -- the
-  // superseded audit thread is structurally untouchable from this script.
-  assert.deepEqual(Object.keys(w.deps).sort(), ["checkPostAuditImpl", "createIssueImpl", "finalizeImpl", "ghAuditViewImpl", "ghControlViewImpl", "ghPrViewImpl", "listCandidatesImpl"]);
+  // The injected dependency surface has no comment/edit/trigger operation at all, and its only close
+  // is of an issue THIS run created (the race-duplicate path below) -- the superseded audit thread is
+  // structurally untouchable from this script, and nothing was closed on the happy path.
+  assert.deepEqual(Object.keys(w.deps).sort(), ["checkPostAuditImpl", "closeIssueImpl", "createIssueImpl", "finalizeImpl", "ghAuditViewImpl", "ghControlViewImpl", "ghPrViewImpl", "listCandidatesImpl"]);
+  assert.deepEqual(w.closed, []);
 });
 
 test("#868 script: repeated runs are idempotent at every interruption boundary (before creation, after creation before projection, after projection)", async () => {
@@ -453,4 +463,116 @@ test("#868 live-shape regression: control #859 carries Lifecycle only as the par
   const notAudit = headingControl.replace("AUDIT", "CORRECTION");
   const blocked = await gate(gateImpls({ control: notAudit, postAudit: UNUSABLE(PRED) }));
   assert.equal(blocked.recovery?.status, "UNAVAILABLE");
+});
+
+// -- Stage 1 correction (#868) -----------------------------------------------------------------
+
+test("#868 correction: the control's Stage 2 pointer is read through ONE canonical parser -- a URL-form pointer works identically in the planner, the command, and the finalizer", async () => {
+  const urlPointer = `https://github.com/o/r/issues/${PRED}`;
+  const urlControl = controlBody({ stage2: urlPointer });
+
+  const planned = await gate(gateImpls({ control: urlControl, postAudit: UNUSABLE(PRED) }));
+  assert.equal(planned.state, "STAGE2_REPLACEMENT_AUDIT_REQUIRED");
+
+  const w = scriptWorld({ control: urlControl });
+  const result = await replaceRun(ARGS, w.deps);
+  assert.equal(result.state, "REPLACEMENT_FINALIZED");
+  assert.equal(w.created.length, 1);
+
+  // The real finalizer accepts the same representation as the authorized stale pointer, and refuses
+  // an unrelated one exactly as before.
+  const composed = composeAuditFinalizedControlBody(urlControl, { auditIssue: 900, executionIssue: 860, pr: 865, staleAuditIssue: PRED });
+  assert.equal(composed.ok, true);
+  assert.equal(parseStage2PointerIssue(composed.body), 900);
+  assert.equal(composeAuditFinalizedControlBody(urlControl, { auditIssue: 900, executionIssue: 860, pr: 865, staleAuditIssue: 123 }).ok, false);
+  assert.equal(parseStage2PointerIssue(controlBody({ stage2: "#866 and #123" })), null);
+});
+
+test("#868 correction: a present-but-blank Supersedes audit heading is malformed provenance -- never 'not a replacement' (planner, script, classifier)", async () => {
+  const blankBody = auditBody().replace("### Merged PR", "### Supersedes audit\n\n### Merged PR");
+  assert.equal(parseSupersedesAuditRef(blankBody), null);
+  assert.equal(hasSupersedesAuditHeading(blankBody), true);
+
+  const planned = await gate(gateImpls({ postAudit: UNUSABLE(PRED), audits: [{ ...PRED_ISSUE, body: blankBody }] }));
+  assert.equal(planned.state, "STAGE2_RESPONSE_UNUSABLE");
+  assert.equal(planned.recovery?.status, "UNAVAILABLE");
+  assert.equal(planned.nextCommand, undefined);
+
+  const asPred = scriptWorld({ pred: { ...PRED_ISSUE, body: blankBody } });
+  const refused = await replaceRun(ARGS, asPred.deps);
+  assert.equal(refused.state, "REPLACEMENT_UNVERIFIED");
+  assert.equal(asPred.created.length, 0);
+
+  // A blank-heading claimant for the same exact target consumes the bound: no creation.
+  const asClaimant = scriptWorld({ existing: [replIssue({ body: blankBody })] });
+  const blocked = await replaceRun(ARGS, asClaimant.deps);
+  assert.equal(blocked.state, "REPLACEMENT_UNVERIFIED");
+  assert.equal(asClaimant.created.length, 0);
+  assert.equal(asClaimant.finalized.length, 0);
+});
+
+test("#868 correction: a CLOSED source audit is never authorized for replacement by the planner (matches the command's own OPEN precondition)", async () => {
+  const result = await gate(gateImpls({ postAudit: UNUSABLE(PRED), audits: [{ ...PRED_ISSUE, state: "CLOSED" }] }));
+  assert.equal(result.state, "STAGE2_RESPONSE_UNUSABLE");
+  assert.equal(result.recovery?.status, "UNAVAILABLE");
+  assert.equal(result.nextCommand, undefined);
+  assert.equal(result.actionEnvelope.mode, "none");
+});
+
+test("#868 correction: controller race -- the run that created the HIGHER-numbered duplicate closes only its own issue, never projects, and a re-run converges on the lowest-numbered winner", async () => {
+  const w = scriptWorld();
+  // Another controller scanned NONE too and its lower-numbered replacement (899) is now visible.
+  w.onCreate = (world) => world.store.push({ number: 899, title: "t", body: REPL_BODY, state: "OPEN", createdAt: T_REPL });
+  const lost = await replaceRun(ARGS, w.deps);
+  assert.equal(lost.state, "REPLACEMENT_UNVERIFIED");
+  assert.equal(lost.replacementAudit, 899);
+  assert.deepEqual(w.closed, [900], "only the issue THIS run created is closed");
+  assert.equal(w.finalized.length, 0, "a lost race never projects current Stage 2 authority");
+  assert.equal(w.control, controlBody(), "control pointer untouched");
+
+  w.onCreate = null;
+  const again = await replaceRun(ARGS, w.deps);
+  assert.equal(again.state, "REPLACEMENT_FINALIZED");
+  assert.equal(again.replacementAudit, 899, "converges on the one canonical replacement");
+  assert.equal(again.created, false);
+  assert.equal(w.created.length, 1, "no third audit is ever created");
+  assert.deepEqual(w.closed, [900]);
+});
+
+test("#868 correction: controller race -- the run that created the LOWEST-numbered replacement refuses to project while a live competing duplicate exists, then proceeds once it retires; no path creates a third audit", async () => {
+  const w = scriptWorld();
+  w.onCreate = (world) => world.store.push({ number: 901, title: "t", body: REPL_BODY, state: "OPEN", createdAt: T_REPL });
+  const first = await replaceRun(ARGS, w.deps);
+  assert.equal(first.state, "REPLACEMENT_UNVERIFIED");
+  assert.equal(w.finalized.length, 0);
+  assert.deepEqual(w.closed, [], "the winner never closes the other controller's issue");
+
+  // The other controller's own run retires its duplicate; the winner's re-run now reuses and projects.
+  w.store.find((c) => c.number === 901).state = "CLOSED";
+  w.onCreate = null;
+  const second = await replaceRun(ARGS, w.deps);
+  assert.equal(second.state, "REPLACEMENT_FINALIZED");
+  assert.equal(second.replacementAudit, 900);
+  assert.equal(second.created, false);
+  assert.equal(w.created.length, 1);
+});
+
+test("#868 correction: an unreconcilable extra claimant (different predecessor, or advanced past pending) still fails closed instead of being treated as a race duplicate", async () => {
+  for (const extra of [
+    { number: 901, body: composeReplacementAuditBody(auditBody(), 700), state: "CLOSED" },
+    { number: 901, body: composeReplacementAuditBody(auditBody({ verdict: "CLEAN" }), PRED), state: "CLOSED" },
+    { number: 901, body: REPL_BODY, state: "OPEN" },
+  ]) {
+    const w = scriptWorld({ existing: [replIssue({ number: 900 }), { title: "t", createdAt: T_REPL, ...extra }] });
+    const result = await replaceRun(ARGS, w.deps);
+    assert.equal(result.state, "REPLACEMENT_UNVERIFIED");
+    assert.equal(w.created.length, 0);
+    assert.equal(w.finalized.length, 0);
+    assert.deepEqual(w.closed, []);
+  }
+  // A CLOSED pristine race duplicate above an OPEN canonical replacement is ignorable (the loser of an earlier race).
+  const settled = scriptWorld({ existing: [replIssue({ number: 900 }), replIssue({ number: 901, state: "CLOSED" })] });
+  const ok = await replaceRun(ARGS, settled.deps);
+  assert.equal(ok.state, "REPLACEMENT_FINALIZED");
+  assert.equal(ok.replacementAudit, 900);
 });

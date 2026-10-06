@@ -618,6 +618,15 @@ export function parseSupersedesAuditRef(body) {
   return match ? Number(match[1]) : null;
 }
 
+// Pure. True when ANY "### Supersedes audit" heading exists in the body, even one whose value is
+// blank or malformed. A present-but-unparseable marker is malformed replacement provenance, never
+// equivalent to "this is not a replacement" (issue #868 Stage 1 correction): every consumer that
+// asks "is this audit a replacement / does it consume the one-replacement bound" uses this, not
+// `parseFormField(...) !== null` (which reads a blank heading as absent).
+export function hasSupersedesAuditHeading(body) {
+  return String(body ?? "").split("\n").some((line) => line.trim() === "### Supersedes audit");
+}
+
 // Pure. The replacement body: a leading provenance section, then the superseded audit's own body
 // byte-for-byte (so Merged PR / Work issue / Exact merge commit / disposition / scope / checklist
 // are identical, and the canonical pending Findings/Verdict/Next fields are preserved). The caller
@@ -644,9 +653,12 @@ const createdMsOf = (candidate) => new Date(candidate?.createdAt ?? NaN).getTime
 //   FOUND      -- exactly one exists, it names exactly `predecessorNumber`, is OPEN, was created
 //                 strictly after the predecessor, and carries the canonical pending initial state:
 //                 reuse it (never create another).
-//   AMBIGUOUS  -- anything else (more than one; one naming a different predecessor; closed;
-//                 no-longer-pending; not created after the predecessor): fail closed, no creation.
-export function classifyAuditReplacements(candidates, { predecessorNumber, predecessorCreatedAt, mergeCommitOid, executionIssue }) {
+//   AMBIGUOUS  -- anything else (more than one unreconcilable claimant; one naming a different
+//                 predecessor; closed; no-longer-pending; not created after the predecessor): fail
+//                 closed, no creation. Multiple claimants reconcile deterministically to the
+//                 lowest-numbered one only when every other is a provable retired race duplicate
+//                 (closed, or racingDuplicate = the caller's own just-created issue) -- see below.
+export function classifyAuditReplacements(candidates, { predecessorNumber, predecessorCreatedAt, mergeCommitOid, executionIssue, racingDuplicate = null }) {
   const expectedWork = executionIssue === "none" ? "none" : executionIssue;
   const claimants = (candidates ?? []).filter((candidate) => {
     if (Number(candidate.number) === Number(predecessorNumber)) return false;
@@ -655,18 +667,37 @@ export function classifyAuditReplacements(candidates, { predecessorNumber, prede
     const merge = parseMergeCommitRef(body);
     if (!merge || merge.toLowerCase() !== String(mergeCommitOid).toLowerCase()) return false;
     if (parseWorkIssueRef(body) !== expectedWork) return false;
-    // Any non-blank "Supersedes audit" field is a claim, even an unparseable one: a malformed
+    // Any "Supersedes audit" heading is a claim, even a blank or unparseable one: a malformed
     // marker must consume the bound rather than read as "not a replacement".
-    return parseFormField(body, "Supersedes audit") !== null;
+    return hasSupersedesAuditHeading(body);
   });
   if (claimants.length === 0) return { kind: "NONE" };
-  const numbers = claimants.map((c) => Number(c.number)).sort((a, b) => a - b);
+  claimants.sort((a, b) => Number(a.number) - Number(b.number));
+  const numbers = claimants.map((c) => Number(c.number));
   if (claimants.length > 1) {
-    return {
-      kind: "AMBIGUOUS",
-      candidates: numbers,
-      reason: `more than one audit already claims to replace an audit of this exact target (${numbers.map((n) => `#${n}`).join(", ")}); the one-replacement bound is exhausted`,
-    };
+    // Ordinary controller race (issue #868 Stage 1 correction): two controllers that both scanned
+    // NONE may each have created a replacement. GitHub allocates Issue numbers atomically, so the
+    // LOWEST-numbered claimant is the one canonical replacement -- deterministic from durable data,
+    // never a guess. Every other claimant is a retirable race duplicate ONLY when it provably names
+    // the same predecessor, was created after it, is still in the pristine pending state, and is
+    // either CLOSED or the very issue the calling run just created (racingDuplicate, which that
+    // run then closes). Anything else (an unrelated, malformed, advanced, or still-open foreign
+    // claimant) is an unreconcilable conflict and fails closed.
+    const [canonical, ...rest] = claimants;
+    const predCreatedMs = new Date(predecessorCreatedAt ?? NaN).getTime();
+    const retirable = (c) =>
+      parseSupersedesAuditRef(c.body ?? "") === Number(predecessorNumber) &&
+      createdMsOf(c) > predCreatedMs &&
+      checkPreAuditPendingState(c.body ?? "").ok &&
+      (c.state === "CLOSED" || (racingDuplicate != null && Number(c.number) === Number(racingDuplicate)));
+    if (!rest.every(retirable)) {
+      return {
+        kind: "AMBIGUOUS",
+        candidates: numbers,
+        reason: `more than one audit already claims to replace an audit of this exact target (${numbers.map((n) => `#${n}`).join(", ")}) and the extra claimant(s) are not provable retired race duplicates of the lowest-numbered #${canonical.number}; the one-replacement bound is exhausted`,
+      };
+    }
+    claimants.length = 1;
   }
   const only = claimants[0];
   const number = Number(only.number);
@@ -2104,6 +2135,16 @@ function chainRetiredCloseComment({ successorAuditIssue, terminalAuditIssue }) {
   );
 }
 
+// Pure. Issue #868: close comment for an unusable audit retired by its validated replacement.
+function replacementRetiredCloseComment({ successorAuditIssue, terminalAuditIssue }) {
+  return (
+    `Closed by \`tools/review-watch/lifecycle-gate.mjs close-audit\`: #${successorAuditIssue} is the one bounded replacement audit ` +
+    `(its "Supersedes audit" field names this issue) for the same exact merge commit and work issue, after this audit's ` +
+    `response was not a completed Stage 2 report. The terminal audit #${terminalAuditIssue} reached its own closing ` +
+    `evidence; this audit's own thread is preserved unchanged as historical evidence.`
+  );
+}
+
 // Pure orchestration (throws only if `ghApiImpl` throws, same convention as
 // evaluateAuditCloseReadiness). Recursively resolves whether `auditIssueNumber` is superseded by a
 // later-created audit issue that explicitly names it as the predecessor it corrects
@@ -2377,8 +2418,14 @@ async function retirePredecessorChain(
   let current = { number: startNumber, body: startBody ?? "", createdMs: new Date(startCreatedAt ?? 0).getTime() };
 
   for (;;) {
-    const predecessorNumber = parseCorrectsAuditRef(current.body);
+    // Two provenance kinds link an audit to its predecessor: a correction PR's corrects-chain
+    // pointer, and (issue #868) a replacement audit's validated "Supersedes audit" pointer. The
+    // latter holds even when the target has no work issue (the sweep below keys on a work issue).
+    const correctsNumber = parseCorrectsAuditRef(current.body);
+    const supersedesNumber = correctsNumber === null ? parseSupersedesAuditRef(current.body) : null;
+    const predecessorNumber = correctsNumber ?? supersedesNumber;
     if (predecessorNumber === null) break;
+    const viaSupersedes = supersedesNumber !== null;
     if (visited.has(predecessorNumber)) {
       skipped.push({ auditIssue: predecessorNumber, reason: "cycle detected in correction-chain provenance; fails closed" });
       break;
@@ -2408,6 +2455,19 @@ async function retirePredecessorChain(
       break;
     }
 
+    if (viaSupersedes) {
+      // A replacement may only retire an audit of the SAME exact merge commit and work issue.
+      const sameMerge = (parseMergeCommitRef(predecessorData.body ?? "") ?? "").toLowerCase();
+      const curMerge = (parseMergeCommitRef(current.body) ?? "").toLowerCase();
+      if (!sameMerge || sameMerge !== curMerge || parseWorkIssueRef(predecessorData.body ?? "") !== parseWorkIssueRef(current.body)) {
+        skipped.push({
+          auditIssue: predecessorNumber,
+          reason: `replacement provenance names #${predecessorNumber}, but it is not an audit of the same exact merge commit/work issue; fails closed`,
+        });
+        break;
+      }
+    }
+
     const predecessorCreatedMs = new Date(predecessorData.createdAt ?? 0).getTime();
     if (!(predecessorCreatedMs < current.createdMs)) {
       skipped.push({
@@ -2434,7 +2494,9 @@ async function retirePredecessorChain(
           await ghCommentImpl({
             repo,
             auditIssue: predecessorNumber,
-            body: chainRetiredCloseComment({ successorAuditIssue: current.number, terminalAuditIssue: startNumber }),
+            body: viaSupersedes
+              ? replacementRetiredCloseComment({ successorAuditIssue: current.number, terminalAuditIssue: startNumber })
+              : chainRetiredCloseComment({ successorAuditIssue: current.number, terminalAuditIssue: startNumber }),
           });
         } catch (err) {
           commentPosted = false;

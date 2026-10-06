@@ -177,3 +177,19 @@ test("listIssuesCreatedSince: follows pages until the lower bound; a truncated o
   assert.throws(() => listIssuesCreatedSince({ repo: "o/r", sinceIso: "2026-10-02T10:00:00Z" }, () => "oops"), /non-JSON/);
   assert.throws(() => listIssuesCreatedSince({ repo: "o/r", sinceIso: "bad" }, () => "[]"), /sinceIso/);
 });
+
+test("classifyAuditReplacements: ordinary controller race reconciles to the lowest-numbered claimant only when every extra is a provable retired duplicate", () => {
+  const args = { predecessorNumber: 866, predecessorCreatedAt: "2026-10-02T09:00:00Z", mergeCommitOid: MERGE, executionIssue: 860 };
+  const body = composeReplacementAuditBody(auditBody(), 866);
+  const a = issue(867, body);
+  // closed pristine higher duplicate: ignorable
+  assert.deepEqual(classifyAuditReplacements([a, issue(868, body, { state: "CLOSED" })], args), { kind: "FOUND", auditIssue: 867 });
+  // open higher duplicate: only the calling run's own just-created issue is ignorable
+  assert.equal(classifyAuditReplacements([a, issue(868, body)], args).kind, "AMBIGUOUS");
+  assert.deepEqual(classifyAuditReplacements([a, issue(868, body)], { ...args, racingDuplicate: 868 }), { kind: "FOUND", auditIssue: 867 });
+  // the lowest-numbered claimant being closed is never reconciled away
+  assert.equal(classifyAuditReplacements([issue(867, body, { state: "CLOSED" }), issue(868, body)], { ...args, racingDuplicate: 868 }).kind, "AMBIGUOUS");
+  // blank heading is a claimant, not "no replacement"
+  const blank = auditBody().replace("### Merged PR", "### Supersedes audit\n\n### Merged PR");
+  assert.equal(classifyAuditReplacements([issue(867, blank)], args).kind, "AMBIGUOUS");
+});

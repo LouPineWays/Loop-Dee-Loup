@@ -1522,6 +1522,13 @@ test("HARD_MODULE_DEPENDENCIES: covers replace-unusable-audit.mjs's four hard im
     toSkip: [{ dest: "tools/review-watch/lifecycle-gate.mjs", reason: "unmanaged" }],
   });
   assert.equal(collisions.length, 1);
+  // The gate that authorizes the command depends on the managed command target itself.
+  assert.ok(has("tools/orchestration/next-review-transition-gate.mjs", r));
+  const gateCollisions = findHardDependencyCollisions({
+    toInstall: [{ destRel: "tools/orchestration/next-review-transition-gate.mjs", content: Buffer.from("x") }],
+    toSkip: [{ dest: r, reason: "unmanaged" }],
+  });
+  assert.equal(gateCollisions.length, 1);
 });
 
 test("HARD_MODULE_DEPENDENCIES: covers github-read.mjs importers and flags a preserved unmanaged github-read.mjs (#725)", () => {

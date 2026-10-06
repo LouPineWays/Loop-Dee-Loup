@@ -15,8 +15,8 @@
 // Tests: node --test tools/orchestration/launcher-readback.test.mjs
 
 import { verifyFinalizedCorrectionBody } from "./finalize-correction-breakpoint.mjs";
-import { parseControlBullet, verifyRoutedDispatchManifest } from "./ready-dispatch-gate.mjs";
-import { parseStage2Verdict } from "../review-watch/lifecycle-gate.mjs";
+import { parseControlBullet, parseHeadingField, verifyRoutedDispatchManifest } from "./ready-dispatch-gate.mjs";
+import { parseStage2Verdict, parseSupersedesAuditRef } from "../review-watch/lifecycle-gate.mjs";
 import { findExistingTrigger } from "../review-watch/trigger.mjs";
 const NO_MANIFEST_POINTER = "Execution Plan Index has no settled Dispatch manifest pointer";
 
@@ -170,6 +170,32 @@ export function buildReadEffect(deps) {
     return bad(target, target, `partially closed in an unexpected order (audit ${auditState}, work ${workState}, control ${controlState})`);
   }
 
+  // Issue #868: first-unusable-audit replacement. Complete only when the control Issue is Lifecycle
+  // AUDIT and its Stage 2 pointer names an OPEN audit (not the superseded one) whose own "Supersedes
+  // audit" field names exactly the verdict's superseded audit. While the pointer still names the
+  // superseded audit the effect is "absent" (nothing created yet) or, when the gate already found
+  // one well-formed replacement (verdict.replacementAudit), "present" but unprojected -- so only the
+  // idempotent command (create-or-reuse + project) re-runs, never a second create. Any other pointer
+  // is wrong-target evidence (fail closed).
+  async function stage2Replacement(verdict) {
+    const superseded = issueNumberOf(verdict?.auditIssue);
+    if (!superseded) return bad("audit:none", "audit:none", "verdict names no audit issue");
+    const target = `audit#${superseded}`;
+    const { body } = await readControl();
+    const pointer = singlePointer(parseControlBullet(body, "Stage 2"));
+    const lifecycle = (parseControlBullet(body, "Lifecycle") ?? parseHeadingField(body, "State") ?? "").trim();
+    if (pointer === superseded) {
+      return ev(target, issueNumberOf(verdict?.replacementAudit) ? "present" : "absent", false);
+    }
+    if (pointer && lifecycle === "AUDIT") {
+      const replacement = await readIssue({ repo, number: pointer });
+      if (replacement.state === "OPEN" && parseSupersedesAuditRef(replacement.body ?? "") === superseded) {
+        return ev(target, "present", true, { replacementAudit: pointer });
+      }
+    }
+    return bad(target, target, "control Stage 2 pointer names neither the superseded audit nor an OPEN replacement that supersedes it");
+  }
+
   async function correctionPrFinalization(verdict) {
     const pr = issueNumberOf(verdict?.pr);
     const head = verdict?.head;
@@ -241,6 +267,8 @@ export function buildReadEffect(deps) {
             return await correctionFinalization(verdict);
           case "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION":
             return await correctionPrFinalization(verdict);
+          case "STAGE2_REPLACEMENT_AUDIT_REQUIRED":
+            return await stage2Replacement(verdict);
           default:
             return bad("unknown", "unknown", `no read-back for ${state}`);
         }

@@ -307,8 +307,8 @@ import {
   defaultGhIssueList as defaultGhAuditIssueSearchList,
   parseMergeCommitRef,
   parseWorkIssueRef,
-  parseFormField,
   parseSupersedesAuditRef,
+  hasSupersedesAuditHeading,
   classifyAuditReplacements,
   checkPreAuditPendingState,
   hasCanonicalAuditShape,
@@ -1297,6 +1297,11 @@ async function planUnusableAuditRecovery(
   }
   const auditBody = audit?.body ?? "";
   const controlBody = control?.body ?? "";
+  // The replacement command's own precondition: only an OPEN source audit can be replaced. Never
+  // authorize an action that deterministically cannot succeed (a closed/unreadable-state audit).
+  if (audit?.state !== "OPEN") {
+    return unavailable(`Audit #${auditIssue} is not OPEN (${JSON.stringify(audit?.state ?? null)}); a closed audit is not replaced automatically`);
+  }
 
   const supersedes = parseSupersedesAuditRef(auditBody);
   if (supersedes !== null) {
@@ -1313,7 +1318,8 @@ async function planUnusableAuditRecovery(
       },
     };
   }
-  if (parseFormField(auditBody, "Supersedes audit") !== null) {
+  if (hasSupersedesAuditHeading(auditBody)) {
+    // Present but blank/malformed provenance: neither "not a replacement" nor a provable one.
     return unavailable(`Audit #${auditIssue} carries a malformed "Supersedes audit" field; replacement provenance cannot be proven`);
   }
   if (!hasCanonicalAuditShape(auditBody)) {

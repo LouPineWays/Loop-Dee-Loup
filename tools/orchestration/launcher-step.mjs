@@ -121,6 +121,18 @@ export const TRANSITIONS = Object.freeze({
     postcondition: "control Issue Stage 1 reads the canonical correction-satisfied disposition for the exact reviewed/corrected heads while the PR head is still the corrected head",
     invalidation: ["PR head changed since the verdict", "PR closed or merged", "control Stage 1 bullet changed"],
   },
+  // Issue #868: the first unusable Stage 2 response's one bounded replacement. The only mechanical
+  // action is the verdict's own replace-unusable-audit.mjs command (canonical-argument checked at
+  // execute time); success is the control Stage 2 pointer naming an OPEN audit whose own
+  // "Supersedes audit" field names the verdict's superseded audit. The replacement's single reviewer
+  // trigger is a LATER step's STAGE2_TRIGGER_REQUIRED, never part of this transition.
+  STAGE2_REPLACEMENT_AUDIT_REQUIRED: {
+    preState: "STAGE2_REPLACEMENT_AUDIT_REQUIRED",
+    action: "replace-unusable-audit",
+    verifier: "replacement-audit-projection-readback",
+    postcondition: "control Issue Stage 2 names an OPEN replacement audit whose Supersedes audit field names the unusable audit, with Lifecycle AUDIT",
+    invalidation: ["control Stage 2 pointer changed", "replacement audit closed or superseded"],
+  },
   STAGE2_CORRECTION_PR_NEEDS_FINALIZATION: {
     preState: "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
     action: "finalize-pr-breakpoint",
