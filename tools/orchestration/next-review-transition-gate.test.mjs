@@ -1621,7 +1621,7 @@ const GENUINE_CORRECTION_COMMITS_437 = [
 
 // PR #838 Stage 1 finding (P1): findings-bearing reviewed head + strict descendant is not
 // provenance. Unrelated descendants and merge-forwards must never authorize finalization.
-async function runProvenance(commits) {
+async function runProvenance(commits, targetCommits = []) {
   return runNextReviewTransitionGate(
     { repo: "o/r", controlIssue: "438" },
     {
@@ -1635,6 +1635,7 @@ async function runProvenance(commits) {
         if (commits instanceof Error) throw commits;
         return commits;
       },
+      readTargetCommitsImpl: async () => targetCommits,
     },
   );
 }
@@ -1652,6 +1653,18 @@ test("runNextReviewTransitionGate: #837 provenance -- one unrelated commit among
 test("runNextReviewTransitionGate: #837 provenance -- a merge-forward commit is not a correction", async () => {
   const r = await runProvenance([{ sha: "m1", parents: 2, message: "Merge main into branch (#437)" }]);
   assert.equal(r.state, "NO_ACTION_YET");
+});
+
+test("runNextReviewTransitionGate: #837 provenance -- the authorized conflict-recovery merge of the target branch is admitted", async () => {
+  const r = await runProvenance(
+    [
+      ...GENUINE_CORRECTION_COMMITS_437,
+      { sha: "t1", parents: 1, parentShas: ["x"], message: "main commit" },
+      { sha: "m1", parents: 2, parentShas: ["c9", "t1"], message: "Merge main into branch (#437)" },
+    ],
+    [{ sha: "t1" }],
+  );
+  assert.equal(r.state, "STAGE1_CORRECTION_FINALIZATION_REQUIRED");
 });
 
 test("runNextReviewTransitionGate: #837 provenance -- unreadable commit history fails closed to AMBIGUOUS", async () => {
@@ -4048,4 +4061,15 @@ test("reduceCompareCommits: a truncated comparison (total_commits > collected) t
 test("runNextReviewTransitionGate: #837 provenance -- truncated compare evidence fails closed to AMBIGUOUS", async () => {
   const r = await runProvenance(new Error("compare API commit enumeration incomplete (collected 250, total_commits 300)"));
   assert.equal(r.state, "AMBIGUOUS");
+});
+
+test("verifyCorrectionProvenance: recovery merge needs off-target first parent, on-target second parent, and the Issue token", () => {
+  const targetShas = new Set(["t1"]);
+  const fix = { sha: "a", parents: 1, parentShas: ["r"], message: "fix (#437)" };
+  const merge = { sha: "m", parents: 2, parentShas: ["a", "t1"], message: "Merge main (#437)" };
+  assert.equal(verifyCorrectionProvenance([fix, { sha: "t1", parents: 1, message: "main" }, merge], 437, { targetShas }).ok, true);
+  assert.equal(verifyCorrectionProvenance([fix, merge], 437).ok, false);
+  assert.equal(verifyCorrectionProvenance([fix, { ...merge, message: "Merge main" }], 437, { targetShas }).ok, false);
+  assert.equal(verifyCorrectionProvenance([fix, { ...merge, parentShas: ["t1", "a"] }], 437, { targetShas }).ok, false);
+  assert.equal(verifyCorrectionProvenance([{ sha: "t1", parents: 1, message: "main" }], 437, { targetShas }).ok, false);
 });

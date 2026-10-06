@@ -106,7 +106,7 @@ import { verifyExecutionMatches, verifyPrLinkage, verifyPrHeadIsCurrent } from "
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 import { checkCorrectionDelta } from "../review-watch/stage1-correction-gate.mjs";
 import { extractUrlPointerKinds } from "./control-field-validator.mjs";
-import { verifyCorrectionProvenance, defaultReadCorrectionCommits } from "./next-review-transition-gate.mjs";
+import { verifyCorrectionProvenanceWithRecovery, defaultReadCorrectionCommits } from "./next-review-transition-gate.mjs";
 
 // Lifecycle values this script is authorized to write the `Stage 1` correction disposition
 // bullet over. `REVIEW` is the value `finalize-pr-breakpoint.mjs` itself establishes at the PR
@@ -240,6 +240,7 @@ export async function run(
     checkCorrectionDeltaImpl = checkCorrectionDelta,
     writeControlSnapshotImpl = checkWriteControlSnapshot,
     readCorrectionCommitsImpl = defaultReadCorrectionCommits,
+    readTargetCommitsImpl,
   } = {},
 ) {
   if (!isPositiveInteger(pr)) {
@@ -328,7 +329,19 @@ export async function run(
     } catch (err) {
       return unverified({ pr, reason: `could not read the reviewed-to-corrected commit range to verify correction provenance: ${err.message}` });
     }
-    const provenance = verifyCorrectionProvenance(commits, executionIssue);
+    let provenance;
+    try {
+      provenance = await verifyCorrectionProvenanceWithRecovery({
+        commits,
+        executionIssue,
+        repo,
+        pr,
+        reviewedHead,
+        ...(readTargetCommitsImpl ? { readTargetCommitsImpl } : {}),
+      });
+    } catch (err) {
+      return unverified({ pr, reason: `could not read target-branch commits to verify correction provenance: ${err.message}` });
+    }
     if (!provenance.ok) {
       return unverified({ pr, reason: `correction provenance not established: ${provenance.reason}` });
     }

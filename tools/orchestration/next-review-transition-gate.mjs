@@ -1059,6 +1059,7 @@ async function resolvePreMerge(
     checkMergeConflictImpl = defaultGhPrMergeable,
     listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
     readCorrectionCommitsImpl = defaultReadCorrectionCommits,
+    readTargetCommitsImpl = defaultReadTargetBranchCommits,
   },
 ) {
   let stage1;
@@ -1177,7 +1178,25 @@ async function resolvePreMerge(
             reason: `could not read the commits between reviewed head ${reviewedHead} and ${head} to verify correction provenance: ${err.message}`,
           };
         }
-        if (verifyCorrectionProvenance(commits, issue).ok) {
+        let provenanceOk;
+        try {
+          provenanceOk = (
+            await verifyCorrectionProvenanceWithRecovery({ commits, executionIssue: issue, repo, pr, reviewedHead: delta.reviewedHead, readTargetCommitsImpl })
+          ).ok;
+        } catch (err) {
+          return {
+            exitCode: 4,
+            state: "AMBIGUOUS",
+            stopAfter: true,
+            repo,
+            pr,
+            head,
+            issue,
+            controlIssue,
+            reason: `could not read target-branch commits to verify correction provenance: ${err.message}`,
+          };
+        }
+        if (provenanceOk) {
           unfinalizedCorrection = { reviewedHead: delta.reviewedHead, correctedHead: delta.correctedHead };
         }
       }
@@ -1927,7 +1946,7 @@ async function resolveStalePointerCorrectionRecovery(
 // the head itself, only once the Execution reference has already checked out.
 async function resolvePreMergeFromControlBody(
   { repo, body, prIssue, controlIssueNumber, head, ghPrHeadImpl },
-  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
+  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
 ) {
   const executionField = readExecutionBulletField(body);
   const executionRef = executionField.conflict
@@ -1958,7 +1977,7 @@ async function resolvePreMergeFromControlBody(
   const stage1Disposition = parseControlBullet(body, "Stage 1");
   return resolvePreMerge(
     { repo, pr: prIssue, head: resolvedHead, issue: executionRef.issue, stage1Disposition, controlIssue: controlIssueNumber },
-    { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
+    { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
   );
 }
 
@@ -2002,7 +2021,12 @@ export function reduceCompareCommits(pages) {
     if (!page || !Array.isArray(page.commits)) throw new Error("compare API returned no commit list");
     if (Number.isInteger(page.total_commits)) total = page.total_commits;
     for (const c of page.commits) {
-      commits.push({ sha: c.sha, parents: Array.isArray(c.parents) ? c.parents.length : -1, message: c.commit?.message });
+      commits.push({
+        sha: c.sha,
+        parents: Array.isArray(c.parents) ? c.parents.length : -1,
+        parentShas: Array.isArray(c.parents) ? c.parents.map((x) => x?.sha) : [],
+        message: c.commit?.message,
+      });
     }
   }
   if (!Number.isInteger(total) || total !== commits.length) {
@@ -2017,17 +2041,60 @@ export function reduceCompareCommits(pages) {
 // whose dispatch authorized the correction (LDL commit convention `... (#<execution>)`). The one
 // representation of correction satisfaction remains the canonical finalized disposition; this
 // only decides whether the gate may authorize writing it.
-export function verifyCorrectionProvenance(commits, executionIssue) {
+export function verifyCorrectionProvenance(commits, executionIssue, { targetShas = null } = {}) {
   if (!Array.isArray(commits) || commits.length === 0) return { ok: false, reason: "no intervening commits" };
   if (!Number.isInteger(executionIssue) || executionIssue <= 0) return { ok: false, reason: "no execution Issue to bind provenance to" };
   const ref = new RegExp(`(^|[^\\w/])#${executionIssue}(?!\\w)`);
+  const onTarget = (sha) => targetShas instanceof Set && typeof sha === "string" && targetShas.has(sha);
+  let authored = 0;
   for (const c of commits) {
+    // Authorized conflict-recovery merge (docs/bounded-review-cycle.md "Correction-satisfied
+    // merge-conflict recovery", PR #916 Stage 1 finding): commits that merely arrived from the
+    // target branch are not correction commits, and the recovery's real merge commit is admitted
+    // only when it is a two-parent merge naming the execution Issue whose first parent is
+    // off-target (the PR branch) and whose second parent is on the target branch. Any other
+    // multi-parent commit (an unrelated merge-forward) still fails closed.
+    if (c && onTarget(c.sha)) continue;
+    if (c && c.parents === 2 && targetShas instanceof Set) {
+      const [first, second] = Array.isArray(c.parentShas) ? c.parentShas : [];
+      if (typeof c.message === "string" && ref.test(c.message) && !onTarget(first) && onTarget(second)) {
+        authored += 1;
+        continue;
+      }
+      return { ok: false, reason: `commit ${c.sha} is a merge that is not the authorized conflict-recovery merge of the target branch` };
+    }
     if (!c || c.parents !== 1) return { ok: false, reason: `commit ${c?.sha ?? "?"} is not a single-parent commit` };
     if (typeof c.message !== "string" || !ref.test(c.message)) {
       return { ok: false, reason: `commit ${c.sha} does not reference execution Issue #${executionIssue}` };
     }
+    authored += 1;
   }
+  if (authored === 0) return { ok: false, reason: "no correction commits in range" };
   return { ok: true };
+}
+
+// Commits on the PR's target branch that are not in `base` (GitHub compare, complete or throws).
+export function defaultReadTargetBranchCommits({ repo, pr, base }) {
+  const baseRef = execFileSync("gh", ["pr", "view", String(pr), "--repo", repo, "--json", "baseRefName", "--jq", ".baseRefName"], {
+    encoding: "utf8",
+  }).trim();
+  if (!baseRef) throw new Error("could not resolve PR base branch");
+  const raw = execFileSync(
+    "gh",
+    ["api", `repos/${repo}/compare/${base}...${encodeURIComponent(baseRef)}?per_page=100`, "--paginate", "--slurp"],
+    { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+  );
+  return reduceCompareCommits(JSON.parse(raw));
+}
+
+// Shared by the gate and the finalizer. Plain provenance first; only when the range contains a
+// multi-parent commit is the target-branch commit set fetched to evaluate the authorized
+// conflict-recovery merge. Throws on an unreadable/incomplete target enumeration (fail closed).
+export async function verifyCorrectionProvenanceWithRecovery({ commits, executionIssue, repo, pr, reviewedHead, readTargetCommitsImpl = defaultReadTargetBranchCommits }) {
+  const plain = verifyCorrectionProvenance(commits, executionIssue);
+  if (plain.ok || !Array.isArray(commits) || !commits.some((c) => c && c.parents === 2)) return plain;
+  const target = await readTargetCommitsImpl({ repo, pr, base: reviewedHead });
+  return verifyCorrectionProvenance(commits, executionIssue, { targetShas: new Set(target.map((t) => t.sha)) });
 }
 
 function defaultGhPrHead({ repo, number }) {
@@ -2144,6 +2211,7 @@ async function runNextReviewTransitionGateCore(
     checkMergeConflictImpl = defaultGhPrMergeable,
     listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
     readCorrectionCommitsImpl = defaultReadCorrectionCommits,
+    readTargetCommitsImpl = defaultReadTargetBranchCommits,
     reconcileStage2CorrectionPrImpl = reconcileStage2CorrectionPr,
     reconcileExistingStage2AuditIssueImpl = reconcileExistingStage2AuditIssue,
     evaluateEvidenceCorrectionImpl = evaluateEvidenceCorrection,
@@ -2305,7 +2373,7 @@ async function runNextReviewTransitionGateCore(
       const head = args.head || prState.headRefOid;
       return resolvePreMergeFromControlBody(
         { repo, body, prIssue: prRef.issue, controlIssueNumber, head, ghPrHeadImpl },
-        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
+        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
       );
     }
     // CLOSED without merging (or any other state gh might report): a genuinely contradictory
@@ -2341,7 +2409,7 @@ async function runNextReviewTransitionGateCore(
     if (args.head) {
       return resolvePreMergeFromControlBody(
         { repo, body, prIssue: prRef.issue, controlIssueNumber, head: args.head, ghPrHeadImpl },
-        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
+        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
       );
     }
     // No settled "Stage 2" reference exists here (the auditRef.kind === "issue" branch above
@@ -2575,7 +2643,7 @@ async function runNextReviewTransitionGateCore(
     const head = prState.headRefOid;
     return resolvePreMergeFromControlBody(
       { repo, body, prIssue: prRef.issue, controlIssueNumber, head, ghPrHeadImpl },
-      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
+      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
     );
   }
 

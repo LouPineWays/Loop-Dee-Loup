@@ -617,6 +617,61 @@ test("run(): a merge-forward (multi-parent) commit in the range fails closed", a
       { sha: "c1", parents: 1, message: "fix (#570)" },
       { sha: "c2", parents: 2, message: "Merge main (#570)" },
     ],
+    readTargetCommitsImpl: async () => [],
+  });
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.equal(wrote, false);
+});
+
+const RECOVERY_RANGE = [
+  { sha: "c1", parents: 1, parentShas: ["r0"], message: "fix (#570)" },
+  { sha: "m1", parents: 1, parentShas: ["c0"], message: "unrelated main commit" },
+  { sha: "mr", parents: 2, parentShas: ["c1", "m1"], message: "Merge main into branch (#570)" },
+];
+
+test("run(): the authorized conflict-recovery merge (target-branch parent) is admitted", async () => {
+  let body = REVIEW_BODY;
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 571, executionIssue: 570, pr: 573, reviewedHead: REVIEWED, correctedHead: CORRECTED },
+    {
+      ghIssueViewImpl: async () => body,
+      ghPrViewImpl: makePrViewStub(LINKED_PR_VIEW_570),
+      checkCorrectionDeltaImpl: async () => correctionSatisfied(),
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        body = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+      readCorrectionCommitsImpl: async () => RECOVERY_RANGE,
+      readTargetCommitsImpl: async () => [{ sha: "m1" }],
+    },
+  );
+  assert.equal(result.state, "FINALIZED");
+});
+
+test("run(): a merge whose second parent is not on the target branch still fails closed", async () => {
+  const { result, wrote } = await finalizeWith({
+    readCorrectionCommitsImpl: async () => RECOVERY_RANGE,
+    readTargetCommitsImpl: async () => [],
+  });
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.equal(wrote, false);
+});
+
+test("run(): a recovery merge not naming the execution Issue fails closed", async () => {
+  const { result, wrote } = await finalizeWith({
+    readCorrectionCommitsImpl: async () => RECOVERY_RANGE.map((c) => (c.sha === "mr" ? { ...c, message: "Merge main" } : c)),
+    readTargetCommitsImpl: async () => [{ sha: "m1" }],
+  });
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.equal(wrote, false);
+});
+
+test("run(): an unreadable target-branch enumeration fails closed", async () => {
+  const { result, wrote } = await finalizeWith({
+    readCorrectionCommitsImpl: async () => RECOVERY_RANGE,
+    readTargetCommitsImpl: async () => {
+      throw new Error("boom");
+    },
   });
   assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
   assert.equal(wrote, false);
