@@ -29,6 +29,8 @@ const deps = (over = {}) => ({
   ghIssueViewImpl: async () => body(`correction-satisfied at ${CORRECTED} (reviewed ${REVIEWED})`),
   ghPrViewImpl: async () => prView(),
   checkCorrectionDeltaImpl: satisfied,
+  readCorrectionCommitsImpl: async () => [{ sha: "c1", parents: 1, message: "Fix finding (#725)" }],
+  readTargetCommitsImpl: async () => [],
   ...over,
 });
 
@@ -132,4 +134,26 @@ test("final control re-read failure is UNVERIFIED", async () => {
 test("missing identity is an operational error (exit 1), not a verdict", async () => {
   assert.equal((await verifyCorrectionCompletion({ ...args, controlIssue: null }, deps())).exitCode, 1);
   assert.equal((await verifyCorrectionCompletion({ ...args, reviewedHead: "" }, deps())).exitCode, 1);
+});
+
+test("#924/#923 escape: correction range omitting the execution Issue provenance is UNVERIFIED even with the canonical disposition", async () => {
+  const r = await verifyCorrectionCompletion(
+    args,
+    deps({ readCorrectionCommitsImpl: async () => [{ sha: "5c29bcf", parents: 1, message: "Prove whole-file target preservation (PR #763 Stage 1 finding)" }] }),
+  );
+  assert.equal(r.exitCode, 2);
+  assert.match(r.reason, /correction provenance not established.*does not reference execution Issue #725/);
+});
+
+test("#924: unreadable commit range fails closed UNVERIFIED", async () => {
+  const r = await verifyCorrectionCompletion(
+    args,
+    deps({
+      readCorrectionCommitsImpl: async () => {
+        throw new Error("compare down");
+      },
+    }),
+  );
+  assert.equal(r.exitCode, 2);
+  assert.match(r.reason, /could not verify correction provenance/);
 });

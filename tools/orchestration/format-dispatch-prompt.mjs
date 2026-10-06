@@ -450,6 +450,12 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
   }
   assertCheckoutBinding(checkoutBinding);
   const { path, token, scriptPath } = checkoutBinding;
+  // Issue #924 (the #908/#907/PR #923 escape): the finalizer's canonical provenance verifier
+  // accepts a correction commit only when its message names the execution Issue. A correction
+  // that omitted it was pushed, could never be finalized, and stranded the control at
+  // NOT_REQUESTED -> NO_ACTION_YET. Mandate the token at authoring time (a published commit
+  // cannot be amended without a prohibited force-push).
+  const provenanceClause = hasExecutionIssue ? ` (every commit message must name #${issue})` : "";
   // Stage 2 audit finding on PR #710 (issue #711, P2): this used to interpolate `scriptPath`
   // unquoted into the rendered `node <scriptPath> ...` invocation, so a controller installation
   // path containing a space split into multiple shell words and the worker's mandatory first
@@ -460,7 +466,7 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
     `Stage 1 correction worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
     renderPreBoundCheckoutClause({ path, token, scriptPath, pr }) +
     `Read PR #${pr}'s Stage 1 review${executionReadClause} for findings (not restated). Apply one ` +
-    `consolidated correction per docs/bounded-review-cycle.md, push, run ` +
+    `consolidated correction per docs/bounded-review-cycle.md${provenanceClause}, push, run ` +
     `tools/orchestration/finalize-correction-breakpoint.mjs (on CORRECTION_BREAKPOINT_UNVERIFIED report ` +
     `that, not success), then --release-binding ${token}. No re-review, merge, or Stage 2.`
   );

@@ -1642,17 +1642,23 @@ async function runProvenance(commits, targetCommits = []) {
 
 test("runNextReviewTransitionGate: #837 provenance -- an unrelated descendant commit (no execution-Issue reference) never yields finalization", async () => {
   const r = await runProvenance([{ sha: "u1", parents: 1, message: "Unrelated refactor (#999)" }]);
-  assert.equal(r.state, "NO_ACTION_YET");
+  assert.equal(r.state, "AMBIGUOUS");
+  assert.equal(r.actionEnvelope.mode, "none");
+  assert.doesNotMatch(r.nextCommand ?? "", /finalize/);
 });
 
 test("runNextReviewTransitionGate: #837 provenance -- one unrelated commit among genuine correction commits fails closed", async () => {
   const r = await runProvenance([...GENUINE_CORRECTION_COMMITS_437, { sha: "u1", parents: 1, message: "drive-by fix" }]);
-  assert.equal(r.state, "NO_ACTION_YET");
+  assert.equal(r.state, "AMBIGUOUS");
+  assert.equal(r.actionEnvelope.mode, "none");
+  assert.doesNotMatch(r.nextCommand ?? "", /finalize/);
 });
 
 test("runNextReviewTransitionGate: #837 provenance -- a merge-forward commit is not a correction", async () => {
   const r = await runProvenance([{ sha: "m1", parents: 2, message: "Merge main into branch (#437)" }]);
-  assert.equal(r.state, "NO_ACTION_YET");
+  assert.equal(r.state, "AMBIGUOUS");
+  assert.equal(r.actionEnvelope.mode, "none");
+  assert.doesNotMatch(r.nextCommand ?? "", /finalize/);
 });
 
 test("runNextReviewTransitionGate: #837 provenance -- the authorized conflict-recovery merge of the target branch is admitted", async () => {
@@ -4151,14 +4157,14 @@ test("runNextReviewTransitionGate: #913 -- intervening commits without execution
   const result = await run913({
     readCorrectionCommitsImpl: async () => [{ sha: "c1", parents: 1, message: "Unrelated change" }],
   });
-  assert.equal(result.state, "STAGE2_PREPARATION_BLOCKED_ON_STAGE1");
+  assert.equal(result.state, "AMBIGUOUS");
 });
 
 test("runNextReviewTransitionGate: #913 -- a merge-forward commit between heads never authorizes finalization", async () => {
   const result = await run913({
     readCorrectionCommitsImpl: async () => [{ sha: "c1", parents: 2, message: "Merge main (#375)" }],
   });
-  assert.equal(result.state, "STAGE2_PREPARATION_BLOCKED_ON_STAGE1");
+  assert.equal(result.state, "AMBIGUOUS");
 });
 
 test("runNextReviewTransitionGate: #913 -- no earlier trigger round (genuine no-findings ordinary state) keeps ordinary recovery unchanged", async () => {
@@ -4225,4 +4231,21 @@ test("runNextReviewTransitionGate: #913 -- malformed affirmative-looking Stage 1
     });
     assert.notEqual(result.state, "STAGE1_CORRECTION_FINALIZATION_REQUIRED", bad);
   }
+});
+
+// Issue #924: the exact #908/#907/PR #923 shape -- genuine findings at the reviewed head, a
+// strict descendant whose correction commit omits the execution Issue token -- must surface a
+// specific fail-closed result naming the provenance gap and the smallest continuation, not an
+// empty-envelope NO_ACTION_YET, and must never authorize finalization or a second review.
+test("runNextReviewTransitionGate: #924 -- findings-bearing correction commit omitting the execution Issue is a specific AMBIGUOUS, not NO_ACTION_YET", async () => {
+  const r = await runProvenance([
+    { sha: "5c29bcf", parents: 1, message: "Prove whole-file target preservation in resolve-protected-conflict (PR #923 Stage 1 finding)" },
+  ]);
+  assert.equal(r.state, "AMBIGUOUS");
+  assert.equal(r.exitCode, 4);
+  assert.match(r.reason, /not mechanically attributable to execution Issue #437/);
+  assert.match(r.reason, /does not reference execution Issue #437/);
+  assert.match(r.reason, /do not request a second ordinary review/);
+  assert.equal(r.reviewedHead, ISSUE_611_REVIEWED_HEAD);
+  assert.equal(r.correctedHead, ISSUE_611_CORRECTED_HEAD);
 });

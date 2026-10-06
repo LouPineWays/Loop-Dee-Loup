@@ -35,6 +35,11 @@ import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 import { verifyExecutionMatches, verifyPrLinkage, verifyPrHeadIsCurrent } from "./finalize-pr-breakpoint.mjs";
 import { composeCorrectionControlBody, verifyFinalizedCorrectionBody } from "./finalize-correction-breakpoint.mjs";
 import { checkCorrectionDelta } from "../review-watch/stage1-correction-gate.mjs";
+import {
+  verifyCorrectionProvenanceWithRecovery,
+  defaultReadCorrectionCommits,
+  defaultReadTargetBranchCommits,
+} from "./next-review-transition-gate.mjs";
 
 function isPositiveInteger(v) {
   return typeof v === "number" && Number.isInteger(v) && v > 0;
@@ -63,7 +68,13 @@ function unverified(pr, reason) {
 
 export async function verifyCorrectionCompletion(
   { repo, controlIssue, executionIssue, pr, reviewedHead },
-  { ghIssueViewImpl = defaultGhIssueView, ghPrViewImpl = defaultGhPrView, checkCorrectionDeltaImpl = checkCorrectionDelta } = {},
+  {
+    ghIssueViewImpl = defaultGhIssueView,
+    ghPrViewImpl = defaultGhPrView,
+    checkCorrectionDeltaImpl = checkCorrectionDelta,
+    readCorrectionCommitsImpl = defaultReadCorrectionCommits,
+    readTargetCommitsImpl = defaultReadTargetBranchCommits,
+  } = {},
 ) {
   if (!isPositiveInteger(pr) || !isPositiveInteger(controlIssue) || !isPositiveInteger(executionIssue)) {
     return { exitCode: 1, message: "--control-issue, --execution-issue, and --pr must be positive integers." };
@@ -97,6 +108,23 @@ export async function verifyCorrectionCompletion(
   }
   if (!delta || delta.exitCode === 1 || delta.state !== "CORRECTION_SATISFIED") {
     return unverified(pr, delta?.reason ?? delta?.message ?? "checkCorrectionDelta did not report CORRECTION_SATISFIED.");
+  }
+  // Issue #924 (the #908/#907/PR #923 escape): completion is never verified for a range the
+  // canonical provenance verifier would reject, independent of how the disposition got on the
+  // control body -- an unattributable correction is not a successful one.
+  try {
+    const commits = await readCorrectionCommitsImpl({ repo, base: reviewed, head: liveHead });
+    const provenance = await verifyCorrectionProvenanceWithRecovery({
+      commits,
+      executionIssue,
+      repo,
+      pr,
+      reviewedHead: reviewed,
+      readTargetCommitsImpl,
+    });
+    if (!provenance.ok) return unverified(pr, `correction provenance not established: ${provenance.reason}`);
+  } catch (err) {
+    return unverified(pr, `could not verify correction provenance: ${err.message}`);
   }
   // Both mutable authorities (PR head and control snapshot) can move during the reads above: a
   // success is only ever based on a final fresh read of BOTH, re-running the full durable checks.
