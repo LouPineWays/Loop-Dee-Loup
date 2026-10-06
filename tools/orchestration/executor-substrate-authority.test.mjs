@@ -121,6 +121,26 @@ test("category-level, unknown, and incomplete grants are not authority", () => {
   assert.equal(check({ changes: [{ path: ROUTING }], authority: { executorSubstrate: "routing-policy" } }).allowed, false);
 });
 
+test("a valid grant cannot mask an invalid grant in the same authority record (Audit #918)", () => {
+  const valid = grant("routing-policy");
+  assert.equal(check({ changes: [{ path: ROUTING }], authority: auth(valid) }).allowed, true);
+  for (const bad of [
+    { component: "*", intendedChange: "x", verification: "y" },
+    { component: "nonexistent", intendedChange: "x", verification: "y" },
+    { component: "verification-controls", intendedChange: "", verification: "y" },
+    { component: "verification-controls", intendedChange: "x", verification: "  " },
+    { component: "verification-controls", intendedChange: "x", verification: "y", paths: [""] },
+    { component: "verification-controls", intendedChange: "x", verification: "y", paths: "not-array" },
+  ]) {
+    const r = check({ changes: [{ path: ROUTING }], authority: { executorSubstrate: [valid, bad] } });
+    assert.equal(r.allowed, false, JSON.stringify(bad));
+    assert.equal(r.action, "STOP_AND_PROPOSE");
+    assert.ok(r.authorityProblems.length > 0);
+  }
+  // Ordinary work is not turned into substrate ceremony by an invalid grant elsewhere.
+  assert.equal(check({ changes: [{ path: "src/a.ts" }], authority: auth({ component: "*", intendedChange: "x", verification: "y" }) }).allowed, true);
+});
+
 test("a grant's paths envelope bounds the component; escaping paths fail closed", () => {
   const authority = auth(grant("routing-policy", { paths: [ROUTING] }));
   assert.equal(check({ changes: [{ path: ROUTING }], authority }).allowed, true);
