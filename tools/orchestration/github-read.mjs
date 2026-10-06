@@ -108,6 +108,9 @@ export function readGithubPr({ repo, number, fields, execFileImpl = execFileSync
     } else if (field === "headRefName") {
       if (typeof payload.head?.ref !== "string" || payload.head.ref === "") throw bad('"head.ref" field');
       out.headRefName = payload.head.ref;
+    } else if (field === "baseRefName") {
+      if (typeof payload.base?.ref !== "string" || payload.base.ref === "") throw bad('"base.ref" field');
+      out.baseRefName = payload.base.ref;
     } else if (field === "headRefOid") {
       if (typeof payload.head?.sha !== "string" || payload.head.sha === "") throw bad('"head.sha" field');
       out.headRefOid = payload.head.sha;

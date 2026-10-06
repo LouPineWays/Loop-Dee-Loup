@@ -117,6 +117,18 @@ import { verifyCorrectionProvenanceWithRecovery, defaultReadCorrectionCommits } 
 // the day something does.
 const ALLOWED_LIFECYCLE_FOR_CORRECTION = new Set(["REVIEW", "CORRECTION"]);
 
+// Issue #913 (Stage 1 correction on PR #914): when the PR is verified MERGED at exactly the
+// corrected head, next-review-transition-gate.mjs can emit STAGE1_CORRECTION_FINALIZATION_REQUIRED
+// from control state that already advanced past the in-review shape (a stale Stage 2 pointer left
+// the control at AUDIT, or the merge landed before the review-stage projection). The same finalizer
+// must be able to complete from those exact verified prestates, so these additional Lifecycle
+// values are admitted ONLY for a merged-at-corrected-head PR; an open PR keeps the strict set.
+const ALLOWED_LIFECYCLE_FOR_MERGED_CORRECTION = new Set([
+  ...ALLOWED_LIFECYCLE_FOR_CORRECTION,
+  "AUDIT",
+  "EXECUTION_COMPLETE",
+]);
+
 function isPositiveInteger(value) {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
@@ -137,15 +149,25 @@ export function correctionSatisfiedDispositionValue({ correctedHead, reviewedHea
 // decision) is left exactly as-is. Distinct from `finalize-pr-breakpoint.mjs`'s
 // `composeFinalizedControlBody`: this breakpoint never transitions Lifecycle and never touches
 // PR/Stage 2 -- it only ever exists once those are already durably established.
-export function composeCorrectionControlBody(body, { pr, correctedHead, reviewedHead }) {
+export function composeCorrectionControlBody(body, { pr, correctedHead, reviewedHead, merged = false }) {
   const currentLifecycle = parseControlBullet(body, "Lifecycle") ?? parseHeadingField(body, "State");
-  if (currentLifecycle === null || !ALLOWED_LIFECYCLE_FOR_CORRECTION.has(currentLifecycle.trim())) {
+  const allowedLifecycles = merged ? ALLOWED_LIFECYCLE_FOR_MERGED_CORRECTION : ALLOWED_LIFECYCLE_FOR_CORRECTION;
+  if (currentLifecycle === null || !allowedLifecycles.has(currentLifecycle.trim())) {
     return {
       ok: false,
       reason:
         `control Issue's current Lifecycle (${JSON.stringify(currentLifecycle)}) is not one of the recognized ` +
-        `values this correction breakpoint is authorized to write over (${[...ALLOWED_LIFECYCLE_FOR_CORRECTION].join(", ")})`,
+        `values this correction breakpoint is authorized to write over (${[...allowedLifecycles].join(", ")})`,
     };
+  }
+  // A merged-at-corrected-head PR whose control never projected a PR pointer (absent or the "none"
+  // sentinel): the caller has already verified Execution match, PR-to-execution linkage, the live
+  // merged head, and correction evidence, so establish the canonical PR pointer here rather than
+  // stranding the verified recovery. Any non-empty PR value still goes through the strict checks
+  // below (a different PR, wrong kind, or malformed value stays fail-closed).
+  const rawPrField = parseControlBullet(body, "PR");
+  if (merged && (rawPrField === null || /^none$/i.test(rawPrField.trim()))) {
+    body = upsertControlBullet(body, "PR", `#${pr}`);
   }
   // Stage 1 review finding on PR #579 (P2): a raw-string comparison against the literal text
   // "#<pr>" rejects two other shapes control-field-validator.mjs's own write-time validator
@@ -401,7 +423,8 @@ export async function run(
     return unverified({ pr, reason: latestExecutionCheck.reason });
   }
 
-  const composed = composeCorrectionControlBody(latestBody, { pr, correctedHead, reviewedHead });
+  const merged = latestPrView?.state === "MERGED";
+  const composed = composeCorrectionControlBody(latestBody, { pr, correctedHead, reviewedHead, merged });
   if (!composed.ok) {
     return unverified({ pr, reason: composed.reason });
   }
