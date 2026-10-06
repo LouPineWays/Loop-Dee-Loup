@@ -87,6 +87,11 @@ const restPr = (over = {}) => ({
   ...over,
 });
 
+test("readGithubPr maps base.ref to baseRefName and rejects a missing one", () => {
+  assert.deepEqual(readGithubPr({ repo: "o/r", number: 7, fields: ["baseRefName"], execFileImpl: fakeExec(restPr({ base: { ref: "main" } })) }), { baseRefName: "main" });
+  assert.throws(() => readGithubPr({ repo: "o/r", number: 7, fields: ["baseRefName"], execFileImpl: fakeExec(restPr()) }), Error);
+});
+
 test("readGithubPr maps REST fields to gh --json shape", () => {
   const all = ["state", "body", "headRefName", "headRefOid", "mergedAt", "mergeCommit", "mergeable"];
   assert.deepEqual(readGithubPr({ repo: "o/r", number: 7, fields: all, execFileImpl: fakeExec(restPr()) }), {

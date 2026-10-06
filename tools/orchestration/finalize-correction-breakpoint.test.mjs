@@ -9,11 +9,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  run,
+  run as runImpl,
+  verifyPrStateAdmissible,
   correctionSatisfiedDispositionValue,
   composeCorrectionControlBody,
   verifyFinalizedCorrectionBody,
 } from "./finalize-correction-breakpoint.mjs";
+
+const okCommits = async () => [{ sha: "c1", parents: 1, message: "Correct findings (#570) (#437)" }];
+// Default-inject a provenance-satisfying commit reader so tests never touch the network.
+const run = (args, deps = {}) => runImpl(args, { readCorrectionCommitsImpl: okCommits, ...deps });
 
 const REVIEWED = "30b36035c9d6e1a9b0f2c3d4e5f60718293a4b5c";
 const CORRECTED = "0009c54b180aedadfa48e3db6266b8473a1d8d35";
@@ -528,6 +533,164 @@ test("run(): direct-reference mode still fails closed on a stale corrected head"
   assert.equal(result.exitCode, 2);
   assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
   assert.match(result.reason, /does not match the PR's live head/);
+});
+
+// -- Stage 2 Audit #915: independent writer-boundary provenance and PR-state checks ------------
+
+async function finalizeWith(deps, prView = LINKED_PR_VIEW_570) {
+  let wrote = false;
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 571, executionIssue: 570, pr: 573, reviewedHead: REVIEWED, correctedHead: CORRECTED },
+    {
+      ghIssueViewImpl: async () => REVIEW_BODY,
+      ghPrViewImpl: makePrViewStub(prView),
+      checkCorrectionDeltaImpl: async () => correctionSatisfied(),
+      writeControlSnapshotImpl: async () => {
+        wrote = true;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+      ...deps,
+    },
+  );
+  return { result, wrote };
+}
+
+test("verifyPrStateAdmissible: OPEN and MERGED only", () => {
+  assert.equal(verifyPrStateAdmissible({ state: "OPEN" }).ok, true);
+  assert.equal(verifyPrStateAdmissible({ state: "MERGED" }).ok, true);
+  assert.equal(verifyPrStateAdmissible({ state: "CLOSED" }).ok, false);
+  assert.equal(verifyPrStateAdmissible({}).ok, false);
+});
+
+test("run(): a closed-unmerged PR fails closed before any durable write", async () => {
+  const { result, wrote } = await finalizeWith({}, { ...LINKED_PR_VIEW_570, state: "CLOSED" });
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.equal(wrote, false);
+});
+
+test("run(): PR closed between the initial read and the pre-write re-read fails closed", async () => {
+  let n = 0;
+  const { result, wrote } = await finalizeWith({
+    ghPrViewImpl: async () => ({ ...LINKED_PR_VIEW_570, state: ++n === 1 ? "OPEN" : "CLOSED" }),
+  });
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.equal(wrote, false);
+});
+
+test("run(): a MERGED PR at exactly the corrected head still finalizes (merged-recovery path)", async () => {
+  let body = REVIEW_BODY;
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 571, executionIssue: 570, pr: 573, reviewedHead: REVIEWED, correctedHead: CORRECTED },
+    {
+      ghIssueViewImpl: async () => body,
+      ghPrViewImpl: makePrViewStub({ ...LINKED_PR_VIEW_570, state: "MERGED" }),
+      checkCorrectionDeltaImpl: async () => correctionSatisfied(),
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        body = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.state, "FINALIZED");
+});
+
+test("run(): a commit lacking execution-Issue provenance fails closed in the finalizer itself", async () => {
+  const { result, wrote } = await finalizeWith({
+    readCorrectionCommitsImpl: async () => [{ sha: "c1", parents: 1, message: "unrelated change" }],
+  });
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /provenance/);
+  assert.equal(wrote, false);
+});
+
+test("run(): a commit naming a different Issue number (#5700) is not provenance", async () => {
+  const { result, wrote } = await finalizeWith({
+    readCorrectionCommitsImpl: async () => [{ sha: "c1", parents: 1, message: "fix (#5700)" }],
+  });
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.equal(wrote, false);
+});
+
+test("run(): a merge-forward (multi-parent) commit in the range fails closed", async () => {
+  const { result, wrote } = await finalizeWith({
+    readCorrectionCommitsImpl: async () => [
+      { sha: "c1", parents: 1, message: "fix (#570)" },
+      { sha: "c2", parents: 2, message: "Merge main (#570)" },
+    ],
+    readTargetCommitsImpl: async () => [],
+  });
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.equal(wrote, false);
+});
+
+const RECOVERY_RANGE = [
+  { sha: "c1", parents: 1, parentShas: ["r0"], message: "fix (#570)" },
+  { sha: "m1", parents: 1, parentShas: ["c0"], message: "unrelated main commit" },
+  { sha: "mr", parents: 2, parentShas: ["c1", "m1"], message: "Merge main into branch (#570)" },
+];
+
+test("run(): the authorized conflict-recovery merge (target-branch parent) is admitted", async () => {
+  let body = REVIEW_BODY;
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 571, executionIssue: 570, pr: 573, reviewedHead: REVIEWED, correctedHead: CORRECTED },
+    {
+      ghIssueViewImpl: async () => body,
+      ghPrViewImpl: makePrViewStub(LINKED_PR_VIEW_570),
+      checkCorrectionDeltaImpl: async () => correctionSatisfied(),
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        body = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+      readCorrectionCommitsImpl: async () => RECOVERY_RANGE,
+      readTargetCommitsImpl: async () => [{ sha: "m1" }],
+    },
+  );
+  assert.equal(result.state, "FINALIZED");
+});
+
+test("run(): a merge whose second parent is not on the target branch still fails closed", async () => {
+  const { result, wrote } = await finalizeWith({
+    readCorrectionCommitsImpl: async () => RECOVERY_RANGE,
+    readTargetCommitsImpl: async () => [],
+  });
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.equal(wrote, false);
+});
+
+test("run(): a recovery merge not naming the execution Issue fails closed", async () => {
+  const { result, wrote } = await finalizeWith({
+    readCorrectionCommitsImpl: async () => RECOVERY_RANGE.map((c) => (c.sha === "mr" ? { ...c, message: "Merge main" } : c)),
+    readTargetCommitsImpl: async () => [{ sha: "m1" }],
+  });
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.equal(wrote, false);
+});
+
+test("run(): an unreadable target-branch enumeration fails closed", async () => {
+  const { result, wrote } = await finalizeWith({
+    readCorrectionCommitsImpl: async () => RECOVERY_RANGE,
+    readTargetCommitsImpl: async () => {
+      throw new Error("boom");
+    },
+  });
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.equal(wrote, false);
+});
+
+test("run(): an empty (unverifiable) commit enumeration is not valid provenance", async () => {
+  const { result, wrote } = await finalizeWith({ readCorrectionCommitsImpl: async () => [] });
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.equal(wrote, false);
+});
+
+test("run(): a commit-enumeration failure (e.g. truncated compare) fails closed", async () => {
+  const { result, wrote } = await finalizeWith({
+    readCorrectionCommitsImpl: async () => {
+      throw new Error("compare API commit enumeration incomplete");
+    },
+  });
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.equal(wrote, false);
 });
 
 // Issue #913: the finalizer is PR-state agnostic -- a PR already MERGED at exactly the corrected
