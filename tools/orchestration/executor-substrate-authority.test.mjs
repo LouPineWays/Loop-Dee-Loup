@@ -91,7 +91,7 @@ test("mixed-purpose locations classify by semantic effect, not directory", () =>
 
 // Proving case 6: no-op negative control.
 test("formatting-only or value-equivalent edits to executor surfaces are not over-classified", () => {
-  assert.equal(classifyPath("AGENTS.md", { before: "a  \r\nb\r\n\r\n", after: "a\nb\n" }).class, WORK_PRODUCT);
+  assert.equal(classifyPath("AGENTS.md", { before: "a \r\nb\r\n", after: "a\nb\n" }).class, WORK_PRODUCT);
   const json = classifyPath(".claude/settings.json", {
     before: '{"a":1,"b":{"x":2}}',
     after: '{\n  "b": {"x": 2},\n  "a": 1\n}',
@@ -101,7 +101,7 @@ test("formatting-only or value-equivalent edits to executor surfaces are not ove
   assert.equal(classifyPath("AGENTS.md", { before: "a", after: "b" }).class, EXECUTOR_SUBSTRATE);
   assert.equal(classifyPath(".claude/settings.json", { before: '{"a":1}', after: '{"a":2}' }).class, EXECUTOR_SUBSTRATE);
   assert.equal(classifyPath("AGENTS.md").class, EXECUTOR_SUBSTRATE);
-  const r = check({ changes: [{ path: "AGENTS.md", before: "x\n", after: "x  \n" }, { path: "src/a.ts" }], authority: {} });
+  const r = check({ changes: [{ path: "AGENTS.md", before: "x\n", after: "x \n" }, { path: "src/a.ts" }], authority: {} });
   assert.equal(r.allowed, true);
 });
 
@@ -151,7 +151,7 @@ test("CLI/changesFromGit: working-tree diff against a base is checked with conte
   writeFileSync(join(dir, "src/a.ts"), "1\n");
   g("add", "-A");
   g("commit", "-q", "-m", "base");
-  writeFileSync(join(dir, "AGENTS.md"), "one  \r\n");
+  writeFileSync(join(dir, "AGENTS.md"), "one \r\n");
   writeFileSync(join(dir, "src/a.ts"), "2\n");
   assert.equal(check({ changes: changesFromGit("HEAD", dir), authority: {} }).allowed, true);
   writeFileSync(join(dir, "AGENTS.md"), "two\n");
@@ -159,4 +159,46 @@ test("CLI/changesFromGit: working-tree diff against a base is checked with conte
   const cli = join(dirname(fileURLToPath(import.meta.url)), "executor-substrate-authority.mjs");
   assert.equal(spawnSync("node", [cli, "--base", "HEAD"], { cwd: dir }).status, 1);
   assert.equal(spawnSync("node", [cli], { cwd: dir }).status, 2);
+});
+
+// Stage 1 corrections (PR #909): fail-closed change discovery and conservative classification.
+test("untracked new substrate files are detected and denied without authority", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ess-u-"));
+  const g = (...a) => execFileSync("git", ["-c", "user.email=a@b.c", "-c", "user.name=t", ...a], { cwd: dir, stdio: "pipe" });
+  g("init", "-q");
+  writeFileSync(join(dir, "README.md"), "x\n");
+  g("add", "-A");
+  g("commit", "-q", "-m", "base");
+  mkdirSync(join(dir, "tools/orchestration"), { recursive: true });
+  writeFileSync(join(dir, "tools/orchestration/new-helper.mjs"), "export {};\n");
+  const changes = changesFromGit("HEAD", dir);
+  assert.deepEqual(changes.map((c) => c.path), ["tools/orchestration/new-helper.mjs"]);
+  assert.equal(check({ changes, authority: {} }).allowed, false);
+  assert.equal(check({ changes, authority: auth(grant("orchestration-lifecycle")) }).allowed, true);
+});
+
+test("production check scripts are substrate; tests remain work product", () => {
+  for (const f of ["tools/check-startup-budget.mjs", "tools/check-priority-labels.mjs", "tools/check-control-plane-paths.mjs"]) {
+    const c = classifyPath(f);
+    assert.equal(c.class, EXECUTOR_SUBSTRATE, f);
+    assert.equal(c.component, "verification-controls");
+    assert.equal(check({ changes: [{ path: f }], authority: auth(grant("routing-policy")) }).allowed, false);
+  }
+  assert.equal(classifyPath("tools/check-eol-policy.test.mjs").class, WORK_PRODUCT);
+});
+
+test("Markdown-significant whitespace is semantic; cosmetic Markdown whitespace is not", () => {
+  assert.equal(classifyPath("AGENTS.md", { before: "a\nb\n", after: "a  \nb\n" }).class, EXECUTOR_SUBSTRATE);
+  assert.equal(classifyPath("AGENTS.md", { before: "a\nb\n", after: "a\n\nb\n" }).class, EXECUTOR_SUBSTRATE);
+  assert.equal(classifyPath("AGENTS.md", { before: "a\nb\n", after: "a \r\nb\r\n" }).class, WORK_PRODUCT);
+});
+
+test("unregistered executor-namespace surfaces fail closed, even with an unknown component grant", () => {
+  const r = check({ changes: [{ path: "tools/manual/compile.mjs" }], authority: auth(grant("manual-compiler")) });
+  assert.equal(r.allowed, false);
+  assert.equal(r.action, "STOP_AND_PROPOSE");
+  assert.ok(r.authorityProblems.length > 0);
+  assert.equal(check({ changes: [{ path: ".claude/newthing/x.md" }], authority: {} }).allowed, false);
+  // Ordinary application paths and local/runtime state are not over-classified.
+  assert.equal(check({ changes: [{ path: "src/tools/x.ts" }, { path: ".claude/settings.local.json" }], authority: {} }).allowed, true);
 });

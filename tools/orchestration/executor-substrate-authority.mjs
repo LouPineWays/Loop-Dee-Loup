@@ -56,9 +56,14 @@ const WORK_PRODUCT_CARVE_OUTS = [
   "docs/execution-boundary-probe-runs/**",
   ".claude/settings.local.json",
   ".claude/launch.json",
+  ".claude/action-envelope-state/**",
+  ".claude/telemetry/**",
   "tools/telemetry/**",
-  "tools/check-*.mjs",
 ];
+
+// Registry misses inside these namespaces are unattributable executor/control-plane surfaces
+// and fail closed (a new component needs registration), rather than becoming work product.
+const EXECUTOR_NAMESPACES = [".claude/**", ".github/**", "tools/**"];
 
 // First match wins; keep specific components ahead of their catch-alls.
 export const EXECUTOR_COMPONENTS = [
@@ -140,7 +145,12 @@ export const EXECUTOR_COMPONENTS = [
   {
     component: "consumer-distribution",
     description: "Installer/updater/sync tooling that propagates the substrate to consumers",
-    paths: ["tools/ldl-*/**", "tools/mcp-server/**", "docs/mcp-server.md"],
+    paths: ["tools/ldl-*", "tools/ldl-*/**", "tools/mcp-server/**", "docs/mcp-server.md"],
+  },
+  {
+    component: "verification-controls",
+    description: "Production check scripts executed by CI/gates that decide whether future work passes",
+    paths: ["tools/check-*.mjs"],
   },
   {
     component: "orchestration-lifecycle",
@@ -191,6 +201,17 @@ export function isNonSemanticChange(path, before, after) {
       return false;
     }
   }
+  if (/\.(md|markdown)$/i.test(path)) {
+    // Markdown whitespace can be structural (two trailing spaces = hard break; blank lines
+    // delimit paragraphs/lists/code): only EOL and single trailing space/tab runs are cosmetic.
+    const mdNorm = (s) =>
+      s
+        .replace(/\r\n?/g, "\n")
+        .split("\n")
+        .map((l) => (/ {2,}$/.test(l) ? l : l.replace(/[ \t]+$/, "")))
+        .join("\n");
+    return mdNorm(before) === mdNorm(after);
+  }
   const norm = (s) =>
     s
       .replace(/\r\n?/g, "\n")
@@ -220,7 +241,17 @@ export function classifyPath(path, { before, after, registry = EXECUTOR_COMPONEN
     return { path: p, class: WORK_PRODUCT, component: null, reason: "work-product carve-out (cannot alter future worker behavior)" };
   }
   const hit = registry.find((c) => c.paths.some((g) => matchesGlob(p, g)));
-  if (!hit) return { path: p, class: WORK_PRODUCT, component: null, reason: "not a registered executor component" };
+  if (!hit) {
+    if (EXECUTOR_NAMESPACES.some((g) => matchesGlob(p, g))) {
+      return {
+        path: p,
+        class: EXECUTOR_SUBSTRATE,
+        component: null,
+        reason: "unregistered surface in an executor/control-plane namespace fails closed; propose registering a component",
+      };
+    }
+    return { path: p, class: WORK_PRODUCT, component: null, reason: "not a registered executor component" };
+  }
   if (isNonSemanticChange(p, before, after)) {
     return { path: p, class: WORK_PRODUCT, component: null, reason: `no semantic change to ${hit.component} (formatting/equivalent value only)` };
   }
@@ -321,8 +352,13 @@ function git(args, cwd) {
 
 export function changesFromGit(base, cwd = process.cwd()) {
   const out = git(["diff", "--name-status", "--no-renames", base], cwd);
+  // Untracked additions are invisible to `git diff`; include them as additions.
+  const untracked = git(["ls-files", "--others", "--exclude-standard"], cwd)
+    .split("\n")
+    .filter(Boolean)
+    .map((p) => `A\t${p}`);
   const changes = [];
-  for (const line of out.split("\n").filter(Boolean)) {
+  for (const line of [...out.split("\n").filter(Boolean), ...untracked]) {
     const [status, ...rest] = line.split("\t");
     const path = rest.join("\t");
     let before = null;
