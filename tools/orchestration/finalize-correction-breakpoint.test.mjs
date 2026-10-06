@@ -565,3 +565,57 @@ test("run(): #913 -- a MERGED PR whose live head is not the corrected head fails
   );
   assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
 });
+
+// Stage 1 correction on PR #914: verified merged recovery must complete from the control prestates
+// the gate can emit it for (AUDIT with a stale Stage 2 pointer; no projected PR pointer), while an
+// OPEN PR keeps the strict Lifecycle set and wrong linkage stays fail-closed.
+async function runMerged(body, prView = { ...LINKED_PR_VIEW_570, state: "MERGED" }) {
+  let currentBody = body;
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 571, executionIssue: 570, pr: 573, reviewedHead: REVIEWED, correctedHead: CORRECTED },
+    {
+      ghIssueViewImpl: async () => currentBody,
+      ghPrViewImpl: makePrViewStub(prView),
+      checkCorrectionDeltaImpl: async () => correctionSatisfied(),
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        currentBody = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  return { result, currentBody };
+}
+
+test("run(): merged recovery from Lifecycle AUDIT with a stale Stage 2 pointer finalizes without touching Stage 2", async () => {
+  const body = REVIEW_BODY.replace("- **Lifecycle:** REVIEW", "- **Lifecycle:** AUDIT").replace(
+    "- **Blocker:**",
+    "- **Stage 2:** #500\n- **Blocker:**",
+  );
+  const { result, currentBody } = await runMerged(body);
+  assert.equal(result.state, "FINALIZED");
+  assert.match(currentBody, /- \*\*Stage 2:\*\* #500/);
+  assert.match(currentBody, /- \*\*Lifecycle:\*\* AUDIT/);
+});
+
+test("run(): the same AUDIT control with an OPEN PR still fails closed", async () => {
+  const body = REVIEW_BODY.replace("- **Lifecycle:** REVIEW", "- **Lifecycle:** AUDIT");
+  const { result } = await runMerged(body, { ...LINKED_PR_VIEW_570, state: "OPEN" });
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+});
+
+test("run(): merged recovery with no projected PR pointer establishes the canonical PR bullet", async () => {
+  for (const prLine of ["", "- **PR:** none\n"]) {
+    const body = REVIEW_BODY.replace("- **PR:** #573\n", prLine).replace("- **Lifecycle:** REVIEW", "- **Lifecycle:** EXECUTION_COMPLETE");
+    const { result, currentBody } = await runMerged(body);
+    assert.equal(result.state, "FINALIZED");
+    assert.match(currentBody, /- \*\*PR:\*\* #573/);
+  }
+});
+
+test("run(): merged recovery with a missing PR pointer still fails closed on wrong PR-to-execution linkage or a different tracked PR", async () => {
+  const noPr = REVIEW_BODY.replace("- **PR:** #573\n", "");
+  const wrongLink = await runMerged(noPr, { ...LINKED_PR_VIEW_570, headRefName: "issue-999-other", body: "Addresses #999.", state: "MERGED" });
+  assert.equal(wrongLink.result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  const otherPr = await runMerged(REVIEW_BODY.replace("#573", "#574"));
+  assert.equal(otherPr.result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+});

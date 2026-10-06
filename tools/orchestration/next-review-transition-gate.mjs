@@ -1123,6 +1123,10 @@ async function mergedUnfinalizedCorrectionVerdict(
   if (parseAffirmativeStage1Disposition(stage1Bullet) !== null) return null;
   if (parseCorrectionSatisfiedDisposition(stage1Bullet) !== null) return null;
   if (looksLikeCorrectionSatisfiedDisposition(stage1Bullet)) return null;
+  // Stage 1 correction on PR #914: a bullet that opens with an affirmative keyword
+  // ("satisfied"/"exempt") but failed the strict parse (e.g. "satisfied at not-a-sha") is a
+  // malformed durable assertion, not a stranded prestate -- never recover over it.
+  if (typeof stage1Bullet === "string" && /^(satisfied|exempt)(?:\s|$)/i.test(stage1Bullet.trim())) return null;
   const probe = await probeUnfinalizedCorrection(
     { repo, pr, head: headRefOid, issue, controlIssue },
     { checkCorrectionDeltaImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },

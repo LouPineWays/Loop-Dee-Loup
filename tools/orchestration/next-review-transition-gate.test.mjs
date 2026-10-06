@@ -4187,3 +4187,17 @@ test("runNextReviewTransitionGate: #913 -- the stale-Stage-2-pointer merged shap
   assert.equal(result.state, "STAGE1_CORRECTION_FINALIZATION_REQUIRED", String(result.reason));
   assert.match(result.nextCommand, /finalize-correction-breakpoint\.mjs --control-issue 691 --execution-issue 737 --pr 742 /);
 });
+
+// Stage 1 correction on PR #914: a malformed affirmative-looking Stage 1 assertion is never
+// reinterpreted as a stranded prestate, even when findings-bearing correction evidence exists.
+test("runNextReviewTransitionGate: #913 -- malformed affirmative-looking Stage 1 values never enter correction finalization", async () => {
+  for (const bad of ["satisfied at not-a-sha", "exempt at", "Satisfied at zzzzzzz (extra)", "satisfied"]) {
+    const result = await run913({
+      ghIssueViewImpl: async () => ({
+        body: CONTROL_BODY_PRE_MERGE.replace("- **Stage 1:** requested", `- **Stage 1:** ${bad}`),
+        state: "OPEN",
+      }),
+    });
+    assert.notEqual(result.state, "STAGE1_CORRECTION_FINALIZATION_REQUIRED", bad);
+  }
+});
