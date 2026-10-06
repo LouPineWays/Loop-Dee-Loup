@@ -43,8 +43,9 @@ const DEFAULT_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 // bootstrap-bound control-plane continuation, else null. Accepts the bound form only
 // (`node <...>/control-plane-bootstrap.mjs tools/<dir>/<x>.mjs args...`).
 export function unwrapBoundSegment(tokens) {
-  const nodeIdx = tokens.indexOf("node");
-  if (nodeIdx === -1) return null;
+  // Exact grammar only: `node` at index 0, bootstrap at 1, canonical script at 2 (Stage 2 #903).
+  if (!Array.isArray(tokens) || tokens[0] !== "node") return null;
+  const nodeIdx = 0;
   const boot = tokens[nodeIdx + 1] ?? "";
   if (!/(?:^|[\\/])control-plane-bootstrap\.mjs$/.test(boot)) return null;
   const script = tokens[nodeIdx + 2] ?? "";
