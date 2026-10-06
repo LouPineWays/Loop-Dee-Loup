@@ -248,3 +248,18 @@ test("explicit checkout source: exact gate path forwards the same authority as t
   assert.deepEqual(run("tools/orchestration/ready-dispatch-gate.mjs"), want);
   assert.deepEqual(run("tools/orchestration/evidence-correction.mjs"), ["--control-issue", "780"]);
 });
+
+test("malformed bound segments (prefixed/suffixed junk) are rejected by unwrap, binding, and launcher parsing (Stage 2 #903)", () => {
+  const sha = "f".repeat(40);
+  const env = { LDL_CONTROL_PLANE_RUNNER: JSON.stringify({ runnerCommit: sha }) };
+  const good = `node /cache/${sha}/tools/orchestration/control-plane-bootstrap.mjs tools/orchestration/close-control.mjs --control-issue 7`;
+  assert.ok(unwrapBoundSegment(good.split(/\s+/)));
+  const prefixed = `junk ${good}`;
+  assert.equal(unwrapBoundSegment(prefixed.split(/\s+/)), null);
+  const r = bindContinuationCommand(prefixed, { env, root: `/cache/${sha}`, readMarker: () => sha });
+  assert.equal(r.ok, false);
+  assert.throws(() => parseNextCommand(prefixed));
+  assert.throws(() => parseNextCommand(`${good} && ${prefixed}`));
+  // Chained: one malformed segment poisons the whole continuation at bind time.
+  assert.equal(bindContinuationCommand(`${good} && ${prefixed}`, { env, root: `/cache/${sha}`, readMarker: () => sha }).ok, false);
+});
