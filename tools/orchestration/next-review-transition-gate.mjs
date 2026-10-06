@@ -1050,6 +1050,108 @@ function exitCodeFor(state) {
   }
 }
 
+// Issue #837 / #913: the shared unfinalized-findings-correction probe. Used by the pre-merge phase
+// (PR still open at the corrected head) and by the merged-PR resume branches (the #702/#910/PR #909
+// recurrence, where the PR merged at the corrected head while the control still read the stale
+// pre-correction "requested" disposition). The reviewed head is the most recent Stage 1 trigger
+// round bound to a head other than `head`; it is evidence-checked by checkCorrectionDelta (genuine
+// head-bound findings + strict non-diverged ancestry + head match) and by correction provenance on
+// every intervening commit, never taken on faith. Returns { unfinalizedCorrection } (null when the
+// evidence is absent/unrelated -- the caller keeps its pre-existing behavior) or { ambiguous }
+// (an operational/unreadable failure -- fail closed).
+async function probeUnfinalizedCorrection(
+  { repo, pr, head, issue, controlIssue },
+  { checkCorrectionDeltaImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
+) {
+  const ambiguous = (reason) => ({
+    ambiguous: { exitCode: 4, state: "AMBIGUOUS", stopAfter: true, repo, pr, head, issue, controlIssue, reason },
+  });
+  let heads;
+  try {
+    heads = await listStage1TriggerHeadsImpl({ repo, pr });
+  } catch (err) {
+    return ambiguous(`could not read PR #${pr}'s Stage 1 trigger rounds to check for an unfinalized correction: ${err.message}`);
+  }
+  const reviewedHead = (Array.isArray(heads) ? heads : []).find(
+    (h) => typeof h === "string" && h && h.toLowerCase() !== String(head).toLowerCase(),
+  );
+  if (!reviewedHead) return { unfinalizedCorrection: null };
+  let delta;
+  try {
+    delta = await checkCorrectionDeltaImpl({ repo, pr, reviewedHead, correctedHead: head, gatedHead: head });
+  } catch (err) {
+    delta = { exitCode: 1, message: `stage1-correction-gate threw: ${err.message}` };
+  }
+  if (!delta || typeof delta.exitCode !== "number" || delta.exitCode === 1) {
+    return ambiguous(`unfinalized-correction probe against reviewed head ${reviewedHead} failed operationally: ${delta && delta.message}`);
+  }
+  if (delta.state !== "CORRECTION_SATISFIED") return { unfinalizedCorrection: null };
+  // Stage 1 review finding on PR #838 (P1): head ancestry plus genuine findings at the reviewed
+  // head proves a descendant exists, not that the descendant is the authorized correction of those
+  // findings (an unrelated commit or merge-forward satisfies the same shape). Require every
+  // intervening commit to carry the execution Issue's own provenance; anything unverifiable stays
+  // unrelated (null) or AMBIGUOUS (unreadable) -- never a finalization authorization.
+  let commits;
+  try {
+    commits = await readCorrectionCommitsImpl({ repo, base: delta.reviewedHead, head: delta.correctedHead });
+  } catch (err) {
+    return ambiguous(`could not read the commits between reviewed head ${reviewedHead} and ${head} to verify correction provenance: ${err.message}`);
+  }
+  if (!verifyCorrectionProvenance(commits, issue).ok) return { unfinalizedCorrection: null };
+  return { unfinalizedCorrection: { reviewedHead: delta.reviewedHead, correctedHead: delta.correctedHead } };
+}
+
+// Issue #913 (the #702/#910/PR #909 recurrence): a MERGED PR whose control "Stage 1" bullet is
+// neither an affirmative nor a correction-satisfied disposition is ordinarily a stranded no-findings
+// state recoverable by finalize-stage1-satisfied-breakpoint.mjs --recover true. When durable
+// evidence instead proves a findings-bearing round followed by an accepted, provenance-bearing
+// correction that is the exact merged PR head (probeUnfinalizedCorrection, merged head =
+// `headRefOid`), that ordinary recovery would (correctly) refuse the prestate -- the one-round
+// policy forbids a second review, and a findings round must never be flattened into
+// "satisfied at <head>". Route to the existing correction-finalization verdict instead, whose
+// bounded envelope authorizes only finalize-correction-breakpoint.mjs. Returns the verdict to emit,
+// or null when no such evidence exists (caller keeps its pre-existing ordinary-recovery verdict).
+async function mergedUnfinalizedCorrectionVerdict(
+  { repo, pr, headRefOid, issue, controlIssue, stage1Bullet },
+  { checkCorrectionDeltaImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
+) {
+  if (typeof headRefOid !== "string" || !headRefOid.trim()) return null;
+  // Only the genuinely stranded shape is probed: any affirmative-shaped bullet (even one naming a
+  // different head) or a malformed correction-satisfied-shaped one keeps its existing fail-closed
+  // handling -- this never reinterprets, repairs, or overrides durable state that already asserts
+  // a disposition.
+  if (parseAffirmativeStage1Disposition(stage1Bullet) !== null) return null;
+  if (parseCorrectionSatisfiedDisposition(stage1Bullet) !== null) return null;
+  if (looksLikeCorrectionSatisfiedDisposition(stage1Bullet)) return null;
+  const probe = await probeUnfinalizedCorrection(
+    { repo, pr, head: headRefOid, issue, controlIssue },
+    { checkCorrectionDeltaImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
+  );
+  if (probe.ambiguous) return probe.ambiguous;
+  const found = probe.unfinalizedCorrection;
+  if (!found) return null;
+  return {
+    exitCode: 3,
+    state: "STAGE1_CORRECTION_FINALIZATION_REQUIRED",
+    stopAfter: true,
+    repo,
+    controlIssue,
+    pr,
+    head: headRefOid,
+    issue,
+    prState: "MERGED",
+    reviewedHead: found.reviewedHead,
+    correctedHead: found.correctedHead,
+    reason:
+      `PR #${pr} is already MERGED at corrected head ${found.correctedHead}, but control Issue #${controlIssue}'s ` +
+      `"Stage 1" bullet never recorded the findings-bearing correction (reviewed ${found.reviewedHead}) -- ` +
+      "finalize the canonical correction-satisfied disposition; ordinary satisfied recovery does not apply",
+    nextCommand:
+      `node tools/orchestration/finalize-correction-breakpoint.mjs --control-issue ${controlIssue} ` +
+      `--execution-issue ${issue} --pr ${pr} --reviewed-head ${found.reviewedHead} --corrected-head ${found.correctedHead}`,
+  };
+}
+
 async function resolvePreMerge(
   { repo, pr, head, issue, stage1Disposition = null, controlIssue },
   {
@@ -1115,73 +1217,12 @@ async function resolvePreMerge(
     !looksLikeCorrectionSatisfiedDisposition(stage1Disposition) &&
     !parseAffirmativeStage1Disposition(stage1Disposition)
   ) {
-    let heads;
-    try {
-      heads = await listStage1TriggerHeadsImpl({ repo, pr });
-    } catch (err) {
-      return {
-        exitCode: 4,
-        state: "AMBIGUOUS",
-        stopAfter: true,
-        repo,
-        pr,
-        head,
-        issue,
-        controlIssue,
-        reason: `could not read PR #${pr}'s Stage 1 trigger rounds to check for an unfinalized correction: ${err.message}`,
-      };
-    }
-    const reviewedHead = (Array.isArray(heads) ? heads : []).find(
-      (h) => typeof h === "string" && h && h.toLowerCase() !== String(head).toLowerCase(),
+    const probe = await probeUnfinalizedCorrection(
+      { repo, pr, head, issue, controlIssue },
+      { checkCorrectionDeltaImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
     );
-    if (reviewedHead) {
-      let delta;
-      try {
-        delta = await checkCorrectionDeltaImpl({ repo, pr, reviewedHead, correctedHead: head, gatedHead: head });
-      } catch (err) {
-        delta = { exitCode: 1, message: `stage1-correction-gate threw: ${err.message}` };
-      }
-      if (!delta || typeof delta.exitCode !== "number" || delta.exitCode === 1) {
-        return {
-          exitCode: 4,
-          state: "AMBIGUOUS",
-          stopAfter: true,
-          repo,
-          pr,
-          head,
-          issue,
-          controlIssue,
-          reason: `unfinalized-correction probe against reviewed head ${reviewedHead} failed operationally: ${delta && delta.message}`,
-        };
-      }
-      if (delta.state === "CORRECTION_SATISFIED") {
-        // Stage 1 review finding on PR #838 (P1): head ancestry plus genuine findings at the
-        // reviewed head proves a descendant exists, not that the descendant is the authorized
-        // correction of those findings (an unrelated commit or merge-forward satisfies the same
-        // shape). Require every intervening commit to carry the execution Issue's own
-        // provenance; anything unverifiable stays NO_ACTION_YET (unrelated) or AMBIGUOUS
-        // (unreadable) -- never a finalization authorization.
-        let commits;
-        try {
-          commits = await readCorrectionCommitsImpl({ repo, base: delta.reviewedHead, head: delta.correctedHead });
-        } catch (err) {
-          return {
-            exitCode: 4,
-            state: "AMBIGUOUS",
-            stopAfter: true,
-            repo,
-            pr,
-            head,
-            issue,
-            controlIssue,
-            reason: `could not read the commits between reviewed head ${reviewedHead} and ${head} to verify correction provenance: ${err.message}`,
-          };
-        }
-        if (verifyCorrectionProvenance(commits, issue).ok) {
-          unfinalizedCorrection = { reviewedHead: delta.reviewedHead, correctedHead: delta.correctedHead };
-        }
-      }
-    }
+    if (probe.ambiguous) return probe.ambiguous;
+    unfinalizedCorrection = probe.unfinalizedCorrection;
   }
 
   // Issue #665: only ever fetched once correctionDelta itself already reports
@@ -1277,6 +1318,8 @@ async function resolvePostMerge(
     reconcileExistingStage2AuditIssueImpl = reconcileExistingStage2AuditIssue,
     checkCorrectionDeltaImpl = checkCorrectionDelta,
     evaluateEvidenceCorrectionImpl = evaluateEvidenceCorrection,
+    listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
+    readCorrectionCommitsImpl = defaultReadCorrectionCommits,
   },
 ) {
   let postAudit;
@@ -1473,7 +1516,7 @@ async function resolvePostMerge(
             headRefOid: livePrState.headRefOid,
             executionRef,
           },
-          { checkCorrectionDeltaImpl, reconcileExistingStage2AuditIssueImpl },
+          { checkCorrectionDeltaImpl, reconcileExistingStage2AuditIssueImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
         );
       }
       // Stage 2 audit finding on this PR (#753, P1): the branch above only special-cases
@@ -1679,6 +1722,8 @@ async function resolveMergedPrWithSettledStage2(
     checkCorrectionDeltaImpl,
     ghPrStateImpl = defaultGhPrState,
     evaluateEvidenceCorrectionImpl,
+    listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
+    readCorrectionCommitsImpl = defaultReadCorrectionCommits,
   },
 ) {
   // No merge commit at all (an unexpected `gh`/test-double response shape): there is no evidence
@@ -1688,7 +1733,7 @@ async function resolveMergedPrWithSettledStage2(
   if (typeof mergeCommitOid !== "string" || !mergeCommitOid.trim()) {
     return resolvePostMerge(
       { repo, auditIssue, controlIssue: controlIssueNumber },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, evaluateEvidenceCorrectionImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
     );
   }
 
@@ -1737,13 +1782,13 @@ async function resolveMergedPrWithSettledStage2(
     // own merge, so it owns the transition unchanged.
     return resolvePostMerge(
       { repo, auditIssue, controlIssue: controlIssueNumber },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, evaluateEvidenceCorrectionImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
     );
   }
 
   return resolveStalePointerCorrectionRecovery(
     { repo, body, auditIssue, prIssue, controlIssueNumber, mergeCommitOid, headRefOid, executionRef },
-    { checkCorrectionDeltaImpl, reconcileExistingStage2AuditIssueImpl },
+    { checkCorrectionDeltaImpl, reconcileExistingStage2AuditIssueImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
   );
 }
 
@@ -1760,7 +1805,12 @@ async function resolveMergedPrWithSettledStage2(
 // commit this call already knows is not genuinely current) could otherwise trigger.
 async function resolveStalePointerCorrectionRecovery(
   { repo, body, auditIssue, prIssue, controlIssueNumber, mergeCommitOid, headRefOid, executionRef },
-  { checkCorrectionDeltaImpl, reconcileExistingStage2AuditIssueImpl },
+  {
+    checkCorrectionDeltaImpl,
+    reconcileExistingStage2AuditIssueImpl,
+    listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
+    readCorrectionCommitsImpl = defaultReadCorrectionCommits,
+  },
 ) {
   // P1 finding on PR #748: the settled pointer is now proven stale/unparseable, but that alone
   // is not proof this merge's own Stage 1 authority was ever satisfied. Mirrors the sibling
@@ -1782,6 +1832,13 @@ async function resolveStalePointerCorrectionRecovery(
   const parsedCorrectionSatisfied = parseCorrectionSatisfiedDisposition(stage1Bullet);
   const hasCorrectionSatisfiedDisposition = parsedCorrectionSatisfied !== null;
   if (!hasAffirmativeDisposition && !hasCorrectionSatisfiedDisposition) {
+    // Issue #913: see the sibling merged-PR branch -- provable findings-correction evidence
+    // selects correction finalization rather than ordinary satisfied recovery.
+    const correctionVerdict = await mergedUnfinalizedCorrectionVerdict(
+      { repo, pr: prIssue, headRefOid, issue: executionRef.issue, controlIssue: controlIssueNumber, stage1Bullet },
+      { checkCorrectionDeltaImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
+    );
+    if (correctionVerdict) return correctionVerdict;
     return {
       exitCode: 3,
       state: "STAGE2_PREPARATION_BLOCKED_ON_STAGE1",
@@ -2166,7 +2223,7 @@ async function runNextReviewTransitionGateCore(
   if (args.auditIssue) {
     return resolvePostMerge(
       { repo, auditIssue: args.auditIssue, controlIssue: null },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, evaluateEvidenceCorrectionImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
     );
   }
   if (args.pr) {
@@ -2294,7 +2351,7 @@ async function runNextReviewTransitionGateCore(
           mergeCommitOid: prState.mergeCommit?.oid,
           headRefOid: prState.headRefOid,
         },
-        { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl, checkCorrectionDeltaImpl, ghPrStateImpl, evaluateEvidenceCorrectionImpl },
+        { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl, checkCorrectionDeltaImpl, ghPrStateImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
       );
     }
     if (prState.state === "OPEN") {
@@ -2330,7 +2387,7 @@ async function runNextReviewTransitionGateCore(
     // Stage 2 reference remains the only active post-review pointer, exactly as before #537.
     return resolvePostMerge(
       { repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, evaluateEvidenceCorrectionImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
     );
   }
 
@@ -2413,6 +2470,13 @@ async function runNextReviewTransitionGateCore(
       const parsedCorrectionSatisfied = parseCorrectionSatisfiedDisposition(stage1Bullet);
       const hasCorrectionSatisfiedDisposition = parsedCorrectionSatisfied !== null;
       if (!hasAffirmativeDisposition && !hasCorrectionSatisfiedDisposition) {
+        // Issue #913: findings-bearing correction evidence selects correction finalization, never
+        // the ordinary satisfied recovery below (which stays unchanged for no-findings state).
+        const correctionVerdict = await mergedUnfinalizedCorrectionVerdict(
+          { repo, pr: prRef.issue, headRefOid: prState.headRefOid, issue: executionRef.issue, controlIssue: controlIssueNumber, stage1Bullet },
+          { checkCorrectionDeltaImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl },
+        );
+        if (correctionVerdict) return correctionVerdict;
         return {
           exitCode: 3,
           state: "STAGE2_PREPARATION_BLOCKED_ON_STAGE1",

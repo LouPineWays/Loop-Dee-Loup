@@ -2181,6 +2181,8 @@ test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 referenc
     {
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE, state: "OPEN" }),
       ghPrStateImpl: async () => ({ headRefOid: "mergedhead", state: "MERGED" }),
+      // Issue #913: genuine no-findings stranded state -- no earlier trigger round at another head.
+      listStage1TriggerHeadsImpl: async () => [],
       stage1RunImpl: async () => {
         throw new Error("should never be called -- Stage 1 is unverified, not a re-run case");
       },
@@ -2685,6 +2687,7 @@ test("runNextReviewTransitionGate: the #691 shape, but the control Issue's Stage
         throw new Error(`unexpected ghIssueViewImpl call for #${number}`);
       },
       ghPrStateImpl: async () => ({ headRefOid: "742head", state: "MERGED", mergeCommit: { oid: MERGE_COMMIT_742 } }),
+      listStage1TriggerHeadsImpl: async () => [],
       reconcileExistingStage2AuditIssueImpl: async () => {
         throw new Error("should never be called -- Stage 1 is unverified, not a recovery/preparation case");
       },
@@ -2696,7 +2699,7 @@ test("runNextReviewTransitionGate: the #691 shape, but the control Issue's Stage
       },
     },
   );
-  assert.equal(result.exitCode, 3);
+  assert.equal(result.exitCode, 3, String(result.reason));
   assert.equal(result.state, "STAGE2_PREPARATION_BLOCKED_ON_STAGE1");
   assert.equal(result.stopAfter, true);
   assert.equal(result.controlIssue, 691);
@@ -4048,4 +4051,139 @@ test("reduceCompareCommits: a truncated comparison (total_commits > collected) t
 test("runNextReviewTransitionGate: #837 provenance -- truncated compare evidence fails closed to AMBIGUOUS", async () => {
   const r = await runProvenance(new Error("compare API commit enumeration incomplete (collected 250, total_commits 300)"));
   assert.equal(r.state, "AMBIGUOUS");
+});
+
+// Issue #913 (the #702/#910/PR #909 recurrence): a MERGED PR at a corrected head whose control
+// still carries the stale pre-correction "requested" Stage 1 disposition selects the existing
+// correction-finalization path, never ordinary finalize-stage1-satisfied --recover.
+const ISSUE_913_REVIEWED_HEAD = "223dfe1637784538a35211728b79de237f6a2135";
+const ISSUE_913_CORRECTED_HEAD = "d09d6eec77c7e4fdab1b237d1483c93aa190d7eb";
+const ISSUE_913_COMMITS = [
+  { sha: "c1", parents: 1, message: "Address Stage 1 findings (#375)" },
+];
+
+async function run913(overrides = {}) {
+  return runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: ISSUE_913_CORRECTED_HEAD, state: "MERGED" }),
+      listStage1TriggerHeadsImpl: async () => [ISSUE_913_REVIEWED_HEAD],
+      readCorrectionCommitsImpl: async () => ISSUE_913_COMMITS,
+      checkCorrectionDeltaImpl: async (args) => ({
+        exitCode: 0,
+        state: "CORRECTION_SATISFIED",
+        reviewedHead: args.reviewedHead,
+        correctedHead: args.correctedHead,
+      }),
+      stage1RunImpl: async () => {
+        throw new Error("should never be called -- no second Stage 1 round");
+      },
+      checkMergeReadyImpl: async () => {
+        throw new Error("should never be called");
+      },
+      ...overrides,
+    },
+  );
+}
+
+test("runNextReviewTransitionGate: #913 -- merged PR with findings-bearing correction and stale 'requested' Stage 1 selects STAGE1_CORRECTION_FINALIZATION_REQUIRED, never ordinary satisfied recovery", async () => {
+  let deltaArgs = null;
+  const result = await run913({
+    checkCorrectionDeltaImpl: async (args) => {
+      deltaArgs = args;
+      return { exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: args.reviewedHead, correctedHead: args.correctedHead };
+    },
+  });
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE1_CORRECTION_FINALIZATION_REQUIRED");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.reviewedHead, ISSUE_913_REVIEWED_HEAD);
+  assert.equal(result.correctedHead, ISSUE_913_CORRECTED_HEAD);
+  assert.deepEqual(deltaArgs, {
+    repo: "o/r",
+    pr: 376,
+    reviewedHead: ISSUE_913_REVIEWED_HEAD,
+    correctedHead: ISSUE_913_CORRECTED_HEAD,
+    gatedHead: ISSUE_913_CORRECTED_HEAD,
+  });
+  assert.equal(
+    result.nextCommand,
+    "node tools/orchestration/finalize-correction-breakpoint.mjs --control-issue 322 --execution-issue 375 --pr 376 " +
+      `--reviewed-head ${ISSUE_913_REVIEWED_HEAD} --corrected-head ${ISSUE_913_CORRECTED_HEAD}`,
+  );
+  assert.doesNotMatch(result.nextCommand, /finalize-stage1-satisfied/);
+});
+
+test("runNextReviewTransitionGate: #913 -- findings round whose correction evidence is NOT_SATISFIED (diverged/stale) falls back to ordinary blocked verdict, never finalization", async () => {
+  const result = await run913({
+    checkCorrectionDeltaImpl: async () => ({ exitCode: 2, state: "NOT_SATISFIED", reason: "diverged" }),
+  });
+  assert.equal(result.state, "STAGE2_PREPARATION_BLOCKED_ON_STAGE1");
+});
+
+test("runNextReviewTransitionGate: #913 -- intervening commits without execution-Issue provenance never authorize finalization", async () => {
+  const result = await run913({
+    readCorrectionCommitsImpl: async () => [{ sha: "c1", parents: 1, message: "Unrelated change" }],
+  });
+  assert.equal(result.state, "STAGE2_PREPARATION_BLOCKED_ON_STAGE1");
+});
+
+test("runNextReviewTransitionGate: #913 -- a merge-forward commit between heads never authorizes finalization", async () => {
+  const result = await run913({
+    readCorrectionCommitsImpl: async () => [{ sha: "c1", parents: 2, message: "Merge main (#375)" }],
+  });
+  assert.equal(result.state, "STAGE2_PREPARATION_BLOCKED_ON_STAGE1");
+});
+
+test("runNextReviewTransitionGate: #913 -- no earlier trigger round (genuine no-findings ordinary state) keeps ordinary recovery unchanged", async () => {
+  const result = await run913({ listStage1TriggerHeadsImpl: async () => [ISSUE_913_CORRECTED_HEAD] });
+  assert.equal(result.state, "STAGE2_PREPARATION_BLOCKED_ON_STAGE1");
+  assert.match(result.nextCommand, /finalize-stage1-satisfied-breakpoint.mjs .* --recover true/);
+});
+
+test("runNextReviewTransitionGate: #913 -- unreadable trigger rounds or commit history fail closed to AMBIGUOUS", async () => {
+  const a = await run913({
+    listStage1TriggerHeadsImpl: async () => {
+      throw new Error("boom");
+    },
+  });
+  assert.equal(a.state, "AMBIGUOUS");
+  const b = await run913({
+    readCorrectionCommitsImpl: async () => {
+      throw new Error("truncated");
+    },
+  });
+  assert.equal(b.state, "AMBIGUOUS");
+  const c = await run913({ checkCorrectionDeltaImpl: async () => ({ exitCode: 1, message: "gh failed" }) });
+  assert.equal(c.state, "AMBIGUOUS");
+});
+
+test("runNextReviewTransitionGate: #913 -- the stale-Stage-2-pointer merged shape with a stale 'requested' Stage 1 and provable findings correction also selects STAGE1_CORRECTION_FINALIZATION_REQUIRED", async () => {
+  const body = CONTROL_BODY_691_MERGED_WITH_PREDECESSOR_STAGE2.replace(
+    "- **Stage 1:** correction-satisfied at a12bf7dc1a13118d39e30712d2e7096d107ac457 (reviewed 55790ac3ec8dc37f11ccd09bcc023e79dc8586dc)",
+    "- **Stage 1:** requested",
+  );
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "691" },
+    {
+      ghIssueViewImpl: async ({ number }) => {
+        if (number === "691") return { body, state: "OPEN" };
+        if (number === 739) return { body: auditIssueBody({ workIssue: 737, mergeCommit: MERGE_COMMIT_738 }), state: "OPEN" };
+        throw new Error(`unexpected ghIssueViewImpl call for #${number}`);
+      },
+      ghPrStateImpl: async () => ({ headRefOid: ISSUE_913_CORRECTED_HEAD, state: "MERGED", mergeCommit: { oid: MERGE_COMMIT_742 } }),
+      listStage1TriggerHeadsImpl: async () => [ISSUE_913_REVIEWED_HEAD],
+      readCorrectionCommitsImpl: async () => [{ sha: "c1", parents: 1, message: "Address findings (#737)" }],
+      checkCorrectionDeltaImpl: async (args) => ({ exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: args.reviewedHead, correctedHead: args.correctedHead }),
+      reconcileExistingStage2AuditIssueImpl: async () => {
+        throw new Error("should never be called -- Stage 1 finalization precedes Stage 2 recovery");
+      },
+      checkPostAuditImpl: async () => {
+        throw new Error("should never be called");
+      },
+    },
+  );
+  assert.equal(result.state, "STAGE1_CORRECTION_FINALIZATION_REQUIRED", String(result.reason));
+  assert.match(result.nextCommand, /finalize-correction-breakpoint\.mjs --control-issue 691 --execution-issue 737 --pr 742 /);
 });

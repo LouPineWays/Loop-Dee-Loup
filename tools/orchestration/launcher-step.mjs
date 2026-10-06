@@ -137,7 +137,7 @@ export const TRANSITIONS = Object.freeze({
     action: "finalize-correction-breakpoint",
     verifier: "control-correction-disposition-readback",
     postcondition: "control Issue Stage 1 reads the canonical correction-satisfied disposition for the exact reviewed/corrected heads while the PR head is still the corrected head",
-    invalidation: ["PR head changed since the verdict", "PR closed or merged", "control Stage 1 bullet changed"],
+    invalidation: ["PR head changed since the verdict", "PR closed without merge", "control Stage 1 bullet changed"],
   },
   STAGE2_CORRECTION_PR_NEEDS_FINALIZATION: {
     preState: "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",

@@ -221,7 +221,9 @@ export function buildReadEffect(deps) {
 
   // Stage 1 correction finalization (#837): the canonical disposition for exactly the verdict's
   // reviewed/corrected pair, read back from the control Issue, while the PR is still open at the
-  // corrected head. A moved/closed PR head is wrong-target evidence (fail closed).
+  // corrected head. A moved/closed PR head is wrong-target evidence (fail closed). Issue #913: a PR
+  // that already MERGED at exactly the corrected head is equally valid (the merged-PR resume
+  // recurrence); a merged PR at any other head, or a closed-unmerged PR, is still wrong-target.
   async function correctionFinalization(verdict) {
     const pr = issueNumberOf(verdict?.pr);
     const { reviewedHead, correctedHead } = verdict ?? {};
@@ -230,8 +232,8 @@ export function buildReadEffect(deps) {
     }
     const target = `PR#${pr}`;
     const live = readPr({ repo: verdict.repo ?? repo, number: pr });
-    if (live?.state !== "OPEN" || String(live?.headRefOid).toLowerCase() !== correctedHead.toLowerCase()) {
-      return bad(target, target, "PR is not open at the corrected head the gate verified");
+    if ((live?.state !== "OPEN" && live?.state !== "MERGED") || String(live?.headRefOid).toLowerCase() !== correctedHead.toLowerCase()) {
+      return bad(target, target, "PR is not open or merged at the corrected head the gate verified");
     }
     const { body } = await readControl();
     const projected = verifyFinalizedCorrectionBody(body, { correctedHead, reviewedHead }).ok === true;

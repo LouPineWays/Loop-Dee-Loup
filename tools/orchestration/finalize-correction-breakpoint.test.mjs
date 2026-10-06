@@ -529,3 +529,39 @@ test("run(): direct-reference mode still fails closed on a stale corrected head"
   assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
   assert.match(result.reason, /does not match the PR's live head/);
 });
+
+// Issue #913: the finalizer is PR-state agnostic -- a PR already MERGED at exactly the corrected
+// head (the #702/#910/PR #909 recurrence) finalizes the same canonical disposition, while a merged
+// PR whose live head differs from the corrected head still fails closed.
+test("run(): #913 -- a MERGED PR whose live head is the corrected head persists and verifies the canonical correction-satisfied disposition", async () => {
+  let currentBody = REVIEW_BODY;
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 571, executionIssue: 570, pr: 573, reviewedHead: REVIEWED, correctedHead: CORRECTED },
+    {
+      ghIssueViewImpl: async () => currentBody,
+      ghPrViewImpl: makePrViewStub({ ...LINKED_PR_VIEW_570, state: "MERGED" }),
+      checkCorrectionDeltaImpl: async () => correctionSatisfied(),
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        currentBody = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.state, "FINALIZED");
+  assert.equal(result.stage1, `correction-satisfied at ${CORRECTED} (reviewed ${REVIEWED})`);
+});
+
+test("run(): #913 -- a MERGED PR whose live head is not the corrected head fails closed", async () => {
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 571, executionIssue: 570, pr: 573, reviewedHead: REVIEWED, correctedHead: CORRECTED },
+    {
+      ghIssueViewImpl: async () => REVIEW_BODY,
+      ghPrViewImpl: makePrViewStub({ ...LINKED_PR_VIEW_570, headRefOid: "f".repeat(40), state: "MERGED" }),
+      checkCorrectionDeltaImpl: async () => correctionSatisfied(),
+      writeControlSnapshotImpl: async () => {
+        throw new Error("must not write");
+      },
+    },
+  );
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+});
