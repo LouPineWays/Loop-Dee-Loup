@@ -314,7 +314,9 @@ export function checkExecutorSubstrateAuthority({ changes, authority, registry =
     }
   }
   const substrate = classified.filter((c) => c.class === EXECUTOR_SUBSTRATE);
-  const allowed = violations.length === 0;
+  // An invalid authority record never authorizes substrate mutation, even when another grant is valid.
+  const authorityInvalid = substrate.length > 0 && problems.length > 0;
+  const allowed = violations.length === 0 && !authorityInvalid;
   const touched = [...new Set(substrate.map((c) => c.component).filter(Boolean))];
   const result = {
     allowed,
@@ -335,9 +337,12 @@ export function checkExecutorSubstrateAuthority({ changes, authority, registry =
   if (!allowed) {
     const missing = [...new Set(violations.map((v) => v.component).filter(Boolean))];
     result.proposal = {
-      reason: "mutation requires executor components outside the authorized envelope",
+      reason: authorityInvalid && violations.length === 0
+        ? "authority record contains invalid grants; an invalid grant cannot be masked by a valid one"
+        : "mutation requires executor components outside the authorized envelope",
       unauthorizedComponents: missing,
       paths: violations.map((v) => v.path),
+      authorityProblems: problems,
       instruction: "Do not modify these surfaces. Return a bounded proposal/interrupt naming the component and intended change; stop at the existing envelope.",
     };
   }
