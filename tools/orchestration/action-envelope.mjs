@@ -357,6 +357,8 @@ const ENVELOPES = {
 // treats as a verdict at all; AGENTS.md § Session execution: "a script error ... must never be
 // treated as the same permission"). Never widen this by guessing at intent from the shape of
 // an unrecognized state string.
+import { unwrapBoundSegment } from "./control-plane-continuation.mjs";
+
 const FAIL_CLOSED_DEFAULT = Object.freeze({
   mode: ENVELOPE_MODES.NONE,
   authorizedActions: [],
@@ -377,7 +379,11 @@ const FAIL_CLOSED_DEFAULT = Object.freeze({
 function parseChainedCommands(commandText) {
   if (typeof commandText !== "string" || commandText.length === 0) return [];
   return commandText.split("&&").map((segment) => {
-    const tokens = segment.trim().split(/\s+/).filter(Boolean);
+    let tokens = segment.trim().split(/\s+/).filter(Boolean);
+    // Issue #901: a runner-bound continuation (`node <runner>/control-plane-bootstrap.mjs <script>
+    // args`) carries exactly the same authority as its canonical `node <script> args` form.
+    const bound = unwrapBoundSegment(tokens);
+    if (bound) tokens = ["node", bound.script, ...bound.rest];
     const nodeIdx = tokens.indexOf("node");
     const scriptPath = nodeIdx !== -1 ? tokens[nodeIdx + 1] ?? "" : "";
     const scriptName = scriptPath.split(/[\\/]/).pop() ?? "";

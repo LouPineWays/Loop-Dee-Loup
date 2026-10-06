@@ -269,6 +269,6 @@ test("leaf gate CLIs attach controlPlaneWitness to emitted verdicts", async () =
     const src = readFileSync(new URL("./" + f, import.meta.url), "utf8");
     assert.match(src, /const controlPlaneWitness = enforceControlPlaneFreshness\(\)/, f);
     assert.match(src, /result\.controlPlaneWitness = controlPlaneWitness/, f);
-    assert.ok(src.indexOf("result.controlPlaneWitness = controlPlaneWitness") < src.indexOf("persistLastGateVerdict(result)", src.indexOf("async function main")), f);
+    assert.ok(src.indexOf("result.controlPlaneWitness = controlPlaneWitness") < src.indexOf("persistLastGateVerdict(emitted)", src.indexOf("async function main")), f);
   }
 });

@@ -17,6 +17,7 @@
 
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { unwrapBoundSegment } from "./control-plane-continuation.mjs";
 import { runLauncherStep, authorizeLauncherVerdict, parseDecisionSurface, resolveOpenPath, isWriterComment, extractVerdictReferences, DECISION_SURFACE_HEADING } from "./launcher-step.mjs";
 import { runLauncherSupervisor } from "./launcher-supervisor.mjs";
 import { buildReadEffect } from "./launcher-readback.mjs";
@@ -126,6 +127,9 @@ export function upsertSettledDecisions(body, decisions) {
 }
 
 const SAFE_TOKEN = /^[A-Za-z0-9_.\/=:#@-]+$/;
+// Issue #901 (PR #902 Stage 1): the runner-bootstrap path token uses the same grammar the binder
+// (control-plane-continuation.mjs SAFE_ROOT) emits, so an emitted bound command is always executable.
+const SAFE_RUNNER_TOKEN = /^[A-Za-z0-9_.\/:@+-]+$/;
 
 // Pure. A verdict's `nextCommand` is composed by the gate itself; before executing it, require
 // that every `&&`-chained segment is `node tools/<script> <plain tokens>` so it can be run without
@@ -133,12 +137,21 @@ const SAFE_TOKEN = /^[A-Za-z0-9_.\/=:#@-]+$/;
 export function parseNextCommand(nextCommand) {
   if (typeof nextCommand !== "string" || nextCommand.trim() === "") throw new Error("verdict carries no nextCommand");
   return nextCommand.split(" && ").map((seg) => {
-    const tokens = seg.trim().split(/\s+/);
+    let tokens = seg.trim().split(/\s+/);
+    // Issue #901: a runner-bound continuation is checked as its canonical script, then executed
+    // exactly as bound (through the authenticated runner's bootstrap), never as the relative copy.
+    const bound = unwrapBoundSegment(tokens);
+    if (bound) {
+      if (!bound.rest.every((t) => SAFE_TOKEN.test(t)) || !SAFE_RUNNER_TOKEN.test(tokens[tokens.indexOf("node") + 1])) {
+        throw new Error(`refusing unsafe token in command segment: ${seg}`);
+      }
+      return { file: tokens[tokens.indexOf("node") + 1], args: [bound.script, ...bound.rest], canonical: bound.script, canonicalArgs: bound.rest };
+    }
     if (tokens[0] !== "node" || !/^tools\/[A-Za-z0-9_\/.-]+\.mjs$/.test(tokens[1] ?? "") || tokens[1].includes("..")) {
       throw new Error(`refusing non node-tools command segment: ${seg}`);
     }
     if (!tokens.every((t) => SAFE_TOKEN.test(t))) throw new Error(`refusing unsafe token in command segment: ${seg}`);
-    return { file: tokens[1], args: tokens.slice(2) };
+    return { file: tokens[1], args: tokens.slice(2), canonical: tokens[1], canonicalArgs: tokens.slice(2) };
   });
 }
 
@@ -225,7 +238,7 @@ export function buildDeps({
         if (String(prState(verdict).headRefOid).toLowerCase() !== correctedHead.toLowerCase()) throw new Error("PR head changed since the verdict");
         const segs = parseNextCommand(verdict.nextCommand);
         const want = ["--control-issue", String(controlIssue), "--execution-issue", String(executionIssue), "--pr", String(pr), "--reviewed-head", reviewedHead, "--corrected-head", correctedHead];
-        if (segs.length !== 1 || segs[0].file !== "tools/orchestration/finalize-correction-breakpoint.mjs" || JSON.stringify(segs[0].args) !== JSON.stringify(want)) {
+        if (segs.length !== 1 || segs[0].canonical !== "tools/orchestration/finalize-correction-breakpoint.mjs" || JSON.stringify(segs[0].canonicalArgs) !== JSON.stringify(want)) {
           throw new Error("finalization verdict nextCommand is not the canonical finalizer for this launch");
         }
         io.node(segs[0].file, segs[0].args);
@@ -251,13 +264,13 @@ export function buildDeps({
       if (state === "READY_TO_RUN_DISPATCH_MANIFEST") return projectRoutedFromFreshGate();
       if (state === "STAGE2_CLOSE_READY") {
         const segs = parseNextCommand(verdict.nextCommand);
-        const control = segs.filter((c) => c.file === "tools/orchestration/close-control.mjs");
+        const control = segs.filter((c) => c.canonical === "tools/orchestration/close-control.mjs");
         if (control.length !== 1) throw new Error("close verdict has no single control-terminalization segment to finalize");
         return io.node(control[0].file, control[0].args);
       }
       if (state === "STAGE2_AUDIT_ALREADY_PREPARED" || state === "STAGE2_EVIDENCE_REAUDIT_READY") {
         // The trigger already exists (read-back); only the control projection is missing.
-        const fin = parseNextCommand(verdict.nextCommand).filter((c) => c.file === "tools/orchestration/finalize-audit-breakpoint.mjs");
+        const fin = parseNextCommand(verdict.nextCommand).filter((c) => c.canonical === "tools/orchestration/finalize-audit-breakpoint.mjs");
         if (fin.length !== 1) throw new Error("prepared-audit verdict has no single finalize-audit-breakpoint segment");
         return io.node(fin[0].file, fin[0].args);
       }
