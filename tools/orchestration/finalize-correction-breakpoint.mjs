@@ -106,6 +106,7 @@ import { verifyExecutionMatches, verifyPrLinkage, verifyPrHeadIsCurrent } from "
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 import { checkCorrectionDelta } from "../review-watch/stage1-correction-gate.mjs";
 import { extractUrlPointerKinds } from "./control-field-validator.mjs";
+import { verifyCorrectionProvenance, defaultReadCorrectionCommits } from "./next-review-transition-gate.mjs";
 
 // Lifecycle values this script is authorized to write the `Stage 1` correction disposition
 // bullet over. `REVIEW` is the value `finalize-pr-breakpoint.mjs` itself establishes at the PR
@@ -207,6 +208,16 @@ export function verifyFinalizedCorrectionBody(freshBody, { correctedHead, review
   return { ok: true };
 }
 
+// Pure (Stage 2 Audit #915 finding): the writer boundary only operates on an OPEN or MERGED PR. A
+// CLOSED-unmerged PR (or any unreadable/unknown state) fails closed.
+export function verifyPrStateAdmissible(prView) {
+  const state = prView?.state;
+  if (state !== "OPEN" && state !== "MERGED") {
+    return { ok: false, reason: `PR state is ${JSON.stringify(state ?? null)}, not OPEN or MERGED -- refusing to finalize a correction for a closed-unmerged or unreadable PR` };
+  }
+  return { ok: true };
+}
+
 function unverified({ pr, reason }) {
   return {
     exitCode: 2,
@@ -228,6 +239,7 @@ export async function run(
     ghPrViewImpl = defaultGhPrView,
     checkCorrectionDeltaImpl = checkCorrectionDelta,
     writeControlSnapshotImpl = checkWriteControlSnapshot,
+    readCorrectionCommitsImpl = defaultReadCorrectionCommits,
   } = {},
 ) {
   if (!isPositiveInteger(pr)) {
@@ -259,6 +271,10 @@ export async function run(
     return unverified({ pr, reason: `gh pr view failed for PR #${pr}: ${err.message}` });
   }
 
+  const stateCheck = verifyPrStateAdmissible(prView);
+  if (!stateCheck.ok) {
+    return unverified({ pr, reason: stateCheck.reason });
+  }
   const headCheck = verifyPrHeadIsCurrent(prView, correctedHead);
   if (!headCheck.ok) {
     return unverified({ pr, reason: headCheck.reason });
@@ -300,6 +316,24 @@ export async function run(
     });
   }
 
+  // Stage 2 Audit #915 (P1): independently re-establish execution-Issue correction provenance at
+  // this writer boundary (the gate and launcher checks are defense-in-depth, not a substitute).
+  // Every commit strictly between the reviewed and corrected heads must be a complete, verifiable,
+  // single-parent commit naming the execution Issue; an unreadable/incomplete enumeration fails
+  // closed. Direct-reference mode has no execution Issue to bind provenance to and skips this.
+  if (controlIssue !== null) {
+    let commits;
+    try {
+      commits = await readCorrectionCommitsImpl({ repo, base: reviewedHead, head: correctedHead });
+    } catch (err) {
+      return unverified({ pr, reason: `could not read the reviewed-to-corrected commit range to verify correction provenance: ${err.message}` });
+    }
+    const provenance = verifyCorrectionProvenance(commits, executionIssue);
+    if (!provenance.ok) {
+      return unverified({ pr, reason: `correction provenance not established: ${provenance.reason}` });
+    }
+  }
+
   // Stage 1 review finding on PR #579 (P2): `headCheck` above ran once, before
   // `checkCorrectionDeltaImpl`'s own GitHub reads (and, in control-Issue mode, before the
   // Execution/PR-linkage reads too) -- a real window in which another commit can land on the
@@ -312,6 +346,10 @@ export async function run(
     latestPrView = await ghPrViewImpl({ repo, pr });
   } catch (err) {
     return unverified({ pr, reason: `pre-finalize PR re-read failed: ${err.message}` });
+  }
+  const freshStateCheck = verifyPrStateAdmissible(latestPrView);
+  if (!freshStateCheck.ok) {
+    return unverified({ pr, reason: freshStateCheck.reason });
   }
   const freshHeadCheck = verifyPrHeadIsCurrent(latestPrView, correctedHead);
   if (!freshHeadCheck.ok) {
