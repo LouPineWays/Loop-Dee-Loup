@@ -1367,3 +1367,11 @@ test("#883 CLI: piped STAGE2_CORRECTION_REQUIRED carries evidenceOnlyEligible th
   const stringly = await runCli({ ...verdict, evidenceOnlyEligible: "true" });
   assert.doesNotMatch(stringly.stdout, /evidence-only/);
 });
+
+test("#924: findings correction template mandates the execution Issue in every commit message; none sentinel omits it", () => {
+  const checkoutBinding = { path: "/w/pr-1", token: "tok", scriptPath: "/c/tools/orchestration/pr-head-checkout-preflight.mjs" };
+  const withIssue = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 908, issue: 907, pr: 923, correctionReason: "findings", checkoutBinding });
+  assert.match(withIssue, /every commit message must name #907/);
+  const none = formatStage1CorrectionWorkerDispatchPrompt({ issue: "none", pr: 5, correctionReason: "findings", checkoutBinding });
+  assert.doesNotMatch(none, /every commit message must name/);
+});

@@ -1059,6 +1059,22 @@ function exitCodeFor(state) {
 // every intervening commit, never taken on faith. Returns { unfinalizedCorrection } (null when the
 // evidence is absent/unrelated -- the caller keeps its pre-existing behavior) or { ambiguous }
 // (an operational/unreadable failure -- fail closed).
+function unrecoverableCorrectionVerdict(u, { repo, pr, head, issue, controlIssue }) {
+  return {
+    exitCode: 4,
+    state: "AMBIGUOUS",
+    stopAfter: true,
+    repo,
+    pr,
+    head,
+    issue,
+    controlIssue,
+    reviewedHead: u.reviewedHead,
+    correctedHead: u.correctedHead,
+    reason: u.reason,
+  };
+}
+
 async function probeUnfinalizedCorrection(
   { repo, pr, head, issue, controlIssue },
   { checkCorrectionDeltaImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl = defaultReadTargetBranchCommits },
@@ -1098,14 +1114,36 @@ async function probeUnfinalizedCorrection(
     return ambiguous(`could not read the commits between reviewed head ${reviewedHead} and ${head} to verify correction provenance: ${err.message}`);
   }
   let provenanceOk;
+  let provenanceReason = "";
   try {
-    provenanceOk = (
-      await verifyCorrectionProvenanceWithRecovery({ commits, executionIssue: issue, repo, pr, reviewedHead: delta.reviewedHead, readTargetCommitsImpl })
-    ).ok;
+    const provenance = await verifyCorrectionProvenanceWithRecovery({ commits, executionIssue: issue, repo, pr, reviewedHead: delta.reviewedHead, readTargetCommitsImpl });
+    provenanceOk = provenance.ok;
+    provenanceReason = provenance.reason ?? "";
   } catch (err) {
     return ambiguous(`could not read target-branch commits to verify correction provenance: ${err.message}`);
   }
-  if (!provenanceOk) return { unfinalizedCorrection: null };
+  if (!provenanceOk) {
+    // Issue #924 (the #908/#907/PR #923 escape): genuine head-bound findings plus a strict
+    // descendant already passed checkCorrectionDelta above, so a provenance failure here is not
+    // "nothing happened" -- it is a findings round whose descendant cannot be attributed to the
+    // execution Issue (e.g. the correction commit omitted `#<issue>`). Plain NO_ACTION_YET with an
+    // empty envelope is the dead end this closes. Surface a specific fail-closed result instead;
+    // the verifier itself is unchanged (no PR-number/diff/conversational substitute).
+    return {
+      unfinalizedCorrection: null,
+      unrecoverable: {
+        reviewedHead: delta.reviewedHead,
+        correctedHead: delta.correctedHead,
+        reason:
+          `PR #${pr} advanced from findings-reviewed head ${delta.reviewedHead} to ${delta.correctedHead}, but the ` +
+          `correction range is not mechanically attributable to execution Issue #${issue} (${provenanceReason}); ` +
+          "finalize-correction-breakpoint.mjs cannot record the canonical correction-satisfied disposition, and " +
+          "no ordinary Stage 1 re-review is authorized. Smallest continuation: founder authorizes republishing the " +
+          `correction with its commit message(s) naming #${issue} (a history rewrite this gate never performs), ` +
+          "then re-run the finalizer; do not request a second ordinary review.",
+      },
+    };
+  }
   return { unfinalizedCorrection: { reviewedHead: delta.reviewedHead, correctedHead: delta.correctedHead } };
 }
 
@@ -1140,6 +1178,7 @@ async function mergedUnfinalizedCorrectionVerdict(
     { checkCorrectionDeltaImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
   );
   if (probe.ambiguous) return probe.ambiguous;
+  if (probe.unrecoverable) return unrecoverableCorrectionVerdict(probe.unrecoverable, { repo, pr, head: headRefOid, issue, controlIssue });
   const found = probe.unfinalizedCorrection;
   if (!found) return null;
   return {
@@ -1235,6 +1274,12 @@ async function resolvePreMerge(
       { checkCorrectionDeltaImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
     );
     if (probe.ambiguous) return probe.ambiguous;
+    if (probe.unrecoverable) {
+      return {
+        exitCode: exitCodeFor("AMBIGUOUS"),
+        ...unrecoverableCorrectionVerdict(probe.unrecoverable, { repo, pr, head, issue, controlIssue }),
+      };
+    }
     unfinalizedCorrection = probe.unfinalizedCorrection;
   }
 
