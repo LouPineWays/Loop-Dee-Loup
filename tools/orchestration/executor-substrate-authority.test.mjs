@@ -129,6 +129,9 @@ test("a valid grant cannot mask an invalid grant in the same authority record (A
     { component: "nonexistent", intendedChange: "x", verification: "y" },
     { component: "verification-controls", intendedChange: "", verification: "y" },
     { component: "verification-controls", intendedChange: "x", verification: "  " },
+    { component: "verification-controls", verification: "y" },
+    { component: "verification-controls", intendedChange: "x" },
+    { component: "verification-controls", intendedChange: "x", verification: "y", paths: [] },
     { component: "verification-controls", intendedChange: "x", verification: "y", paths: [""] },
     { component: "verification-controls", intendedChange: "x", verification: "y", paths: "not-array" },
   ]) {
