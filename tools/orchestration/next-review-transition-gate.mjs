@@ -620,8 +620,27 @@ export function resolvePreMergeVerdict(
         reason: correctionDelta.reason,
       };
     } else if (correctionDelta && correctionDelta.state === "HEAD_MISMATCH") {
-      // A stale/superseded disposition that doesn't name the head currently being gated --
-      // same plain NO_ACTION_YET as no disposition present at all.
+      // Issue #954 (live #951/#950/PR #952): a canonical correction-satisfied disposition can
+      // become stale when the same one-round findings correction legitimately appends more
+      // correction commits after an earlier finalization. If the existing unfinalized-correction
+      // probe independently proves that later live head (findings provenance + strict ancestry +
+      // execution-Issue commit provenance), re-enter the same deterministic finalizer instead of
+      // dead-ending at NO_ACTION_YET. Without that proof, preserve the historical fallback.
+      if (unfinalizedCorrection && context.controlIssue != null && Number.isInteger(context.issue)) {
+        return {
+          state: "STAGE1_CORRECTION_FINALIZATION_REQUIRED",
+          stopAfter: true,
+          ...context,
+          stage1,
+          mergeReady,
+          reviewedHead: unfinalizedCorrection.reviewedHead,
+          correctedHead: unfinalizedCorrection.correctedHead,
+          nextCommand:
+            `node tools/orchestration/finalize-correction-breakpoint.mjs --control-issue ${context.controlIssue} ` +
+            `--execution-issue ${context.issue} --pr ${context.pr} ` +
+            `--reviewed-head ${unfinalizedCorrection.reviewedHead} --corrected-head ${unfinalizedCorrection.correctedHead}`,
+        };
+      }
       return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
     } else if (!correctionDelta && looksLikeCorrectionSatisfiedDisposition(stage1Disposition)) {
       // Stage 1 review finding on PR #459: `parseCorrectionSatisfiedDisposition` returning
@@ -1262,12 +1281,14 @@ async function resolvePreMerge(
   // by the same checkCorrectionDelta every other correction path trusts (genuine head-bound
   // findings at that head + strict non-diverged ancestry), never taken on faith.
   let unfinalizedCorrection = null;
+  const staleCorrectionSatisfiedHead = correctionDelta && correctionDelta.state === "HEAD_MISMATCH";
   if (
     stage1.state === "NOT_REQUESTED" &&
     controlIssue != null &&
-    !correctionDelta &&
-    !looksLikeCorrectionSatisfiedDisposition(stage1Disposition) &&
-    !parseAffirmativeStage1Disposition(stage1Disposition)
+    (staleCorrectionSatisfiedHead ||
+      (!correctionDelta &&
+        !looksLikeCorrectionSatisfiedDisposition(stage1Disposition) &&
+        !parseAffirmativeStage1Disposition(stage1Disposition)))
   ) {
     const probe = await probeUnfinalizedCorrection(
       { repo, pr, head, issue, controlIssue },
