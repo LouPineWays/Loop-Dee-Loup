@@ -16,6 +16,7 @@ import {
   proveFile,
   parseDiff3,
   resolveProtectedConflict,
+  commitMessageReferencesIssue,
   defaultDeps,
 } from "./resolve-protected-conflict.mjs";
 import { formatBindingLockReason } from "./pr-head-checkout-preflight.mjs";
@@ -77,6 +78,25 @@ test("proveHunk: an identical shared rewrite plus an accepted PR-only insertion 
   const r = proveHunk({ prText: pr, baseText: BASE, targetText: target, reviewedText: pr });
   assert.equal(r.ok, true);
   assert.equal(r.resolved, pr);
+});
+
+test("proveHunk: shared rewrites require contiguous containment, never token interleaving", () => {
+  const r = proveHunk({
+    baseText: "Rule is old.\n",
+    prText: "Rule is not never allowed.\n",
+    targetText: "Rule is never allowed.\n",
+    reviewedText: "Rule is not never allowed.\n",
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, "COMPETING_CHANGE");
+});
+
+test("commitMessageReferencesIssue requires the established whole GitHub issue token", () => {
+  assert.equal(commitMessageReferencesIssue("accepted correction (#868)", 868), true);
+  assert.equal(commitMessageReferencesIssue("accepted correction #868.", 868), true);
+  assert.equal(commitMessageReferencesIssue("accepted correction #868abc", 868), false);
+  assert.equal(commitMessageReferencesIssue("word#868", 868), false);
+  assert.equal(commitMessageReferencesIssue("path/#868", 868), false);
 });
 
 test("proveHunk: target edit adjacent to the PR insertion point is competing", () => {
