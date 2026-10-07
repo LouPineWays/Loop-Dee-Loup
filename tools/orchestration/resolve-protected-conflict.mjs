@@ -217,7 +217,8 @@ function fail(code, reason) {
 export function parseDiff3(output) {
   const lines = output.split(/(?<=\n)/);
   const segments = [];
-  let plain = "";  let state = "plain";
+  let plain = "";
+  let state = "plain";
   let cur = null;
   for (const line of lines) {
     const bare = line.replace(/\r?\n$/, "");
@@ -474,7 +475,8 @@ export async function resolveProtectedConflict(
     if (others.length) return closed("BINDING_UNVERIFIED", `reservation ${binding.token} is claimed by more than one worktree`);
   } catch (err) {
     return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: `could not read worktree bindings: ${String(err.message ?? err).split("\n")[0]}` };
-  }  if (prGiven && binding.pr !== pr) return closed("BINDING_UNVERIFIED", `the reservation is for PR #${binding.pr}, not PR #${pr}`);
+  }
+  if (prGiven && binding.pr !== pr) return closed("BINDING_UNVERIFIED", `the reservation is for PR #${binding.pr}, not PR #${pr}`);
   pr = binding.pr;
   try {
     mergeHead = g(["rev-parse", "-q", "--verify", "MERGE_HEAD"]);
