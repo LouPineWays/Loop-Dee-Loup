@@ -144,6 +144,7 @@ function buildFixture({
   prPara = PR_ADD,
   postReviewPara = null,
   postReviewMessage = "post-review protected change",
+  postReviewCode = null,
   other = false,
   substrate = false,
   prHeader = HEADER,
@@ -170,10 +171,9 @@ function buildFixture({
   if (substrate) write(pr, "tools/orchestration/action-envelope.mjs", prPara);
   sh(pr, "commit", "-q", "-am", "pr change");
   const reviewed = sh(pr, "rev-parse", "HEAD");
-  if (postReviewPara) {
-    write(pr, "AGENTS.md", HEADER + postReviewPara + FOOTER);
-    sh(pr, "commit", "-q", "-am", postReviewMessage);
-  }
+  if (postReviewPara) write(pr, "AGENTS.md", HEADER + postReviewPara + FOOTER);
+  if (postReviewCode !== null) write(pr, "code.txt", postReviewCode);
+  if (postReviewPara || postReviewCode !== null) sh(pr, "commit", "-q", "-am", postReviewMessage);
   const corrected = sh(pr, "rev-parse", "HEAD");
   write(primary, "AGENTS.md", HEADER + targetPara + FOOTER);
   if (other) write(primary, "code.txt", "main code\n");
@@ -202,12 +202,12 @@ function depsFor(fx, { prHead = null, baseTip = null, state = "OPEN" } = {}) {
   };
 }
 
-function depsForCorrection(fx, { controlIssue = 867, executionIssue = 868 } = {}) {
+function depsForCorrection(fx, { controlIssue = 867, executionIssue = 868, executionLabel = "Execution" } = {}) {
   const deps = depsFor(fx);
   deps.readIssue = async ({ issue }) => ({
     state: "OPEN",
     body:
-      `- **Execution:** #${executionIssue}\n` +
+      `- **${executionLabel}:** #${executionIssue}\n` +
       `- **PR:** #869\n` +
       `- **Stage 1:** correction-satisfied at ${fx.corrected} (reviewed ${fx.reviewed})\n`,
     number: issue,
