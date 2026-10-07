@@ -7,7 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, realpathSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -93,7 +93,7 @@ const FOOTER = "\nTrailing section.\n";
 
 // Builds: primary repo on main (base), a reserved/locked worktree on the PR branch, and a
 // target advance on main. Options shape each side's AGENTS.md content.
-function buildFixture({ targetPara = TARGET_EDIT, prPara = PR_ADD, postReviewPara = null, other = false, prHeader = HEADER } = {}) {
+function buildFixture({ targetPara = TARGET_EDIT, prPara = PR_ADD, postReviewPara = null, other = false, prHeader = HEADER, targetExecutable = false } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "ldl-rpc-test-")));
   const primary = join(root, "primary");
   execFileSync("git", ["init", "-q", "-b", "main", primary]);
@@ -117,7 +117,10 @@ function buildFixture({ targetPara = TARGET_EDIT, prPara = PR_ADD, postReviewPar
   const corrected = sh(pr, "rev-parse", "HEAD");
   write(primary, "AGENTS.md", HEADER + targetPara + FOOTER);
   if (other) write(primary, "code.txt", "main code\n");
-  sh(primary, "commit", "-q", "-am", "target advance");
+  sh(primary, "add", "AGENTS.md");
+  if (other) sh(primary, "add", "code.txt");
+  if (targetExecutable) sh(primary, "update-index", "--chmod=+x", "AGENTS.md");
+  sh(primary, "commit", "-q", "-m", "target advance");
   const tip = sh(primary, "rev-parse", "main");
   const token = "tok123";
   sh(primary, "worktree", "lock", "--reason", formatBindingLockReason({ pr: 869, sha: corrected, branch: "pr-branch", mode: "created", token }), pr);
@@ -174,6 +177,21 @@ test("#869-equivalent: mechanically proven AGENTS.md conflict resolves without a
   }
 });
 
+test("#869-equivalent: root-relative provenance and staging work when launched from a worktree subdirectory", async () => {
+  const fx = buildFixture();
+  try {
+    const nested = join(fx.pr, "nested");
+    mkdirSync(nested);
+    const r = await resolveProtectedConflict(args(fx, { cwd: nested, apply: true }), depsFor(fx));
+    assert.equal(r.exitCode, 0);
+    assert.equal(r.verdict, "RESOLVED");
+    assert.equal(readFileSync(join(fx.pr, "AGENTS.md"), "utf8"), HEADER + MERGED + FOOTER);
+    assert.equal(unmergedPaths(fx).includes("AGENTS.md"), false);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("target-side instruction is never dropped: a PR rewrite of base text fails closed instead of choosing the PR side", async () => {
   const prRewrite = "Rule one applies when alpha holds. Rule two now applies when omega holds. Keep it short.\n";
   const fx = buildFixture({ prPara: prRewrite });
@@ -217,8 +235,7 @@ test("whole-file invariant: a reviewed non-conflicting PR insertion outside the 
   try {
     const r = await resolveProtectedConflict(args(fx, { apply: true }), depsFor(fx));
     assert.equal(r.verdict, "RESOLVED");
-    assert.equal(readFileSync(join(fx.pr, "AGENTS.md"), "utf8"), prHeader + MERGED + FOOTER);
-  } finally {
+    assert.equal(readFileSync(join(fx.pr, "AGENTS.md"), "utf8"), prHeader + MERGED + FOOTER);  } finally {
     fx.cleanup();
   }
 });
@@ -336,6 +353,22 @@ test("regular-file mode mismatch between an index stage and its tree entry fails
   }
 });
 
+test("regular-file mode mismatch across PR/target provenance fails closed before mutation", async () => {
+  const fx = buildFixture({ targetExecutable: true });
+  try {
+    sh(fx.pr, "config", "core.fileMode", "false");
+    const before = readFileSync(join(fx.pr, "AGENTS.md"), "utf8");
+    const r = await resolveProtectedConflict(args(fx, { apply: true }), depsFor(fx));
+    assert.equal(r.exitCode, 2);
+    assert.equal(r.verdict, "FAIL_CLOSED");
+    assert.equal(r.code, "MODE_MISMATCH");
+    assert.equal(r.mutated, false);
+    assertNoMutation(fx, before);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("non-regular worktree path fails closed before write-through mutation", async () => {
   const fx = buildFixture();
   try {
@@ -348,6 +381,49 @@ test("non-regular worktree path fails closed before write-through mutation", asy
     assert.equal(r.mutated, false);
     assert.equal(readFileSync(join(fx.pr, "AGENTS.md"), "utf8"), before);
     assert.ok(unmergedPaths(fx).includes("AGENTS.md"));
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("late symlink swap cannot redirect the atomic protected-file replacement", async (t) => {
+  const fx = buildFixture();
+  try {
+    const protectedPath = join(fx.pr, "AGENTS.md");
+    const outside = join(fx.root, "outside.txt");
+    const probe = join(fx.root, "symlink-probe");
+    writeFileSync(outside, "outside sentinel\n");
+    try {
+      symlinkSync(outside, probe, "file");
+      unlinkSync(probe);
+    } catch (err) {
+      if (["EPERM", "EACCES", "ENOTSUP"].includes(err?.code)) {
+        t.skip(`symlink creation unavailable on this platform: ${err.code}`);
+        return;
+      }
+      throw err;
+    }
+
+    const deps = depsFor(fx);
+    const realIsRegularFile = deps.isRegularFile;
+    let checks = 0;
+    deps.isRegularFile = (path) => {
+      const regular = realIsRegularFile(path);
+      checks++;
+      if (checks === 2) {
+        unlinkSync(protectedPath);
+        symlinkSync(outside, protectedPath, "file");
+      }
+      return regular;
+    };
+
+    const r = await resolveProtectedConflict(args(fx, { apply: true }), deps);
+    assert.equal(r.exitCode, 0);
+    assert.equal(r.verdict, "RESOLVED");
+    assert.equal(readFileSync(outside, "utf8"), "outside sentinel\n", "late symlink target must never be written");
+    assert.equal(lstatSync(protectedPath).isFile(), true, "protected path must end as a regular file");
+    assert.equal(readFileSync(protectedPath, "utf8"), HEADER + MERGED + FOOTER);
+    assert.equal(unmergedPaths(fx).includes("AGENTS.md"), false);
   } finally {
     fx.cleanup();
   }
