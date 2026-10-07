@@ -27,8 +27,11 @@ function fixture() {
   const sha = g(repo, "rev-parse", "HEAD");
   const wtPath = join(repo, ".claude", "worktrees", "pr-869-bind-x");
   mkdirSync(join(repo, ".claude", "worktrees"), { recursive: true });
+  const origin = realpathSync(mkdtempSync(join(tmpdir(), "ldl-968-origin-")));
+  g(origin, "init", "-q", "--bare");
+  g(repo, "remote", "add", "origin", origin);
   g(repo, "worktree", "add", "-q", "-b", BRANCH, wtPath, sha);
-  return { repo, sha, wtPath, target: { ref: "main", sha } };
+  return { repo, origin, sha, wtPath, target: { ref: "main", sha } };
 }
 const defaultLocalGitFor = (f) => defaultLocalGit(f.repo);
 const inspect = (f, extra = {}, deps = FREE) => inspectLocalSuccessor({ ...ID, target: f.target, cwd: f.repo, ...extra }, deps);
@@ -44,6 +47,45 @@ test("no local successor branch -> null (remote-only logic decides)", () => {
   g(f.repo, "worktree", "remove", "--force", f.wtPath);
   g(f.repo, "branch", "-D", BRANCH);
   assert.equal(inspect(f), null);
+});
+
+test("remote-only canonical branch with no local ref -> fail closed, never null (audit #970 finding 1)", () => {
+  const f = fixture();
+  g(f.repo, "push", "-q", "origin", `${f.sha}:refs/heads/${BRANCH}`);
+  g(f.repo, "worktree", "remove", "--force", f.wtPath);
+  g(f.repo, "branch", "-D", BRANCH);
+  const r = inspect(f, { attempt: 1 });
+  assert.equal(r.state, "FAIL_CLOSED");
+  assert.match(r.reason, /already exists on origin/);
+  assert.equal(r.remoteSha, f.sha);
+});
+
+test("no local branch and unreadable/missing origin -> fail closed (audit #970 finding 2)", () => {
+  const f = fixture();
+  g(f.repo, "worktree", "remove", "--force", f.wtPath);
+  g(f.repo, "branch", "-D", BRANCH);
+  g(f.repo, "remote", "remove", "origin");
+  assert.equal(inspect(f, { attempt: 1 }).state, "FAIL_CLOSED");
+});
+
+test("defaultLocalGit.remoteBranch: absent=null, present=sha, no origin/unreadable=undefined", () => {
+  const f = fixture();
+  const lg = defaultLocalGit(f.repo);
+  assert.equal(lg.remoteBranch(BRANCH), null);
+  g(f.repo, "push", "-q", "origin", `${f.sha}:refs/heads/${BRANCH}`);
+  assert.equal(lg.remoteBranch(BRANCH), f.sha);
+  g(f.repo, "remote", "set-url", "origin", join(f.origin, "nope"));
+  assert.equal(lg.remoteBranch(BRANCH), undefined);
+  g(f.repo, "remote", "remove", "origin");
+  assert.equal(lg.remoteBranch(BRANCH), undefined);
+});
+
+test("missing origin never makes a stale attempt reclaimable", () => {
+  const f = fixture();
+  g(f.repo, "remote", "remove", "origin");
+  const r = inspect(f, { attempt: 1 });
+  assert.equal(r.state, "FAIL_CLOSED");
+  assert.match(r.reason, /cannot read origin/);
 });
 
 test("branch created but nothing done (interrupted before any work) -> STALE_RECLAIMABLE, not a create-new path", () => {
