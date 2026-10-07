@@ -13,6 +13,9 @@ import { join } from "node:path";
 import {
   PROTECTED_PATHS,
   proveHunk,
+  align,
+  tokenize,
+  MAX_EDIT_DISTANCE,
   proveFile,
   parseDiff3,
   resolveProtectedConflict,
@@ -20,6 +23,110 @@ import {
   defaultDeps,
 } from "./resolve-protected-conflict.mjs";
 import { formatBindingLockReason } from "./pr-head-checkout-preflight.mjs";
+
+// -- issue #944: exact sparse alignment at real #869 scale -----------------------------------
+
+const HUNK_869 = JSON.parse(readFileSync(new URL("./fixtures/resolve-protected-conflict-869-hunk.json", import.meta.url), "utf8"));
+const OLD_MAX_ALIGN_CELLS = 4_000_000;
+
+test("#944 real #869 AGENTS.md hunk exceeds the former dense-matrix ceiling yet is proven exactly", () => {
+  const { baseText, prText, targetText } = HUNK_869;
+  const b = tokenize(baseText).length;
+  assert.ok((b + 1) * (tokenize(prText).length + 1) > OLD_MAX_ALIGN_CELLS * 6);
+  assert.ok((b + 1) * (tokenize(targetText).length + 1) > OLD_MAX_ALIGN_CELLS * 6);
+  const r = proveHunk({ prText, baseText, targetText, reviewedText: prText });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.resolved, prText);
+});
+
+test("#944 real #869 hunk: PR-only content absent from reviewed text is still refused at scale", () => {
+  const { baseText, prText, targetText } = HUNK_869;
+  const r = proveHunk({ prText, baseText, targetText, reviewedText: baseText });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, "UNREVIEWED_PR_CONTENT");
+});
+
+test("#944 real #869 hunk: a target-side edit the PR did not make is not silently composed", () => {
+  const { baseText, prText, targetText } = HUNK_869;
+  const r = proveHunk({ prText, baseText, targetText: targetText.replace("session-entry-gate.mjs", "x"), reviewedText: prText });
+  assert.equal(r.ok, false);
+});
+
+test("#944 semicolon boundary: reviewed insertion before a clause-ending semicolon composes without target loss", () => {
+  const base = "Keep one own; keep two.\n";
+  const target = "Keep one own; keep two, plus gamma.\n";
+  const pr = "Keep one own - except reviewed delta; keep two.\n";
+  const r = proveHunk({ prText: pr, baseText: base, targetText: target, reviewedText: pr });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.resolved, "Keep one own - except reviewed delta; keep two, plus gamma.\n");
+});
+
+test("#944 tokenization splits only semicolons: identifiers and paths stay whole tokens", () => {
+  assert.deepEqual(tokenize("a/b.mjs own;x"), ["a/b.mjs", " ", "own", ";", "x"]);
+  // A PR edit inside an identifier is still a rewrite of that token, not target preservation.
+  const base = "run tools/orch/alpha.mjs now.\n";
+  const r = proveHunk({ prText: "run tools/orch/beta.mjs now.\n", baseText: base, targetText: "run tools/orch/alpha.mjs now, ok.\n", reviewedText: "run tools/orch/beta.mjs now.\n" });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, "PR_SIDE_REWRITES_BASE");
+});
+
+test("#944 align is an exact, deterministic maximum common subsequence (randomized vs dense DP)", () => {
+  const dense = (a, b) => {
+    const dp = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+    for (let i = a.length - 1; i >= 0; i--) for (let j = b.length - 1; j >= 0; j--) dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    return dp[0][0];
+  };
+  let seed = 7;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  for (let t = 0; t < 500; t++) {
+    const gen = () => Array.from({ length: Math.floor(rnd() * 14) }, () => "abc"[Math.floor(rnd() * 3)]);
+    const a = gen();
+    const b = gen();
+    const m = align(a, b);
+    let last = -1;
+    let count = 0;
+    m.forEach((o, i) => { if (o >= 0) { assert.equal(a[i], b[o]); assert.ok(o > last); last = o; count++; } });
+    assert.equal(count, dense(a, b));
+    assert.deepEqual(align(a, b), m);
+  }
+});
+
+test("#944 correctness is continuous across the former 4,000,000-cell threshold", () => {
+  for (const size of [1990, 2000, 2010]) {
+    const base = Array.from({ length: size }, (_, i) => "w" + i).join(" ") + "\n";
+    const pr = base.replace("w5 ", "w5 reviewedinsert ");
+    const target = base.replace("w900 ", "w900 targetinsert ");
+    const r = proveHunk({ prText: pr, baseText: base, targetText: target, reviewedText: pr });
+    assert.equal(r.ok, true, r.reason);
+    assert.ok(r.resolved.includes("reviewedinsert") && r.resolved.includes("targetinsert"));
+  }
+});
+
+test("#944 large competing rewrite and asymmetric deletion still fail closed", () => {
+  const base = Array.from({ length: 3000 }, (_, i) => "w" + i).join(" ") + "\n";
+  const pr = base.replace("w10 ", "w10 prchange ");
+  const alpha = base.replace("w10 ", "w10 alpha ");
+  const competing = proveHunk({ prText: alpha, baseText: base, targetText: base.replace("w10 ", "w10 beta "), reviewedText: alpha });
+  assert.equal(competing.ok, false);
+  assert.equal(competing.code, "COMPETING_CHANGE");
+  const asym = proveHunk({ prText: pr.replace(" w2000", ""), baseText: base, targetText: base, reviewedText: pr });
+  assert.equal(asym.ok, false);
+  assert.equal(asym.code, "PR_SIDE_REWRITES_BASE");
+  const adjacent = base.replace("w2000 ", "w2000 prchange ");
+  const dropped = proveHunk({ prText: adjacent, baseText: base, targetText: base.replace("w2000 ", ""), reviewedText: adjacent });
+  assert.equal(dropped.ok, false);
+  assert.equal(dropped.code, "COMPETING_CHANGE");
+});
+
+test("#944 resource bound is a distinct fail-closed stop, not a semantic verdict", () => {
+  assert.equal(align(["a", "b", "c"], ["x", "y", "z"], 2), null);
+  const a = Array.from({ length: 3 * MAX_EDIT_DISTANCE }, (_, i) => "a" + i).join(" ") + "\n";
+  const b = Array.from({ length: 3 * MAX_EDIT_DISTANCE }, (_, i) => "b" + i).join(" ") + "\n";
+  const r = proveHunk({ prText: b, baseText: a, targetText: a, reviewedText: b });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, "HUNK_TOO_LARGE");
+  assert.match(r.reason, /resource bound/);
+});
 
 // -- pure proof ----------------------------------------------------------------------------
 

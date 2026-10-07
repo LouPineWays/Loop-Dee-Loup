@@ -71,38 +71,61 @@ import { describeExecutionConflict, parseExecutionPointer, readExecutionBulletFi
 // change to this script, never a runtime option.
 export const PROTECTED_PATHS = Object.freeze(["AGENTS.md", "CLAUDE.md"]);
 
-const MAX_ALIGN_CELLS = 4_000_000;
+// Resource bound for the exact sparse alignment (issue #944). Myers' O(ND) algorithm stores
+// one frontier row per edit-distance step, so memory is ~D^2 entries and time ~(N+M)*D. The
+// bound is on the edit distance D, not on N*M: a ~5k-token hunk with a few hundred edits is
+// cheap, while a pathological wholesale rewrite stops (fail closed) rather than approximating.
+// 2,500 steps ~ 6.25M frontier entries (~25 MB as Int32).
+export const MAX_EDIT_DISTANCE = 2_500;
 const SHA_RE = /^[0-9a-f]{7,64}$/i;
 
+// Whitespace runs are tokens, and a semicolon is split from adjacent text so a reviewed
+// insertion before a clause-ending ";" is not misread as a rewrite of the target's "own;"
+// token (issue #944). Deliberately no other splitting: identifiers and paths stay whole.
 export function tokenize(text) {
-  return text.split(/(\s+)/).filter((t) => t !== "");
+  return text.split(/(\s+|;)/).filter((t) => t !== "");
 }
 
-// Longest-common-subsequence alignment of `base` against `other`. Returns null when the
-// problem is too large to align (fail closed rather than approximate).
-export function align(base, other) {
+// Exact shortest-edit (Myers) alignment of `base` against `other`; the matched pairs form a
+// maximum-size common subsequence. Deterministic: ties follow the fixed Myers move order.
+// Returns baseToOther, or null when the edit distance exceeds `maxD` (fail closed rather
+// than approximate).
+export function align(base, other, maxD = MAX_EDIT_DISTANCE) {
   const n = base.length;
   const m = other.length;
-  if ((n + 1) * (m + 1) > MAX_ALIGN_CELLS) return null;
-  const w = m + 1;
-  const dp = new Uint32Array((n + 1) * w);
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i * w + j] =
-        base[i] === other[j] ? dp[(i + 1) * w + j + 1] + 1 : Math.max(dp[(i + 1) * w + j], dp[i * w + j + 1]);
+  const max = Math.min(n + m, maxD);
+  const off = max + 1;
+  const v = new Int32Array(2 * max + 3);
+  const trace = [];
+  let found = -1;
+  for (let d = 0; d <= max && found < 0; d++) {
+    trace.push(v.slice(off - d - 1, off + d + 2));
+    for (let k = -d; k <= d; k += 2) {
+      let x;
+      if (k === -d || (k !== d && v[off + k - 1] < v[off + k + 1])) x = v[off + k + 1];
+      else x = v[off + k - 1] + 1;
+      let y = x - k;
+      while (x < n && y < m && base[x] === other[y]) { x++; y++; }
+      v[off + k] = x;
+      if (x >= n && y >= m) { found = d; break; }
     }
   }
+  if (found < 0) return null;
   const baseToOther = new Array(n).fill(-1);
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    if (base[i] === other[j]) {
-      baseToOther[i] = j;
-      i++;
-      j++;
-    } else if (dp[(i + 1) * w + j] >= dp[i * w + j + 1]) i++;
-    else j++;
+  let x = n;
+  let y = m;
+  for (let d = found; d > 0; d--) {
+    const row = trace[d];
+    const at = (k) => row[k + d + 1];
+    const k = x - y;
+    const prevK = k === -d || (k !== d && at(k - 1) < at(k + 1)) ? k + 1 : k - 1;
+    const prevX = at(prevK);
+    const prevY = prevX - prevK;
+    while (x > prevX && y > prevY) { x--; y--; baseToOther[x] = y; }
+    x = prevX;
+    y = prevY;
   }
+  while (x > 0 && y > 0) { x--; y--; baseToOther[x] = y; }
   return baseToOther;
 }
 
@@ -154,7 +177,7 @@ export function proveHunk({ prText, baseText, targetText, reviewedText }) {
   const target = tokenize(targetText);
   const prAlign = align(base, pr);
   const targetAlign = align(base, target);
-  if (!prAlign || !targetAlign) return fail("HUNK_TOO_LARGE", "conflict hunk too large to prove mechanically");
+  if (!prAlign || !targetAlign) return fail("HUNK_TOO_LARGE", `conflict hunk edit distance exceeds the exact-alignment resource bound (${MAX_EDIT_DISTANCE}); not a semantic verdict`);
 
   // #939: a PR-side base rewrite is mechanical only when the target deletes the exact
   // same base tokens. The insertions that replace those tokens are then composed per gap below:
