@@ -810,7 +810,7 @@ test("formatConflictRecoveryWorkerDispatchPrompt mandates finalize-correction-br
   const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
   assert.match(prompt, /finalize-correction-breakpoint\.mjs/);
   assert.match(prompt, /CORRECTION_BREAKPOINT_UNVERIFIED/);
-  assert.match(prompt, /stop before re-review\/merge\/Stage 2/);
+  assert.match(prompt, /no re-review, merge, or Stage 2/);
 });
 
 // Stage 1 review finding on PR #719 (P1): names the pre-bound checkout and mandates
