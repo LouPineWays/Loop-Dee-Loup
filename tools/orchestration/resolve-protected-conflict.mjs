@@ -55,9 +55,9 @@
 // Tests: node --test tools/orchestration/resolve-protected-conflict.test.mjs
 
 import { execFileSync } from "node:child_process";
-import { lstatSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseBindingLockReason } from "./pr-head-checkout-preflight.mjs";
 import { parseWorktreeListPorcelain } from "./worktree-preflight.mjs";
@@ -217,8 +217,7 @@ function fail(code, reason) {
 export function parseDiff3(output) {
   const lines = output.split(/(?<=\n)/);
   const segments = [];
-  let plain = "";
-  let state = "plain";
+  let plain = "";  let state = "plain";
   let cur = null;
   for (const line of lines) {
     const bare = line.replace(/\r?\n$/, "");
@@ -351,7 +350,7 @@ export function defaultDeps() {
         rmSync(dir, { recursive: true, force: true });
       }
     },
-    writeFile: (path, text) => writeFileSync(path, text),
+    replaceFileAtomically: (path, text, mode) => replaceRegularFileAtomically(path, text, mode),
     isRegularFile: (path) => lstatSync(path).isFile(),
   };
 }
@@ -378,11 +377,49 @@ function isRegularGitFileMode(mode) {
   return REGULAR_GIT_FILE_MODES.has(mode);
 }
 
+function fsModeForGitMode(mode) {
+  if (mode === "100755") return 0o755;
+  if (mode === "100644") return 0o644;
+  throw new Error(`unsupported protected-file Git mode ${mode}`);
+}
+
+// Replace the final directory entry rather than opening the protected path for writing. A late
+// swap to a symlink/hard link therefore replaces that entry instead of following it elsewhere.
+export function replaceRegularFileAtomically(path, text, mode) {
+  const tempDir = mkdtempSync(join(dirname(path), ".ldl-protected-conflict-replace-"));
+  const tempPath = join(tempDir, "replacement");
+  let replaced = false;
+  try {
+    const fsMode = fsModeForGitMode(mode);
+    writeFileSync(tempPath, text, { encoding: "utf8", flag: "wx", mode: fsMode });
+    chmodSync(tempPath, fsMode);
+    renameSync(tempPath, path);
+    replaced = true;
+    if (!lstatSync(path).isFile() || readFileSync(path, "utf8") !== text) {
+      const err = new Error("atomic protected-file replacement postcondition failed");
+      err.mutated = true;
+      throw err;
+    }
+  } catch (err) {
+    if (replaced) err.mutated = true;
+    throw err;
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 function parseTreeEntry(lsTree, expectedPath) {
   const line = lsTree.trim();
   const m = /^(\d+) ([^ ]+) ([0-9a-f]+)\t(.+)$/.exec(line);
   if (!m || m[4] !== expectedPath) return null;
   return { mode: m[1], type: m[2], oid: m[3] };
+}
+
+function parseStagedEntry(lsFilesStage, expectedPath) {
+  const line = lsFilesStage.trim();
+  const m = /^(\d+) ([0-9a-f]+) 0\t(.+)$/.exec(line);
+  if (!m || m[3] !== expectedPath) return null;
+  return { mode: m[1], oid: m[2] };
 }
 
 export async function resolveProtectedConflict(
@@ -437,8 +474,7 @@ export async function resolveProtectedConflict(
     if (others.length) return closed("BINDING_UNVERIFIED", `reservation ${binding.token} is claimed by more than one worktree`);
   } catch (err) {
     return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: `could not read worktree bindings: ${String(err.message ?? err).split("\n")[0]}` };
-  }
-  if (prGiven && binding.pr !== pr) return closed("BINDING_UNVERIFIED", `the reservation is for PR #${binding.pr}, not PR #${pr}`);
+  }  if (prGiven && binding.pr !== pr) return closed("BINDING_UNVERIFIED", `the reservation is for PR #${binding.pr}, not PR #${pr}`);
   pr = binding.pr;
   try {
     mergeHead = g(["rev-parse", "-q", "--verify", "MERGE_HEAD"]);
@@ -481,7 +517,7 @@ export async function resolveProtectedConflict(
     return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: `could not compute merge base: ${String(err.message ?? err).split("\n")[0]}` };
   }
 
-  const unmerged = parseUnmerged(deps.git(["ls-files", "-u"], { cwd }));
+  const unmerged = parseUnmerged(deps.git(["ls-files", "-u", "--full-name"], { cwd: top }));
   if (!unmerged) return closed("MALFORMED_INDEX", "could not parse the index's unmerged entries");
   const targets = paths.length ? paths : [...unmerged.keys()].filter((p) => PROTECTED_PATHS.includes(p));
   if (targets.length === 0) return closed("NO_PROTECTED_CONFLICT", "no unmerged eligible protected path in this checkout");
@@ -500,7 +536,7 @@ export async function resolveProtectedConflict(
       return closed("NON_REGULAR_WORKTREE_PATH", `${path} is missing or cannot be proven to be a regular worktree file`, { path });
     }
 
-    const treeEntryAt = (rev) => parseTreeEntry(deps.git(["ls-tree", rev, "--", path], { cwd }), path);
+    const treeEntryAt = (rev) => parseTreeEntry(deps.git(["ls-tree", "--full-tree", rev, "--", path], { cwd: top }), path);
     let headEntry, targetEntry, baseEntry, reviewedEntry;
     try {
       headEntry = treeEntryAt(head);
@@ -533,6 +569,14 @@ export async function resolveProtectedConflict(
     ) {
       return closed("PROVENANCE_MISMATCH", `${path}'s index stages do not exactly match HEAD / MERGE_HEAD / merge-base modes and blobs`, { path });
     }
+    const provenanceModes = [baseEntry.mode, headEntry.mode, targetEntry.mode, reviewedEntry.mode];
+    if (provenanceModes.some((mode) => mode !== provenanceModes[0])) {
+      return closed(
+        "MODE_MISMATCH",
+        `${path} changes regular-file mode across merge-base / HEAD / MERGE_HEAD / reviewed-head provenance; protected mode choices are not resolved mechanically`,
+        { path },
+      );
+    }
     if (headEntry.oid !== reviewedEntry.oid || headEntry.mode !== reviewedEntry.mode) {
       return closed("UNREVIEWED_POST_REVIEW_CONTENT", `${path} at the corrected head differs from the Stage 1 reviewed head in content or mode`, { path });
     }
@@ -541,7 +585,7 @@ export async function resolveProtectedConflict(
     const diff3 = deps.mergeFile({ ours: content(headEntry.oid), base: content(baseEntry.oid), theirs: content(targetEntry.oid) });
     const proof = proveFile({ diff3Output: diff3, reviewedText: content(reviewedEntry.oid), targetText: content(targetEntry.oid) });
     if (!proof.ok) return closed(proof.code, proof.reason, { path, hunk: proof.hunk });
-    results.push({ path, resolved: proof.resolved, hunks: proof.hunks });
+    results.push({ path, resolved: proof.resolved, hunks: proof.hunks, mode: targetEntry.mode });
   }
 
   // Every proof held. Re-check every write target as a regular file immediately before the
@@ -557,8 +601,43 @@ export async function resolveProtectedConflict(
       }
     }
     for (const r of results) {
-      deps.writeFile(join(top, r.path), r.resolved);
-      deps.git(["add", "--", r.path], { cwd });
+      const worktreePath = join(top, r.path);
+      try {
+        deps.replaceFileAtomically(worktreePath, r.resolved, r.mode);
+      } catch (err) {
+        return {
+          exitCode: 1,
+          verdict: "OPERATIONAL_ERROR",
+          code: "ATOMIC_REPLACE_FAILED",
+          message: `could not atomically replace ${r.path}: ${String(err.message ?? err).split("\n")[0]}`,
+          mutated: Boolean(err?.mutated),
+          path: r.path,
+        };
+      }
+      try {
+        const expectedOid = deps.git(["hash-object", "--stdin"], { cwd: top, input: r.resolved }).trim();
+        deps.git(["add", "--", r.path], { cwd: top });
+        const staged = parseStagedEntry(deps.git(["ls-files", "--stage", "--full-name", "--", r.path], { cwd: top }), r.path);
+        if (!staged || staged.mode !== r.mode || staged.oid !== expectedOid) {
+          return {
+            exitCode: 1,
+            verdict: "OPERATIONAL_ERROR",
+            code: "POSTCONDITION_FAILED",
+            message: `${r.path} did not stage as the proven regular-file mode/blob after atomic replacement`,
+            mutated: true,
+            path: r.path,
+          };
+        }
+      } catch (err) {
+        return {
+          exitCode: 1,
+          verdict: "OPERATIONAL_ERROR",
+          code: "POSTCONDITION_FAILED",
+          message: `could not verify staged postcondition for ${r.path}: ${String(err.message ?? err).split("\n")[0]}`,
+          mutated: true,
+          path: r.path,
+        };
+      }
     }
   }
   return {
