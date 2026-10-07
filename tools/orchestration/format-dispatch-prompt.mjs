@@ -643,13 +643,13 @@ export const CONFLICT_RECOVERY_PROTECTED_CLAUSE =
 // branch point, not automatically a founder interrupt. Fixed template text (path/numbers aside),
 // excluded from the 700-char prose budget exactly like the protected clause; see
 // docs/bounded-review-cycle.md § Successor integration PR.
-export function renderConflictRecoverySuccessorClause({ preflightPath, issue, pr }) {
+export function renderConflictRecoverySuccessorClause({ preflightPath, issue, pr, correctedHead }) {
   return (
     `founder/product/security/authority ambiguity => founder interrupt; ordinary technical integration of the settled outcome => ` +
-    `one successor PR: node "${preflightPath}" --execution-issue ${issue} --predecessor-pr ${pr}. ` +
+    `one successor PR: node "${preflightPath}" --execution-issue ${issue} --predecessor-pr ${pr} --expect-predecessor-head ${correctedHead}. ` +
     `SUCCESSOR_EXISTS => reuse that PR and never create/push another. FAIL_CLOSED => stop. NO_SUCCESSOR => save returned target.sha+branch, ` +
     `git merge --abort, create that branch from target, re-integrate only the accepted outcome, then immediately before push rerun the same ` +
-    `preflight with --expect-target <saved-target-sha> and require NO_SUCCESSOR with the same branch; push the successor branch (not the ` +
+    `preflight with --expect-predecessor-head ${correctedHead} --expect-target <saved-target-sha> and require NO_SUCCESSOR with the same branch; push the successor branch (not the ` +
     `predecessor binding refspec), open PR with "Addresses #${issue}" + "Supersedes #${pr}", request fresh Stage 1 on its live head, run ` +
     `finalize-pr-breakpoint.mjs, release the predecessor binding, and stop; never rebase/force-push/re-review #${pr} or run its correction finalizer; ` +
     `no re-review, merge, or Stage 2 of the predecessor here.`
@@ -713,7 +713,14 @@ function siblingAuthoritativeScript(scriptPath, fileName) {
 // and stopping. A conflict that instead requires a new semantic/product/architecture/security/
 // privacy decision fails closed as a founder interrupt rather than being auto-resolved — this
 // template says so explicitly rather than leaving it to be inferred.
-export function formatConflictRecoveryWorkerDispatchPrompt({ controlIssue = null, issue, pr, reviewedHead = null, checkoutBinding = null }) {
+export function formatConflictRecoveryWorkerDispatchPrompt({
+  controlIssue = null,
+  issue,
+  pr,
+  reviewedHead = null,
+  correctedHead = null,
+  checkoutBinding = null,
+}) {
   if (!isPositiveInteger(pr)) {
     throw new Error("formatConflictRecoveryWorkerDispatchPrompt requires pr to be a positive integer");
   }
@@ -726,6 +733,11 @@ export function formatConflictRecoveryWorkerDispatchPrompt({ controlIssue = null
   const hasControlIssue = controlIssue !== null && controlIssue !== undefined;
   if (hasControlIssue && !isPositiveInteger(controlIssue)) {
     throw new Error("formatConflictRecoveryWorkerDispatchPrompt requires controlIssue to be a positive integer when present");
+  }
+  if (hasControlIssue && hasExecutionIssue && (typeof correctedHead !== "string" || !/^[0-9a-f]{40}$/i.test(correctedHead))) {
+    throw new Error(
+      "formatConflictRecoveryWorkerDispatchPrompt requires the gated 40-character correctedHead for a control/execution successor route",
+    );
   }
   if (!hasControlIssue && (typeof reviewedHead !== "string" || !reviewedHead.trim())) {
     throw new Error(
@@ -749,6 +761,7 @@ export function formatConflictRecoveryWorkerDispatchPrompt({ controlIssue = null
           preflightPath: siblingAuthoritativeScript(scriptPath, "successor-integration-preflight.mjs"),
           issue,
           pr,
+          correctedHead,
         })
       : null;
   const resolverCommand =
@@ -855,7 +868,7 @@ const TEMPLATES_BY_STATE = {
   },
   STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT: {
     formatter: formatConflictRecoveryWorkerDispatchPrompt,
-    fields: ["controlIssue", "issue", "pr", "reviewedHead", "checkoutBinding"],
+    fields: ["controlIssue", "issue", "pr", "reviewedHead", "correctedHead", "checkoutBinding"],
   },
 };
 
@@ -891,7 +904,7 @@ const FORMATTERS_BY_KIND = {
   },
   "conflict-recovery": {
     formatter: formatConflictRecoveryWorkerDispatchPrompt,
-    fields: ["controlIssue", "issue", "pr", "reviewedHead", "checkoutBinding"],
+    fields: ["controlIssue", "issue", "pr", "reviewedHead", "correctedHead", "checkoutBinding"],
   },
 };
 
@@ -907,6 +920,7 @@ const CLI_FLAG_BY_FIELD = {
   correctionReason: "correction-reason",
   head: "head",
   reviewedHead: "reviewed-head",
+  correctedHead: "corrected-head",
   evidenceOnlyEligible: "evidence-only-eligible",
 };
 
@@ -1059,6 +1073,7 @@ function main() {
           preflightPath: siblingAuthoritativeScript(fields.checkoutBinding.scriptPath, "successor-integration-preflight.mjs"),
           issue: fields.issue,
           pr: fields.pr,
+          correctedHead: fields.correctedHead,
         }).length
       : 0;
   const templateAllowance =
