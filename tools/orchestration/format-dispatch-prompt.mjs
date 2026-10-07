@@ -721,24 +721,21 @@ export function formatConflictRecoveryWorkerDispatchPrompt({ controlIssue = null
   const resolverScriptPath = siblingAuthoritativeScript(scriptPath, "resolve-protected-conflict.mjs");
   const executionLine = hasExecutionIssue ? ` Execution Issue: #${issue}.` : "";
   const controlLine = hasControlIssue ? ` Controlling Issue: #${controlIssue}.` : "";
-  const reviewedHeadClause = hasControlIssue
-    ? "reviewed head: Controlling Issue's Stage 1 bullet"
-    : `reviewed head: ${reviewedHead}`;
+  const reviewedHeadArg = hasControlIssue ? "<control Stage 1 reviewed head>" : reviewedHead;
   const integrationArgs =
     hasControlIssue && hasExecutionIssue
       ? ` --control-issue ${controlIssue} --execution-issue ${issue} --all-executor-substrate`
       : "";
   const mechanicalClause =
-    `${CONFLICT_RECOVERY_PROTECTED_CLAUSE}: node "${resolverScriptPath}" --reviewed-head <reviewed head>` +
-    `${integrationArgs} --apply (exit 2: founder interrupt).`;
+    `${CONFLICT_RECOVERY_PROTECTED_CLAUSE}: node "${resolverScriptPath}" --reviewed-head ${reviewedHeadArg}` +
+    `${integrationArgs} --apply; exit 2 => founder interrupt.`;
   return (
     `Conflict-recovery worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
     renderPreBoundCheckoutClause({ path, token, scriptPath, pr }) +
-    `Correction-satisfied reserved head (${reviewedHeadClause}) conflicts with target. Merge target in ` +
-    `(never rebase/force-push); a semantic/security conflict is a founder interrupt, not auto-resolved. ` +
+    `Merge target into the reserved PR head (never rebase/force-push); semantic/security conflict => founder interrupt. ` +
     `${mechanicalClause} ` +
-    `Verify, push, run tools/orchestration/finalize-correction-breakpoint.mjs (nonzero: ` +
-    `CORRECTION_BREAKPOINT_UNVERIFIED), --release-binding ${token}; no re-review, merge, or Stage 2.`
+    `Verify/push; run tools/orchestration/finalize-correction-breakpoint.mjs; release binding ${token}; ` +
+    `stop before re-review/merge/Stage 2.`
   );
 }
 
