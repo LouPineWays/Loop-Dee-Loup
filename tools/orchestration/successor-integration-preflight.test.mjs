@@ -18,7 +18,7 @@ const PRED = {
   body: "Addresses #868",
 };
 
-function harness({ pred = PRED, linked = [], bases = {}, sha = SHA } = {}) {
+function harness({ pred = PRED, linked = [], bases = {}, sha = SHA, ...overrides } = {}) {
   return {
     readPr: (n, fields) => {
       if (n === pred.number) return pred;
@@ -26,6 +26,8 @@ function harness({ pred = PRED, linked = [], bases = {}, sha = SHA } = {}) {
     },
     listLinked: () => linked,
     readTarget: () => sha,
+    inspectLocal: () => null,
+    ...overrides,
   };
 }
 const base = { repo: "o/r", executionIssue: 868, predecessorPr: 869, expectedPredecessorHead: PRED_HEAD };
@@ -114,4 +116,46 @@ test("invalid identifiers fail closed; marker parser is exact", () => {
   assert.equal(run({ ...base, predecessorPr: 0 }, harness()).state, "FAIL_CLOSED");
   assert.equal(referencesSupersede("Supersedes #8690", 869), false);
   assert.equal(referencesSupersede("supersedes: #869", 869), true);
+});
+
+// Issue #968: local-only successor state.
+test("remote NO_SUCCESSOR with a local-only successor never offers creation", () => {
+  const local = { state: "LOCAL_SUCCESSOR_RESUMABLE", exitCode: 0, branch: "issue-868-successor-of-869-attempt-1", path: "/w" };
+  const r = run(base, harness({ linked: [PRED], inspectLocal: () => local }));
+  assert.equal(r.state, "LOCAL_SUCCESSOR_RESUMABLE");
+  assert.deepEqual(r.target, { ref: "main", sha: SHA });
+});
+
+test("live-owned local successor suppresses creation; ambiguous fails closed with exit 2", () => {
+  assert.equal(run(base, harness({ linked: [PRED], inspectLocal: () => ({ state: "LOCAL_SUCCESSOR_LIVE_OWNED", exitCode: 0 }) })).state, "LOCAL_SUCCESSOR_LIVE_OWNED");
+  const amb = run(base, harness({ linked: [PRED], inspectLocal: () => ({ state: "FAIL_CLOSED", exitCode: 2, reason: "AMBIGUOUS_LOCAL_SUCCESSOR: x" }) }));
+  assert.equal(amb.exitCode, 2);
+});
+
+test("caller-owned local successor passes the pre-push re-check with the same branch", () => {
+  const r = run({ ...base, worktree: "/w" }, harness({ linked: [PRED], inspectLocal: () => ({ state: "CALLER_OWNED", branch: "issue-868-successor-of-869-attempt-1" }) }));
+  assert.equal(r.state, "NO_SUCCESSOR");
+  assert.equal(r.branch, "issue-868-successor-of-869-attempt-1");
+});
+
+test("reclaim flag retires a STALE_RECLAIMABLE attempt then returns NO_SUCCESSOR; without it only reports", () => {
+  const stale = { state: "LOCAL_SUCCESSOR_STALE_RECLAIMABLE", exitCode: 0 };
+  let calls = 0;
+  const deps = { linked: [PRED], inspectLocal: () => stale, reclaimLocal: (l, o) => (o.revalidate().state === stale.state && calls++, ["branch-removed"]) };
+  assert.equal(run(base, harness(deps)).state, "LOCAL_SUCCESSOR_STALE_RECLAIMABLE");
+  assert.equal(calls, 0);
+  const r = run({ ...base, reclaim: true }, harness(deps));
+  assert.equal(r.state, "NO_SUCCESSOR");
+  assert.deepEqual(r.reclaimed, ["branch-removed"]);
+});
+
+test("the expected attempt (after closed successors) is passed to local inspection", () => {
+  let seen;
+  run(base, harness({ linked: [PRED, { number: 700, state: "CLOSED", body: "Supersedes #869" }], inspectLocal: (a) => ((seen = a.attempt), null) }));
+  assert.equal(seen, 2);
+});
+
+test("remote successor PR takes precedence; local state is not consulted (#950 unchanged)", () => {
+  const r = run(base, harness({ linked: [PRED, succ(900)], inspectLocal: () => { throw new Error("must not be called"); } }));
+  assert.equal(r.state, "SUCCESSOR_EXISTS");
 });

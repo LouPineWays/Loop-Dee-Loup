@@ -722,6 +722,11 @@ export const HARD_MODULE_DEPENDENCIES = [
   // Issue #950: successor-integration-preflight.mjs hard-imports github-read.mjs and ready-dispatch-gate.mjs.
   { dest: "tools/orchestration/successor-integration-preflight.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/orchestration/successor-integration-preflight.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
+  // Issue #968: successor-integration-preflight.mjs hard-imports successor-local-state.mjs, which hard-imports
+  // classify-primary-path-lock.mjs and pr-head-checkout-preflight.mjs.
+  { dest: "tools/orchestration/successor-integration-preflight.mjs", dependsOnDest: "tools/orchestration/successor-local-state.mjs" },
+  { dest: "tools/orchestration/successor-local-state.mjs", dependsOnDest: "tools/orchestration/classify-primary-path-lock.mjs" },
+  { dest: "tools/orchestration/successor-local-state.mjs", dependsOnDest: "tools/orchestration/pr-head-checkout-preflight.mjs" },
   // Stage 1 on PR #952: the formatter operationally requires the managed successor preflight it renders.
   { dest: "tools/orchestration/format-dispatch-prompt.mjs", dependsOnDest: "tools/orchestration/successor-integration-preflight.mjs" },
   { dest: "tools/orchestration/reconcile-control-blocker.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
