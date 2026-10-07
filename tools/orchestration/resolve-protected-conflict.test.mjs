@@ -267,6 +267,24 @@ test("#869-equivalent: root-relative provenance and staging work when launched f
   }
 });
 
+test("protected-only direct recovery still works when HEAD advanced after review but the protected file did not", async () => {
+  const fx = buildFixture({
+    other: true,
+    postReviewCode: "post-review code change\n",
+    postReviewMessage: "unrelated post-review work",
+  });
+  try {
+    assert.notEqual(fx.reviewed, fx.corrected);
+    const r = await resolveProtectedConflict(args(fx, { apply: true }), depsFor(fx));
+    assert.equal(r.exitCode, 0, JSON.stringify(r));
+    assert.equal(r.verdict, "RESOLVED");
+    assert.equal(r.acceptedContent.source, "stage1-reviewed-head");
+    assert.equal(readFileSync(join(fx.pr, "AGENTS.md"), "utf8"), HEADER + MERGED + FOOTER);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("target-side instruction is never dropped: a PR rewrite of base text fails closed instead of choosing the PR side", async () => {
   const prRewrite = "Rule one applies when alpha holds. Rule two now applies when omega holds. Keep it short.\n";
   const fx = buildFixture({ prPara: prRewrite });
@@ -375,6 +393,30 @@ test("#939: correction-provenance-bound executor substrate resolves mechanically
     assert.equal(unmergedPaths(fx).includes("tools/orchestration/action-envelope.mjs"), false);
     assert.equal(r.acceptedContent.source, "correction-satisfied-head");
     assert.deepEqual(r.acceptedContent.commits.length, 1);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("#939: correction provenance accepts the repository-supported Execution issue field spelling", async () => {
+  const correctedPara = PR_ADD.replace("Keep it short.", "Correction note for #868. Keep it short.");
+  const fx = buildFixture({
+    substrate: true,
+    postReviewPara: correctedPara,
+    postReviewMessage: "accepted findings correction (#868)",
+  });
+  try {
+    const r = await resolveProtectedConflict(
+      args(fx, {
+        controlIssue: 867,
+        executionIssue: 868,
+        includeExecutorSubstrate: true,
+      }),
+      depsForCorrection(fx, { executionLabel: "Execution issue" }),
+    );
+    assert.equal(r.exitCode, 0, JSON.stringify(r));
+    assert.equal(r.verdict, "WOULD_RESOLVE");
+    assert.equal(r.acceptedContent.source, "correction-satisfied-head");
   } finally {
     fx.cleanup();
   }
