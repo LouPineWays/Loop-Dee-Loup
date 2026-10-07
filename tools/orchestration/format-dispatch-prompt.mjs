@@ -758,9 +758,9 @@ export function formatConflictRecoveryWorkerDispatchPrompt({ controlIssue = null
     successorClause === null
       ? `exit 0 => verify/push via the binding; run tools/orchestration/finalize-correction-breakpoint.mjs; ` +
         `nonzero=CORRECTION_BREAKPOINT_UNVERIFIED; --release-binding ${token}; stop; exit 2 => founder interrupt. ` +
-        `No re-review, merge, or Stage 2.`
+        `no re-review, merge, or Stage 2.`
       : `exit 0=>verify/push predecessor; run tools/orchestration/finalize-correction-breakpoint.mjs; ` +
-        `nonzero=CORRECTION_BREAKPOINT_UNVERIFIED; --release-binding ${token}; stop. exit 2=>${successorClause}`;
+        `nonzero=CORRECTION_BREAKPOINT_UNVERIFIED; --release-binding ${token}; stop. exit 2 => ${successorClause}`;
   return (
     `Conflict-recovery worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
     renderPreBoundCheckoutClause({ path, token, scriptPath, pr }) +
