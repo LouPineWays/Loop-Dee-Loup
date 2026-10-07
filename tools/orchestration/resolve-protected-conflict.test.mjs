@@ -235,7 +235,8 @@ test("whole-file invariant: a reviewed non-conflicting PR insertion outside the 
   try {
     const r = await resolveProtectedConflict(args(fx, { apply: true }), depsFor(fx));
     assert.equal(r.verdict, "RESOLVED");
-    assert.equal(readFileSync(join(fx.pr, "AGENTS.md"), "utf8"), prHeader + MERGED + FOOTER);  } finally {
+    assert.equal(readFileSync(join(fx.pr, "AGENTS.md"), "utf8"), prHeader + MERGED + FOOTER);
+  } finally {
     fx.cleanup();
   }
 });
