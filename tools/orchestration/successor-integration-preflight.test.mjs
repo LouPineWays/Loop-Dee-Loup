@@ -23,12 +23,12 @@ function harness({ pred = PRED, linked = [], bases = {}, sha = SHA } = {}) {
 const base = { repo: "o/r", executionIssue: 868, predecessorPr: 869 };
 const succ = (number, extra = {}) => ({ number, state: "OPEN", headRefName: `issue-868-successor-of-869`, body: "Addresses #868\nSupersedes #869", ...extra });
 
-test("predecessor-only -> NO_SUCCESSOR with target and linked branch name", () => {
+test("predecessor-only -> NO_SUCCESSOR with target and first-attempt linked branch name", () => {
   const r = run(base, harness({ linked: [PRED] }));
   assert.equal(r.state, "NO_SUCCESSOR");
   assert.equal(r.exitCode, 0);
   assert.deepEqual(r.target, { ref: "main", sha: SHA });
-  assert.match(r.branch, /^issue-868-/);
+  assert.equal(r.branch, "issue-868-successor-of-869-attempt-1");
 });
 
 test("exactly one valid linked successor -> reuse (no duplicate)", () => {
@@ -59,8 +59,10 @@ test("successor targeting a different base -> fail closed", () => {
   assert.equal(r.state, "FAIL_CLOSED");
 });
 
-test("closed historical successor is ignored; merged successor fails closed", () => {
-  assert.equal(run(base, harness({ linked: [PRED, succ(900, { state: "CLOSED" })] })).state, "NO_SUCCESSOR");
+test("closed historical successor advances the branch attempt; merged successor fails closed", () => {
+  const afterClosed = run(base, harness({ linked: [PRED, succ(900, { state: "CLOSED" })] }));
+  assert.equal(afterClosed.state, "NO_SUCCESSOR");
+  assert.equal(afterClosed.branch, "issue-868-successor-of-869-attempt-2");
   assert.equal(run(base, harness({ linked: [PRED, succ(900, { state: "MERGED" })] })).state, "FAIL_CLOSED");
 });
 
