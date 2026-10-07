@@ -16,6 +16,7 @@ import {
   classifyPath,
   classifyMechanicalIntegrationPath,
   changesFromGit,
+  classifyMechanicalIntegrationPath,
 } from "./executor-substrate-authority.mjs";
 
 const grant = (component, extra = {}) => ({
@@ -109,6 +110,27 @@ test("mixed-purpose locations classify by semantic effect, not directory", () =>
   assert.equal(classifyPath(".claude/launch.json").class, WORK_PRODUCT);
   assert.equal(classifyPath(".claude/skills/model-check/SKILL.md").component, "model-selection-policy");
   assert.equal(classifyPath(".claude/skills/retro/SKILL.md").component, "skills");
+});
+
+test("mechanical integration classification names exact registered components without granting mutation authority", () => {
+  for (const [path, component] of [
+    ["tools/orchestration/action-envelope.mjs", "authority-guards"],
+    ["tools/orchestration/next-review-transition-gate.mjs", "routing-policy"],
+    ["tools/review-watch/lifecycle-gate.mjs", "review-control"],
+    ["AGENTS.md", "operating-contract"],
+  ]) {
+    const c = classifyMechanicalIntegrationPath(path);
+    assert.equal(c.eligible, true, path);
+    assert.equal(c.component, component, path);
+    assert.equal(check({ changes: [{ path }], authority: {} }).allowed, false, path + ": classification must not become a grant");
+  }
+  const testFile = classifyMechanicalIntegrationPath("tools/orchestration/action-envelope.test.mjs");
+  assert.equal(testFile.eligible, false);
+  assert.equal(testFile.class, WORK_PRODUCT);
+  const unknown = classifyMechanicalIntegrationPath("tools/manual/compile.mjs");
+  assert.equal(unknown.eligible, false);
+  assert.equal(unknown.class, EXECUTOR_SUBSTRATE);
+  assert.equal(unknown.component, null);
 });
 
 // Proving case 6: no-op negative control.
