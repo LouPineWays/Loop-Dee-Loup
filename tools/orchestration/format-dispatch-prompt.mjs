@@ -732,10 +732,10 @@ export function formatConflictRecoveryWorkerDispatchPrompt({ controlIssue = null
   return (
     `Conflict-recovery worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
     renderPreBoundCheckoutClause({ path, token, scriptPath, pr }) +
-    `Merge target into the reserved PR head (never rebase/force-push); semantic/security conflict => founder interrupt. ` +
+    `Merge target (never rebase/force-push); semantic/security => founder interrupt. ` +
     `${mechanicalClause} ` +
-    `Verify/push; run tools/orchestration/finalize-correction-breakpoint.mjs; release binding ${token}; ` +
-    `stop before re-review/merge/Stage 2.`
+    `Verify/push; run tools/orchestration/finalize-correction-breakpoint.mjs; ` +
+    `nonzero=CORRECTION_BREAKPOINT_UNVERIFIED; release binding ${token}; stop before re-review/merge/Stage 2.`
   );
 }
 
