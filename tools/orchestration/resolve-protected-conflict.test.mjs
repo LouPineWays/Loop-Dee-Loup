@@ -296,6 +296,63 @@ test("tampered index stage (provenance) fails closed", async () => {
   }
 });
 
+test("symlink-mode protected conflict fails closed before proof or mutation", async () => {
+  const fx = buildFixture();
+  try {
+    const before = readFileSync(join(fx.pr, "AGENTS.md"), "utf8");
+    const unmerged = sh(fx.pr, "ls-files", "-u")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => line.replace(/^100644 /, "120000 "))
+      .join("\n");
+    execFileSync("git", ["update-index", "--index-info"], { cwd: fx.pr, input: `${unmerged}\n` });
+    const r = await resolveProtectedConflict(args(fx, { apply: true }), depsFor(fx));
+    assert.equal(r.exitCode, 2);
+    assert.equal(r.code, "NON_REGULAR_CONTENT_CONFLICT");
+    assert.equal(r.mutated, false);
+    assert.equal(readFileSync(join(fx.pr, "AGENTS.md"), "utf8"), before);
+    assert.ok(unmergedPaths(fx).includes("AGENTS.md"));
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("regular-file mode mismatch between an index stage and its tree entry fails closed", async () => {
+  const fx = buildFixture();
+  try {
+    const before = readFileSync(join(fx.pr, "AGENTS.md"), "utf8");
+    const lines = sh(fx.pr, "ls-files", "-u").split("\n").filter(Boolean);
+    const stage3 = lines.find((line) => / 3\tAGENTS\.md$/.test(line));
+    assert.ok(stage3);
+    execFileSync("git", ["update-index", "--index-info"], { cwd: fx.pr, input: `${stage3.replace(/^100644 /, "100755 ")}\n` });
+    const r = await resolveProtectedConflict(args(fx, { apply: true }), depsFor(fx));
+    assert.equal(r.exitCode, 2);
+    assert.equal(r.code, "PROVENANCE_MISMATCH");
+    assert.equal(r.mutated, false);
+    assert.equal(readFileSync(join(fx.pr, "AGENTS.md"), "utf8"), before);
+    assert.ok(unmergedPaths(fx).includes("AGENTS.md"));
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("non-regular worktree path fails closed before write-through mutation", async () => {
+  const fx = buildFixture();
+  try {
+    const before = readFileSync(join(fx.pr, "AGENTS.md"), "utf8");
+    const deps = depsFor(fx);
+    deps.isRegularFile = () => false;
+    const r = await resolveProtectedConflict(args(fx, { apply: true }), deps);
+    assert.equal(r.exitCode, 2);
+    assert.equal(r.code, "NON_REGULAR_WORKTREE_PATH");
+    assert.equal(r.mutated, false);
+    assert.equal(readFileSync(join(fx.pr, "AGENTS.md"), "utf8"), before);
+    assert.ok(unmergedPaths(fx).includes("AGENTS.md"));
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("only the closed protected-path list is eligible; ordinary conflicts are untouched", async () => {
   const fx = buildFixture({ other: true });
   try {
