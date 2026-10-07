@@ -64,7 +64,7 @@ import { parseWorktreeListPorcelain } from "./worktree-preflight.mjs";
 import { normalizePathForComparison } from "./classify-primary-path-lock.mjs";
 import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 import { classifyMechanicalIntegrationPath } from "./executor-substrate-authority.mjs";
-import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
+import { describeExecutionConflict, parseExecutionPointer, readExecutionBulletField, resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 
 // Closed list of operating-contract files this reconciliation may ever write. Deliberately not
 // derived from the executor-substrate classifier: widening it is a new, separately authorized
@@ -367,7 +367,19 @@ async function proveAcceptedCorrectionHead({ repo, controlIssue, executionIssue,
   if (control?.state !== "OPEN") return closed("CORRECTION_PROVENANCE_UNVERIFIED", `control Issue #${controlIssue} is not OPEN`);
   const body = control?.body ?? "";
   const stage1 = parseCorrectionSatisfied(parseControlBullet(body, "Stage 1"));
-  if (parseIssueRef(parseControlBullet(body, "Execution")) !== executionIssue || parseIssueRef(parseControlBullet(body, "PR")) !== pr || !stage1 || stage1.correctedHead !== head.toLowerCase() || stage1.reviewedHead !== reviewed.toLowerCase()) {
+  const executionField = readExecutionBulletField(body);
+  if (executionField.conflict) {
+    return closed("CORRECTION_PROVENANCE_UNVERIFIED", describeExecutionConflict(executionField));
+  }
+  const executionRef = parseExecutionPointer(executionField.value);
+  if (
+    !executionRef.ok ||
+    executionRef.issue !== executionIssue ||
+    parseIssueRef(parseControlBullet(body, "PR")) !== pr ||
+    !stage1 ||
+    stage1.correctedHead !== head.toLowerCase() ||
+    stage1.reviewedHead !== reviewed.toLowerCase()
+  ) {
     return closed("CORRECTION_PROVENANCE_UNVERIFIED", `control Issue #${controlIssue} does not bind Execution #${executionIssue}, PR #${pr}, and the exact correction-satisfied heads`);
   }
   let commits;
