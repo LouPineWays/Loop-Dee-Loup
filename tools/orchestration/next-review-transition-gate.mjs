@@ -1484,6 +1484,7 @@ async function resolvePostMerge(
     ghIssueViewImpl = defaultGhIssueView,
     reconcileExistingStage2AuditIssueImpl = reconcileExistingStage2AuditIssue,
     checkCorrectionDeltaImpl = checkCorrectionDelta,
+    compareImpl = defaultCompare,
     evaluateEvidenceCorrectionImpl = evaluateEvidenceCorrection,
     listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
     readCorrectionCommitsImpl = defaultReadCorrectionCommits,
@@ -1684,7 +1685,7 @@ async function resolvePostMerge(
             headRefOid: livePrState.headRefOid,
             executionRef,
           },
-          { checkCorrectionDeltaImpl, reconcileExistingStage2AuditIssueImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+          { checkCorrectionDeltaImpl, compareImpl, reconcileExistingStage2AuditIssueImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
         );
       }
       // Stage 2 audit finding on this PR (#753, P1): the branch above only special-cases
