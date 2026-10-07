@@ -93,7 +93,7 @@ const FOOTER = "\nTrailing section.\n";
 
 // Builds: primary repo on main (base), a reserved/locked worktree on the PR branch, and a
 // target advance on main. Options shape each side's AGENTS.md content.
-function buildFixture({ targetPara = TARGET_EDIT, prPara = PR_ADD, postReviewPara = null, other = false } = {}) {
+function buildFixture({ targetPara = TARGET_EDIT, prPara = PR_ADD, postReviewPara = null, other = false, prHeader = HEADER } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "ldl-rpc-test-")));
   const primary = join(root, "primary");
   execFileSync("git", ["init", "-q", "-b", "main", primary]);
@@ -106,7 +106,7 @@ function buildFixture({ targetPara = TARGET_EDIT, prPara = PR_ADD, postReviewPar
   sh(primary, "commit", "-q", "-m", "base");
   const pr = join(root, "pr-wt");
   sh(primary, "worktree", "add", "-q", "-b", "pr-branch", pr);
-  write(pr, "AGENTS.md", HEADER + prPara + FOOTER);
+  write(pr, "AGENTS.md", prHeader + prPara + FOOTER);
   if (other) write(pr, "code.txt", "pr code\n");
   sh(pr, "commit", "-q", "-am", "pr change");
   const reviewed = sh(pr, "rev-parse", "HEAD");
@@ -188,6 +188,44 @@ test("target-side instruction is never dropped: a PR rewrite of base text fails 
   } finally {
     fx.cleanup();
   }
+});
+
+test("whole-file invariant: a PR-side deletion/rewrite of target content OUTSIDE the conflict hunk fails closed with no mutation (PR #923 Stage 1 finding)", async () => {
+  for (const prHeader of ["# Contract\n\n", "# Contract\n\nIntro line rewritten.\n\n"]) {
+    const fx = buildFixture({ prHeader });
+    try {
+      const before = readFileSync(join(fx.pr, "AGENTS.md"), "utf8");
+      const staged = sh(fx.pr, "ls-files", "-u");
+      for (const apply of [false, true]) {
+        const r = await resolveProtectedConflict(args(fx, { apply }), depsFor(fx));
+        assert.equal(r.verdict, "FAIL_CLOSED");
+        assert.equal(r.exitCode, 2);
+        assert.equal(r.mutated, false);
+        assert.ok(["TARGET_CONTENT_DROPPED", "UNREVIEWED_PR_CONTENT", "PR_SIDE_REWRITES_BASE"].includes(r.code), r.code);
+        assertNoMutation(fx, before);
+        assert.equal(sh(fx.pr, "ls-files", "-u"), staged);
+      }
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test("whole-file invariant: a reviewed non-conflicting PR insertion outside the hunk is accepted when the target is still wholly preserved", async () => {
+  const prHeader = "# Contract\n\nIntro line.\n\nExtra reviewed line.\n\n";
+  const fx = buildFixture({ prHeader });
+  try {
+    const r = await resolveProtectedConflict(args(fx, { apply: true }), depsFor(fx));
+    assert.equal(r.verdict, "RESOLVED");
+    assert.equal(readFileSync(join(fx.pr, "AGENTS.md"), "utf8"), prHeader + MERGED + FOOTER);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("proveFile requires the target file text for the whole-file proof", () => {
+  const d = "a\n<<<<<<< ours\nx\ny\n||||||| base\nx\n=======\nx\n>>>>>>> theirs\nb\n";
+  assert.equal(proveFile({ diff3Output: d, reviewedText: "y" }).code, "VERIFICATION_FAILED");
 });
 
 test("both sides adding different substantive instructions at the same place fails closed to founder", async () => {

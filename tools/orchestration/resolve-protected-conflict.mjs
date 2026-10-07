@@ -35,6 +35,10 @@
 //                target never edited or inserted at that point); and the composed result minus
 //                the PR insertions equals the target side exactly. Target content is therefore
 //                wholly preserved and only already-reviewed PR content is added.
+//   Whole file   the same invariant is then proven over the COMPLETE resolved file (plain
+//                segments included): every target-file token survives in order and every other
+//                token run is reviewed PR content, so a PR-side deletion/rewrite outside a
+//                conflict hunk fails closed (PR #923 Stage 1 finding).
 // Anything else -- a target change that would be dropped, both sides editing/inserting at the
 // same place, a PR-side rewrite, ambiguous alignment -- is a founder interrupt, never selected.
 //
@@ -249,7 +253,38 @@ export function parseDiff3(output) {
 }
 
 // Pure. Proves a whole file; returns { ok, resolved, hunks } or the first failure.
-export function proveFile({ diff3Output, reviewedText }) {
+// Whole-file invariant (Stage 1 finding on PR #923): the per-hunk proof alone leaves the plain
+// (non-conflict) segments unproven, so a reviewed PR-side deletion/rewrite of target content
+// outside a conflict hunk could ride through. This checks the COMPLETE resolved file: every
+// target-file token must survive in order (target wholly preserved), and every remaining token
+// run must be reviewed PR content. Linear greedy subsequence match; fails closed on any doubt.
+export function proveWholeFile({ resolved, targetText, reviewedText }) {
+  if (typeof targetText !== "string") return fail("VERIFICATION_FAILED", "target file text is required for the whole-file proof");
+  const target = tokenize(targetText);
+  const out = tokenize(resolved);
+  let t = 0;
+  const runs = [];
+  let run = "";
+  for (const tok of out) {
+    if (t < target.length && tok === target[t]) {
+      t++;
+      if (run) runs.push(run);
+      run = "";
+    } else run += tok;
+  }
+  if (run) runs.push(run);
+  if (t !== target.length) {
+    return fail("TARGET_CONTENT_DROPPED", "the resolved file does not preserve the whole target file; a PR-side deletion or rewrite outside the conflict hunk would drop target content");
+  }
+  for (const r of runs) {
+    if (r.trim() !== "" && !reviewedText.includes(r.trim())) {
+      return fail("UNREVIEWED_PR_CONTENT", "the resolved file adds content that is not present in the Stage 1 reviewed file");
+    }
+  }
+  return { ok: true };
+}
+
+export function proveFile({ diff3Output, reviewedText, targetText }) {
   const segments = parseDiff3(diff3Output);
   if (!segments) return fail("MALFORMED_CONFLICT", "conflict markers are not a well-formed diff3 structure");
   const hunks = segments.filter((s) => s.conflict);
@@ -274,6 +309,8 @@ export function proveFile({ diff3Output, reviewedText }) {
   if (/^(<{7}|\|{7}|={7}|>{7})( |$)/m.test(resolved)) {
     return fail("VERIFICATION_FAILED", "resolved text still contains conflict markers");
   }
+  const whole = proveWholeFile({ resolved, targetText, reviewedText });
+  if (!whole.ok) return whole;
   return { ok: true, resolved, hunks: count };
 }
 
@@ -457,7 +494,7 @@ export async function resolveProtectedConflict(
     }
     const content = (oid) => deps.git(["cat-file", "blob", oid], { cwd });
     const diff3 = deps.mergeFile({ ours: content(headOid), base: content(baseOid), theirs: content(targetOid) });
-    const proof = proveFile({ diff3Output: diff3, reviewedText: content(reviewedOid) });
+    const proof = proveFile({ diff3Output: diff3, reviewedText: content(reviewedOid), targetText: content(targetOid) });
     if (!proof.ok) return closed(proof.code, proof.reason, { path, hunk: proof.hunk });
     results.push({ path, resolved: proof.resolved, hunks: proof.hunks });
   }
