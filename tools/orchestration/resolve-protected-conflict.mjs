@@ -62,7 +62,8 @@ import { pathToFileURL } from "node:url";
 import { parseBindingLockReason } from "./pr-head-checkout-preflight.mjs";
 import { parseWorktreeListPorcelain } from "./worktree-preflight.mjs";
 import { normalizePathForComparison } from "./classify-primary-path-lock.mjs";
-import { readGithubPr } from "./github-read.mjs";
+import { readGithubIssue, readGithubPr } from "./github-read.mjs";
+import { classifyMechanicalIntegrationPath } from "./executor-substrate-authority.mjs";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 
 // Closed list of operating-contract files this reconciliation may ever write. Deliberately not
@@ -118,12 +119,36 @@ function insertionsOf(baseToOther, otherTokens) {
     if (otherToBase.has(j)) gap = otherToBase.get(j) + 1;
     else {
       if (!ins.has(gap)) ins.set(gap, []);
-      ins.get(gap).push({ token: otherTokens[j] });
+      ins.get(gap).push({ token: otherTokens[j], index: j });
     }
   }
   return ins;
 }
 
+function sameDeletionMask(a, b) {
+  return a.length === b.length && a.every((x, i) => (x < 0) === (b[i] < 0));
+}
+
+function uniqueContiguousIndex(haystack, needle) {
+  if (needle.length === 0) return { index: 0, unique: true };
+  let found = -1;
+  for (let i = 0; i + needle.length <= haystack.length; i++) {
+    let ok = true;
+    for (let j = 0; j < needle.length; j++) {
+      if (haystack[i + j] !== needle[j]) { ok = false; break; }
+    }
+    if (!ok) continue;
+    if (found !== -1) return { index: -1, unique: false };
+    found = i;
+  }
+  return { index: found, unique: found !== -1 };
+}
+
+function tokenSubsequence(needle, haystack) {
+  let n = 0;
+  for (const token of haystack) if (n < needle.length && token === needle[n]) n++;
+  return n === needle.length;
+}
 // Pure. Proves (or refuses) the single mechanical resolution of ONE conflict hunk. `prText` is
 // the PR side, `baseText` the merge base, `targetText` the target side, `reviewedText` the whole
 // reviewed protected file. Returns { ok: true, resolved, insertedText } or { ok: false, code,
@@ -136,33 +161,43 @@ export function proveHunk({ prText, baseText, targetText, reviewedText }) {
   const targetAlign = align(base, target);
   if (!prAlign || !targetAlign) return fail("HUNK_TOO_LARGE", "conflict hunk too large to prove mechanically");
 
+  // #939: identical shared base rewrites are composable only when one resulting hunk contains the other.
   if (prAlign.some((x) => x < 0)) {
-    return fail("PR_SIDE_REWRITES_BASE", "the PR side deletes or rewrites base content; not a pure reviewed insertion");
+    if (!sameDeletionMask(prAlign, targetAlign)) {
+      return fail("PR_SIDE_REWRITES_BASE", "the PR side deletes or rewrites base content that the target side does not delete identically");
+    }
+    if (tokenSubsequence(target, pr)) return { ok: true, resolved: prText };
+    if (tokenSubsequence(pr, target)) return { ok: true, resolved: targetText };
+    return fail("COMPETING_CHANGE", "shared base rewrite still leaves competing non-containing content");
   }
+
   const prIns = insertionsOf(prAlign, pr);
   if (prIns.size === 0) return fail("NO_PR_CHANGE", "the PR side adds nothing to the base; not the expected conflict shape");
-
   const targetIns = insertionsOf(targetAlign, target);
   const n = base.length;
-  const insertBefore = new Map(); // target token index -> PR tokens placed before it
+  const insertBefore = new Map();
+  const insertAfter = new Map();
   let appendAtEnd = null;
   for (const [gap, entries] of prIns) {
     const text = entries.map((e) => e.token).join("");
-    if (text.trim() !== "" && !reviewedText.includes(text.trim())) {
-      return fail("UNREVIEWED_PR_CONTENT", "a PR-side insertion is not present in the Stage 1 reviewed file");
-    }
+    if (text.trim() !== "" && !reviewedText.includes(text.trim())) return fail("UNREVIEWED_PR_CONTENT", "a PR-side insertion is not present in accepted Stage 1/correction content");
     const left = gap > 0 ? targetAlign[gap - 1] : null;
     const right = gap < n ? targetAlign[gap] : null;
-    if ((gap > 0 && left < 0) || (gap < n && right < 0)) {
-      return fail("COMPETING_CHANGE", "the target side edited or removed content adjacent to a PR-side insertion");
-    }
-    if (targetIns.has(gap)) {
-      return fail("COMPETING_CHANGE", "both sides add content at the same position; ordering is a semantic choice");
-    }
-    if (gap > 0 && gap < n && right !== left + 1) {
-      return fail("AMBIGUOUS_ALIGNMENT", "the target side's token alignment around the insertion point is not contiguous");
-    }
+    if ((gap > 0 && left < 0) || (gap < n && right < 0)) return fail("COMPETING_CHANGE", "the target side edited or removed content adjacent to a PR-side insertion");
     const toks = entries.map((e) => e.token);
+    if (targetIns.has(gap)) {
+      const te = targetIns.get(gap);
+      const tt = te.map((e) => e.token);
+      if (uniqueContiguousIndex(tt, toks).unique) continue;
+      const targetInPr = uniqueContiguousIndex(toks, tt);
+      if (!targetInPr.unique) return fail("COMPETING_CHANGE", "same-gap additions are non-containing or ambiguously repeated");
+      const prefix = toks.slice(0, targetInPr.index);
+      const suffix = toks.slice(targetInPr.index + tt.length);
+      if (prefix.length) insertBefore.set(te[0].index, prefix);
+      if (suffix.length) insertAfter.set(te[te.length - 1].index, suffix);
+      continue;
+    }
+    if (gap > 0 && gap < n && right !== left + 1) return fail("AMBIGUOUS_ALIGNMENT", "the target side token alignment around the insertion point is not contiguous");
     if (gap < n) insertBefore.set(right, toks);
     else appendAtEnd = toks;
   }
@@ -170,44 +205,22 @@ export function proveHunk({ prText, baseText, targetText, reviewedText }) {
   const out = [];
   const inserted = [];
   for (let j = 0; j < target.length; j++) {
-    if (insertBefore.has(j)) {
-      for (const t of insertBefore.get(j)) {
-        inserted.push(out.length);
-        out.push(t);
-      }
-    }
+    if (insertBefore.has(j)) for (const t of insertBefore.get(j)) { inserted.push(out.length); out.push(t); }
     out.push(target[j]);
+    if (insertAfter.has(j)) for (const t of insertAfter.get(j)) { inserted.push(out.length); out.push(t); }
   }
-  if (appendAtEnd) {
-    for (const t of appendAtEnd) {
-      inserted.push(out.length);
-      out.push(t);
-    }
-  }
+  if (appendAtEnd) for (const t of appendAtEnd) { inserted.push(out.length); out.push(t); }
   const resolved = out.join("");
-
-  // Independent re-verification of both halves of the proof.
-  // (1) Target content is wholly preserved: the result minus the proven PR insertions is the
-  //     target side exactly.
   const insertedAt = new Set(inserted);
-  const withoutInsertions = out.filter((_, i) => !insertedAt.has(i)).join("");
-  if (withoutInsertions !== targetText) {
-    return fail("VERIFICATION_FAILED", "composed result does not preserve the target side exactly");
-  }
-  // (2) Only PR content is added: base plus the proven PR insertions reproduces the PR side
-  //     exactly, and every inserted token is accounted for.
+  if (out.filter((_, i) => !insertedAt.has(i)).join("") !== targetText) return fail("VERIFICATION_FAILED", "composed result does not preserve the target side exactly");
   const prRebuilt = [];
   for (let gap = 0; gap <= n; gap++) {
     if (prIns.has(gap)) prRebuilt.push(...prIns.get(gap).map((e) => e.token));
     if (gap < n) prRebuilt.push(base[gap]);
   }
-  const insertedCount = [...prIns.values()].reduce((sum, e) => sum + e.length, 0);
-  if (prRebuilt.join("") !== prText || inserted.length !== insertedCount) {
-    return fail("VERIFICATION_FAILED", "proven insertions do not reproduce the PR side's content");
-  }
+  if (prRebuilt.join("") !== prText) return fail("VERIFICATION_FAILED", "proven insertions do not reproduce the PR side content");
   return { ok: true, resolved };
 }
-
 function fail(code, reason) {
   return { ok: false, code, reason };
 }
