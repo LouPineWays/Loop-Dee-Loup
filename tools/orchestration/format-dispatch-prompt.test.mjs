@@ -1410,15 +1410,21 @@ test("#924: findings correction template mandates the execution Issue in every c
 
 // Issue #950: exit 2 of the deterministic resolver is a branch point, not a blanket founder
 // interrupt, when a split control/execution flow can name a successor route.
-test("conflict-recovery prompt routes resolver exit 2 to the bounded successor path, keeping same-PR recovery first", () => {
+test("conflict-recovery prompt gives mutually exclusive predecessor/successor tails and rechecks target before successor push", () => {
   const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
   assert.ok(prompt.indexOf("resolve-protected-conflict.mjs") < prompt.indexOf("successor-integration-preflight.mjs"));
+  assert.match(prompt, /exit 0 => verify\/push predecessor via the binding/);
   assert.match(prompt, /exit 2 => founder\/product\/security\/authority ambiguity => founder interrupt/);
   assert.match(prompt, /--execution-issue 638 --predecessor-pr 640/);
+  assert.match(prompt, /--expect-target <saved-target-sha>/);
+  assert.match(prompt, /push the successor branch \(not the predecessor binding refspec\)/);
+  assert.match(prompt, /Addresses #638/);
   assert.match(prompt, /Supersedes #640/);
   assert.match(prompt, /fresh Stage 1/);
   assert.match(prompt, /never rebase\/force-push\/re-review #640/);
-  assert.match(prompt, /no re-review, merge, or Stage 2/);
+  const successorTail = prompt.slice(prompt.indexOf("exit 2 =>"));
+  assert.doesNotMatch(successorTail, /finalize-correction-breakpoint\.mjs/);
+  assert.match(successorTail, /finalize-pr-breakpoint\.mjs/);
 });
 
 test("conflict-recovery prompt without a control/execution pair keeps exit 2 as a founder interrupt (no successor route)", () => {
