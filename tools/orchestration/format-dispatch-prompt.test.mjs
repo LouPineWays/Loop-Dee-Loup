@@ -790,7 +790,7 @@ test("formatConflictRecoveryWorkerDispatchPrompt omits the Execution Issue line 
 
 test("formatConflictRecoveryWorkerDispatchPrompt tells the worker to read the reviewed head from the Controlling Issue's Stage 1 bullet, not restated, when a control Issue is present", () => {
   const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
-  assert.match(prompt, /Controlling Issue's Stage 1 bullet/);
+  assert.match(prompt, /control Stage 1 reviewed head/);
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt requires an explicit reviewedHead only when controlIssue is absent (direct-reference mode has no durable bullet to read)", () => {
@@ -803,14 +803,14 @@ test("formatConflictRecoveryWorkerDispatchPrompt requires an explicit reviewedHe
 test("formatConflictRecoveryWorkerDispatchPrompt mandates a real merge commit (never rebase/force-push) and fails closed to a founder interrupt for a semantic conflict", () => {
   const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
   assert.match(prompt, /never rebase\/force-push/);
-  assert.match(prompt, /founder interrupt, not auto-resolved/);
+  assert.match(prompt, /semantic\/security => founder interrupt/);
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt mandates finalize-correction-breakpoint.mjs, naming its fail-closed CORRECTION_BREAKPOINT_UNVERIFIED reference, and forbids merge/Stage 2/re-review here", () => {
   const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
   assert.match(prompt, /finalize-correction-breakpoint\.mjs/);
   assert.match(prompt, /CORRECTION_BREAKPOINT_UNVERIFIED/);
-  assert.match(prompt, /no re-review, merge, or Stage 2/);
+  assert.match(prompt, /stop before re-review\/merge\/Stage 2/);
 });
 
 // Stage 1 review finding on PR #719 (P1): names the pre-bound checkout and mandates
@@ -820,7 +820,7 @@ test("formatConflictRecoveryWorkerDispatchPrompt names the pre-bound checkout an
   assert.ok(prompt.includes(`Pre-bound checkout: ${BINDING.path}.`));
   assert.ok(prompt.includes(`node "${BINDING.scriptPath}" --verify-binding ${BINDING.token} --pr 640`));
   assert.match(prompt, /pushRefspec/);
-  assert.ok(prompt.indexOf("--verify-binding") < prompt.indexOf("Correction-satisfied reserved head"));
+  assert.ok(prompt.indexOf("--verify-binding") < prompt.indexOf("Merge target"));
   assert.ok(prompt.includes(`--release-binding ${BINDING.token}`));
 });
 
