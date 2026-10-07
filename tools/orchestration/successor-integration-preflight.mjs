@@ -26,12 +26,23 @@
 //                              closed (TARGET_MOVED) if main moved during preparation.
 //   SUCCESSOR_EXISTS  exit 0  -- reuse `successor`; never create another.
 //   FAIL_CLOSED       exit 2  -- `reason` names why; no successor mutation may proceed.
+//   LOCAL_SUCCESSOR_LIVE_OWNED | _RESUMABLE | _STALE_RECLAIMABLE  exit 0 -- issue #968: no remote
+//                              successor, but one interrupted attempt exists only as a local branch/worktree
+//                              (classified by successor-local-state.mjs). Never create another; LIVE_OWNED =>
+//                              stop (one worker already owns it); RESUMABLE => adopt `path`/`branch`;
+//                              STALE_RECLAIMABLE => rerun with `--reclaim true` to retire it (unlock + remove
+//                              the clean LDL worktree, archive any commits under refs/ldl/reclaimed/, delete the
+//                              branch), which then returns NO_SUCCESSOR with `reclaimed`. `--worktree <path>`
+//                              declares the caller's own successor worktree so the pre-push re-check returns
+//                              NO_SUCCESSOR with that same branch.
+//   AMBIGUOUS local state fails closed (FAIL_CLOSED, reason AMBIGUOUS_LOCAL_SUCCESSOR) and touches nothing.
 // Exit 1 is an operational failure (unreadable GitHub state), never a verdict.
 //
 // The predecessor PR is never touched: its Stage 1 history is preserved and is not review
 // authority for the successor (docs/bounded-review-cycle.md § Successor integration PR).
 import { execFileSync } from "node:child_process";
 import { readGithubPr } from "./github-read.mjs";
+import { inspectLocalSuccessor, reclaimLocalSuccessor } from "./successor-local-state.mjs";
 import { defaultGhPrList, referencesExecutionIssue, resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 
 export function referencesSupersede(body, predecessorPr) {
@@ -76,8 +87,14 @@ export function evaluateSuccessor({ executionIssue, predecessor, linkedPrs, pred
 }
 
 export function run(
-  { repo, executionIssue, predecessorPr, expectedPredecessorHead, expectTarget = null },
-  { readPr = (n, fields) => readGithubPr({ repo, number: n, fields }), listLinked = defaultGhPrList, readTarget = defaultReadTarget } = {},
+  { repo, executionIssue, predecessorPr, expectedPredecessorHead, expectTarget = null, worktree = null, reclaim = false },
+  {
+    readPr = (n, fields) => readGithubPr({ repo, number: n, fields }),
+    listLinked = defaultGhPrList,
+    readTarget = defaultReadTarget,
+    inspectLocal = inspectLocalSuccessor,
+    reclaimLocal = reclaimLocalSuccessor,
+  } = {},
 ) {
   if (!Number.isInteger(executionIssue) || executionIssue <= 0 || !Number.isInteger(predecessorPr) || predecessorPr <= 0) {
     return failClosed("--execution-issue and --predecessor-pr must be positive integers");
@@ -110,12 +127,28 @@ export function run(
   const priorClosedSuccessors = (linkedPrs ?? []).filter(
     (pr) => pr.number !== predecessorPr && pr.state === "CLOSED" && referencesSupersede(pr.body, predecessorPr),
   ).length;
+  const target = { ref: predecessor.baseRefName, sha };
+  let branch = `issue-${executionIssue}-successor-of-${predecessorPr}-attempt-${priorClosedSuccessors + 1}`;
+  // Issue #968: no remote successor is not "no successor" -- an interrupted attempt may exist only
+  // as a local branch/worktree. Classify it before ever suggesting creation of another.
+  let local = inspectLocal({ executionIssue, predecessorPr, target, callerWorktree: worktree });
+  let reclaimed;
+  if (local?.state === "LOCAL_SUCCESSOR_STALE_RECLAIMABLE" && reclaim) {
+    reclaimed = reclaimLocal(local, { predecessorPr });
+    local = null;
+  }
+  if (local?.state === "CALLER_OWNED") {
+    branch = local.branch; // the caller's own worktree is the one successor; re-check passes with the same branch
+  } else if (local) {
+    return { ...local, predecessor: predecessorPr, target };
+  }
   return {
     state: "NO_SUCCESSOR",
     exitCode: 0,
     predecessor: predecessorPr,
-    target: { ref: predecessor.baseRefName, sha },
-    branch: `issue-${executionIssue}-successor-of-${predecessorPr}-attempt-${priorClosedSuccessors + 1}`,
+    target,
+    branch,
+    ...(reclaimed ? { reclaimed } : {}),
   };
 }
 
@@ -144,6 +177,8 @@ function main() {
       predecessorPr: Number(args["predecessor-pr"]),
       expectedPredecessorHead: args["expect-predecessor-head"] ?? null,
       expectTarget: args["expect-target"] ?? null,
+      worktree: args.worktree ?? null,
+      reclaim: args.reclaim === "true",
     });
   } catch (err) {
     console.error(`successor-integration-preflight: ${err.message}`);

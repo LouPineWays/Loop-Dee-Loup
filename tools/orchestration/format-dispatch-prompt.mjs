@@ -647,9 +647,9 @@ export function renderConflictRecoverySuccessorClause({ preflightPath, issue, pr
   return (
     `founder/product/security/authority ambiguity => founder interrupt; ordinary technical integration of the settled outcome => ` +
     `one successor PR: node "${preflightPath}" --execution-issue ${issue} --predecessor-pr ${pr} --expect-predecessor-head ${correctedHead}. ` +
-    `SUCCESSOR_EXISTS => reuse that PR and never create/push another. FAIL_CLOSED => stop. NO_SUCCESSOR => save returned target.sha+branch, ` +
+    `SUCCESSOR_EXISTS => reuse that PR and never create/push another. LOCAL_SUCCESSOR_LIVE_OWNED => stop (a worker already owns it). LOCAL_SUCCESSOR_RESUMABLE => resume its returned path/branch, never a new branch or binding. LOCAL_SUCCESSOR_STALE_RECLAIMABLE => rerun with --reclaim true, then treat as NO_SUCCESSOR. FAIL_CLOSED => stop. NO_SUCCESSOR => save returned target.sha+branch, ` +
     `git merge --abort, create that branch from target, re-integrate only the accepted outcome, then immediately before push rerun the same ` +
-    `preflight with --expect-predecessor-head ${correctedHead} --expect-target <saved-target-sha> and require NO_SUCCESSOR with the same branch; push the successor branch (not the ` +
+    `preflight with --expect-predecessor-head ${correctedHead} --expect-target <saved-target-sha> --worktree <successor worktree path> and require NO_SUCCESSOR with the same branch; push the successor branch (not the ` +
     `predecessor binding refspec), open PR with "Addresses #${issue}" + "Supersedes #${pr}", request fresh Stage 1 on its live head, run ` +
     `finalize-pr-breakpoint.mjs, release the predecessor binding, and stop; never rebase/force-push/re-review #${pr} or run its correction finalizer; ` +
     `no re-review, merge, or Stage 2 of the predecessor here.`
