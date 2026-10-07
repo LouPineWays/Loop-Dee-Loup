@@ -141,12 +141,18 @@ test("caller-owned local successor passes the pre-push re-check with the same br
 test("reclaim flag retires a STALE_RECLAIMABLE attempt then returns NO_SUCCESSOR; without it only reports", () => {
   const stale = { state: "LOCAL_SUCCESSOR_STALE_RECLAIMABLE", exitCode: 0 };
   let calls = 0;
-  const deps = { linked: [PRED], inspectLocal: () => stale, reclaimLocal: () => (calls++, ["branch-removed"]) };
+  const deps = { linked: [PRED], inspectLocal: () => stale, reclaimLocal: (l, o) => (o.revalidate().state === stale.state && calls++, ["branch-removed"]) };
   assert.equal(run(base, harness(deps)).state, "LOCAL_SUCCESSOR_STALE_RECLAIMABLE");
   assert.equal(calls, 0);
   const r = run({ ...base, reclaim: true }, harness(deps));
   assert.equal(r.state, "NO_SUCCESSOR");
   assert.deepEqual(r.reclaimed, ["branch-removed"]);
+});
+
+test("the expected attempt (after closed successors) is passed to local inspection", () => {
+  let seen;
+  run(base, harness({ linked: [PRED, { number: 700, state: "CLOSED", body: "Supersedes #869" }], inspectLocal: (a) => ((seen = a.attempt), null) }));
+  assert.equal(seen, 2);
 });
 
 test("remote successor PR takes precedence; local state is not consulted (#950 unchanged)", () => {

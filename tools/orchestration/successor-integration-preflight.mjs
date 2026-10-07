@@ -128,13 +128,15 @@ export function run(
     (pr) => pr.number !== predecessorPr && pr.state === "CLOSED" && referencesSupersede(pr.body, predecessorPr),
   ).length;
   const target = { ref: predecessor.baseRefName, sha };
-  let branch = `issue-${executionIssue}-successor-of-${predecessorPr}-attempt-${priorClosedSuccessors + 1}`;
+  const attempt = priorClosedSuccessors + 1;
+  let branch = `issue-${executionIssue}-successor-of-${predecessorPr}-attempt-${attempt}`;
   // Issue #968: no remote successor is not "no successor" -- an interrupted attempt may exist only
   // as a local branch/worktree. Classify it before ever suggesting creation of another.
-  let local = inspectLocal({ executionIssue, predecessorPr, target, callerWorktree: worktree });
+  const inspectArgs = { executionIssue, predecessorPr, target, attempt, callerWorktree: worktree };
+  let local = inspectLocal(inspectArgs);
   let reclaimed;
   if (local?.state === "LOCAL_SUCCESSOR_STALE_RECLAIMABLE" && reclaim) {
-    reclaimed = reclaimLocal(local, { predecessorPr });
+    reclaimed = reclaimLocal(local, { predecessorPr, revalidate: () => inspectLocal(inspectArgs) });
     local = null;
   }
   if (local?.state === "CALLER_OWNED") {

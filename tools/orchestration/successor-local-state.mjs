@@ -116,7 +116,12 @@ export function defaultLocalGit(cwd) {
       }
       return found;
     },
+    currentWorktree: () => {
+      const top = git(["rev-parse", "--show-toplevel"], { cwd, allowFail: true });
+      return top ? normalizePathForComparison(top) : null;
+    },
     remoteBranch: (branch) => {
+      if (git(["remote", "get-url", "origin"], { cwd, allowFail: true }) === null) return null; // no origin: nothing can be pushed
       const out = git(["ls-remote", "--heads", "origin", branch], { cwd, allowFail: true });
       if (out === null) return undefined; // unreadable
       const m = /^([0-9a-f]{40})\s/i.exec(out);
@@ -140,11 +145,13 @@ function attributable(w, predecessorPr, primaryPath) {
 
 // Returns null when no local successor state exists for this execution/predecessor pair.
 export function inspectLocalSuccessor(
-  { executionIssue, predecessorPr, target, callerWorktree = null, cwd = process.cwd() },
+  { executionIssue, predecessorPr, target, attempt = null, callerWorktree = null, cwd = process.cwd() },
   { localGit = defaultLocalGit(cwd), probeOccupancy = defaultProbeOccupancy } = {},
 ) {
   const prefix = `issue-${executionIssue}-successor-of-${predecessorPr}-attempt-`;
-  const re = new RegExp(`^${prefix}\\d+$`);
+  // Only the expected current attempt is inspected when known: a surviving branch of a closed
+  // historical attempt is not this attempt's local state.
+  const re = new RegExp(`^${prefix}${Number.isInteger(attempt) && attempt > 0 ? attempt : "\\d+"}$`);
   const branches = localGit.branches(`${prefix}*`).filter((b) => re.test(b.name));
   if (branches.length === 0) return null;
   if (branches.length > 1) return ambiguous(`multiple local successor branches (${branches.map((b) => b.name).join(", ")})`, { branches: branches.map((b) => b.name) });
@@ -162,11 +169,26 @@ export function inspectLocalSuccessor(
   const wt = wts[0] && existsSync(wts[0].path) ? wts[0] : null;
   const remoteSha = localGit.remoteBranch(branch);
   const remote = { remoteSha: remoteSha ?? null, pushed: Boolean(remoteSha) };
+  // A pushed (or unprovably-unpushed) attempt must never be retired as local-only: recreating the
+  // branch would collide with the divergent remote ref and strand the required successor PR.
+  const reclaimable = (payload) =>
+    remoteSha === null
+      ? payload
+      : ambiguous(
+          remoteSha === undefined
+            ? "cannot read origin to prove the successor branch was never pushed; not reclaiming"
+            : `successor branch ${branch} is already pushed to origin (${remoteSha}) without an open PR; not reclaimable as local-only -- reconcile the remote attempt instead`,
+          { ...base, path: payload.path ?? null },
+        );
 
   if (wt) {
     const why = attributable(wt, predecessorPr, localGit.primaryPath());
     if (why) return ambiguous(why, { ...base, path: wt.path });
     if (callerWorktree && normalizePathForComparison(wt.path) === normalizePathForComparison(callerWorktree)) {
+      const actual = localGit.currentWorktree?.() ?? null;
+      if (!actual || actual !== normalizePathForComparison(callerWorktree)) {
+        return ambiguous(`--worktree ${callerWorktree} is not the current checkout (${actual ?? "unknown"}); run preflight from inside the declared worktree`, { ...base, path: wt.path });
+      }
       return { state: "CALLER_OWNED", branch, path: wt.path, targetMoved, ...remote };
     }
     const occupancy = probeOccupancy(wt.path);
@@ -182,13 +204,13 @@ export function inspectLocalSuccessor(
     const unique = ahead > 0 || ops.length > 0 || dirty;
     const progress = { commitsAhead: ahead, operation: ops[0] ?? null, dirty, targetMoved };
     if (!unique) {
-      return { state: "LOCAL_SUCCESSOR_STALE_RECLAIMABLE", exitCode: 0, ...base, path: wt.path, progress, ...remote };
+      return reclaimable({ state: "LOCAL_SUCCESSOR_STALE_RECLAIMABLE", exitCode: 0, ...base, path: wt.path, progress, ...remote });
     }
     if (targetMoved && (ops.length > 0 || dirty)) {
       return ambiguous(`target moved (branch base ${mergeBase}) while uncommitted/in-progress work exists; not resumable or reclaimable without losing work`, { ...base, path: wt.path, progress });
     }
     if (targetMoved) {
-      return { state: "LOCAL_SUCCESSOR_STALE_RECLAIMABLE", exitCode: 0, ...base, path: wt.path, progress, archive: true, ...remote };
+      return reclaimable({ state: "LOCAL_SUCCESSOR_STALE_RECLAIMABLE", exitCode: 0, ...base, path: wt.path, progress, archive: true, ...remote });
     }
     return {
       state: "LOCAL_SUCCESSOR_RESUMABLE",
@@ -202,8 +224,8 @@ export function inspectLocalSuccessor(
   }
 
   // Branch exists without any worktree: no process can hold a path, work (if any) is committed.
-  if (ahead === 0) return { state: "LOCAL_SUCCESSOR_STALE_RECLAIMABLE", exitCode: 0, ...base, path: null, progress: { commitsAhead: 0, targetMoved }, ...remote };
-  if (targetMoved) return { state: "LOCAL_SUCCESSOR_STALE_RECLAIMABLE", exitCode: 0, ...base, path: null, progress: { commitsAhead: ahead, targetMoved }, archive: true, ...remote };
+  if (ahead === 0) return reclaimable({ state: "LOCAL_SUCCESSOR_STALE_RECLAIMABLE", exitCode: 0, ...base, path: null, progress: { commitsAhead: 0, targetMoved }, ...remote });
+  if (targetMoved) return reclaimable({ state: "LOCAL_SUCCESSOR_STALE_RECLAIMABLE", exitCode: 0, ...base, path: null, progress: { commitsAhead: ahead, targetMoved }, archive: true, ...remote });
   return {
     state: "LOCAL_SUCCESSOR_RESUMABLE",
     exitCode: 0,
@@ -216,8 +238,21 @@ export function inspectLocalSuccessor(
 }
 
 // Bounded retirement of one STALE_RECLAIMABLE attempt. Re-validates state itself, never forces.
-export function reclaimLocalSuccessor(local, { cwd = process.cwd(), predecessorPr } = {}) {
+// `revalidate` re-runs the full inspection immediately before mutation; any change from the
+// earlier snapshot (state, tip, path, archive need) aborts without touching anything.
+export function reclaimLocalSuccessor(local, { cwd = process.cwd(), predecessorPr, revalidate } = {}) {
   if (local?.state !== "LOCAL_SUCCESSOR_STALE_RECLAIMABLE") throw new Error("reclaim requires a STALE_RECLAIMABLE verdict");
+  if (typeof revalidate !== "function") throw new Error("reclaim requires a revalidate callback");
+  const fresh = revalidate();
+  if (
+    fresh?.state !== "LOCAL_SUCCESSOR_STALE_RECLAIMABLE" ||
+    fresh.branch !== local.branch ||
+    fresh.tip !== local.tip ||
+    (fresh.path ?? null) !== (local.path ?? null) ||
+    Boolean(fresh.archive) !== Boolean(local.archive)
+  ) {
+    throw new Error("successor local state changed since inspection; refusing to reclaim");
+  }
   const actions = [];
   if (local.path) {
     const lock = parseWorktreePorcelain(git(["worktree", "list", "--porcelain"], { cwd })).find((w) => normalizePathForComparison(w.path) === normalizePathForComparison(local.path));
@@ -235,7 +270,7 @@ export function reclaimLocalSuccessor(local, { cwd = process.cwd(), predecessorP
     git(["update-ref", ref, local.tip], { cwd });
     actions.push(`archived:${ref}`);
   }
-  git(["branch", "-D", local.branch], { cwd });
+  git(["update-ref", "-d", `refs/heads/${local.branch}`, local.tip], { cwd }); // compare-and-delete: refuses if the ref advanced
   actions.push("branch-removed");
   return actions;
 }

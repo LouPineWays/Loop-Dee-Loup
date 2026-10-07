@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { inspectLocalSuccessor, reclaimLocalSuccessor, parseWorktreePorcelain, defaultProbeOccupancy } from "./successor-local-state.mjs";
+import { inspectLocalSuccessor, reclaimLocalSuccessor, parseWorktreePorcelain, defaultProbeOccupancy, defaultLocalGit } from "./successor-local-state.mjs";
 
 const g = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const BRANCH = "issue-868-successor-of-869-attempt-1";
@@ -30,6 +30,7 @@ function fixture() {
   g(repo, "worktree", "add", "-q", "-b", BRANCH, wtPath, sha);
   return { repo, sha, wtPath, target: { ref: "main", sha } };
 }
+const defaultLocalGitFor = (f) => defaultLocalGit(f.repo);
 const inspect = (f, extra = {}, deps = FREE) => inspectLocalSuccessor({ ...ID, target: f.target, cwd: f.repo, ...extra }, deps);
 const lockFor = (f, pr) => g(f.repo, "worktree", "lock", "--reason", `ldl-pr-head-binding pr=${pr} sha=${f.sha} branch=x mode=created token=ab12cd34`, f.wtPath);
 const commitIn = (cwd, file, text) => {
@@ -134,15 +135,51 @@ test("more than one local successor branch -> fail closed (exactly-one invariant
 
 test("the caller's own worktree is CALLER_OWNED so the pre-push re-check keeps the same branch", () => {
   const f = fixture();
-  const r = inspect(f, { callerWorktree: f.wtPath }, { probeOccupancy: () => "OCCUPIED" });
+  const r = inspect(f, { callerWorktree: f.wtPath, cwd: f.wtPath }, { probeOccupancy: () => "OCCUPIED" });
   assert.equal(r.state, "CALLER_OWNED");
   assert.equal(r.branch, BRANCH);
+});
+
+test("a declared --worktree that is not the process's actual checkout fails closed (no CALLER_OWNED)", () => {
+  const f = fixture();
+  const r = inspect(f, { callerWorktree: f.wtPath }, { probeOccupancy: () => "OCCUPIED" });
+  assert.equal(r.state, "FAIL_CLOSED");
+  assert.match(r.reason, /not the current checkout/);
+});
+
+test("only the expected attempt is inspected; a closed historical attempt branch is ignored", () => {
+  const f = fixture();
+  g(f.repo, "branch", "issue-868-successor-of-869-attempt-2", f.sha);
+  assert.equal(inspect(f, { attempt: 2 }).branch, "issue-868-successor-of-869-attempt-2");
+  g(f.repo, "worktree", "remove", "--force", f.wtPath);
+  g(f.repo, "branch", "-D", BRANCH);
+  commitIn(f.repo, "m.txt", "moved\n");
+  assert.equal(inspect(f, { attempt: 3 }), null);
+});
+
+test("a pushed attempt is never reclaimable as local-only; unreadable origin fails closed", () => {
+  const f = fixture();
+  const real = defaultLocalGitFor(f);
+  const r = inspect(f, {}, { ...FREE, localGit: { ...real, remoteBranch: () => f.sha } });
+  assert.equal(r.state, "FAIL_CLOSED");
+  assert.match(r.reason, /already pushed/);
+  const u = inspect(f, {}, { ...FREE, localGit: { ...real, remoteBranch: () => undefined } });
+  assert.equal(u.state, "FAIL_CLOSED");
+});
+
+test("reclaim aborts, touching nothing, if the successor advanced after inspection", () => {
+  const f = fixture();
+  const r = inspect(f);
+  commitIn(f.wtPath, "late.txt", "late\n");
+  assert.throws(() => reclaimLocalSuccessor(r, { cwd: f.repo, predecessorPr: 869, revalidate: () => inspect(f) }), /changed since inspection/);
+  assert.ok(existsSync(f.wtPath));
+  assert.equal(g(f.repo, "rev-parse", BRANCH), g(f.wtPath, "rev-parse", "HEAD"));
 });
 
 test("stale reclaim: clean bound worktree is unlocked+removed and branch deleted; a fresh run sees no local state", () => {
   const f = fixture();
   lockFor(f, 869);
-  const actions = reclaimLocalSuccessor(inspect(f), { cwd: f.repo, predecessorPr: 869 });
+  const actions = reclaimLocalSuccessor(inspect(f), { cwd: f.repo, predecessorPr: 869, revalidate: () => inspect(f) });
   assert.ok(actions.includes("branch-removed"));
   assert.equal(existsSync(f.wtPath), false);
   assert.equal(inspect(f), null);
@@ -154,7 +191,7 @@ test("reclaim refuses to unlock a binding for another PR", () => {
   const r = inspect(f);
   g(f.repo, "worktree", "unlock", f.wtPath);
   lockFor(f, 111);
-  assert.throws(() => reclaimLocalSuccessor(r, { cwd: f.repo, predecessorPr: 869 }));
+  assert.throws(() => reclaimLocalSuccessor(r, { cwd: f.repo, predecessorPr: 869, revalidate: () => inspect(f) }));
   assert.ok(existsSync(f.wtPath));
 });
 
@@ -163,10 +200,11 @@ test("moved target with committed work archives the commits under refs/ldl/recla
   commitIn(f.wtPath, "h.txt", "work\n");
   const tip = g(f.wtPath, "rev-parse", "HEAD");
   commitIn(f.repo, "m.txt", "moved\n");
-  const r = inspect(f, { target: { ref: "main", sha: g(f.repo, "rev-parse", "main") } });
+  const moved = { target: { ref: "main", sha: g(f.repo, "rev-parse", "main") } };
+  const r = inspect(f, moved);
   assert.equal(r.state, "LOCAL_SUCCESSOR_STALE_RECLAIMABLE");
   assert.equal(r.archive, true);
-  reclaimLocalSuccessor(r, { cwd: f.repo, predecessorPr: 869 });
+  reclaimLocalSuccessor(r, { cwd: f.repo, predecessorPr: 869, revalidate: () => inspect(f, moved) });
   assert.equal(g(f.repo, "rev-parse", `refs/ldl/reclaimed/${BRANCH}-${tip.slice(0, 8)}`), tip);
 });
 
