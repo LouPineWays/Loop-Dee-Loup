@@ -29,6 +29,7 @@ const BINDING = {
   token: "1a2b3c4d",
   scriptPath: "C:/Loop-Dee-Loup/tools/orchestration/pr-head-checkout-preflight.mjs",
 };
+const CORRECTED_HEAD = "b".repeat(40);
 
 test("formatDispatchPrompt includes the exact control Issue, execution Issue, and route", () => {
   const prompt = formatDispatchPrompt({ controlIssue: 322, executionIssue: 321, route: "implementation worker" });
@@ -771,13 +772,13 @@ test("CLI explicit --kind stage2-preparation renders the same template", async (
 // findings-bearing Stage 1 correction worker, so it now requires the identical pre-spawn
 // `checkoutBinding` (P1) -- every test below passes the shared `BINDING` fixture and fails
 // closed without it, mirroring `formatStage1CorrectionWorkerDispatchPrompt`'s own coverage. P2
-// (pinning the reservation to the gated `correctedHead`) is covered where the pin actually
-// happens -- `pr-head-checkout-preflight.test.mjs`'s `reserve`/`reserveFromGate` tests -- since
-// this formatter itself never sees `correctedHead` (the pin already happened upstream, before
-// this template is ever rendered).
+// (pinning the reservation to the gated `correctedHead`) remains covered where the pin happens
+// in `pr-head-checkout-preflight.test.mjs`; audit #961 additionally requires this formatter to
+// carry that same gated head into successor-integration-preflight so successor creation/reuse
+// cannot outlive the predecessor head that authorized conflict recovery.
 
 test("formatConflictRecoveryWorkerDispatchPrompt includes the exact PR, Execution Issue, and Controlling Issue references", () => {
-  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding: BINDING });
   assert.match(prompt, /^Conflict-recovery worker dispatch\./);
   assert.match(prompt, /#638/);
   assert.match(prompt, /#640/);
@@ -790,7 +791,7 @@ test("formatConflictRecoveryWorkerDispatchPrompt omits the Execution Issue line 
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt tells the worker to read the reviewed head from the Controlling Issue's Stage 1 bullet, not restated, when a control Issue is present", () => {
-  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding: BINDING });
   assert.match(prompt, /control Stage 1 reviewed head/);
 });
 
@@ -802,13 +803,13 @@ test("formatConflictRecoveryWorkerDispatchPrompt requires an explicit reviewedHe
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt mandates a real merge commit (never rebase/force-push) and fails closed to a founder interrupt for a semantic conflict", () => {
-  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding: BINDING });
   assert.match(prompt, /never rebase\/force-push/);
   assert.match(prompt, /semantic\/security => founder interrupt/);
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt mandates finalize-correction-breakpoint.mjs, naming its fail-closed CORRECTION_BREAKPOINT_UNVERIFIED reference, and forbids merge/Stage 2/re-review here", () => {
-  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding: BINDING });
   assert.match(prompt, /finalize-correction-breakpoint\.mjs/);
   assert.match(prompt, /CORRECTION_BREAKPOINT_UNVERIFIED/);
   assert.match(prompt, /no re-review, merge, or Stage 2/);
@@ -817,7 +818,7 @@ test("formatConflictRecoveryWorkerDispatchPrompt mandates finalize-correction-br
 // Stage 1 review finding on PR #719 (P1): names the pre-bound checkout and mandates
 // --verify-binding before any other step, mirroring the equivalent findings-correction test.
 test("formatConflictRecoveryWorkerDispatchPrompt names the pre-bound checkout and mandates --verify-binding before the recovery instructions", () => {
-  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding: BINDING });
   assert.ok(prompt.includes(`Pre-bound checkout: ${BINDING.path}.`));
   assert.ok(prompt.includes(`node "${BINDING.scriptPath}" --verify-binding ${BINDING.token} --pr 640`));
   assert.match(prompt, /pushRefspec/);
@@ -830,7 +831,7 @@ test("formatConflictRecoveryWorkerDispatchPrompt names the pre-bound checkout an
 test("formatConflictRecoveryWorkerDispatchPrompt fails closed with no pre-spawn checkoutBinding", () => {
   for (const checkoutBinding of [null, undefined, {}, { path: "", token: "1a2b3c4d", scriptPath: "x" }]) {
     assert.throws(
-      () => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding }),
+      () => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding }),
       /requires a pre-spawn checkoutBinding/,
     );
   }
@@ -838,9 +839,9 @@ test("formatConflictRecoveryWorkerDispatchPrompt fails closed with no pre-spawn 
 
 test("formatConflictRecoveryWorkerDispatchPrompt stays under the 700-char reference-only threshold (excluding the pre-bound path and scriptPath), with and without a control Issue and a full-length 40-char reviewedHead", () => {
   const resolverPath = BINDING.scriptPath.replace("pr-head-checkout-preflight.mjs", "resolve-protected-conflict.mjs");
-  const withControl = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
+  const withControl = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding: BINDING });
   const preflightPath = BINDING.scriptPath.replace("pr-head-checkout-preflight.mjs", "successor-integration-preflight.mjs");
-  const successorLen = renderConflictRecoverySuccessorClause({ preflightPath, issue: 638, pr: 640 }).length;
+  const successorLen = renderConflictRecoverySuccessorClause({ preflightPath, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD }).length;
   const withControlProse =
     withControl.length - BINDING.path.length - BINDING.scriptPath.length - resolverPath.length - CONFLICT_RECOVERY_PROTECTED_CLAUSE.length - successorLen;
   assert.ok(withControlProse < 700, `expected < 700 chars, got ${withControlProse}`);
@@ -859,7 +860,7 @@ test("formatConflictRecoveryWorkerDispatchPrompt stays under the 700-char refere
 // edit or a generic bypass, and the template's existing stop-at-breakpoint boundaries are intact.
 test("formatConflictRecoveryWorkerDispatchPrompt routes protected-file conflicts to the deterministic helper only and preserves the stop boundaries", () => {
   for (const args of [
-    { controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING },
+    { controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding: BINDING },
     { issue: 638, pr: 640, reviewedHead: "a".repeat(40), checkoutBinding: BINDING },
   ]) {
     const prompt = formatConflictRecoveryWorkerDispatchPrompt(args);
@@ -878,6 +879,17 @@ test("formatConflictRecoveryWorkerDispatchPrompt routes protected-file conflicts
     assert.match(prompt, /no re-review, merge, or Stage 2/);
     assert.ok(prompt.indexOf("--verify-binding") < prompt.indexOf("resolve-protected-conflict.mjs"));
   }
+});
+
+test("formatConflictRecoveryWorkerDispatchPrompt requires the gated correctedHead for a split successor route", () => {
+  assert.throws(
+    () => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING }),
+    /requires the gated 40-character correctedHead/,
+  );
+  assert.throws(
+    () => formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: "abc", checkoutBinding: BINDING }),
+    /requires the gated 40-character correctedHead/,
+  );
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt throws for missing/invalid required fields", () => {
@@ -939,6 +951,7 @@ test("CLI: piped STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT selects the conflict
     controlIssue: 666,
     issue: 638,
     pr: 640,
+    correctedHead: CORRECTED_HEAD,
     checkoutBinding: BINDING,
   });
   assert.equal(result.status, 0);
@@ -951,7 +964,13 @@ test("CLI: piped STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT selects the conflict
 // Stage 1 review finding on PR #719 (P1): piping this verdict without a pre-spawn checkoutBinding
 // must fail closed, mirroring the equivalent STAGE1_CORRECTION_REQUIRED CLI coverage below.
 test("CLI: piped STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT without a pre-spawn checkoutBinding fails closed", async () => {
-  const result = await runCli({ state: "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT", controlIssue: 666, issue: 638, pr: 640 });
+  const result = await runCli({
+    state: "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT",
+    controlIssue: 666,
+    issue: 638,
+    pr: 640,
+    correctedHead: CORRECTED_HEAD,
+  });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /requires a pre-spawn checkoutBinding/);
   assert.equal(result.stdout, "");
@@ -973,6 +992,8 @@ test("CLI: explicit --kind conflict-recovery selects the conflict-recovery templ
       "638",
       "--pr",
       "640",
+      "--corrected-head",
+      CORRECTED_HEAD,
       "--binding-path",
       BINDING.path,
       "--binding-token",
@@ -1411,11 +1432,12 @@ test("#924: findings correction template mandates the execution Issue in every c
 // Issue #950: exit 2 of the deterministic resolver is a branch point, not a blanket founder
 // interrupt, when a split control/execution flow can name a successor route.
 test("conflict-recovery prompt gives mutually exclusive predecessor/successor tails and rechecks target before successor push", () => {
-  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding: BINDING });
   assert.ok(prompt.indexOf("resolve-protected-conflict.mjs") < prompt.indexOf("successor-integration-preflight.mjs"));
   assert.match(prompt, /exit 0=>verify\/push predecessor/);
   assert.match(prompt, /exit 2 => founder\/product\/security\/authority ambiguity => founder interrupt/);
-  assert.match(prompt, /--execution-issue 638 --predecessor-pr 640/);
+  assert.match(prompt, new RegExp(`--execution-issue 638 --predecessor-pr 640 --expect-predecessor-head ${CORRECTED_HEAD}`));
+  assert.equal(prompt.split(`--expect-predecessor-head ${CORRECTED_HEAD}`).length - 1, 2);
   assert.match(prompt, /--expect-target <saved-target-sha>/);
   assert.match(prompt, /push the successor branch \(not the predecessor binding refspec\)/);
   assert.match(prompt, /Addresses #638/);
