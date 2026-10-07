@@ -16,8 +16,9 @@
 // in the merge-in-progress checkout instead of editing the file itself.
 //
 // Eligibility (all required; any failure is a FAIL_CLOSED reason code, nothing is written):
-//   Scope        the path is in PROTECTED_PATHS (a closed list -- not a general editor) and is a
-//                regular three-stage content conflict (base, PR side, target side all present).
+//   Scope        default selection stays on PROTECTED_PATHS. Correction-satisfied control mode
+//                may additionally select registered executor-substrate paths; ordinary work
+//                product and unregistered paths remain ineligible.
 //   Binding      this checkout is the live pre-bound PR-head reservation (the lock record
 //                pr-head-checkout-preflight.mjs wrote; `--binding-token`/`--pr` must match it if given), HEAD equals the reservation's
 //                pinned corrected head AND the PR's live head (no stale/moved head).
@@ -26,29 +27,28 @@
 //   Provenance   the index's stage blobs are exactly HEAD:path (PR side), MERGE_HEAD:path
 //                (target side) and the single merge-base's path (base) -- a tampered index or
 //                worktree cannot feed the proof.
-//   Reviewed     the PR side's file is byte-identical to the file at the Stage 1 reviewed head
-//                (`--reviewed-head`, a proven ancestor of HEAD): nothing in the protected file
-//                changed after review, so no unreviewed post-review content can ride through.
-//   Mechanical   per conflict hunk, a token-level three-way proof: the PR side is a pure
-//                insertion into the base (it deletes/rewrites nothing); each insertion sits
-//                between two base tokens the target side kept unchanged and adjacent (so the
-//                target never edited or inserted at that point); and the composed result minus
-//                the PR insertions equals the target side exactly. Target content is therefore
-//                wholly preserved and only already-reviewed PR content is added.
+//   Accepted     content is byte-identical to the Stage 1 reviewed head OR the exact
+//                correction-satisfied HEAD bound by --control-issue/--execution-issue, with every
+//                reviewed..HEAD commit attributable to that execution Issue.
+//   Mechanical   per hunk, the result preserves target authority and adds only accepted PR
+//                content. Pure insertions remain supported; same-gap additions require unique
+//                containment; shared rewrites require identical base deletions and one resulting
+//                hunk to contain the other. Competing content/order remains fail-closed.
 //   Whole file   the same invariant is then proven over the COMPLETE resolved file (plain
 //                segments included): every target-file token survives in order and every other
 //                token run is reviewed PR content, so a PR-side deletion/rewrite outside a
 //                conflict hunk fails closed (PR #923 Stage 1 finding).
-// Anything else -- a target change that would be dropped, both sides editing/inserting at the
-// same place, a PR-side rewrite, ambiguous alignment -- is a founder interrupt, never selected.
+// Anything else -- target loss, asymmetric rewrites, non-containing same-gap edits, stale
+// correction provenance, or ambiguous alignment -- is a founder interrupt/stop, never selected.
 //
-// Never done here: commit, push, rebase, touch other conflicted files, write a path outside
-// PROTECTED_PATHS, or relax a provider protection. The worker still resolves ordinary conflicts,
+// Never done here: commit, push, rebase, touch unrequested conflicts, write ordinary work-product
+// paths, author novel executor-substrate semantics, or relax a provider protection. The worker still resolves ordinary conflicts,
 // commits the merge, verifies, pushes, and finalizes per the recovery contract.
 //
 // Usage (from the reserved checkout, merge in progress):
-//   node tools/orchestration/resolve-protected-conflict.mjs --reviewed-head <sha> [--apply]
-//     [--pr <N>] [--binding-token <token>] [--path AGENTS.md]... [--repo <owner/repo>]
+//   node <controller-authoritative>/resolve-protected-conflict.mjs --reviewed-head <sha> [--apply]
+//     [--control-issue <N> --execution-issue <N> --all-executor-substrate]
+//     [--pr <N>] [--binding-token <token>] [--path <eligible-path>]... [--repo <owner/repo>]
 //   Without --apply it only reports the verdict (dry run). Exit 0 RESOLVED/WOULD_RESOLVE,
 //   2 FAIL_CLOSED (founder interrupt, no mutation), 1 usage/operational error.
 //
@@ -62,8 +62,9 @@ import { pathToFileURL } from "node:url";
 import { parseBindingLockReason } from "./pr-head-checkout-preflight.mjs";
 import { parseWorktreeListPorcelain } from "./worktree-preflight.mjs";
 import { normalizePathForComparison } from "./classify-primary-path-lock.mjs";
-import { readGithubPr } from "./github-read.mjs";
-import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
+import { readGithubIssue, readGithubPr } from "./github-read.mjs";
+import { classifyMechanicalIntegrationPath } from "./executor-substrate-authority.mjs";
+import { describeExecutionConflict, parseExecutionPointer, readExecutionBulletField, resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 
 // Closed list of operating-contract files this reconciliation may ever write. Deliberately not
 // derived from the executor-substrate classifier: widening it is a new, separately authorized
@@ -118,10 +119,29 @@ function insertionsOf(baseToOther, otherTokens) {
     if (otherToBase.has(j)) gap = otherToBase.get(j) + 1;
     else {
       if (!ins.has(gap)) ins.set(gap, []);
-      ins.get(gap).push({ token: otherTokens[j] });
+      ins.get(gap).push({ token: otherTokens[j], index: j });
     }
   }
   return ins;
+}
+
+function sameDeletionMask(a, b) {
+  return a.length === b.length && a.every((x, i) => (x < 0) === (b[i] < 0));
+}
+
+function uniqueContiguousIndex(haystack, needle) {
+  if (needle.length === 0) return { index: 0, unique: true };
+  let found = -1;
+  for (let i = 0; i + needle.length <= haystack.length; i++) {
+    let ok = true;
+    for (let j = 0; j < needle.length; j++) {
+      if (haystack[i + j] !== needle[j]) { ok = false; break; }
+    }
+    if (!ok) continue;
+    if (found !== -1) return { index: -1, unique: false };
+    found = i;
+  }
+  return { index: found, unique: found !== -1 };
 }
 
 // Pure. Proves (or refuses) the single mechanical resolution of ONE conflict hunk. `prText` is
@@ -136,33 +156,54 @@ export function proveHunk({ prText, baseText, targetText, reviewedText }) {
   const targetAlign = align(base, target);
   if (!prAlign || !targetAlign) return fail("HUNK_TOO_LARGE", "conflict hunk too large to prove mechanically");
 
-  if (prAlign.some((x) => x < 0)) {
-    return fail("PR_SIDE_REWRITES_BASE", "the PR side deletes or rewrites base content; not a pure reviewed insertion");
+  // #939: a PR-side base rewrite is mechanical only when the target deletes the exact
+  // same base tokens. The insertions that replace those tokens are then composed per gap below:
+  // same-gap text needs unique contiguous containment, while a separate PR-only addition can
+  // still be preserved when its target anchors remain intact.
+  const sharedRewrite = prAlign.some((x) => x < 0);
+  if (sharedRewrite && !sameDeletionMask(prAlign, targetAlign)) {
+    return fail("PR_SIDE_REWRITES_BASE", "the PR side deletes or rewrites base content that the target side does not delete identically");
   }
+
   const prIns = insertionsOf(prAlign, pr);
   if (prIns.size === 0) return fail("NO_PR_CHANGE", "the PR side adds nothing to the base; not the expected conflict shape");
-
   const targetIns = insertionsOf(targetAlign, target);
   const n = base.length;
-  const insertBefore = new Map(); // target token index -> PR tokens placed before it
+  const insertBefore = new Map();
+  const insertAfter = new Map();
   let appendAtEnd = null;
   for (const [gap, entries] of prIns) {
     const text = entries.map((e) => e.token).join("");
-    if (text.trim() !== "" && !reviewedText.includes(text.trim())) {
-      return fail("UNREVIEWED_PR_CONTENT", "a PR-side insertion is not present in the Stage 1 reviewed file");
-    }
+    if (text.trim() !== "" && !reviewedText.includes(text.trim())) return fail("UNREVIEWED_PR_CONTENT", "a PR-side insertion is not present in accepted Stage 1/correction content");
     const left = gap > 0 ? targetAlign[gap - 1] : null;
     const right = gap < n ? targetAlign[gap] : null;
-    if ((gap > 0 && left < 0) || (gap < n && right < 0)) {
-      return fail("COMPETING_CHANGE", "the target side edited or removed content adjacent to a PR-side insertion");
-    }
-    if (targetIns.has(gap)) {
-      return fail("COMPETING_CHANGE", "both sides add content at the same position; ordering is a semantic choice");
-    }
-    if (gap > 0 && gap < n && right !== left + 1) {
-      return fail("AMBIGUOUS_ALIGNMENT", "the target side's token alignment around the insertion point is not contiguous");
-    }
     const toks = entries.map((e) => e.token);
+    if (targetIns.has(gap)) {
+      const te = targetIns.get(gap);
+      const tt = te.map((e) => e.token);
+      // When both sides deleted the same base token(s), this insertion is the replacement text:
+      // require exact equality there. A prefix/suffix such as "not " can reverse an instruction
+      // even while containing the target tokens verbatim. Separate PR-only additions remain
+      // composable at other, intact gaps below.
+      if (sharedRewrite) {
+        if (tt.join("") !== toks.join("")) {
+          return fail("COMPETING_CHANGE", "shared base rewrite has non-identical replacement text");
+        }
+        continue;
+      }
+      if (uniqueContiguousIndex(tt, toks).unique) continue;
+      const targetInPr = uniqueContiguousIndex(toks, tt);
+      if (!targetInPr.unique) return fail("COMPETING_CHANGE", "same-gap additions are non-containing or ambiguously repeated");
+      const prefix = toks.slice(0, targetInPr.index);
+      const suffix = toks.slice(targetInPr.index + tt.length);
+      if (prefix.length) insertBefore.set(te[0].index, prefix);
+      if (suffix.length) insertAfter.set(te[te.length - 1].index, suffix);
+      continue;
+    }
+    if ((gap > 0 && left < 0) || (gap < n && right < 0)) {
+      return fail("COMPETING_CHANGE", "the target side edited or removed content adjacent to a PR-only insertion");
+    }
+    if (gap > 0 && gap < n && right !== left + 1) return fail("AMBIGUOUS_ALIGNMENT", "the target side token alignment around the insertion point is not contiguous");
     if (gap < n) insertBefore.set(right, toks);
     else appendAtEnd = toks;
   }
@@ -170,44 +211,22 @@ export function proveHunk({ prText, baseText, targetText, reviewedText }) {
   const out = [];
   const inserted = [];
   for (let j = 0; j < target.length; j++) {
-    if (insertBefore.has(j)) {
-      for (const t of insertBefore.get(j)) {
-        inserted.push(out.length);
-        out.push(t);
-      }
-    }
+    if (insertBefore.has(j)) for (const t of insertBefore.get(j)) { inserted.push(out.length); out.push(t); }
     out.push(target[j]);
+    if (insertAfter.has(j)) for (const t of insertAfter.get(j)) { inserted.push(out.length); out.push(t); }
   }
-  if (appendAtEnd) {
-    for (const t of appendAtEnd) {
-      inserted.push(out.length);
-      out.push(t);
-    }
-  }
+  if (appendAtEnd) for (const t of appendAtEnd) { inserted.push(out.length); out.push(t); }
   const resolved = out.join("");
-
-  // Independent re-verification of both halves of the proof.
-  // (1) Target content is wholly preserved: the result minus the proven PR insertions is the
-  //     target side exactly.
   const insertedAt = new Set(inserted);
-  const withoutInsertions = out.filter((_, i) => !insertedAt.has(i)).join("");
-  if (withoutInsertions !== targetText) {
-    return fail("VERIFICATION_FAILED", "composed result does not preserve the target side exactly");
-  }
-  // (2) Only PR content is added: base plus the proven PR insertions reproduces the PR side
-  //     exactly, and every inserted token is accounted for.
+  if (out.filter((_, i) => !insertedAt.has(i)).join("") !== targetText) return fail("VERIFICATION_FAILED", "composed result does not preserve the target side exactly");
   const prRebuilt = [];
   for (let gap = 0; gap <= n; gap++) {
     if (prIns.has(gap)) prRebuilt.push(...prIns.get(gap).map((e) => e.token));
-    if (gap < n) prRebuilt.push(base[gap]);
+    if (gap < n && prAlign[gap] >= 0) prRebuilt.push(base[gap]);
   }
-  const insertedCount = [...prIns.values()].reduce((sum, e) => sum + e.length, 0);
-  if (prRebuilt.join("") !== prText || inserted.length !== insertedCount) {
-    return fail("VERIFICATION_FAILED", "proven insertions do not reproduce the PR side's content");
-  }
+  if (prRebuilt.join("") !== prText) return fail("VERIFICATION_FAILED", "proven insertions do not reproduce the PR side content");
   return { ok: true, resolved };
 }
-
 function fail(code, reason) {
   return { ok: false, code, reason };
 }
@@ -322,10 +341,70 @@ function git(args, { cwd, input } = {}) {
   return execFileSync("git", args, { cwd, encoding: "utf8", input, stdio: ["pipe", "pipe", "pipe"] });
 }
 
+function parseControlBullet(body, label) {
+  const prefix = `- **${label}:**`;
+  const line = String(body ?? "").split(/\r?\n/).find((candidate) => candidate.startsWith(prefix));
+  return line ? line.slice(prefix.length).trim() : null;
+}
+
+function parseIssueRef(value) {
+  const m = /^#(\d+)$/.exec(String(value ?? "").trim());
+  return m ? Number(m[1]) : null;
+}
+
+function parseCorrectionSatisfied(value) {
+  const m = /^correction-satisfied at ([0-9a-f]{7,64}) \(reviewed ([0-9a-f]{7,64})\)$/i.exec(String(value ?? "").trim());
+  return m ? { correctedHead: m[1].toLowerCase(), reviewedHead: m[2].toLowerCase() } : null;
+}
+
+export function commitMessageReferencesIssue(message, issue) {
+  if (!Number.isInteger(issue) || issue <= 0) return false;
+  const re = new RegExp(`(^|[^\\w/])#${issue}(?!\\w)`);
+  return re.test(String(message ?? ""));
+}
+
+async function proveAcceptedCorrectionHead({ repo, controlIssue, executionIssue, pr, reviewed, head, cwd }, deps) {
+  if (!Number.isInteger(controlIssue) || controlIssue <= 0 || !Number.isInteger(executionIssue) || executionIssue <= 0) {
+    return closed("UNREVIEWED_POST_REVIEW_CONTENT", "corrected head differs from reviewed head without exact control/execution identity");
+  }
+  let control;
+  try { control = await deps.readIssue({ repo, issue: controlIssue }); }
+  catch (err) { return closed("CORRECTION_PROVENANCE_UNVERIFIED", `could not read control Issue #${controlIssue}: ${String(err.message ?? err).split("\n")[0]}`); }
+  if (control?.state !== "OPEN") return closed("CORRECTION_PROVENANCE_UNVERIFIED", `control Issue #${controlIssue} is not OPEN`);
+  const body = control?.body ?? "";
+  const stage1 = parseCorrectionSatisfied(parseControlBullet(body, "Stage 1"));
+  const executionField = readExecutionBulletField(body);
+  if (executionField.conflict) {
+    return closed("CORRECTION_PROVENANCE_UNVERIFIED", describeExecutionConflict(executionField));
+  }
+  const executionRef = parseExecutionPointer(executionField.value);
+  if (
+    !executionRef.ok ||
+    executionRef.issue !== executionIssue ||
+    parseIssueRef(parseControlBullet(body, "PR")) !== pr ||
+    !stage1 ||
+    stage1.correctedHead !== head.toLowerCase() ||
+    stage1.reviewedHead !== reviewed.toLowerCase()
+  ) {
+    return closed("CORRECTION_PROVENANCE_UNVERIFIED", `control Issue #${controlIssue} does not bind Execution #${executionIssue}, PR #${pr}, and the exact correction-satisfied heads`);
+  }
+  let commits;
+  try { commits = deps.git(["rev-list", "--reverse", `${reviewed}..${head}`], { cwd }).trim().split("\n").filter(Boolean); }
+  catch (err) { return closed("CORRECTION_PROVENANCE_UNVERIFIED", `could not enumerate correction commits: ${String(err.message ?? err).split("\n")[0]}`); }
+  if (commits.length === 0) return closed("CORRECTION_PROVENANCE_UNVERIFIED", "no correction commits found between reviewed and corrected heads");
+  for (const commit of commits) {
+    let message;
+    try { message = deps.git(["show", "-s", "--format=%B", commit], { cwd }); }
+    catch (err) { return closed("CORRECTION_PROVENANCE_UNVERIFIED", `could not read correction commit ${commit}: ${String(err.message ?? err).split("\n")[0]}`); }
+    if (!commitMessageReferencesIssue(message, executionIssue)) return closed("CORRECTION_PROVENANCE_UNVERIFIED", `correction commit ${commit} is not attributable to execution Issue #${executionIssue}`);
+  }
+  return { ok: true, commits };
+}
 export function defaultDeps() {
   return {
     git: (args, opts) => git(args, opts),
     readPr: ({ repo, pr }) => readGithubPr({ repo, number: pr, fields: ["headRefOid", "baseRefName", "state"] }),
+    readIssue: ({ repo, issue }) => readGithubIssue({ repo, number: issue, fields: ["body", "state"] }),
     readBranchTip: ({ repo, branch }) =>
       JSON.parse(
         execFileSync("gh", ["api", `repos/${repo}/git/ref/heads/${branch}`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
@@ -424,24 +503,36 @@ function parseStagedEntry(lsFilesStage, expectedPath) {
 }
 
 export async function resolveProtectedConflict(
-  { repo, pr, token, reviewedHead, paths = [], apply = false, cwd = process.cwd() },
+  { repo, pr, token, reviewedHead, controlIssue = null, executionIssue = null, paths = [], includeExecutorSubstrate = false, apply = false, cwd = process.cwd() },
   deps = defaultDeps(),
 ) {
   const prGiven = pr !== undefined && pr !== null && !Number.isNaN(pr);
   if (
     (prGiven && (!Number.isInteger(pr) || pr <= 0)) ||
     (token !== undefined && token !== null && (typeof token !== "string" || !token)) ||
+    (controlIssue !== null && controlIssue !== undefined && (!Number.isInteger(controlIssue) || controlIssue <= 0)) ||
+    (executionIssue !== null && executionIssue !== undefined && (!Number.isInteger(executionIssue) || executionIssue <= 0)) ||
     typeof reviewedHead !== "string" ||
     !SHA_RE.test(reviewedHead) ||
     typeof repo !== "string" ||
     !repo
   ) {
-    return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: "--reviewed-head <sha> and a repository are required; --pr/--binding-token, when given, must be well-formed" };
+    return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: "--reviewed-head <sha> and a repository are required; --pr/--binding-token/--control-issue/--execution-issue, when given, must be well-formed" };
   }
+  const explicitPathClasses = new Map();
   for (const p of paths) {
-    if (!PROTECTED_PATHS.includes(p)) {
-      return closed("PATH_NOT_ELIGIBLE", `${p} is not an eligible protected operating-contract path (${PROTECTED_PATHS.join(", ")})`);
+    if (PROTECTED_PATHS.includes(p)) {
+      explicitPathClasses.set(p, classifyMechanicalIntegrationPath(p));
+      continue;
     }
+    const classified = classifyMechanicalIntegrationPath(p);
+    if (!classified.eligible) {
+      return closed("PATH_NOT_ELIGIBLE", `${p} is not a registered executor-substrate component eligible for deterministic merge integration`);
+    }
+    if (!controlIssue || !executionIssue) {
+      return closed("MECHANICAL_INTEGRATION_AUTHORITY_MISSING", `${p} is executor substrate (${classified.component}); exact control/execution identity is required`);
+    }
+    explicitPathClasses.set(p, classified);
   }
   const g = (args) => deps.git(args, { cwd }).trim();
   let top, head, reviewed;
@@ -504,6 +595,18 @@ export async function resolveProtectedConflict(
   } catch {
     return closed("REVIEWED_HEAD_NOT_ANCESTOR", "the reviewed head is not an ancestor of the corrected head");
   }
+
+  let correctionProvenance = null;
+  // Executor-substrate integration always consumes correction-satisfied content, so prove that
+  // control/execution binding up front. Protected-only recovery stays backward-compatible: a
+  // later HEAD is harmless when the protected file itself is still byte-identical to the
+  // reviewed version; provenance is required lazily only if protected content changed.
+  if (includeExecutorSubstrate && head.toLowerCase() !== reviewed.toLowerCase()) {
+    const proof = await proveAcceptedCorrectionHead({ repo, controlIssue, executionIssue, pr, reviewed, head, cwd }, deps);
+    if (!proof.ok) return proof;
+    correctionProvenance = proof;
+  }
+
   try {
     deps.git(["merge-base", "--is-ancestor", mergeHead, head], { cwd });
     return closed("TARGET_ALREADY_MERGED", "MERGE_HEAD is already contained in HEAD");
@@ -521,8 +624,21 @@ export async function resolveProtectedConflict(
 
   const unmerged = parseUnmerged(deps.git(["ls-files", "-u", "--full-name"], { cwd: top }));
   if (!unmerged) return closed("MALFORMED_INDEX", "could not parse the index's unmerged entries");
-  const targets = paths.length ? paths : [...unmerged.keys()].filter((p) => PROTECTED_PATHS.includes(p));
-  if (targets.length === 0) return closed("NO_PROTECTED_CONFLICT", "no unmerged eligible protected path in this checkout");
+  if (includeExecutorSubstrate && (!controlIssue || !executionIssue)) {
+    return closed("MECHANICAL_INTEGRATION_AUTHORITY_MISSING", "--all-executor-substrate requires exact --control-issue and --execution-issue identities");
+  }
+  const targets = paths.length
+    ? paths
+    : [...unmerged.keys()].filter((p) => {
+        if (PROTECTED_PATHS.includes(p)) return true;
+        return includeExecutorSubstrate && classifyMechanicalIntegrationPath(p).eligible;
+      });
+  if (targets.length === 0) return closed("NO_PROTECTED_CONFLICT", "no unmerged eligible protected/executor-substrate path in this checkout");
+  const includesExecutorSubstrate = targets.some((p) => !PROTECTED_PATHS.includes(p));
+  if (includesExecutorSubstrate && !correctionProvenance) {
+    return closed("MECHANICAL_INTEGRATION_AUTHORITY_MISSING", "executor-substrate integration requires exact correction-satisfied control binding and correction provenance");
+  }
+  const pathClasses = new Map(targets.map((p) => [p, explicitPathClasses.get(p) ?? classifyMechanicalIntegrationPath(p)]));
 
   const results = [];
   for (const path of targets) {
@@ -579,15 +695,26 @@ export async function resolveProtectedConflict(
         { path },
       );
     }
-    if (headEntry.oid !== reviewedEntry.oid || headEntry.mode !== reviewedEntry.mode) {
-      return closed("UNREVIEWED_POST_REVIEW_CONTENT", `${path} at the corrected head differs from the Stage 1 reviewed head in content or mode`, { path });
+    if (!correctionProvenance && (headEntry.oid !== reviewedEntry.oid || headEntry.mode !== reviewedEntry.mode)) {
+      if (controlIssue && executionIssue) {
+        const proof = await proveAcceptedCorrectionHead({ repo, controlIssue, executionIssue, pr, reviewed, head, cwd }, deps);
+        if (!proof.ok) return proof;
+        correctionProvenance = proof;
+      } else {
+        return closed("UNREVIEWED_POST_REVIEW_CONTENT", `${path} at the corrected head differs from the Stage 1 reviewed head in content or mode`, { path });
+      }
     }
 
+    const pathClass = pathClasses.get(path);
+    if (!PROTECTED_PATHS.includes(path) && (!pathClass || !pathClass.eligible)) {
+      return closed("PATH_NOT_ELIGIBLE", `${path} is not a registered executor-substrate component`, { path });
+    }
     const content = (oid) => deps.git(["cat-file", "blob", oid], { cwd });
+    const acceptedText = correctionProvenance ? content(headEntry.oid) : content(reviewedEntry.oid);
     const diff3 = deps.mergeFile({ ours: content(headEntry.oid), base: content(baseEntry.oid), theirs: content(targetEntry.oid) });
-    const proof = proveFile({ diff3Output: diff3, reviewedText: content(reviewedEntry.oid), targetText: content(targetEntry.oid) });
+    const proof = proveFile({ diff3Output: diff3, reviewedText: acceptedText, targetText: content(targetEntry.oid) });
     if (!proof.ok) return closed(proof.code, proof.reason, { path, hunk: proof.hunk });
-    results.push({ path, resolved: proof.resolved, hunks: proof.hunks, mode: targetEntry.mode });
+    results.push({ path, component: pathClass?.component ?? null, resolved: proof.resolved, hunks: proof.hunks, mode: targetEntry.mode });
   }
 
   // Every proof held. Re-check every write target as a regular file immediately before the
@@ -646,7 +773,10 @@ export async function resolveProtectedConflict(
     exitCode: 0,
     verdict: apply ? "RESOLVED" : "WOULD_RESOLVE",
     mutated: apply,
-    paths: results.map((r) => ({ path: r.path, hunks: r.hunks })),
+    paths: results.map((r) => ({ path: r.path, component: r.component, hunks: r.hunks })),
+    acceptedContent: correctionProvenance
+      ? { source: "correction-satisfied-head", controlIssue, executionIssue, commits: correctionProvenance.commits }
+      : { source: "stage1-reviewed-head" },
   };
 }
 
@@ -655,10 +785,13 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--apply") args.apply = true;
+    else if (a === "--all-executor-substrate") args.includeExecutorSubstrate = true;
     else if (a === "--path") args.paths.push(argv[++i]);
     else if (a === "--pr") args.pr = Number(argv[++i]);
     else if (a === "--binding-token") args.token = argv[++i];
     else if (a === "--reviewed-head") args.reviewedHead = argv[++i];
+    else if (a === "--control-issue") args.controlIssue = Number(argv[++i]);
+    else if (a === "--execution-issue") args.executionIssue = Number(argv[++i]);
     else if (a === "--repo") args.repo = argv[++i];
     else return { error: `unknown argument ${a}` };
   }

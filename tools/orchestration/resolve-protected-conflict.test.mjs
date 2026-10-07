@@ -16,6 +16,7 @@ import {
   proveFile,
   parseDiff3,
   resolveProtectedConflict,
+  commitMessageReferencesIssue,
   defaultDeps,
 } from "./resolve-protected-conflict.mjs";
 import { formatBindingLockReason } from "./pr-head-checkout-preflight.mjs";
@@ -51,6 +52,51 @@ test("proveHunk: both sides inserting at the same position is competing, never o
   const r = proveHunk({ prText: PR_ADD, baseText: BASE, targetText: target, reviewedText: PR_ADD });
   assert.equal(r.ok, false);
   assert.equal(r.code, "COMPETING_CHANGE");
+});
+
+test("proveHunk: same-gap insertion is mechanical when one side uniquely contains the other", () => {
+  const targetContainsPr =
+    "Rule one applies when alpha holds. Rule two applies when beta holds. Rule three covers delta. Rule four covers epsilon. Keep it short.\n";
+  const a = proveHunk({ prText: PR_ADD, baseText: BASE, targetText: targetContainsPr, reviewedText: PR_ADD });
+  assert.equal(a.ok, true);
+  assert.equal(a.resolved, targetContainsPr);
+
+  const prContainsTarget =
+    "Rule one applies when alpha holds. Rule two applies when beta holds. Rule four covers epsilon. Rule three covers delta. Keep it short.\n";
+  const targetAdd =
+    "Rule one applies when alpha holds. Rule two applies when beta holds. Rule four covers epsilon. Keep it short.\n";
+  const b = proveHunk({ prText: prContainsTarget, baseText: BASE, targetText: targetAdd, reviewedText: prContainsTarget });
+  assert.equal(b.ok, true);
+  assert.equal(b.resolved, prContainsTarget);
+});
+
+test("proveHunk: an identical shared rewrite plus an accepted PR-only insertion is mechanical", () => {
+  const target =
+    "Rule one applies when alpha holds. Rule two now applies when omega holds. Keep it short.\n";
+  const pr =
+    "Rule one applies when alpha holds. Rule two now applies when omega holds. Rule three covers delta. Keep it short.\n";
+  const r = proveHunk({ prText: pr, baseText: BASE, targetText: target, reviewedText: pr });
+  assert.equal(r.ok, true);
+  assert.equal(r.resolved, pr);
+});
+
+test("proveHunk: shared rewrites require contiguous containment, never token interleaving", () => {
+  const r = proveHunk({
+    baseText: "Rule is old.\n",
+    prText: "Rule is not never allowed.\n",
+    targetText: "Rule is never allowed.\n",
+    reviewedText: "Rule is not never allowed.\n",
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, "COMPETING_CHANGE");
+});
+
+test("commitMessageReferencesIssue requires the established whole GitHub issue token", () => {
+  assert.equal(commitMessageReferencesIssue("accepted correction (#868)", 868), true);
+  assert.equal(commitMessageReferencesIssue("accepted correction #868.", 868), true);
+  assert.equal(commitMessageReferencesIssue("accepted correction #868abc", 868), false);
+  assert.equal(commitMessageReferencesIssue("word#868", 868), false);
+  assert.equal(commitMessageReferencesIssue("path/#868", 868), false);
 });
 
 test("proveHunk: target edit adjacent to the PR insertion point is competing", () => {
@@ -93,7 +139,17 @@ const FOOTER = "\nTrailing section.\n";
 
 // Builds: primary repo on main (base), a reserved/locked worktree on the PR branch, and a
 // target advance on main. Options shape each side's AGENTS.md content.
-function buildFixture({ targetPara = TARGET_EDIT, prPara = PR_ADD, postReviewPara = null, other = false, prHeader = HEADER, targetExecutable = false } = {}) {
+function buildFixture({
+  targetPara = TARGET_EDIT,
+  prPara = PR_ADD,
+  postReviewPara = null,
+  postReviewMessage = "post-review protected change",
+  postReviewCode = null,
+  other = false,
+  substrate = false,
+  prHeader = HEADER,
+  targetExecutable = false,
+} = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "ldl-rpc-test-")));
   const primary = join(root, "primary");
   execFileSync("git", ["init", "-q", "-b", "main", primary]);
@@ -102,23 +158,29 @@ function buildFixture({ targetPara = TARGET_EDIT, prPara = PR_ADD, postReviewPar
   const write = (dir, file, text) => writeFileSync(join(dir, file), text);
   write(primary, "AGENTS.md", HEADER + BASE + FOOTER);
   write(primary, "code.txt", "base code\n");
+  if (substrate) {
+    mkdirSync(join(primary, "tools", "orchestration"), { recursive: true });
+    write(primary, "tools/orchestration/action-envelope.mjs", BASE);
+  }
   sh(primary, "add", ".");
   sh(primary, "commit", "-q", "-m", "base");
   const pr = join(root, "pr-wt");
   sh(primary, "worktree", "add", "-q", "-b", "pr-branch", pr);
   write(pr, "AGENTS.md", prHeader + prPara + FOOTER);
   if (other) write(pr, "code.txt", "pr code\n");
+  if (substrate) write(pr, "tools/orchestration/action-envelope.mjs", prPara);
   sh(pr, "commit", "-q", "-am", "pr change");
   const reviewed = sh(pr, "rev-parse", "HEAD");
-  if (postReviewPara) {
-    write(pr, "AGENTS.md", HEADER + postReviewPara + FOOTER);
-    sh(pr, "commit", "-q", "-am", "post-review protected change");
-  }
+  if (postReviewPara) write(pr, "AGENTS.md", HEADER + postReviewPara + FOOTER);
+  if (postReviewCode !== null) write(pr, "code.txt", postReviewCode);
+  if (postReviewPara || postReviewCode !== null) sh(pr, "commit", "-q", "-am", postReviewMessage);
   const corrected = sh(pr, "rev-parse", "HEAD");
   write(primary, "AGENTS.md", HEADER + targetPara + FOOTER);
   if (other) write(primary, "code.txt", "main code\n");
+  if (substrate) write(primary, "tools/orchestration/action-envelope.mjs", targetPara);
   sh(primary, "add", "AGENTS.md");
   if (other) sh(primary, "add", "code.txt");
+  if (substrate) sh(primary, "add", "tools/orchestration/action-envelope.mjs");
   if (targetExecutable) sh(primary, "update-index", "--chmod=+x", "AGENTS.md");
   sh(primary, "commit", "-q", "-m", "target advance");
   const tip = sh(primary, "rev-parse", "main");
@@ -138,6 +200,19 @@ function depsFor(fx, { prHead = null, baseTip = null, state = "OPEN" } = {}) {
     readPr: async () => ({ headRefOid: prHead ?? fx.corrected, baseRefName: "main", state }),
     readBranchTip: async () => baseTip ?? fx.tip,
   };
+}
+
+function depsForCorrection(fx, { controlIssue = 867, executionIssue = 868, executionLabel = "Execution" } = {}) {
+  const deps = depsFor(fx);
+  deps.readIssue = async ({ issue }) => ({
+    state: "OPEN",
+    body:
+      `- **${executionLabel}:** #${executionIssue}\n` +
+      `- **PR:** #869\n` +
+      `- **Stage 1:** correction-satisfied at ${fx.corrected} (reviewed ${fx.reviewed})\n`,
+    number: issue,
+  });
+  return deps;
 }
 
 const args = (fx, extra = {}) => ({ repo: "o/r", pr: 869, token: fx.token, reviewedHead: fx.reviewed, cwd: fx.pr, ...extra });
@@ -187,6 +262,24 @@ test("#869-equivalent: root-relative provenance and staging work when launched f
     assert.equal(r.verdict, "RESOLVED");
     assert.equal(readFileSync(join(fx.pr, "AGENTS.md"), "utf8"), HEADER + MERGED + FOOTER);
     assert.equal(unmergedPaths(fx).includes("AGENTS.md"), false);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("protected-only direct recovery still works when HEAD advanced after review but the protected file did not", async () => {
+  const fx = buildFixture({
+    other: true,
+    postReviewCode: "post-review code change\n",
+    postReviewMessage: "unrelated post-review work",
+  });
+  try {
+    assert.notEqual(fx.reviewed, fx.corrected);
+    const r = await resolveProtectedConflict(args(fx, { apply: true }), depsFor(fx));
+    assert.equal(r.exitCode, 0, JSON.stringify(r));
+    assert.equal(r.verdict, "RESOLVED");
+    assert.equal(r.acceptedContent.source, "stage1-reviewed-head");
+    assert.equal(readFileSync(join(fx.pr, "AGENTS.md"), "utf8"), HEADER + MERGED + FOOTER);
   } finally {
     fx.cleanup();
   }
@@ -269,6 +362,88 @@ test("unreviewed post-review protected-file content cannot ride through the mech
     assert.equal(r.verdict, "FAIL_CLOSED");
     assert.equal(r.code, "UNREVIEWED_POST_REVIEW_CONTENT");
     assertNoMutation(fx, before);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("#939: correction-provenance-bound executor substrate resolves mechanically without a component grant or agent edit", async () => {
+  const correctedPara = PR_ADD.replace("Keep it short.", "Correction note for #868. Keep it short.");
+  const fx = buildFixture({
+    substrate: true,
+    postReviewPara: correctedPara,
+    postReviewMessage: "accepted findings correction (#868)",
+  });
+  try {
+    const r = await resolveProtectedConflict(
+      args(fx, {
+        controlIssue: 867,
+        executionIssue: 868,
+        includeExecutorSubstrate: true,
+        apply: true,
+      }),
+      depsForCorrection(fx),
+    );
+    assert.equal(r.exitCode, 0);
+    assert.equal(r.verdict, "RESOLVED");
+    const byPath = Object.fromEntries(r.paths.map((p) => [p.path, p]));
+    assert.equal(byPath["AGENTS.md"].component, "operating-contract");
+    assert.equal(byPath["tools/orchestration/action-envelope.mjs"].component, "authority-guards");
+    assert.equal(unmergedPaths(fx).includes("AGENTS.md"), false);
+    assert.equal(unmergedPaths(fx).includes("tools/orchestration/action-envelope.mjs"), false);
+    assert.equal(r.acceptedContent.source, "correction-satisfied-head");
+    assert.deepEqual(r.acceptedContent.commits.length, 1);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("#939: correction provenance accepts the repository-supported Execution issue field spelling", async () => {
+  const correctedPara = PR_ADD.replace("Keep it short.", "Correction note for #868. Keep it short.");
+  const fx = buildFixture({
+    substrate: true,
+    postReviewPara: correctedPara,
+    postReviewMessage: "accepted findings correction (#868)",
+  });
+  try {
+    const r = await resolveProtectedConflict(
+      args(fx, {
+        controlIssue: 867,
+        executionIssue: 868,
+        includeExecutorSubstrate: true,
+      }),
+      depsForCorrection(fx, { executionLabel: "Execution issue" }),
+    );
+    assert.equal(r.exitCode, 0, JSON.stringify(r));
+    assert.equal(r.verdict, "WOULD_RESOLVE");
+    assert.equal(r.acceptedContent.source, "correction-satisfied-head");
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("#939: missing execution provenance in a post-review correction remains fail closed before substrate mutation", async () => {
+  const correctedPara = PR_ADD.replace("Keep it short.", "Correction note. Keep it short.");
+  const fx = buildFixture({
+    substrate: true,
+    postReviewPara: correctedPara,
+    postReviewMessage: "accepted-looking correction without issue provenance",
+  });
+  try {
+    const before = readFileSync(join(fx.pr, "tools/orchestration/action-envelope.mjs"), "utf8");
+    const r = await resolveProtectedConflict(
+      args(fx, {
+        controlIssue: 867,
+        executionIssue: 868,
+        includeExecutorSubstrate: true,
+        apply: true,
+      }),
+      depsForCorrection(fx),
+    );
+    assert.equal(r.exitCode, 2);
+    assert.equal(r.code, "CORRECTION_PROVENANCE_UNVERIFIED");
+    assert.equal(readFileSync(join(fx.pr, "tools/orchestration/action-envelope.mjs"), "utf8"), before);
+    assert.ok(unmergedPaths(fx).includes("tools/orchestration/action-envelope.mjs"));
   } finally {
     fx.cleanup();
   }
@@ -430,7 +605,7 @@ test("late symlink swap cannot redirect the atomic protected-file replacement", 
   }
 });
 
-test("only the closed protected-path list is eligible; ordinary conflicts are untouched", async () => {
+test("default selection stays protected-only; ordinary work product is never eligible and substrate needs correction provenance", async () => {
   const fx = buildFixture({ other: true });
   try {
     assert.ok(unmergedPaths(fx).includes("code.txt"));
@@ -438,7 +613,7 @@ test("only the closed protected-path list is eligible; ordinary conflicts are un
     const explicit = await resolveProtectedConflict(args(fx, { apply: true, paths: ["code.txt"] }), depsFor(fx));
     assert.equal(explicit.code, "PATH_NOT_ELIGIBLE");
     const docs = await resolveProtectedConflict(args(fx, { apply: true, paths: ["docs/operating-model.md"] }), depsFor(fx));
-    assert.equal(docs.code, "PATH_NOT_ELIGIBLE");
+    assert.equal(docs.code, "MECHANICAL_INTEGRATION_AUTHORITY_MISSING");
     // Default path selection resolves only AGENTS.md and leaves the ordinary conflict exactly as it was.
     const real = await resolveProtectedConflict(args(fx, { apply: true }), depsFor(fx));
     assert.equal(real.verdict, "RESOLVED");

@@ -258,6 +258,31 @@ export function classifyPath(path, { before, after, registry = EXECUTOR_COMPONEN
   return { path: p, class: EXECUTOR_SUBSTRATE, component: hit.component, reason: `changes ${hit.component}` };
 }
 
+// Issue #939: deterministic merge integration is not a second grant system. It may operate on a
+// registered executor-substrate component only when the caller independently proves that the
+// result contains no newly-authored semantic content (current target authority plus already
+// accepted/correction-provenance-bound PR content). This helper supplies only the component
+// identity needed by that proof path; it never makes checkExecutorSubstrateAuthority() return
+// allowed and never turns a work-product/unregistered path into substrate authority.
+export function classifyMechanicalIntegrationPath(path, { registry = EXECUTOR_COMPONENTS } = {}) {
+  const classified = classifyPath(path, { registry });
+  if (classified.class !== EXECUTOR_SUBSTRATE || !classified.component) {
+    return {
+      eligible: false,
+      ...classified,
+      reason:
+        classified.class === WORK_PRODUCT
+          ? "mechanical integration is reserved for registered executor-substrate components; ordinary work-product conflicts use the ordinary recovery path"
+          : classified.reason,
+    };
+  }
+  return {
+    eligible: true,
+    ...classified,
+    reason: `registered executor-substrate component ${classified.component}; mechanical integration still requires independent no-novel-content proof`,
+  };
+}
+
 const CATEGORY_LEVEL = new Set(["*", "all", "any", "control_plane", "control_plane_write", "executor_substrate", "executor-substrate"]);
 
 // Validate the durable grants. Returns { grants: Map<component, grant>, problems: [] }.

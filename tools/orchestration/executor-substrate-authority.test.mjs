@@ -14,6 +14,7 @@ import {
   WORK_PRODUCT,
   checkExecutorSubstrateAuthority as check,
   classifyPath,
+  classifyMechanicalIntegrationPath,
   changesFromGit,
 } from "./executor-substrate-authority.mjs";
 
@@ -75,6 +76,27 @@ test("component A insufficient and component B needed: whole change set stops wi
 });
 
 // Proving case 5: mixed-purpose paths follow semantic effect.
+test("mechanical integration classification is component-aware but never widens ordinary authority", () => {
+  const routing = classifyMechanicalIntegrationPath("tools/orchestration/next-review-transition-gate.mjs");
+  const guard = classifyMechanicalIntegrationPath("tools/orchestration/action-envelope.mjs");
+  const review = classifyMechanicalIntegrationPath("tools/review-watch/lifecycle-gate.mjs");
+  assert.deepEqual(
+    [routing.component, guard.component, review.component],
+    ["routing-policy", "authority-guards", "review-control"],
+  );
+  assert.ok(routing.eligible && guard.eligible && review.eligible);
+  assert.equal(classifyMechanicalIntegrationPath("tools/orchestration/action-envelope.test.mjs").eligible, false);
+  assert.equal(classifyMechanicalIntegrationPath("src/app.ts").eligible, false);
+
+  // Classification is evidence only: it does not make the normal authored-mutation guard pass.
+  const unchangedGuard = check({
+    changes: [{ path: "tools/orchestration/action-envelope.mjs" }],
+    authority: {},
+  });
+  assert.equal(unchangedGuard.allowed, false);
+  assert.equal(unchangedGuard.action, "STOP_AND_PROPOSE");
+});
+
 test("mixed-purpose locations classify by semantic effect, not directory", () => {
   assert.equal(classifyPath(ROUTING).class, EXECUTOR_SUBSTRATE);
   assert.equal(classifyPath("tools/orchestration/ready-dispatch-gate.test.mjs").class, WORK_PRODUCT);

@@ -790,7 +790,7 @@ test("formatConflictRecoveryWorkerDispatchPrompt omits the Execution Issue line 
 
 test("formatConflictRecoveryWorkerDispatchPrompt tells the worker to read the reviewed head from the Controlling Issue's Stage 1 bullet, not restated, when a control Issue is present", () => {
   const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
-  assert.match(prompt, /Controlling Issue's Stage 1 bullet/);
+  assert.match(prompt, /control Stage 1 reviewed head/);
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt requires an explicit reviewedHead only when controlIssue is absent (direct-reference mode has no durable bullet to read)", () => {
@@ -803,7 +803,7 @@ test("formatConflictRecoveryWorkerDispatchPrompt requires an explicit reviewedHe
 test("formatConflictRecoveryWorkerDispatchPrompt mandates a real merge commit (never rebase/force-push) and fails closed to a founder interrupt for a semantic conflict", () => {
   const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
   assert.match(prompt, /never rebase\/force-push/);
-  assert.match(prompt, /founder interrupt, not auto-resolved/);
+  assert.match(prompt, /semantic\/security => founder interrupt/);
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt mandates finalize-correction-breakpoint.mjs, naming its fail-closed CORRECTION_BREAKPOINT_UNVERIFIED reference, and forbids merge/Stage 2/re-review here", () => {
@@ -820,7 +820,7 @@ test("formatConflictRecoveryWorkerDispatchPrompt names the pre-bound checkout an
   assert.ok(prompt.includes(`Pre-bound checkout: ${BINDING.path}.`));
   assert.ok(prompt.includes(`node "${BINDING.scriptPath}" --verify-binding ${BINDING.token} --pr 640`));
   assert.match(prompt, /pushRefspec/);
-  assert.ok(prompt.indexOf("--verify-binding") < prompt.indexOf("Correction-satisfied reserved head"));
+  assert.ok(prompt.indexOf("--verify-binding") < prompt.indexOf("Merge target"));
   assert.ok(prompt.includes(`--release-binding ${BINDING.token}`));
 });
 
@@ -836,8 +836,10 @@ test("formatConflictRecoveryWorkerDispatchPrompt fails closed with no pre-spawn 
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt stays under the 700-char reference-only threshold (excluding the pre-bound path and scriptPath), with and without a control Issue and a full-length 40-char reviewedHead", () => {
+  const resolverPath = BINDING.scriptPath.replace("pr-head-checkout-preflight.mjs", "resolve-protected-conflict.mjs");
   const withControl = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
-  const withControlProse = withControl.length - BINDING.path.length - BINDING.scriptPath.length - CONFLICT_RECOVERY_PROTECTED_CLAUSE.length;
+  const withControlProse =
+    withControl.length - BINDING.path.length - BINDING.scriptPath.length - resolverPath.length - CONFLICT_RECOVERY_PROTECTED_CLAUSE.length;
   assert.ok(withControlProse < 700, `expected < 700 chars, got ${withControlProse}`);
   const withoutControl = formatConflictRecoveryWorkerDispatchPrompt({
     issue: 638,
@@ -845,7 +847,8 @@ test("formatConflictRecoveryWorkerDispatchPrompt stays under the 700-char refere
     reviewedHead: "a".repeat(40),
     checkoutBinding: BINDING,
   });
-  const withoutControlProse = withoutControl.length - BINDING.path.length - BINDING.scriptPath.length - CONFLICT_RECOVERY_PROTECTED_CLAUSE.length;
+  const withoutControlProse =
+    withoutControl.length - BINDING.path.length - BINDING.scriptPath.length - resolverPath.length - CONFLICT_RECOVERY_PROTECTED_CLAUSE.length;
   assert.ok(withoutControlProse < 700, `expected < 700 chars, got ${withoutControlProse}`);
 });
 
@@ -858,9 +861,16 @@ test("formatConflictRecoveryWorkerDispatchPrompt routes protected-file conflicts
   ]) {
     const prompt = formatConflictRecoveryWorkerDispatchPrompt(args);
     assert.ok(prompt.includes(CONFLICT_RECOVERY_PROTECTED_CLAUSE));
-    assert.match(prompt, /AGENTS\.md\/CLAUDE\.md conflicts: never hand-edit/);
-    assert.match(prompt, /resolve-protected-conflict\.mjs --reviewed-head <reviewed head> --apply \(exit 2: founder interrupt\)/);
-    assert.ok(!/--force|bypass|--no-verify/i.test(prompt));
+    assert.match(prompt, /Protected\/executor-substrate conflicts: never hand-edit to bypass authority/);
+    assert.match(prompt, /C:\/Loop-Dee-Loup\/tools\/orchestration\/resolve-protected-conflict\.mjs/);
+    assert.match(prompt, args.controlIssue ? /--reviewed-head <control Stage 1 reviewed head>/ : new RegExp(`--reviewed-head ${"a".repeat(40)}`));
+    if (args.controlIssue) {
+      assert.match(prompt, /--control-issue 666 --execution-issue 638 --all-executor-substrate --apply/);
+    } else {
+      assert.doesNotMatch(prompt, /--all-executor-substrate/);
+    }
+    assert.doesNotMatch(prompt, /node tools\/orchestration\/resolve-protected-conflict\.mjs/);
+    assert.ok(!/--force|--no-verify/i.test(prompt));
     assert.match(prompt, /never rebase\/force-push/);
     assert.match(prompt, /no re-review, merge, or Stage 2/);
     assert.ok(prompt.indexOf("--verify-binding") < prompt.indexOf("resolve-protected-conflict.mjs"));
