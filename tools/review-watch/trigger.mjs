@@ -437,7 +437,11 @@ export function defaultGhPost({ repo, kind, number, head }, runImpl = execFileSy
   }
 
   const htmlUrl = String(posted.html_url ?? "");
-  if (!htmlUrl.toLowerCase().includes(`/${repo}/`.toLowerCase()) || !/#issuecomment-\d+$/i.test(htmlUrl)) {
+  // Kind-specific HTML path: the shared Issue-comments endpoint accepts a PR number for
+  // --kind issue (and vice versa), so require /issues/N for Stage 2 and /pull/N for Stage 1.
+  const kindSegment = kind === "pr" ? "pull" : "issues";
+  const expectedHtmlPath = `/${repo}/${kindSegment}/${number}#issuecomment-`.toLowerCase();
+  if (!htmlUrl.toLowerCase().includes(expectedHtmlPath) || !/#issuecomment-\d+$/i.test(htmlUrl)) {
     throw new Error(`REST comment response URL does not identify a comment on ${repo}#${number}`);
   }
 

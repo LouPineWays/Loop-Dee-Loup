@@ -291,6 +291,36 @@ test("defaultGhPost: wrong target fails closed", () => {
   );
 });
 
+test("defaultGhPost: issue kind rejects a PR-target comment URL, and pr kind rejects an issue-target URL", () => {
+  const resp = (url) => () =>
+    JSON.stringify({
+      id: 1,
+      body: "@codex review",
+      created_at: "2026-08-24T09:00:00Z",
+      issue_url: "https://api.github.com/repos/owner/repo/issues/53",
+      html_url: url,
+    });
+  assert.throws(
+    () => defaultGhPost({ repo: "owner/repo", kind: "issue", number: 53 }, resp("https://github.com/owner/repo/pull/53#issuecomment-1")),
+    /does not identify a comment/,
+  );
+  assert.throws(
+    () =>
+      defaultGhPost(
+        { repo: "owner/repo", kind: "pr", number: 53, head: "abc" },
+        () =>
+          JSON.stringify({
+            id: 1,
+            body: triggerCommentBody("abc"),
+            created_at: "2026-08-24T09:00:00Z",
+            issue_url: "https://api.github.com/repos/owner/repo/issues/53",
+            html_url: "https://github.com/owner/repo/issues/53#issuecomment-1",
+          }),
+      ),
+    /does not identify a comment/,
+  );
+});
+
 test("defaultGhPost: wrong echoed body fails closed", () => {
   assert.throws(
     () =>
