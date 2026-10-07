@@ -431,17 +431,54 @@ export function defaultGhPost({ repo, kind, number, head }, runImpl = execFileSy
   }
 
   const expectedIssuePath = `/repos/${repo}/issues/${number}`.toLowerCase();
-  const issueUrl = String(posted.issue_url ?? "").toLowerCase();
-  if (!issueUrl.endsWith(expectedIssuePath)) {
+  let issueUrl;
+  try {
+    issueUrl = new URL(String(posted.issue_url ?? ""));
+  } catch {
     throw new Error(`REST comment response identity does not match ${repo}#${number}`);
   }
 
-  const htmlUrl = String(posted.html_url ?? "");
+  let issuePath;
+  try {
+    issuePath = decodeURIComponent(issueUrl.pathname).toLowerCase();
+  } catch {
+    throw new Error(`REST comment response identity does not match ${repo}#${number}`);
+  }
+
+  if (
+    issueUrl.origin.toLowerCase() !== "https://api.github.com" ||
+    issuePath !== expectedIssuePath ||
+    issueUrl.search ||
+    issueUrl.hash
+  ) {
+    throw new Error(`REST comment response identity does not match ${repo}#${number}`);
+  }
+
   // Kind-specific HTML path: the shared Issue-comments endpoint accepts a PR number for
-  // --kind issue (and vice versa), so require /issues/N for Stage 2 and /pull/N for Stage 1.
+  // --kind issue (and vice versa), so require the exact /issues/N path for Stage 2 and
+  // /pull/N path for Stage 1 on github.com, followed only by a numeric issue-comment fragment.
   const kindSegment = kind === "pr" ? "pull" : "issues";
-  const expectedHtmlPath = `/${repo}/${kindSegment}/${number}#issuecomment-`.toLowerCase();
-  if (!htmlUrl.toLowerCase().includes(expectedHtmlPath) || !/#issuecomment-\d+$/i.test(htmlUrl)) {
+  const expectedHtmlPath = `/${repo}/${kindSegment}/${number}`.toLowerCase();
+  let htmlUrl;
+  try {
+    htmlUrl = new URL(String(posted.html_url ?? ""));
+  } catch {
+    throw new Error(`REST comment response URL does not identify a comment on ${repo}#${number}`);
+  }
+
+  let htmlPath;
+  try {
+    htmlPath = decodeURIComponent(htmlUrl.pathname).toLowerCase();
+  } catch {
+    throw new Error(`REST comment response URL does not identify a comment on ${repo}#${number}`);
+  }
+
+  if (
+    htmlUrl.origin.toLowerCase() !== "https://github.com" ||
+    htmlPath !== expectedHtmlPath ||
+    htmlUrl.search ||
+    !/^#issuecomment-\d+$/i.test(htmlUrl.hash)
+  ) {
     throw new Error(`REST comment response URL does not identify a comment on ${repo}#${number}`);
   }
 
