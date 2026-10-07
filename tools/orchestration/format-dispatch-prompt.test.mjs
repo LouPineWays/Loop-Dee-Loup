@@ -863,7 +863,7 @@ test("formatConflictRecoveryWorkerDispatchPrompt routes protected-file conflicts
     assert.ok(prompt.includes(CONFLICT_RECOVERY_PROTECTED_CLAUSE));
     assert.match(prompt, /Protected\/executor-substrate conflicts: never hand-edit to bypass authority/);
     assert.match(prompt, /C:\/Loop-Dee-Loup\/tools\/orchestration\/resolve-protected-conflict\.mjs/);
-    assert.match(prompt, /--reviewed-head <reviewed head>/);
+    assert.match(prompt, args.controlIssue ? /--reviewed-head <control Stage 1 reviewed head>/ : new RegExp(`--reviewed-head ${"a".repeat(40)}`));
     if (args.controlIssue) {
       assert.match(prompt, /--control-issue 666 --execution-issue 638 --all-executor-substrate --apply/);
     } else {
