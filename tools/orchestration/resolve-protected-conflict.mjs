@@ -55,7 +55,7 @@
 // Tests: node --test tools/orchestration/resolve-protected-conflict.test.mjs
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -352,6 +352,7 @@ export function defaultDeps() {
       }
     },
     writeFile: (path, text) => writeFileSync(path, text),
+    isRegularFile: (path) => lstatSync(path).isFile(),
   };
 }
 
@@ -369,6 +370,19 @@ function parseUnmerged(lsFilesU) {
     byPath.get(m[4])[m[3]] = { mode: m[1], oid: m[2] };
   }
   return byPath;
+}
+
+const REGULAR_GIT_FILE_MODES = new Set(["100644", "100755"]);
+
+function isRegularGitFileMode(mode) {
+  return REGULAR_GIT_FILE_MODES.has(mode);
+}
+
+function parseTreeEntry(lsTree, expectedPath) {
+  const line = lsTree.trim();
+  const m = /^(\d+) ([^ ]+) ([0-9a-f]+)\t(.+)$/.exec(line);
+  if (!m || m[4] !== expectedPath) return null;
+  return { mode: m[1], type: m[2], oid: m[3] };
 }
 
 export async function resolveProtectedConflict(
@@ -476,31 +490,72 @@ export async function resolveProtectedConflict(
   for (const path of targets) {
     const st = unmerged.get(path);
     if (!st || !st[1] || !st[2] || !st[3]) return closed("NOT_A_CONTENT_CONFLICT", `${path} is not a three-stage content conflict`, { path });
-    const blobAt = (rev) => g(["rev-parse", "--verify", `${rev}:${path}`]);
-    let headOid, targetOid, baseOid, reviewedOid;
+
+    const worktreePath = join(top, path);
     try {
-      headOid = blobAt(head);
-      targetOid = blobAt(mergeHead);
-      baseOid = blobAt(mergeBase);
-      reviewedOid = blobAt(reviewed);
+      if (!deps.isRegularFile(worktreePath)) {
+        return closed("NON_REGULAR_WORKTREE_PATH", `${path} is not a regular worktree file; refusing any write-through path`, { path });
+      }
     } catch {
+      return closed("NON_REGULAR_WORKTREE_PATH", `${path} is missing or cannot be proven to be a regular worktree file`, { path });
+    }
+
+    const treeEntryAt = (rev) => parseTreeEntry(deps.git(["ls-tree", rev, "--", path], { cwd }), path);
+    let headEntry, targetEntry, baseEntry, reviewedEntry;
+    try {
+      headEntry = treeEntryAt(head);
+      targetEntry = treeEntryAt(mergeHead);
+      baseEntry = treeEntryAt(mergeBase);
+      reviewedEntry = treeEntryAt(reviewed);
+    } catch {
+      return closed("PROVENANCE_MISMATCH", `${path} tree provenance could not be read at HEAD, MERGE_HEAD, the merge base or the reviewed head`, { path });
+    }
+    if (!headEntry || !targetEntry || !baseEntry || !reviewedEntry) {
       return closed("PROVENANCE_MISMATCH", `${path} is missing at HEAD, MERGE_HEAD, the merge base or the reviewed head`, { path });
     }
-    if (st[2].oid !== headOid || st[3].oid !== targetOid || st[1].oid !== baseOid) {
-      return closed("PROVENANCE_MISMATCH", `${path}'s index stages do not match HEAD / MERGE_HEAD / merge-base blobs`, { path });
+
+    const indexEntries = [st[1], st[2], st[3]];
+    const treeEntries = [baseEntry, headEntry, targetEntry, reviewedEntry];
+    if (
+      indexEntries.some((entry) => !isRegularGitFileMode(entry.mode)) ||
+      treeEntries.some((entry) => entry.type !== "blob" || !isRegularGitFileMode(entry.mode))
+    ) {
+      return closed("NON_REGULAR_CONTENT_CONFLICT", `${path} must be a regular-file content conflict at every index/tree provenance point`, { path });
     }
-    if (headOid !== reviewedOid) {
-      return closed("UNREVIEWED_POST_REVIEW_CONTENT", `${path} at the corrected head differs from the Stage 1 reviewed head`, { path });
+
+    if (
+      st[2].oid !== headEntry.oid ||
+      st[3].oid !== targetEntry.oid ||
+      st[1].oid !== baseEntry.oid ||
+      st[2].mode !== headEntry.mode ||
+      st[3].mode !== targetEntry.mode ||
+      st[1].mode !== baseEntry.mode
+    ) {
+      return closed("PROVENANCE_MISMATCH", `${path}'s index stages do not exactly match HEAD / MERGE_HEAD / merge-base modes and blobs`, { path });
     }
+    if (headEntry.oid !== reviewedEntry.oid || headEntry.mode !== reviewedEntry.mode) {
+      return closed("UNREVIEWED_POST_REVIEW_CONTENT", `${path} at the corrected head differs from the Stage 1 reviewed head in content or mode`, { path });
+    }
+
     const content = (oid) => deps.git(["cat-file", "blob", oid], { cwd });
-    const diff3 = deps.mergeFile({ ours: content(headOid), base: content(baseOid), theirs: content(targetOid) });
-    const proof = proveFile({ diff3Output: diff3, reviewedText: content(reviewedOid), targetText: content(targetOid) });
+    const diff3 = deps.mergeFile({ ours: content(headEntry.oid), base: content(baseEntry.oid), theirs: content(targetEntry.oid) });
+    const proof = proveFile({ diff3Output: diff3, reviewedText: content(reviewedEntry.oid), targetText: content(targetEntry.oid) });
     if (!proof.ok) return closed(proof.code, proof.reason, { path, hunk: proof.hunk });
     results.push({ path, resolved: proof.resolved, hunks: proof.hunks });
   }
 
-  // Every proof held -- only now may anything be written.
+  // Every proof held. Re-check every write target as a regular file immediately before the
+  // mutation phase so a protected path cannot be redirected through a symlink after proof.
   if (apply) {
+    for (const r of results) {
+      try {
+        if (!deps.isRegularFile(join(top, r.path))) {
+          return closed("NON_REGULAR_WORKTREE_PATH", `${r.path} stopped being a regular worktree file before mutation`, { path: r.path });
+        }
+      } catch {
+        return closed("NON_REGULAR_WORKTREE_PATH", `${r.path} cannot be proven to remain a regular worktree file before mutation`, { path: r.path });
+      }
+    }
     for (const r of results) {
       deps.writeFile(join(top, r.path), r.resolved);
       deps.git(["add", "--", r.path], { cwd });
