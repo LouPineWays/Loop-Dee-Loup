@@ -324,6 +324,7 @@ import { isFindingsBearingResponse, isFormalReviewEndpoint } from "../review-wat
 // this safely regardless of which module is loaded first.
 import {
   checkCorrectionDelta,
+  defaultCompare,
   parseCorrectionSatisfiedDisposition,
   looksLikeCorrectionSatisfiedDisposition,
 } from "../review-watch/stage1-correction-gate.mjs";
@@ -1166,6 +1167,62 @@ async function probeUnfinalizedCorrection(
   return { unfinalizedCorrection: { reviewedHead: delta.reviewedHead, correctedHead: delta.correctedHead } };
 }
 
+// PR #955 Stage 1 correction (#954): a stale canonical correction-satisfied disposition is
+// recoverable only when the live head is a strict continuation of the correction that was already
+// finalized. The ordinary unfinalized-correction probe proves reviewed->live findings/provenance,
+// but by itself it also admits a force-pushed sibling correction from the same reviewed head. First
+// prove old-corrected->live is strictly "ahead", then reuse the existing probe. Operational compare
+// failures fail closed; a non-ahead relation is simply not a valid later continuation.
+async function probeStaleCorrectionContinuation(
+  { repo, pr, head, issue, controlIssue, disposition },
+  {
+    compareImpl = defaultCompare,
+    checkCorrectionDeltaImpl,
+    listStage1TriggerHeadsImpl,
+    readCorrectionCommitsImpl,
+    readTargetCommitsImpl,
+  },
+) {
+  const ambiguous = (reason) => ({
+    ambiguous: { exitCode: 4, state: "AMBIGUOUS", stopAfter: true, repo, pr, head, issue, controlIssue, reason },
+  });
+  if (!disposition?.correctedHead || !disposition?.reviewedHead) return { unfinalizedCorrection: null };
+
+  let ancestry;
+  try {
+    ancestry = await compareImpl({ repo, base: disposition.correctedHead, head });
+  } catch (err) {
+    return ambiguous(
+      `could not verify stale correction continuation from recorded corrected head ${disposition.correctedHead} to live head ${head}: ${err.message}`,
+    );
+  }
+  if (!ancestry || typeof ancestry.status !== "string") {
+    return ambiguous(
+      `stale correction continuation compare for ${disposition.correctedHead}...${head} returned no trustworthy status`,
+    );
+  }
+  if (ancestry.status !== "ahead") return { unfinalizedCorrection: null };
+
+  const probe = await probeUnfinalizedCorrection(
+    { repo, pr, head, issue, controlIssue },
+    { checkCorrectionDeltaImpl, compareImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+  );
+  if (probe.ambiguous || probe.unrecoverable || !probe.unfinalizedCorrection) return probe;
+
+  // Bind the re-finalization to the same Stage 1 findings round the durable disposition records.
+  // A different trigger round must never be borrowed merely because it can prove its own
+  // reviewed->live correction lineage.
+  if (
+    !stage1DispositionMatchesHead(
+      { sha: disposition.reviewedHead.toLowerCase() },
+      probe.unfinalizedCorrection.reviewedHead,
+    )
+  ) {
+    return { unfinalizedCorrection: null };
+  }
+  return probe;
+}
+
 // Issue #913 (the #702/#910/PR #909 recurrence): a MERGED PR whose control "Stage 1" bullet is
 // neither an affirmative nor a correction-satisfied disposition is ordinarily a stranded no-findings
 // state recoverable by finalize-stage1-satisfied-breakpoint.mjs --recover true. When durable
@@ -1178,24 +1235,42 @@ async function probeUnfinalizedCorrection(
 // or null when no such evidence exists (caller keeps its pre-existing ordinary-recovery verdict).
 async function mergedUnfinalizedCorrectionVerdict(
   { repo, pr, headRefOid, issue, controlIssue, stage1Bullet },
-  { checkCorrectionDeltaImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+  {
+    compareImpl = defaultCompare,
+    checkCorrectionDeltaImpl,
+    listStage1TriggerHeadsImpl,
+    readCorrectionCommitsImpl,
+    readTargetCommitsImpl,
+  },
 ) {
   if (typeof headRefOid !== "string" || !headRefOid.trim()) return null;
-  // Only the genuinely stranded shape is probed: any affirmative-shaped bullet (even one naming a
-  // different head) or a malformed correction-satisfied-shaped one keeps its existing fail-closed
-  // handling -- this never reinterprets, repairs, or overrides durable state that already asserts
-  // a disposition.
+  // Ordinary affirmative dispositions and malformed correction-satisfied-looking values retain
+  // their existing handling. A strictly parsed correction-satisfied disposition is admitted only
+  // through the stale-continuation proof below, which additionally requires old-corrected->live
+  // strict ancestry before the existing reviewed->live findings/provenance probe can authorize
+  // re-finalization.
   if (parseAffirmativeStage1Disposition(stage1Bullet) !== null) return null;
-  if (parseCorrectionSatisfiedDisposition(stage1Bullet) !== null) return null;
-  if (looksLikeCorrectionSatisfiedDisposition(stage1Bullet)) return null;
+  const parsedCorrectionSatisfied = parseCorrectionSatisfiedDisposition(stage1Bullet);
+  if (parsedCorrectionSatisfied === null && looksLikeCorrectionSatisfiedDisposition(stage1Bullet)) return null;
   // Stage 1 correction on PR #914: a bullet that opens with an affirmative keyword
   // ("satisfied"/"exempt") but failed the strict parse (e.g. "satisfied at not-a-sha") is a
   // malformed durable assertion, not a stranded prestate -- never recover over it.
   if (typeof stage1Bullet === "string" && /^(satisfied|exempt)(?:\s|$)/i.test(stage1Bullet.trim())) return null;
-  const probe = await probeUnfinalizedCorrection(
-    { repo, pr, head: headRefOid, issue, controlIssue },
-    { checkCorrectionDeltaImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
-  );
+  const probe = parsedCorrectionSatisfied
+    ? await probeStaleCorrectionContinuation(
+        { repo, pr, head: headRefOid, issue, controlIssue, disposition: parsedCorrectionSatisfied },
+        {
+          compareImpl,
+          checkCorrectionDeltaImpl,
+          listStage1TriggerHeadsImpl,
+          readCorrectionCommitsImpl,
+          readTargetCommitsImpl,
+        },
+      )
+    : await probeUnfinalizedCorrection(
+        { repo, pr, head: headRefOid, issue, controlIssue },
+        { checkCorrectionDeltaImpl, compareImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+      );
   if (probe.ambiguous) return probe.ambiguous;
   if (probe.unrecoverable) return unrecoverableCorrectionVerdict(probe.unrecoverable, { repo, pr, head: headRefOid, issue, controlIssue });
   const found = probe.unfinalizedCorrection;
@@ -1228,6 +1303,7 @@ async function resolvePreMerge(
     stage1RunImpl,
     checkMergeReadyImpl,
     checkCorrectionDeltaImpl,
+    compareImpl = defaultCompare,
     checkMergeConflictImpl = defaultGhPrMergeable,
     listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
     readCorrectionCommitsImpl = defaultReadCorrectionCommits,
@@ -1253,15 +1329,16 @@ async function resolvePreMerge(
   // is absent (parseCorrectionSatisfiedDisposition is pure and returns `null` for every other
   // shape, including an absent bullet, without ever calling checkCorrectionDeltaImpl).
   let correctionDelta = null;
+  let parsedCorrectionSatisfied = null;
   if (stage1.state === "NOT_REQUESTED") {
-    const parsed = parseCorrectionSatisfiedDisposition(stage1Disposition);
-    if (parsed) {
+    parsedCorrectionSatisfied = parseCorrectionSatisfiedDisposition(stage1Disposition);
+    if (parsedCorrectionSatisfied) {
       try {
         correctionDelta = await checkCorrectionDeltaImpl({
           repo,
           pr,
-          reviewedHead: parsed.reviewedHead,
-          correctedHead: parsed.correctedHead,
+          reviewedHead: parsedCorrectionSatisfied.reviewedHead,
+          correctedHead: parsedCorrectionSatisfied.correctedHead,
           gatedHead: head,
         });
       } catch (err) {
@@ -1290,10 +1367,21 @@ async function resolvePreMerge(
         !looksLikeCorrectionSatisfiedDisposition(stage1Disposition) &&
         !parseAffirmativeStage1Disposition(stage1Disposition)))
   ) {
-    const probe = await probeUnfinalizedCorrection(
-      { repo, pr, head, issue, controlIssue },
-      { checkCorrectionDeltaImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
-    );
+    const probe = staleCorrectionSatisfiedHead
+      ? await probeStaleCorrectionContinuation(
+          { repo, pr, head, issue, controlIssue, disposition: parsedCorrectionSatisfied },
+          {
+            compareImpl,
+            checkCorrectionDeltaImpl,
+            listStage1TriggerHeadsImpl,
+            readCorrectionCommitsImpl,
+            readTargetCommitsImpl,
+          },
+        )
+      : await probeUnfinalizedCorrection(
+          { repo, pr, head, issue, controlIssue },
+          { checkCorrectionDeltaImpl, compareImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+        );
     if (probe.ambiguous) return probe.ambiguous;
     if (probe.unrecoverable) {
       return {
@@ -1800,6 +1888,7 @@ async function resolveMergedPrWithSettledStage2(
     checkPostAuditImpl,
     reconcileStage2CorrectionPrImpl,
     checkCorrectionDeltaImpl,
+    compareImpl = defaultCompare,
     ghPrStateImpl = defaultGhPrState,
     evaluateEvidenceCorrectionImpl,
     listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
@@ -1814,7 +1903,7 @@ async function resolveMergedPrWithSettledStage2(
   if (typeof mergeCommitOid !== "string" || !mergeCommitOid.trim()) {
     return resolvePostMerge(
       { repo, auditIssue, controlIssue: controlIssueNumber },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, compareImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
     );
   }
 
@@ -1863,7 +1952,7 @@ async function resolveMergedPrWithSettledStage2(
     // own merge, so it owns the transition unchanged.
     return resolvePostMerge(
       { repo, auditIssue, controlIssue: controlIssueNumber },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, compareImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
     );
   }
 
@@ -1888,6 +1977,7 @@ async function resolveStalePointerCorrectionRecovery(
   { repo, body, auditIssue, prIssue, controlIssueNumber, mergeCommitOid, headRefOid, executionRef },
   {
     checkCorrectionDeltaImpl,
+    compareImpl = defaultCompare,
     reconcileExistingStage2AuditIssueImpl,
     listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
     readCorrectionCommitsImpl = defaultReadCorrectionCommits,
@@ -1918,7 +2008,7 @@ async function resolveStalePointerCorrectionRecovery(
     // selects correction finalization rather than ordinary satisfied recovery.
     const correctionVerdict = await mergedUnfinalizedCorrectionVerdict(
       { repo, pr: prIssue, headRefOid, issue: executionRef.issue, controlIssue: controlIssueNumber, stage1Bullet },
-      { checkCorrectionDeltaImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+      { checkCorrectionDeltaImpl, compareImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
     );
     if (correctionVerdict) return correctionVerdict;
     return {
@@ -1969,6 +2059,13 @@ async function resolveStalePointerCorrectionRecovery(
           `Stage-2-pointer resume correction-satisfied disposition for PR #${prIssue}: ` +
           `${correctionDelta && correctionDelta.message}`,
       };
+    }
+    if (correctionDelta.state === "HEAD_MISMATCH") {
+      const correctionVerdict = await mergedUnfinalizedCorrectionVerdict(
+        { repo, pr: prIssue, headRefOid, issue: executionRef.issue, controlIssue: controlIssueNumber, stage1Bullet },
+        { checkCorrectionDeltaImpl, compareImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+      );
+      if (correctionVerdict) return correctionVerdict;
     }
     if (correctionDelta.state !== "CORRECTION_SATISFIED") {
       return {
@@ -2066,7 +2163,7 @@ async function resolveStalePointerCorrectionRecovery(
 // the head itself, only once the Execution reference has already checked out.
 async function resolvePreMergeFromControlBody(
   { repo, body, prIssue, controlIssueNumber, head, ghPrHeadImpl },
-  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
 ) {
   const executionField = readExecutionBulletField(body);
   const executionRef = executionField.conflict
@@ -2097,7 +2194,7 @@ async function resolvePreMergeFromControlBody(
   const stage1Disposition = parseControlBullet(body, "Stage 1");
   return resolvePreMerge(
     { repo, pr: prIssue, head: resolvedHead, issue: executionRef.issue, stage1Disposition, controlIssue: controlIssueNumber },
-    { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+    { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
   );
 }
 
@@ -2326,6 +2423,7 @@ async function runNextReviewTransitionGateCore(
     checkMergeReadyImpl = checkMergeReady,
     checkPostAuditImpl = checkPostAudit,
     checkCorrectionDeltaImpl = checkCorrectionDelta,
+    compareImpl = defaultCompare,
     checkMergeConflictImpl = defaultGhPrMergeable,
     listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
     readCorrectionCommitsImpl = defaultReadCorrectionCommits,
@@ -2352,7 +2450,7 @@ async function runNextReviewTransitionGateCore(
   if (args.auditIssue) {
     return resolvePostMerge(
       { repo, auditIssue: args.auditIssue, controlIssue: null },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, compareImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
     );
   }
   if (args.pr) {
@@ -2379,7 +2477,7 @@ async function runNextReviewTransitionGateCore(
         stage1Disposition: args.stage1Disposition ?? null,
         controlIssue: null,
       },
-      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl },
+      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl },
     );
   }
 
@@ -2480,7 +2578,7 @@ async function runNextReviewTransitionGateCore(
           mergeCommitOid: prState.mergeCommit?.oid,
           headRefOid: prState.headRefOid,
         },
-        { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl, checkCorrectionDeltaImpl, ghPrStateImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+        { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl, checkCorrectionDeltaImpl, compareImpl, ghPrStateImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
       );
     }
     if (prState.state === "OPEN") {
@@ -2491,7 +2589,7 @@ async function runNextReviewTransitionGateCore(
       const head = args.head || prState.headRefOid;
       return resolvePreMergeFromControlBody(
         { repo, body, prIssue: prRef.issue, controlIssueNumber, head, ghPrHeadImpl },
-        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
       );
     }
     // CLOSED without merging (or any other state gh might report): a genuinely contradictory
@@ -2516,7 +2614,7 @@ async function runNextReviewTransitionGateCore(
     // Stage 2 reference remains the only active post-review pointer, exactly as before #537.
     return resolvePostMerge(
       { repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, compareImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
     );
   }
 
@@ -2527,7 +2625,7 @@ async function runNextReviewTransitionGateCore(
     if (args.head) {
       return resolvePreMergeFromControlBody(
         { repo, body, prIssue: prRef.issue, controlIssueNumber, head: args.head, ghPrHeadImpl },
-        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
       );
     }
     // No settled "Stage 2" reference exists here (the auditRef.kind === "issue" branch above
@@ -2603,7 +2701,7 @@ async function runNextReviewTransitionGateCore(
         // the ordinary satisfied recovery below (which stays unchanged for no-findings state).
         const correctionVerdict = await mergedUnfinalizedCorrectionVerdict(
           { repo, pr: prRef.issue, headRefOid: prState.headRefOid, issue: executionRef.issue, controlIssue: controlIssueNumber, stage1Bullet },
-          { checkCorrectionDeltaImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+          { checkCorrectionDeltaImpl, compareImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
         );
         if (correctionVerdict) return correctionVerdict;
         return {
@@ -2659,6 +2757,13 @@ async function runNextReviewTransitionGateCore(
               `merged-PR resume correction-satisfied disposition for PR #${prRef.issue}: ` +
               `${correctionDelta && correctionDelta.message}`,
           };
+        }
+        if (correctionDelta.state === "HEAD_MISMATCH") {
+          const correctionVerdict = await mergedUnfinalizedCorrectionVerdict(
+            { repo, pr: prRef.issue, headRefOid: prState.headRefOid, issue: executionRef.issue, controlIssue: controlIssueNumber, stage1Bullet },
+            { checkCorrectionDeltaImpl, compareImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+          );
+          if (correctionVerdict) return correctionVerdict;
         }
         if (correctionDelta.state !== "CORRECTION_SATISFIED") {
           return {
@@ -2768,7 +2873,7 @@ async function runNextReviewTransitionGateCore(
     const head = prState.headRefOid;
     return resolvePreMergeFromControlBody(
       { repo, body, prIssue: prRef.issue, controlIssueNumber, head, ghPrHeadImpl },
-      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
     );
   }
 
