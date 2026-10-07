@@ -1513,6 +1513,7 @@ test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfie
       ghPrStateImpl: async () => ({ headRefOid: "somesupersededhead", state: "OPEN" }),
       stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      compareImpl: async () => ({ status: "diverged" }),
       listStage1TriggerHeadsImpl: async () => [],
       checkCorrectionDeltaImpl: async () => ({
         exitCode: 2,
@@ -2440,6 +2441,7 @@ test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 referenc
       checkMergeReadyImpl: async () => {
         throw new Error("should never be called -- the PR is already merged, resume forward instead");
       },
+      compareImpl: async () => ({ status: "diverged" }),
       checkCorrectionDeltaImpl: async (args) => {
         correctionDeltaCallArgs = args;
         return { exitCode: 2, state: "HEAD_MISMATCH", reviewedHead: "30b36035c9", correctedHead: "0009c54b18", gatedHead: "somedifferenthead" };
