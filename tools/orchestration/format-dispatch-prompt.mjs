@@ -637,8 +637,15 @@ export function formatStage2PreparationWorkerDispatchPrompt({ controlIssue = nul
 // same way the machine-generated checkout path is: the CLI adds exactly its length as an
 // allowance for this one template, and the formatter test measures prose excluding it.
 export const CONFLICT_RECOVERY_PROTECTED_CLAUSE =
-  "AGENTS.md/CLAUDE.md conflicts: never hand-edit; run tools/orchestration/resolve-protected-conflict.mjs " +
-  "--reviewed-head <reviewed head> --apply (exit 2: founder interrupt).";
+  "Protected/executor-substrate conflicts: never hand-edit to bypass authority; use only the controller-side deterministic resolver";
+
+function siblingAuthoritativeScript(scriptPath, fileName) {
+  const m = /^(.*[\\/])pr-head-checkout-preflight\.mjs$/.exec(scriptPath);
+  if (!m) {
+    throw new Error("conflict recovery requires checkoutBinding.scriptPath to name pr-head-checkout-preflight.mjs");
+  }
+  return `${m[1]}${fileName}`;
+}
 
 // Pure. Renders the fixed reference-only "Conflict-recovery worker dispatch" template for
 // issue #665 — `next-review-transition-gate.mjs`'s `STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT`
@@ -711,17 +718,25 @@ export function formatConflictRecoveryWorkerDispatchPrompt({ controlIssue = null
   }
   assertCheckoutBinding(checkoutBinding, "formatConflictRecoveryWorkerDispatchPrompt", "a conflict-recovery dispatch");
   const { path, token, scriptPath } = checkoutBinding;
+  const resolverScriptPath = siblingAuthoritativeScript(scriptPath, "resolve-protected-conflict.mjs");
   const executionLine = hasExecutionIssue ? ` Execution Issue: #${issue}.` : "";
   const controlLine = hasControlIssue ? ` Controlling Issue: #${controlIssue}.` : "";
   const reviewedHeadClause = hasControlIssue
     ? "reviewed head: Controlling Issue's Stage 1 bullet"
     : `reviewed head: ${reviewedHead}`;
+  const integrationArgs =
+    hasControlIssue && hasExecutionIssue
+      ? ` --control-issue ${controlIssue} --execution-issue ${issue} --all-executor-substrate`
+      : "";
+  const mechanicalClause =
+    `${CONFLICT_RECOVERY_PROTECTED_CLAUSE}: node "${resolverScriptPath}" --reviewed-head <reviewed head>` +
+    `${integrationArgs} --apply (exit 2: founder interrupt).`;
   return (
     `Conflict-recovery worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
     renderPreBoundCheckoutClause({ path, token, scriptPath, pr }) +
     `Correction-satisfied reserved head (${reviewedHeadClause}) conflicts with target. Merge target in ` +
     `(never rebase/force-push); a semantic/security conflict is a founder interrupt, not auto-resolved. ` +
-    `${CONFLICT_RECOVERY_PROTECTED_CLAUSE} ` +
+    `${mechanicalClause} ` +
     `Verify, push, run tools/orchestration/finalize-correction-breakpoint.mjs (nonzero: ` +
     `CORRECTION_BREAKPOINT_UNVERIFIED), --release-binding ${token}; no re-review, merge, or Stage 2.`
   );
@@ -1002,7 +1017,12 @@ function main() {
   // budget exclusion.
   const bindingAllowance =
     (typeof fields?.checkoutBinding?.path === "string" ? fields.checkoutBinding.path.length : 0) +
-    (typeof fields?.checkoutBinding?.scriptPath === "string" ? fields.checkoutBinding.scriptPath.length : 0);
+    (typeof fields?.checkoutBinding?.scriptPath === "string" ? fields.checkoutBinding.scriptPath.length : 0) +
+    // #939: conflict recovery renders a second machine-generated path: the deterministic resolver
+    // beside the controller-authoritative binding verifier, never a path from the conflicted PR.
+    (formatter === formatConflictRecoveryWorkerDispatchPrompt && typeof fields?.checkoutBinding?.scriptPath === "string"
+      ? fields.checkoutBinding.scriptPath.length
+      : 0);
   const templateAllowance = formatter === formatConflictRecoveryWorkerDispatchPrompt ? CONFLICT_RECOVERY_PROTECTED_CLAUSE.length : 0;
   let prompt;
   try {
