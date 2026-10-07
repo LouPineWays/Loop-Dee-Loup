@@ -94,12 +94,15 @@ export function run(
   if (expectTarget && sha.toLowerCase() !== String(expectTarget).toLowerCase()) {
     return failClosed(`TARGET_MOVED: ${predecessor.baseRefName} is ${sha}, expected ${expectTarget}`);
   }
+  const priorClosedSuccessors = (linkedPrs ?? []).filter(
+    (pr) => pr.number !== predecessorPr && pr.state === "CLOSED" && referencesSupersede(pr.body, predecessorPr),
+  ).length;
   return {
     state: "NO_SUCCESSOR",
     exitCode: 0,
     predecessor: predecessorPr,
     target: { ref: predecessor.baseRefName, sha },
-    branch: `issue-${executionIssue}-successor-of-${predecessorPr}`,
+    branch: `issue-${executionIssue}-successor-of-${predecessorPr}-attempt-${priorClosedSuccessors + 1}`,
   };
 }
 
