@@ -836,8 +836,10 @@ test("formatConflictRecoveryWorkerDispatchPrompt fails closed with no pre-spawn 
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt stays under the 700-char reference-only threshold (excluding the pre-bound path and scriptPath), with and without a control Issue and a full-length 40-char reviewedHead", () => {
+  const resolverPath = BINDING.scriptPath.replace("pr-head-checkout-preflight.mjs", "resolve-protected-conflict.mjs");
   const withControl = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
-  const withControlProse = withControl.length - BINDING.path.length - BINDING.scriptPath.length - CONFLICT_RECOVERY_PROTECTED_CLAUSE.length;
+  const withControlProse =
+    withControl.length - BINDING.path.length - BINDING.scriptPath.length - resolverPath.length - CONFLICT_RECOVERY_PROTECTED_CLAUSE.length;
   assert.ok(withControlProse < 700, `expected < 700 chars, got ${withControlProse}`);
   const withoutControl = formatConflictRecoveryWorkerDispatchPrompt({
     issue: 638,
@@ -845,7 +847,8 @@ test("formatConflictRecoveryWorkerDispatchPrompt stays under the 700-char refere
     reviewedHead: "a".repeat(40),
     checkoutBinding: BINDING,
   });
-  const withoutControlProse = withoutControl.length - BINDING.path.length - BINDING.scriptPath.length - CONFLICT_RECOVERY_PROTECTED_CLAUSE.length;
+  const withoutControlProse =
+    withoutControl.length - BINDING.path.length - BINDING.scriptPath.length - resolverPath.length - CONFLICT_RECOVERY_PROTECTED_CLAUSE.length;
   assert.ok(withoutControlProse < 700, `expected < 700 chars, got ${withoutControlProse}`);
 });
 
@@ -858,9 +861,16 @@ test("formatConflictRecoveryWorkerDispatchPrompt routes protected-file conflicts
   ]) {
     const prompt = formatConflictRecoveryWorkerDispatchPrompt(args);
     assert.ok(prompt.includes(CONFLICT_RECOVERY_PROTECTED_CLAUSE));
-    assert.match(prompt, /AGENTS\.md\/CLAUDE\.md conflicts: never hand-edit/);
-    assert.match(prompt, /resolve-protected-conflict\.mjs --reviewed-head <reviewed head> --apply \(exit 2: founder interrupt\)/);
-    assert.ok(!/--force|bypass|--no-verify/i.test(prompt));
+    assert.match(prompt, /Protected\/executor-substrate conflicts: never hand-edit to bypass authority/);
+    assert.match(prompt, /C:\/Loop-Dee-Loup\/tools\/orchestration\/resolve-protected-conflict\.mjs/);
+    assert.match(prompt, /--reviewed-head <reviewed head>/);
+    if (args.controlIssue) {
+      assert.match(prompt, /--control-issue 666 --execution-issue 638 --all-executor-substrate --apply/);
+    } else {
+      assert.doesNotMatch(prompt, /--all-executor-substrate/);
+    }
+    assert.doesNotMatch(prompt, /node tools\/orchestration\/resolve-protected-conflict\.mjs/);
+    assert.ok(!/--force|--no-verify/i.test(prompt));
     assert.match(prompt, /never rebase\/force-push/);
     assert.match(prompt, /no re-review, merge, or Stage 2/);
     assert.ok(prompt.indexOf("--verify-binding") < prompt.indexOf("resolve-protected-conflict.mjs"));
