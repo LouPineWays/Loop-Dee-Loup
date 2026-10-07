@@ -735,7 +735,7 @@ export function formatConflictRecoveryWorkerDispatchPrompt({ controlIssue = null
     `Merge target (never rebase/force-push); semantic/security => founder interrupt. ` +
     `${mechanicalClause} ` +
     `Verify/push; run tools/orchestration/finalize-correction-breakpoint.mjs; ` +
-    `nonzero=CORRECTION_BREAKPOINT_UNVERIFIED; release binding ${token}; stop before re-review/merge/Stage 2.`
+    `nonzero=CORRECTION_BREAKPOINT_UNVERIFIED; --release-binding ${token}; no re-review, merge, or Stage 2.`
   );
 }
 
