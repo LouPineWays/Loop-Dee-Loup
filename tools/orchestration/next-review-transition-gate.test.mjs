@@ -1536,6 +1536,11 @@ test("runNextReviewTransitionGate: #954 -- stale correction-satisfied head plus 
       ghPrStateImpl: async () => ({ headRefOid: liveHead, state: "OPEN" }),
       stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      compareImpl: async ({ base, head }) => {
+        assert.equal(base, "0009c54b18");
+        assert.equal(head, liveHead);
+        return { status: "ahead" };
+      },
       listStage1TriggerHeadsImpl: async () => ["30b36035c9"],
       readCorrectionCommitsImpl: async () => [
         { sha: "c1", parents: 1, message: "Address remaining Stage 1 correction (#375)" },
@@ -1576,6 +1581,89 @@ test("runNextReviewTransitionGate: #954 -- stale correction-satisfied head plus 
     mode: "bounded",
     authorizedActions: ["run-finalize-correction-breakpoint"],
   });
+});
+
+
+test("runNextReviewTransitionGate: #954 -- a sibling correction head that does not contain the already-finalized correction never re-enters correction finalization", async () => {
+  const liveHead = "af52e922c2e4839cb1f6ae0dabcd91faaf2b5ad5";
+  let triggerReads = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: liveHead, state: "OPEN" }),
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      compareImpl: async ({ base, head }) => {
+        assert.equal(base, "0009c54b18");
+        assert.equal(head, liveHead);
+        return { status: "diverged" };
+      },
+      listStage1TriggerHeadsImpl: async () => {
+        triggerReads++;
+        throw new Error("should never inspect trigger rounds after old-corrected->live ancestry fails");
+      },
+      checkCorrectionDeltaImpl: async () => ({
+        exitCode: 2,
+        state: "HEAD_MISMATCH",
+        reviewedHead: "30b36035c9",
+        correctedHead: "0009c54b18",
+        gatedHead: liveHead,
+      }),
+    },
+  );
+  assert.equal(triggerReads, 0);
+  assert.equal(result.state, "NO_ACTION_YET");
+});
+
+test("runNextReviewTransitionGate: #954 -- the same stale correction-satisfied continuation remains recoverable after the PR has already merged", async () => {
+  const liveHead = "af52e922c2e4839cb1f6ae0dabcd91faaf2b5ad5";
+  const calls = [];
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: liveHead, state: "MERGED", mergeCommit: { oid: "merge954" } }),
+      compareImpl: async ({ base, head }) => {
+        assert.equal(base, "0009c54b18");
+        assert.equal(head, liveHead);
+        return { status: "ahead" };
+      },
+      listStage1TriggerHeadsImpl: async () => ["30b36035c9"],
+      readCorrectionCommitsImpl: async () => [
+        { sha: "c1", parents: 1, message: "Address remaining Stage 1 correction (#375)" },
+      ],
+      readTargetCommitsImpl: async () => [],
+      checkCorrectionDeltaImpl: async (args) => {
+        calls.push(args);
+        if (args.correctedHead === "0009c54b18") {
+          return {
+            exitCode: 2,
+            state: "HEAD_MISMATCH",
+            reviewedHead: "30b36035c9",
+            correctedHead: "0009c54b18",
+            gatedHead: liveHead,
+          };
+        }
+        return {
+          exitCode: 0,
+          state: "CORRECTION_SATISFIED",
+          reviewedHead: args.reviewedHead,
+          correctedHead: args.correctedHead,
+        };
+      },
+      reconcileExistingStage2AuditIssueImpl: async () => {
+        throw new Error("should never prepare/reconcile Stage 2 before stale correction finalization");
+      },
+    },
+  );
+  assert.equal(calls.length, 2);
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE1_CORRECTION_FINALIZATION_REQUIRED");
+  assert.equal(result.prState, "MERGED");
+  assert.equal(result.reviewedHead, "30b36035c9");
+  assert.equal(result.correctedHead, liveHead);
+  assert.match(result.nextCommand, /finalize-correction-breakpoint\.mjs --control-issue 322 --execution-issue 375 --pr 376/);
 });
 
 // -- issue #611: the exact live #438/PR #610 regression -----------------------------------
