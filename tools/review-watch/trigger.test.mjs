@@ -321,6 +321,52 @@ test("defaultGhPost: issue kind rejects a PR-target comment URL, and pr kind rej
   );
 });
 
+test("defaultGhPost: rejects wrong URL origins and prefixed target paths", () => {
+  const base = {
+    id: 1,
+    issue_url: "https://api.github.com/repos/owner/repo/issues/53",
+    html_url: "https://github.com/owner/repo/issues/53#issuecomment-1",
+    body: "@codex review",
+    created_at: "2026-10-06T23:46:00Z",
+  };
+
+  const cases = [
+    {
+      label: "wrong API origin",
+      response: { ...base, issue_url: "https://evil.invalid/not-github/repos/owner/repo/issues/53" },
+      error: /identity does not match/,
+    },
+    {
+      label: "wrong HTML origin",
+      response: { ...base, html_url: "https://evil.invalid/owner/repo/issues/53#issuecomment-1" },
+      error: /does not identify a comment/,
+    },
+    {
+      label: "prefixed GitHub path",
+      response: { ...base, html_url: "https://github.com/unrelated/owner/repo/issues/53#issuecomment-1" },
+      error: /does not identify a comment/,
+    },
+    {
+      label: "malformed API URL",
+      response: { ...base, issue_url: "not-a-url" },
+      error: /identity does not match/,
+    },
+    {
+      label: "malformed HTML URL",
+      response: { ...base, html_url: "not-a-url" },
+      error: /does not identify a comment/,
+    },
+  ];
+
+  for (const { label, response, error } of cases) {
+    assert.throws(
+      () => defaultGhPost({ repo: "owner/repo", kind: "issue", number: 53 }, () => JSON.stringify(response)),
+      error,
+      label,
+    );
+  }
+});
+
 test("defaultGhPost: wrong echoed body fails closed", () => {
   assert.throws(
     () =>
