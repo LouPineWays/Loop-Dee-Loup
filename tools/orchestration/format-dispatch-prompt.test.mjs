@@ -16,6 +16,7 @@ import {
   formatStage2PreparationWorkerDispatchPrompt,
   formatConflictRecoveryWorkerDispatchPrompt,
   CONFLICT_RECOVERY_PROTECTED_CLAUSE,
+  renderConflictRecoverySuccessorClause,
   assertReferenceOnly,
 } from "./format-dispatch-prompt.mjs";
 
@@ -838,8 +839,10 @@ test("formatConflictRecoveryWorkerDispatchPrompt fails closed with no pre-spawn 
 test("formatConflictRecoveryWorkerDispatchPrompt stays under the 700-char reference-only threshold (excluding the pre-bound path and scriptPath), with and without a control Issue and a full-length 40-char reviewedHead", () => {
   const resolverPath = BINDING.scriptPath.replace("pr-head-checkout-preflight.mjs", "resolve-protected-conflict.mjs");
   const withControl = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
+  const preflightPath = BINDING.scriptPath.replace("pr-head-checkout-preflight.mjs", "successor-integration-preflight.mjs");
+  const successorLen = renderConflictRecoverySuccessorClause({ preflightPath, issue: 638, pr: 640 }).length;
   const withControlProse =
-    withControl.length - BINDING.path.length - BINDING.scriptPath.length - resolverPath.length - CONFLICT_RECOVERY_PROTECTED_CLAUSE.length;
+    withControl.length - BINDING.path.length - BINDING.scriptPath.length - resolverPath.length - CONFLICT_RECOVERY_PROTECTED_CLAUSE.length - successorLen;
   assert.ok(withControlProse < 700, `expected < 700 chars, got ${withControlProse}`);
   const withoutControl = formatConflictRecoveryWorkerDispatchPrompt({
     issue: 638,
@@ -1403,4 +1406,23 @@ test("#924: findings correction template mandates the execution Issue in every c
   assert.match(withIssue, /every commit message must name #907/);
   const none = formatStage1CorrectionWorkerDispatchPrompt({ issue: "none", pr: 5, correctionReason: "findings", checkoutBinding });
   assert.doesNotMatch(none, /every commit message must name/);
+});
+
+// Issue #950: exit 2 of the deterministic resolver is a branch point, not a blanket founder
+// interrupt, when a split control/execution flow can name a successor route.
+test("conflict-recovery prompt routes resolver exit 2 to the bounded successor path, keeping same-PR recovery first", () => {
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
+  assert.ok(prompt.indexOf("resolve-protected-conflict.mjs") < prompt.indexOf("successor-integration-preflight.mjs"));
+  assert.match(prompt, /exit 2 => founder\/product\/security\/authority ambiguity => founder interrupt/);
+  assert.match(prompt, /--execution-issue 638 --predecessor-pr 640/);
+  assert.match(prompt, /Supersedes #640/);
+  assert.match(prompt, /fresh Stage 1/);
+  assert.match(prompt, /never rebase\/force-push\/re-review #640/);
+  assert.match(prompt, /no re-review, merge, or Stage 2/);
+});
+
+test("conflict-recovery prompt without a control/execution pair keeps exit 2 as a founder interrupt (no successor route)", () => {
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ issue: 638, pr: 640, reviewedHead: "a".repeat(40), checkoutBinding: BINDING });
+  assert.doesNotMatch(prompt, /successor-integration-preflight/);
+  assert.match(prompt, /exit 2 => founder interrupt\./);
 });

@@ -719,6 +719,9 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/next-review-transition-gate.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/orchestration/pr-head-checkout-preflight.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/orchestration/ready-dispatch-gate.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  // Issue #950: successor-integration-preflight.mjs hard-imports github-read.mjs and ready-dispatch-gate.mjs.
+  { dest: "tools/orchestration/successor-integration-preflight.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/successor-integration-preflight.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
   { dest: "tools/orchestration/reconcile-control-blocker.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/orchestration/transition-guard.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/orchestration/verify-audit-ready.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
