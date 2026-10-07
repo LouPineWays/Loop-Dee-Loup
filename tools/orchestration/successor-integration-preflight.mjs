@@ -8,7 +8,9 @@
 // cut from current `main`. This script is the idempotence/identity guard for that route: it never
 // mutates anything. It answers exactly one question before the conflict-recovery worker creates a
 // successor branch -- "is there already a successor for this execution attempt, or may one be
-// created?" -- and fails closed on any stale, mismatched, or ambiguous evidence.
+// created?" -- and fails closed on any stale, mismatched, or ambiguous evidence. Every invocation
+// must supply the Stage-1-authorized correction-satisfied predecessor head so neither creation nor
+// reuse can proceed from a predecessor that moved after the controller's gate.
 //
 // Successor identity (all required): an OPEN PR that references the execution Issue via the
 // existing linkage convention (`referencesExecutionIssue`: `issue-<N>-` head branch or an
@@ -74,13 +76,24 @@ export function evaluateSuccessor({ executionIssue, predecessor, linkedPrs, pred
 }
 
 export function run(
-  { repo, executionIssue, predecessorPr, expectTarget = null },
+  { repo, executionIssue, predecessorPr, expectedPredecessorHead, expectTarget = null },
   { readPr = (n, fields) => readGithubPr({ repo, number: n, fields }), listLinked = defaultGhPrList, readTarget = defaultReadTarget } = {},
 ) {
   if (!Number.isInteger(executionIssue) || executionIssue <= 0 || !Number.isInteger(predecessorPr) || predecessorPr <= 0) {
     return failClosed("--execution-issue and --predecessor-pr must be positive integers");
   }
-  const predecessor = readPr(predecessorPr, ["state", "headRefName", "baseRefName", "body"]);
+  if (typeof expectedPredecessorHead !== "string" || !/^[0-9a-f]{40}$/i.test(expectedPredecessorHead)) {
+    return failClosed("--expect-predecessor-head must be a 40-character commit SHA");
+  }
+  const predecessor = readPr(predecessorPr, ["state", "headRefName", "headRefOid", "baseRefName", "body"]);
+  if (
+    typeof predecessor.headRefOid !== "string" ||
+    predecessor.headRefOid.toLowerCase() !== expectedPredecessorHead.toLowerCase()
+  ) {
+    return failClosed(
+      `PREDECESSOR_HEAD_MISMATCH: PR #${predecessorPr} is ${predecessor.headRefOid ?? "unknown"}, expected ${expectedPredecessorHead}`,
+    );
+  }
   const linkedPrs = listLinked({ repo, executionIssue });
   const verdict = evaluateSuccessor({
     executionIssue,
@@ -129,6 +142,7 @@ function main() {
       repo,
       executionIssue: Number(args["execution-issue"]),
       predecessorPr: Number(args["predecessor-pr"]),
+      expectedPredecessorHead: args["expect-predecessor-head"] ?? null,
       expectTarget: args["expect-target"] ?? null,
     });
   } catch (err) {

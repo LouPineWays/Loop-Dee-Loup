@@ -8,7 +8,15 @@ import assert from "node:assert/strict";
 import { run, referencesSupersede } from "./successor-integration-preflight.mjs";
 
 const SHA = "a".repeat(40);
-const PRED = { number: 869, state: "OPEN", headRefName: "issue-868-replace", baseRefName: "main", body: "Addresses #868" };
+const PRED_HEAD = "c".repeat(40);
+const PRED = {
+  number: 869,
+  state: "OPEN",
+  headRefName: "issue-868-replace",
+  headRefOid: PRED_HEAD,
+  baseRefName: "main",
+  body: "Addresses #868",
+};
 
 function harness({ pred = PRED, linked = [], bases = {}, sha = SHA } = {}) {
   return {
@@ -20,7 +28,7 @@ function harness({ pred = PRED, linked = [], bases = {}, sha = SHA } = {}) {
     readTarget: () => sha,
   };
 }
-const base = { repo: "o/r", executionIssue: 868, predecessorPr: 869 };
+const base = { repo: "o/r", executionIssue: 868, predecessorPr: 869, expectedPredecessorHead: PRED_HEAD };
 const succ = (number, extra = {}) => ({ number, state: "OPEN", headRefName: `issue-868-successor-of-869`, body: "Addresses #868\nSupersedes #869", ...extra });
 
 test("predecessor-only -> NO_SUCCESSOR with target and first-attempt linked branch name", () => {
@@ -74,6 +82,25 @@ test("predecessor wrong execution link, merged, or closed-without-successor -> f
 
 test("closed predecessor with its open successor still resolves the successor (re-entry after supersede)", () => {
   assert.equal(run(base, harness({ pred: { ...PRED, state: "CLOSED" }, linked: [PRED, succ(900)] })).state, "SUCCESSOR_EXISTS");
+});
+
+test("predecessor head mismatch fails closed before successor creation or reuse", () => {
+  const moved = { ...PRED, headRefOid: "d".repeat(40) };
+  for (const linked of [[moved], [moved, succ(900)]]) {
+    const r = run(base, harness({ pred: moved, linked }));
+    assert.equal(r.state, "FAIL_CLOSED");
+    assert.equal(r.exitCode, 2);
+    assert.match(r.reason, /PREDECESSOR_HEAD_MISMATCH/);
+  }
+});
+
+test("missing or malformed expected predecessor head fails closed", () => {
+  for (const expectedPredecessorHead of [null, "", "abc", "g".repeat(40)]) {
+    const r = run({ ...base, expectedPredecessorHead }, harness({ linked: [PRED] }));
+    assert.equal(r.state, "FAIL_CLOSED");
+    assert.equal(r.exitCode, 2);
+    assert.match(r.reason, /expect-predecessor-head/);
+  }
 });
 
 test("target moved during preparation -> fail closed", () => {
