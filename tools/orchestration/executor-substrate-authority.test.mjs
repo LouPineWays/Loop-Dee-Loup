@@ -16,7 +16,6 @@ import {
   classifyPath,
   classifyMechanicalIntegrationPath,
   changesFromGit,
-  classifyMechanicalIntegrationPath,
 } from "./executor-substrate-authority.mjs";
 
 const grant = (component, extra = {}) => ({
