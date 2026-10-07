@@ -283,6 +283,32 @@ export function classifyMechanicalIntegrationPath(path, { registry = EXECUTOR_CO
   };
 }
 
+// Issue #939: classification-only boundary for deterministic merge integration. This is NOT a
+// mutation grant and never substitutes for checkExecutorSubstrateAuthority: it answers only
+// whether a conflicted path belongs to one already-registered executor component. The conflict
+// resolver must separately prove binding/head/target provenance and construct the result only
+// from current target content plus the already-authorized PR side.
+export function classifyMechanicalIntegrationPath(path, { registry = EXECUTOR_COMPONENTS } = {}) {
+  const classified = classifyPath(path, { registry });
+  if (classified.class !== EXECUTOR_SUBSTRATE) {
+    return { ...classified, eligible: false, integrationReason: "path is work product, not executor substrate" };
+  }
+  if (!classified.component) {
+    return {
+      ...classified,
+      eligible: false,
+      integrationReason: "executor-substrate path has no registered component; mechanical integration fails closed",
+    };
+  }
+  return {
+    ...classified,
+    eligible: true,
+    integrationReason:
+      'registered component "' + classified.component +
+      '" is identifiable for mechanical integration; content authority must still be proven by the conflict resolver',
+  };
+}
+
 const CATEGORY_LEVEL = new Set(["*", "all", "any", "control_plane", "control_plane_write", "executor_substrate", "executor-substrate"]);
 
 // Validate the durable grants. Returns { grants: Map<component, grant>, problems: [] }.
