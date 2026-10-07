@@ -591,7 +591,11 @@ export async function resolveProtectedConflict(
   }
 
   let correctionProvenance = null;
-  if (head.toLowerCase() !== reviewed.toLowerCase()) {
+  // Executor-substrate integration always consumes correction-satisfied content, so prove that
+  // control/execution binding up front. Protected-only recovery stays backward-compatible: a
+  // later HEAD is harmless when the protected file itself is still byte-identical to the
+  // reviewed version; provenance is required lazily only if protected content changed.
+  if (includeExecutorSubstrate && head.toLowerCase() !== reviewed.toLowerCase()) {
     const proof = await proveAcceptedCorrectionHead({ repo, controlIssue, executionIssue, pr, reviewed, head, cwd }, deps);
     if (!proof.ok) return proof;
     correctionProvenance = proof;
@@ -686,7 +690,13 @@ export async function resolveProtectedConflict(
       );
     }
     if (!correctionProvenance && (headEntry.oid !== reviewedEntry.oid || headEntry.mode !== reviewedEntry.mode)) {
-      return closed("UNREVIEWED_POST_REVIEW_CONTENT", `${path} at the corrected head differs from the Stage 1 reviewed head in content or mode`, { path });
+      if (controlIssue && executionIssue) {
+        const proof = await proveAcceptedCorrectionHead({ repo, controlIssue, executionIssue, pr, reviewed, head, cwd }, deps);
+        if (!proof.ok) return proof;
+        correctionProvenance = proof;
+      } else {
+        return closed("UNREVIEWED_POST_REVIEW_CONTENT", `${path} at the corrected head differs from the Stage 1 reviewed head in content or mode`, { path });
+      }
     }
 
     const pathClass = pathClasses.get(path);
