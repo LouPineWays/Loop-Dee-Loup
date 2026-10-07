@@ -1413,7 +1413,7 @@ test("#924: findings correction template mandates the execution Issue in every c
 test("conflict-recovery prompt gives mutually exclusive predecessor/successor tails and rechecks target before successor push", () => {
   const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, checkoutBinding: BINDING });
   assert.ok(prompt.indexOf("resolve-protected-conflict.mjs") < prompt.indexOf("successor-integration-preflight.mjs"));
-  assert.match(prompt, /exit 0 => verify\/push predecessor via the binding/);
+  assert.match(prompt, /exit 0=>verify\/push predecessor/);
   assert.match(prompt, /exit 2 => founder\/product\/security\/authority ambiguity => founder interrupt/);
   assert.match(prompt, /--execution-issue 638 --predecessor-pr 640/);
   assert.match(prompt, /--expect-target <saved-target-sha>/);
