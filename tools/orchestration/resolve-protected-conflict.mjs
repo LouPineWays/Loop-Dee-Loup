@@ -1005,6 +1005,13 @@ export async function resolveProtectedConflict(
         return includeExecutorSubstrate && classifyMechanicalIntegrationPath(p).eligible;
       });
   if (targets.length === 0) return closed("NO_PROTECTED_CONFLICT", "no unmerged eligible protected/executor-substrate path in this checkout");
+  const includesExecutorSubstrate = targets.some((p) => !PROTECTED_PATHS.includes(p));
+  if (includesExecutorSubstrate && !correctionProvenance) {
+    return closed(
+      "MECHANICAL_INTEGRATION_AUTHORITY_MISSING",
+      "executor-substrate conflict integration requires an exact correction-satisfied control binding and provenance-bearing reviewed..HEAD correction range",
+    );
+  }
   const pathClasses = new Map(
     targets.map((p) => [p, explicitPathClasses.get(p) ?? classifyMechanicalIntegrationPath(p)]),
   );
