@@ -10,13 +10,13 @@
 //   node tools/review-watch/trigger.mjs --repo OWNER/REPO --kind pr --number 50 --head <sha>
 //   node tools/review-watch/trigger.mjs --repo OWNER/REPO --kind issue --number 53
 //
-// --kind pr and --kind issue both check the same GitHub "issue comments" thread
-// (repos/OWNER/REPO/issues/NUMBER/comments) — GitHub models a PR as an issue, and the
-// trigger comment described by docs/bounded-review-cycle.md Stage 1 step 3 and Stage 2
-// step 4 is always a plain thread comment, never an inline review comment on a diff
-// position. --kind only selects which `gh` subcommand posts the comment (`gh pr comment`
-// vs `gh issue comment`), mirroring poll.mjs's existing --kind split rather than
-// introducing a second flag convention.
+// --kind pr and --kind issue both use the same GitHub "issue comments" REST thread
+// (repos/OWNER/REPO/issues/NUMBER/comments) — GitHub models a PR conversation as an issue
+// thread, and the trigger comment described by docs/bounded-review-cycle.md Stage 1 step 3
+// and Stage 2 step 4 is always a plain thread comment, never an inline review comment on a
+// diff position. --kind still controls the Stage 1/Stage 2 guard semantics and polling
+// endpoints; posting itself uses this repository-scoped REST endpoint for both kinds so the
+// canonical trigger works in authorized remote sessions where GitHub GraphQL is unavailable.
 //
 // --head <sha> (Stage 1 only — pass the PR head SHA frozen per that stage's step 2) scopes
 // both the dedup check and the posted comment to that exact head via a hidden HTML-comment
@@ -385,11 +385,10 @@ function defaultGhApi(path) {
   return JSON.parse(raw).flat();
 }
 
-// `gh pr comment` / `gh issue comment` print the URL of the just-created comment
-// (".../issuecomment-NNNN") to stdout on success. Parsing that id is how the freshly
-// posted comment is identified after the re-read below — `findExistingTrigger`'s
-// earliest-match semantics are for dedup, not for locating a comment just posted, and
-// would return a pre-existing older trigger instead of this one on a `--force` retry.
+// Legacy helpers retained for compatibility with existing tests and any direct importers.
+// Before issue #928 the default post path used `gh pr comment` / `gh issue comment`,
+// parsed the printed URL, then re-read the thread by id. The canonical post path below now
+// uses the authoritative repository-scoped REST POST response directly.
 export function extractCommentId(ghCommentOutput) {
   const match = String(ghCommentOutput).match(/#issuecomment-(\d+)/);
   if (!match) throw new Error(`could not parse comment id from gh output: ${ghCommentOutput}`);
@@ -403,23 +402,61 @@ export function findCommentById(comments, id) {
   return comments.find((c) => String(c.id) === String(id)) ?? null;
 }
 
-// Posts the trigger via `gh pr comment` / `gh issue comment` (not a raw POST to the
-// comments endpoint) so it is authored as the authenticated `gh` user, then reads the
-// thread back and picks out that exact comment by id to obtain its authoritative
-// timestamp/url — never re-derived via trigger-text dedup, which would return a stale
-// pre-existing trigger instead of the one just posted.
-function defaultGhPost({ repo, kind, number, head }) {
-  const sub = kind === "pr" ? "pr" : "issue";
+// Issue #928: post through the repository-scoped Issue-comments REST endpoint rather than
+// `gh pr comment` / `gh issue comment`, which can depend on GitHub GraphQL and fail with
+// HTTP 403 in otherwise-authorized repository-bound remote sessions. GitHub exposes PR
+// conversation comments through this same endpoint. The trigger body is sent as structured
+// JSON over stdin, and the authoritative POST response is validated before its timestamp/url
+// are trusted by downstream polling.
+export function defaultGhPost({ repo, kind, number, head }, runImpl = execFileSync) {
   const body = triggerCommentBody(head);
-  const output = execFileSync("gh", [sub, "comment", String(number), "--repo", repo, "--body", body], {
+  const path = endpointsFor(kind, repo, number).find((e) => e.name === "issue-comments")?.path;
+  if (!path) throw new Error(`No issue-comments endpoint resolved for --kind ${kind}.`);
+
+  const raw = runImpl("gh", ["api", "-X", "POST", path, "--input", "-"], {
     encoding: "utf8",
+    input: JSON.stringify({ body }),
+    maxBuffer: 20 * 1024 * 1024,
   });
-  const commentId = extractCommentId(output);
-  const path = endpointsFor(kind, repo, number).find((e) => e.name === "issue-comments").path;
-  const raw = execFileSync("gh", ["api", path, "--paginate", "--slurp"], { encoding: "utf8" });
-  const comments = JSON.parse(raw).flat();
-  const posted = findCommentById(comments, commentId);
-  if (!posted) throw new Error(`posted comment id ${commentId} not found on re-read`);
+
+  let posted;
+  try {
+    posted = JSON.parse(raw);
+  } catch {
+    throw new Error(`malformed (non-JSON) REST response from POST ${path}`);
+  }
+
+  if (!posted || typeof posted !== "object" || Array.isArray(posted)) {
+    throw new Error(`malformed REST comment response from POST ${path}`);
+  }
+
+  const expectedIssuePath = `/repos/${repo}/issues/${number}`.toLowerCase();
+  const issueUrl = String(posted.issue_url ?? "").toLowerCase();
+  if (!issueUrl.endsWith(expectedIssuePath)) {
+    throw new Error(`REST comment response identity does not match ${repo}#${number}`);
+  }
+
+  const htmlUrl = String(posted.html_url ?? "");
+  // Kind-specific HTML path: the shared Issue-comments endpoint accepts a PR number for
+  // --kind issue (and vice versa), so require /issues/N for Stage 2 and /pull/N for Stage 1.
+  const kindSegment = kind === "pr" ? "pull" : "issues";
+  const expectedHtmlPath = `/${repo}/${kindSegment}/${number}#issuecomment-`.toLowerCase();
+  if (!htmlUrl.toLowerCase().includes(expectedHtmlPath) || !/#issuecomment-\d+$/i.test(htmlUrl)) {
+    throw new Error(`REST comment response URL does not identify a comment on ${repo}#${number}`);
+  }
+
+  if (posted.body !== body) {
+    throw new Error("REST comment response body does not match the trigger body written");
+  }
+
+  if (!posted.created_at || !Number.isFinite(new Date(posted.created_at).getTime())) {
+    throw new Error("REST comment response is missing a valid created_at timestamp");
+  }
+
+  if (posted.id === undefined || posted.id === null) {
+    throw new Error("REST comment response is missing a comment id");
+  }
+
   return posted;
 }
 

@@ -17,6 +17,7 @@ import {
   hasPriorGenuineIssueResponse,
   extractCommentId,
   findCommentById,
+  defaultGhPost,
   run,
 } from "./trigger.mjs";
 
@@ -224,6 +225,131 @@ test("findCommentById: selects the comment matching the given id, not merely the
 
 test("findCommentById: returns null when no comment matches the id", () => {
   assert.equal(findCommentById([{ id: 1 }], "999"), null);
+});
+
+test("defaultGhPost: posts a Stage 2 trigger through repository-scoped REST and returns authoritative comment evidence", () => {
+  let call;
+  const posted = defaultGhPost(
+    { repo: "owner/repo", kind: "issue", number: 53 },
+    (bin, args, options) => {
+      call = { bin, args, options };
+      return JSON.stringify({
+        id: 123456789,
+        issue_url: "https://api.github.com/repos/owner/repo/issues/53",
+        html_url: "https://github.com/owner/repo/issues/53#issuecomment-123456789",
+        body: "@codex review",
+        created_at: "2026-10-06T23:45:00Z",
+      });
+    },
+  );
+  assert.equal(call.bin, "gh");
+  assert.deepEqual(call.args, ["api", "-X", "POST", "repos/owner/repo/issues/53/comments", "--input", "-"]);
+  assert.deepEqual(JSON.parse(call.options.input), { body: "@codex review" });
+  assert.equal(posted.id, 123456789);
+  assert.equal(posted.created_at, "2026-10-06T23:45:00Z");
+});
+
+test("defaultGhPost: Stage 1 uses the same REST endpoint and preserves the frozen-head marker", () => {
+  let payload;
+  defaultGhPost(
+    { repo: "owner/repo", kind: "pr", number: 50, head: "abc123" },
+    (_bin, args, options) => {
+      assert.deepEqual(args, ["api", "-X", "POST", "repos/owner/repo/issues/50/comments", "--input", "-"]);
+      payload = JSON.parse(options.input);
+      return JSON.stringify({
+        id: 222,
+        issue_url: "https://api.github.com/repos/owner/repo/issues/50",
+        html_url: "https://github.com/owner/repo/pull/50#issuecomment-222",
+        body: payload.body,
+        created_at: "2026-10-06T23:46:00Z",
+      });
+    },
+  );
+  assert.deepEqual(payload, { body: triggerCommentBody("abc123") });
+});
+
+test("defaultGhPost: malformed REST JSON fails closed", () => {
+  assert.throws(
+    () => defaultGhPost({ repo: "owner/repo", kind: "issue", number: 53 }, () => "not-json"),
+    /malformed \(non-JSON\) REST response/,
+  );
+});
+
+test("defaultGhPost: wrong target fails closed", () => {
+  assert.throws(
+    () =>
+      defaultGhPost({ repo: "owner/repo", kind: "issue", number: 53 }, () =>
+        JSON.stringify({
+          id: 1,
+          issue_url: "https://api.github.com/repos/owner/repo/issues/54",
+          html_url: "https://github.com/owner/repo/issues/54#issuecomment-1",
+          body: "@codex review",
+          created_at: "2026-10-06T23:46:00Z",
+        }),
+      ),
+    /identity does not match/,
+  );
+});
+
+test("defaultGhPost: issue kind rejects a PR-target comment URL, and pr kind rejects an issue-target URL", () => {
+  const resp = (url) => () =>
+    JSON.stringify({
+      id: 1,
+      body: "@codex review",
+      created_at: "2026-08-24T09:00:00Z",
+      issue_url: "https://api.github.com/repos/owner/repo/issues/53",
+      html_url: url,
+    });
+  assert.throws(
+    () => defaultGhPost({ repo: "owner/repo", kind: "issue", number: 53 }, resp("https://github.com/owner/repo/pull/53#issuecomment-1")),
+    /does not identify a comment/,
+  );
+  assert.throws(
+    () =>
+      defaultGhPost(
+        { repo: "owner/repo", kind: "pr", number: 53, head: "abc" },
+        () =>
+          JSON.stringify({
+            id: 1,
+            body: triggerCommentBody("abc"),
+            created_at: "2026-08-24T09:00:00Z",
+            issue_url: "https://api.github.com/repos/owner/repo/issues/53",
+            html_url: "https://github.com/owner/repo/issues/53#issuecomment-1",
+          }),
+      ),
+    /does not identify a comment/,
+  );
+});
+
+test("defaultGhPost: wrong echoed body fails closed", () => {
+  assert.throws(
+    () =>
+      defaultGhPost({ repo: "owner/repo", kind: "issue", number: 53 }, () =>
+        JSON.stringify({
+          id: 1,
+          issue_url: "https://api.github.com/repos/owner/repo/issues/53",
+          html_url: "https://github.com/owner/repo/issues/53#issuecomment-1",
+          body: "@codex review altered",
+          created_at: "2026-10-06T23:46:00Z",
+        }),
+      ),
+    /body does not match/,
+  );
+});
+
+test("defaultGhPost: missing authoritative timestamp fails closed", () => {
+  assert.throws(
+    () =>
+      defaultGhPost({ repo: "owner/repo", kind: "issue", number: 53 }, () =>
+        JSON.stringify({
+          id: 1,
+          issue_url: "https://api.github.com/repos/owner/repo/issues/53",
+          html_url: "https://github.com/owner/repo/issues/53#issuecomment-1",
+          body: "@codex review",
+        }),
+      ),
+    /valid created_at timestamp/,
+  );
 });
 
 test("run: exits 1 when required args are missing", async () => {
