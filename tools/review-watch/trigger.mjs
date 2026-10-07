@@ -408,7 +408,18 @@ export function findCommentById(comments, id) {
 // conversation comments through this same endpoint. The trigger body is sent as structured
 // JSON over stdin, and the authoritative POST response is validated before its timestamp/url
 // are trusted by downstream polling.
-export function defaultGhPost({ repo, kind, number, head }, runImpl = execFileSync) {
+export function githubHostEndpoints(ghHost) {
+  const host = String(ghHost ?? "").trim().toLowerCase() || "github.com";
+  if (host === "github.com") {
+    return { apiOrigin: "https://api.github.com", apiPrefix: [], webOrigin: "https://github.com" };
+  }
+  if (host.endsWith(".ghe.com")) {
+    return { apiOrigin: `https://api.${host}`, apiPrefix: [], webOrigin: `https://${host}` };
+  }
+  return { apiOrigin: `https://${host}`, apiPrefix: ["api", "v3"], webOrigin: `https://${host}` };
+}
+
+export function defaultGhPost({ repo, kind, number, head }, runImpl = execFileSync, env = process.env) {
   const body = triggerCommentBody(head);
   const path = endpointsFor(kind, repo, number).find((e) => e.name === "issue-comments")?.path;
   if (!path) throw new Error(`No issue-comments endpoint resolved for --kind ${kind}.`);
@@ -430,19 +441,49 @@ export function defaultGhPost({ repo, kind, number, head }, runImpl = execFileSy
     throw new Error(`malformed REST comment response from POST ${path}`);
   }
 
-  const expectedIssuePath = `/repos/${repo}/issues/${number}`.toLowerCase();
-  const issueUrl = String(posted.issue_url ?? "").toLowerCase();
-  if (!issueUrl.endsWith(expectedIssuePath)) {
-    throw new Error(`REST comment response identity does not match ${repo}#${number}`);
+  // Accepted origins derive from the configured GitHub host (GH_HOST, default github.com),
+  // mirroring `gh api`'s own host selection. Path segments are compared raw (never decoded),
+  // so encoded separators or other normalization tricks cannot satisfy the equality check.
+  const { apiOrigin, apiPrefix, webOrigin } = githubHostEndpoints(env.GH_HOST);
+  const segs = (p) => p.split("/").filter((x, i) => i > 0 || x !== "").map((x) => x.toLowerCase());
+  const sameSegs = (actual, expected) =>
+    actual.length === expected.length && actual.every((x, i) => x === expected[i]);
+  const repoSegs = repo.toLowerCase().split("/");
+
+  const identityError = () => new Error(`REST comment response identity does not match ${repo}#${number}`);
+  let issueUrl;
+  try {
+    issueUrl = new URL(String(posted.issue_url ?? ""));
+  } catch {
+    throw identityError();
+  }
+  if (
+    issueUrl.origin.toLowerCase() !== apiOrigin ||
+    !sameSegs(segs(issueUrl.pathname), [...apiPrefix, "repos", ...repoSegs, "issues", String(number)]) ||
+    issueUrl.search ||
+    issueUrl.hash
+  ) {
+    throw identityError();
   }
 
-  const htmlUrl = String(posted.html_url ?? "");
   // Kind-specific HTML path: the shared Issue-comments endpoint accepts a PR number for
-  // --kind issue (and vice versa), so require /issues/N for Stage 2 and /pull/N for Stage 1.
+  // --kind issue (and vice versa), so require the exact /issues/N path for Stage 2 and
+  // /pull/N path for Stage 1, followed only by a numeric issue-comment fragment.
   const kindSegment = kind === "pr" ? "pull" : "issues";
-  const expectedHtmlPath = `/${repo}/${kindSegment}/${number}#issuecomment-`.toLowerCase();
-  if (!htmlUrl.toLowerCase().includes(expectedHtmlPath) || !/#issuecomment-\d+$/i.test(htmlUrl)) {
-    throw new Error(`REST comment response URL does not identify a comment on ${repo}#${number}`);
+  const htmlError = () => new Error(`REST comment response URL does not identify a comment on ${repo}#${number}`);
+  let htmlUrl;
+  try {
+    htmlUrl = new URL(String(posted.html_url ?? ""));
+  } catch {
+    throw htmlError();
+  }
+  if (
+    htmlUrl.origin.toLowerCase() !== webOrigin ||
+    !sameSegs(segs(htmlUrl.pathname), [...repoSegs, kindSegment, String(number)]) ||
+    htmlUrl.search ||
+    !/^#issuecomment-\d+$/i.test(htmlUrl.hash)
+  ) {
+    throw htmlError();
   }
 
   if (posted.body !== body) {
