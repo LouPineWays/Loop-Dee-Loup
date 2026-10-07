@@ -1525,6 +1525,58 @@ test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfie
   assert.equal(result.state, "NO_ACTION_YET");
 });
 
+test("runNextReviewTransitionGate: #954 -- stale correction-satisfied head plus provable same-round later correction re-enters correction finalization", async () => {
+  const liveHead = "af52e922c2e4839cb1f6ae0dabcd91faaf2b5ad5";
+  const calls = [];
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: liveHead, state: "OPEN" }),
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      listStage1TriggerHeadsImpl: async () => ["30b36035c9"],
+      readCorrectionCommitsImpl: async () => [
+        { sha: "c1", parents: 1, message: "Address remaining Stage 1 correction (#375)" },
+      ],
+      checkCorrectionDeltaImpl: async (args) => {
+        calls.push(args);
+        if (args.correctedHead === "0009c54b18") {
+          return {
+            exitCode: 2,
+            state: "HEAD_MISMATCH",
+            reviewedHead: "30b36035c9",
+            correctedHead: "0009c54b18",
+            gatedHead: liveHead,
+          };
+        }
+        return {
+          exitCode: 0,
+          state: "CORRECTION_SATISFIED",
+          reviewedHead: args.reviewedHead,
+          correctedHead: args.correctedHead,
+        };
+      },
+    },
+  );
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].reviewedHead, "30b36035c9");
+  assert.equal(calls[1].correctedHead, liveHead);
+  assert.equal(calls[1].gatedHead, liveHead);
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE1_CORRECTION_FINALIZATION_REQUIRED");
+  assert.equal(result.reviewedHead, "30b36035c9");
+  assert.equal(result.correctedHead, liveHead);
+  assert.equal(
+    result.nextCommand,
+    `node tools/orchestration/finalize-correction-breakpoint.mjs --control-issue 322 --execution-issue 375 --pr 376 --reviewed-head 30b36035c9 --corrected-head ${liveHead}`,
+  );
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["run-finalize-correction-breakpoint"],
+  });
+});
+
 // -- issue #611: the exact live #438/PR #610 regression -----------------------------------
 //
 // #611's own reproduction: PR #610's Stage 1 review was genuinely requested and reviewed at
