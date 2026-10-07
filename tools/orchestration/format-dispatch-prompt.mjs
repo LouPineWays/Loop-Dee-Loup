@@ -628,6 +628,18 @@ export function formatStage2PreparationWorkerDispatchPrompt({ controlIssue = nul
   );
 }
 
+// Issue #907 (control #908; live #867/#868/PR #869 reproduction): a conflict in a protected
+// operating-contract file must never be semantically hand-edited by the recovery worker -- the
+// provider's self-modification protection rightly refuses that, and LDL must not route around it.
+// The only authorized path is the deterministic helper, which applies a resolution only when it
+// is mechanically proven (see its module comment); exit 2 is a founder interrupt. This clause is
+// fixed template text (no interpolation), kept out of the 700-char reference-only budget the
+// same way the machine-generated checkout path is: the CLI adds exactly its length as an
+// allowance for this one template, and the formatter test measures prose excluding it.
+export const CONFLICT_RECOVERY_PROTECTED_CLAUSE =
+  "AGENTS.md/CLAUDE.md conflicts: never hand-edit; run tools/orchestration/resolve-protected-conflict.mjs " +
+  "--reviewed-head <reviewed head> --apply (exit 2: founder interrupt).";
+
 // Pure. Renders the fixed reference-only "Conflict-recovery worker dispatch" template for
 // issue #665 — `next-review-transition-gate.mjs`'s `STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT`
 // verdict (live #639/#638/PR #640 reproduction: a correction-satisfied PR reached
@@ -709,6 +721,7 @@ export function formatConflictRecoveryWorkerDispatchPrompt({ controlIssue = null
     renderPreBoundCheckoutClause({ path, token, scriptPath, pr }) +
     `Correction-satisfied reserved head (${reviewedHeadClause}) conflicts with target. Merge target in ` +
     `(never rebase/force-push); a semantic/security conflict is a founder interrupt, not auto-resolved. ` +
+    `${CONFLICT_RECOVERY_PROTECTED_CLAUSE} ` +
     `Verify, push, run tools/orchestration/finalize-correction-breakpoint.mjs (nonzero: ` +
     `CORRECTION_BREAKPOINT_UNVERIFIED), --release-binding ${token}; no re-review, merge, or Stage 2.`
   );
@@ -990,9 +1003,10 @@ function main() {
   const bindingAllowance =
     (typeof fields?.checkoutBinding?.path === "string" ? fields.checkoutBinding.path.length : 0) +
     (typeof fields?.checkoutBinding?.scriptPath === "string" ? fields.checkoutBinding.scriptPath.length : 0);
+  const templateAllowance = formatter === formatConflictRecoveryWorkerDispatchPrompt ? CONFLICT_RECOVERY_PROTECTED_CLAUSE.length : 0;
   let prompt;
   try {
-    prompt = assertReferenceOnly(formatter(fields), REFERENCE_ONLY_THRESHOLD_CHARS + bindingAllowance);
+    prompt = assertReferenceOnly(formatter(fields), REFERENCE_ONLY_THRESHOLD_CHARS + bindingAllowance + templateAllowance);
   } catch (err) {
     process.stderr.write(`format-dispatch-prompt.mjs: ${err.message}\n`);
     process.exit(1);
