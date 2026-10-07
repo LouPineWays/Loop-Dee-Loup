@@ -16,8 +16,9 @@
 // in the merge-in-progress checkout instead of editing the file itself.
 //
 // Eligibility (all required; any failure is a FAIL_CLOSED reason code, nothing is written):
-//   Scope        the path is in PROTECTED_PATHS (a closed list -- not a general editor) and is a
-//                regular three-stage content conflict (base, PR side, target side all present).
+//   Scope        default selection stays on PROTECTED_PATHS. Correction-satisfied control mode
+//                may additionally select registered executor-substrate paths; ordinary work
+//                product and unregistered paths remain ineligible.
 //   Binding      this checkout is the live pre-bound PR-head reservation (the lock record
 //                pr-head-checkout-preflight.mjs wrote; `--binding-token`/`--pr` must match it if given), HEAD equals the reservation's
 //                pinned corrected head AND the PR's live head (no stale/moved head).
@@ -26,29 +27,28 @@
 //   Provenance   the index's stage blobs are exactly HEAD:path (PR side), MERGE_HEAD:path
 //                (target side) and the single merge-base's path (base) -- a tampered index or
 //                worktree cannot feed the proof.
-//   Reviewed     the PR side's file is byte-identical to the file at the Stage 1 reviewed head
-//                (`--reviewed-head`, a proven ancestor of HEAD): nothing in the protected file
-//                changed after review, so no unreviewed post-review content can ride through.
-//   Mechanical   per conflict hunk, a token-level three-way proof: the PR side is a pure
-//                insertion into the base (it deletes/rewrites nothing); each insertion sits
-//                between two base tokens the target side kept unchanged and adjacent (so the
-//                target never edited or inserted at that point); and the composed result minus
-//                the PR insertions equals the target side exactly. Target content is therefore
-//                wholly preserved and only already-reviewed PR content is added.
+//   Accepted     content is byte-identical to the Stage 1 reviewed head OR the exact
+//                correction-satisfied HEAD bound by --control-issue/--execution-issue, with every
+//                reviewed..HEAD commit attributable to that execution Issue.
+//   Mechanical   per hunk, the result preserves target authority and adds only accepted PR
+//                content. Pure insertions remain supported; same-gap additions require unique
+//                containment; shared rewrites require identical base deletions and one resulting
+//                hunk to contain the other. Competing content/order remains fail-closed.
 //   Whole file   the same invariant is then proven over the COMPLETE resolved file (plain
 //                segments included): every target-file token survives in order and every other
 //                token run is reviewed PR content, so a PR-side deletion/rewrite outside a
 //                conflict hunk fails closed (PR #923 Stage 1 finding).
-// Anything else -- a target change that would be dropped, both sides editing/inserting at the
-// same place, a PR-side rewrite, ambiguous alignment -- is a founder interrupt, never selected.
+// Anything else -- target loss, asymmetric rewrites, non-containing same-gap edits, stale
+// correction provenance, or ambiguous alignment -- is a founder interrupt/stop, never selected.
 //
-// Never done here: commit, push, rebase, touch other conflicted files, write a path outside
-// PROTECTED_PATHS, or relax a provider protection. The worker still resolves ordinary conflicts,
+// Never done here: commit, push, rebase, touch unrequested conflicts, write ordinary work-product
+// paths, author novel executor-substrate semantics, or relax a provider protection. The worker still resolves ordinary conflicts,
 // commits the merge, verifies, pushes, and finalizes per the recovery contract.
 //
 // Usage (from the reserved checkout, merge in progress):
-//   node tools/orchestration/resolve-protected-conflict.mjs --reviewed-head <sha> [--apply]
-//     [--pr <N>] [--binding-token <token>] [--path AGENTS.md]... [--repo <owner/repo>]
+//   node <controller-authoritative>/resolve-protected-conflict.mjs --reviewed-head <sha> [--apply]
+//     [--control-issue <N> --execution-issue <N> --all-executor-substrate]
+//     [--pr <N>] [--binding-token <token>] [--path <eligible-path>]... [--repo <owner/repo>]
 //   Without --apply it only reports the verdict (dry run). Exit 0 RESOLVED/WOULD_RESOLVE,
 //   2 FAIL_CLOSED (founder interrupt, no mutation), 1 usage/operational error.
 //
