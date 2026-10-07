@@ -689,9 +689,10 @@ function siblingAuthoritativeScript(scriptPath, fileName) {
 //   to `correctedHead` (the exact head this verdict gated) and fail closed
 //   (`STALE_HEAD_MISMATCH`) if the PR's live head has already moved past it; the worker's
 //   mandatory `--verify-binding` first step (named by the shared preamble) then re-proves both
-//   the reserved checkout and that head identity still hold before any source mutation. Nothing
-//   further needs restating in the prompt text itself — the pin already happened before this
-//   template was ever rendered.
+//   the reserved checkout and that head identity still hold before any source mutation. Same-PR
+//   recovery needs no extra restatement. Audit #961 closes the successor-path gap by carrying that
+//   same gated `correctedHead` into successor-integration-preflight as the predecessor-head
+//   expectation before either successor creation or reuse.
 //
 // `reviewedHead` keeps its pre-existing, separate role and exception: when a Controlling Issue
 // is present, the reviewed head is already durably recorded there (the exact
