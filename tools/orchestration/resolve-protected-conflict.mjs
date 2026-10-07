@@ -144,11 +144,6 @@ function uniqueContiguousIndex(haystack, needle) {
   return { index: found, unique: found !== -1 };
 }
 
-function tokenSubsequence(needle, haystack) {
-  let n = 0;
-  for (const token of haystack) if (n < needle.length && token === needle[n]) n++;
-  return n === needle.length;
-}
 // Pure. Proves (or refuses) the single mechanical resolution of ONE conflict hunk. `prText` is
 // the PR side, `baseText` the merge base, `targetText` the target side, `reviewedText` the whole
 // reviewed protected file. Returns { ok: true, resolved, insertedText } or { ok: false, code,
@@ -161,14 +156,12 @@ export function proveHunk({ prText, baseText, targetText, reviewedText }) {
   const targetAlign = align(base, target);
   if (!prAlign || !targetAlign) return fail("HUNK_TOO_LARGE", "conflict hunk too large to prove mechanically");
 
-  // #939: identical shared base rewrites are composable only when one resulting hunk contains the other.
-  if (prAlign.some((x) => x < 0)) {
-    if (!sameDeletionMask(prAlign, targetAlign)) {
-      return fail("PR_SIDE_REWRITES_BASE", "the PR side deletes or rewrites base content that the target side does not delete identically");
-    }
-    if (uniqueContiguousIndex(pr, target).unique) return { ok: true, resolved: prText };
-    if (uniqueContiguousIndex(target, pr).unique) return { ok: true, resolved: targetText };
-    return fail("COMPETING_CHANGE", "shared base rewrite still leaves competing non-containing content");
+  // #939: a PR-side base rewrite is mechanical only when the target deletes the exact
+  // same base tokens. The insertions that replace those tokens are then composed per gap below:
+  // same-gap text needs unique contiguous containment, while a separate PR-only addition can
+  // still be preserved when its target anchors remain intact.
+  if (prAlign.some((x) => x < 0) && !sameDeletionMask(prAlign, targetAlign)) {
+    return fail("PR_SIDE_REWRITES_BASE", "the PR side deletes or rewrites base content that the target side does not delete identically");
   }
 
   const prIns = insertionsOf(prAlign, pr);
@@ -183,7 +176,6 @@ export function proveHunk({ prText, baseText, targetText, reviewedText }) {
     if (text.trim() !== "" && !reviewedText.includes(text.trim())) return fail("UNREVIEWED_PR_CONTENT", "a PR-side insertion is not present in accepted Stage 1/correction content");
     const left = gap > 0 ? targetAlign[gap - 1] : null;
     const right = gap < n ? targetAlign[gap] : null;
-    if ((gap > 0 && left < 0) || (gap < n && right < 0)) return fail("COMPETING_CHANGE", "the target side edited or removed content adjacent to a PR-side insertion");
     const toks = entries.map((e) => e.token);
     if (targetIns.has(gap)) {
       const te = targetIns.get(gap);
@@ -196,6 +188,9 @@ export function proveHunk({ prText, baseText, targetText, reviewedText }) {
       if (prefix.length) insertBefore.set(te[0].index, prefix);
       if (suffix.length) insertAfter.set(te[te.length - 1].index, suffix);
       continue;
+    }
+    if ((gap > 0 && left < 0) || (gap < n && right < 0)) {
+      return fail("COMPETING_CHANGE", "the target side edited or removed content adjacent to a PR-only insertion");
     }
     if (gap > 0 && gap < n && right !== left + 1) return fail("AMBIGUOUS_ALIGNMENT", "the target side token alignment around the insertion point is not contiguous");
     if (gap < n) insertBefore.set(right, toks);
@@ -216,7 +211,7 @@ export function proveHunk({ prText, baseText, targetText, reviewedText }) {
   const prRebuilt = [];
   for (let gap = 0; gap <= n; gap++) {
     if (prIns.has(gap)) prRebuilt.push(...prIns.get(gap).map((e) => e.token));
-    if (gap < n) prRebuilt.push(base[gap]);
+    if (gap < n && prAlign[gap] >= 0) prRebuilt.push(base[gap]);
   }
   if (prRebuilt.join("") !== prText) return fail("VERIFICATION_FAILED", "proven insertions do not reproduce the PR side content");
   return { ok: true, resolved };
