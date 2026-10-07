@@ -646,10 +646,12 @@ export const CONFLICT_RECOVERY_PROTECTED_CLAUSE =
 export function renderConflictRecoverySuccessorClause({ preflightPath, issue, pr }) {
   return (
     `founder/product/security/authority ambiguity => founder interrupt; ordinary technical integration of the settled outcome => ` +
-    `one successor PR: node "${preflightPath}" --execution-issue ${issue} --predecessor-pr ${pr} ` +
-    `(SUCCESSOR_EXISTS => reuse; FAIL_CLOSED => stop). Else git merge --abort, branch from current target, ` +
-    `re-integrate only the accepted outcome, open PR "Supersedes #${pr}", request fresh Stage 1 on it, ` +
-    `finalize-pr-breakpoint.mjs; never rebase/force-push/re-review #${pr}. Skip finalize-correction-breakpoint; still release the binding.`
+    `one successor PR: node "${preflightPath}" --execution-issue ${issue} --predecessor-pr ${pr}. ` +
+    `SUCCESSOR_EXISTS => reuse that PR and never create/push another. FAIL_CLOSED => stop. NO_SUCCESSOR => save returned target.sha+branch, ` +
+    `git merge --abort, create that branch from target, re-integrate only the accepted outcome, then immediately before push rerun the same ` +
+    `preflight with --expect-target <saved-target-sha> and require NO_SUCCESSOR with the same branch; push the successor branch (not the ` +
+    `predecessor binding refspec), open PR with "Addresses #${issue}" + "Supersedes #${pr}", request fresh Stage 1 on its live head, run ` +
+    `finalize-pr-breakpoint.mjs, release the predecessor binding, and stop; never rebase/force-push/re-review #${pr} or run its correction finalizer.`
   );
 }
 
@@ -748,16 +750,23 @@ export function formatConflictRecoveryWorkerDispatchPrompt({ controlIssue = null
           pr,
         })
       : null;
-  const mechanicalClause =
+  const resolverCommand =
     `${CONFLICT_RECOVERY_PROTECTED_CLAUSE}: node "${resolverScriptPath}" --reviewed-head ${reviewedHeadArg}` +
-    `${integrationArgs} --apply; exit 2 => ${successorClause ?? "founder interrupt."}`;
+    `${integrationArgs} --apply`;
+  const completion =
+    successorClause === null
+      ? `exit 0 => verify/push via the binding, run tools/orchestration/finalize-correction-breakpoint.mjs, require success, ` +
+        `--release-binding ${token}, stop; exit 2 => founder interrupt. No re-review, merge, or Stage 2.`
+      : `exit 0 => verify/push predecessor via the binding, run tools/orchestration/finalize-correction-breakpoint.mjs, require success, ` +
+        `--release-binding ${token}, stop; exit 2 => ${successorClause} No merge or Stage 2 here.`;
   return (
     `Conflict-recovery worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
     renderPreBoundCheckoutClause({ path, token, scriptPath, pr }) +
+    (successorClause === null
+      ? ""
+      : `The binding's pushRefspec applies only to same-PR predecessor recovery; the successor route below stays in this checkout after abort and pushes only its returned successor branch.\n\n`) +
     `Merge target (never rebase/force-push); semantic/security => founder interrupt. ` +
-    `${mechanicalClause} ` +
-    `Verify/push; run tools/orchestration/finalize-correction-breakpoint.mjs; ` +
-    `nonzero=CORRECTION_BREAKPOINT_UNVERIFIED; --release-binding ${token}; no re-review, merge, or Stage 2.`
+    `${resolverCommand}; ${completion}`
   );
 }
 
