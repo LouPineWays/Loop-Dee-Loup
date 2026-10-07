@@ -55,9 +55,9 @@
 // Tests: node --test tools/orchestration/resolve-protected-conflict.test.mjs
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseBindingLockReason } from "./pr-head-checkout-preflight.mjs";
 import { parseWorktreeListPorcelain } from "./worktree-preflight.mjs";
@@ -351,7 +351,8 @@ export function defaultDeps() {
         rmSync(dir, { recursive: true, force: true });
       }
     },
-    writeFile: (path, text) => writeFileSync(path, text),
+    replaceFileAtomically: (path, text, mode) => replaceRegularFileAtomically(path, text, mode),
+    isRegularFile: (path) => lstatSync(path).isFile(),
   };
 }
 
@@ -369,6 +370,57 @@ function parseUnmerged(lsFilesU) {
     byPath.get(m[4])[m[3]] = { mode: m[1], oid: m[2] };
   }
   return byPath;
+}
+
+const REGULAR_GIT_FILE_MODES = new Set(["100644", "100755"]);
+
+function isRegularGitFileMode(mode) {
+  return REGULAR_GIT_FILE_MODES.has(mode);
+}
+
+function fsModeForGitMode(mode) {
+  if (mode === "100755") return 0o755;
+  if (mode === "100644") return 0o644;
+  throw new Error(`unsupported protected-file Git mode ${mode}`);
+}
+
+// Replace the final directory entry rather than opening the protected path for writing. A late
+// swap to a symlink/hard link therefore replaces that entry instead of following it elsewhere.
+export function replaceRegularFileAtomically(path, text, mode) {
+  const tempDir = mkdtempSync(join(dirname(path), ".ldl-protected-conflict-replace-"));
+  const tempPath = join(tempDir, "replacement");
+  let replaced = false;
+  try {
+    const fsMode = fsModeForGitMode(mode);
+    writeFileSync(tempPath, text, { encoding: "utf8", flag: "wx", mode: fsMode });
+    chmodSync(tempPath, fsMode);
+    renameSync(tempPath, path);
+    replaced = true;
+    if (!lstatSync(path).isFile() || readFileSync(path, "utf8") !== text) {
+      const err = new Error("atomic protected-file replacement postcondition failed");
+      err.mutated = true;
+      throw err;
+    }
+  } catch (err) {
+    if (replaced) err.mutated = true;
+    throw err;
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function parseTreeEntry(lsTree, expectedPath) {
+  const line = lsTree.trim();
+  const m = /^(\d+) ([^ ]+) ([0-9a-f]+)\t(.+)$/.exec(line);
+  if (!m || m[4] !== expectedPath) return null;
+  return { mode: m[1], type: m[2], oid: m[3] };
+}
+
+function parseStagedEntry(lsFilesStage, expectedPath) {
+  const line = lsFilesStage.trim();
+  const m = /^(\d+) ([0-9a-f]+) 0\t(.+)$/.exec(line);
+  if (!m || m[3] !== expectedPath) return null;
+  return { mode: m[1], oid: m[2] };
 }
 
 export async function resolveProtectedConflict(
@@ -467,7 +519,7 @@ export async function resolveProtectedConflict(
     return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: `could not compute merge base: ${String(err.message ?? err).split("\n")[0]}` };
   }
 
-  const unmerged = parseUnmerged(deps.git(["ls-files", "-u"], { cwd }));
+  const unmerged = parseUnmerged(deps.git(["ls-files", "-u", "--full-name"], { cwd: top }));
   if (!unmerged) return closed("MALFORMED_INDEX", "could not parse the index's unmerged entries");
   const targets = paths.length ? paths : [...unmerged.keys()].filter((p) => PROTECTED_PATHS.includes(p));
   if (targets.length === 0) return closed("NO_PROTECTED_CONFLICT", "no unmerged eligible protected path in this checkout");
@@ -476,34 +528,118 @@ export async function resolveProtectedConflict(
   for (const path of targets) {
     const st = unmerged.get(path);
     if (!st || !st[1] || !st[2] || !st[3]) return closed("NOT_A_CONTENT_CONFLICT", `${path} is not a three-stage content conflict`, { path });
-    const blobAt = (rev) => g(["rev-parse", "--verify", `${rev}:${path}`]);
-    let headOid, targetOid, baseOid, reviewedOid;
+
+    const worktreePath = join(top, path);
     try {
-      headOid = blobAt(head);
-      targetOid = blobAt(mergeHead);
-      baseOid = blobAt(mergeBase);
-      reviewedOid = blobAt(reviewed);
+      if (!deps.isRegularFile(worktreePath)) {
+        return closed("NON_REGULAR_WORKTREE_PATH", `${path} is not a regular worktree file; refusing any write-through path`, { path });
+      }
     } catch {
+      return closed("NON_REGULAR_WORKTREE_PATH", `${path} is missing or cannot be proven to be a regular worktree file`, { path });
+    }
+
+    const treeEntryAt = (rev) => parseTreeEntry(deps.git(["ls-tree", "--full-tree", rev, "--", path], { cwd: top }), path);
+    let headEntry, targetEntry, baseEntry, reviewedEntry;
+    try {
+      headEntry = treeEntryAt(head);
+      targetEntry = treeEntryAt(mergeHead);
+      baseEntry = treeEntryAt(mergeBase);
+      reviewedEntry = treeEntryAt(reviewed);
+    } catch {
+      return closed("PROVENANCE_MISMATCH", `${path} tree provenance could not be read at HEAD, MERGE_HEAD, the merge base or the reviewed head`, { path });
+    }
+    if (!headEntry || !targetEntry || !baseEntry || !reviewedEntry) {
       return closed("PROVENANCE_MISMATCH", `${path} is missing at HEAD, MERGE_HEAD, the merge base or the reviewed head`, { path });
     }
-    if (st[2].oid !== headOid || st[3].oid !== targetOid || st[1].oid !== baseOid) {
-      return closed("PROVENANCE_MISMATCH", `${path}'s index stages do not match HEAD / MERGE_HEAD / merge-base blobs`, { path });
+
+    const indexEntries = [st[1], st[2], st[3]];
+    const treeEntries = [baseEntry, headEntry, targetEntry, reviewedEntry];
+    if (
+      indexEntries.some((entry) => !isRegularGitFileMode(entry.mode)) ||
+      treeEntries.some((entry) => entry.type !== "blob" || !isRegularGitFileMode(entry.mode))
+    ) {
+      return closed("NON_REGULAR_CONTENT_CONFLICT", `${path} must be a regular-file content conflict at every index/tree provenance point`, { path });
     }
-    if (headOid !== reviewedOid) {
-      return closed("UNREVIEWED_POST_REVIEW_CONTENT", `${path} at the corrected head differs from the Stage 1 reviewed head`, { path });
+
+    if (
+      st[2].oid !== headEntry.oid ||
+      st[3].oid !== targetEntry.oid ||
+      st[1].oid !== baseEntry.oid ||
+      st[2].mode !== headEntry.mode ||
+      st[3].mode !== targetEntry.mode ||
+      st[1].mode !== baseEntry.mode
+    ) {
+      return closed("PROVENANCE_MISMATCH", `${path}'s index stages do not exactly match HEAD / MERGE_HEAD / merge-base modes and blobs`, { path });
     }
+    const provenanceModes = [baseEntry.mode, headEntry.mode, targetEntry.mode, reviewedEntry.mode];
+    if (provenanceModes.some((mode) => mode !== provenanceModes[0])) {
+      return closed(
+        "MODE_MISMATCH",
+        `${path} changes regular-file mode across merge-base / HEAD / MERGE_HEAD / reviewed-head provenance; protected mode choices are not resolved mechanically`,
+        { path },
+      );
+    }
+    if (headEntry.oid !== reviewedEntry.oid || headEntry.mode !== reviewedEntry.mode) {
+      return closed("UNREVIEWED_POST_REVIEW_CONTENT", `${path} at the corrected head differs from the Stage 1 reviewed head in content or mode`, { path });
+    }
+
     const content = (oid) => deps.git(["cat-file", "blob", oid], { cwd });
-    const diff3 = deps.mergeFile({ ours: content(headOid), base: content(baseOid), theirs: content(targetOid) });
-    const proof = proveFile({ diff3Output: diff3, reviewedText: content(reviewedOid), targetText: content(targetOid) });
+    const diff3 = deps.mergeFile({ ours: content(headEntry.oid), base: content(baseEntry.oid), theirs: content(targetEntry.oid) });
+    const proof = proveFile({ diff3Output: diff3, reviewedText: content(reviewedEntry.oid), targetText: content(targetEntry.oid) });
     if (!proof.ok) return closed(proof.code, proof.reason, { path, hunk: proof.hunk });
-    results.push({ path, resolved: proof.resolved, hunks: proof.hunks });
+    results.push({ path, resolved: proof.resolved, hunks: proof.hunks, mode: targetEntry.mode });
   }
 
-  // Every proof held -- only now may anything be written.
+  // Every proof held. Re-check every write target as a regular file immediately before the
+  // mutation phase so a protected path cannot be redirected through a symlink after proof.
   if (apply) {
     for (const r of results) {
-      deps.writeFile(join(top, r.path), r.resolved);
-      deps.git(["add", "--", r.path], { cwd });
+      try {
+        if (!deps.isRegularFile(join(top, r.path))) {
+          return closed("NON_REGULAR_WORKTREE_PATH", `${r.path} stopped being a regular worktree file before mutation`, { path: r.path });
+        }
+      } catch {
+        return closed("NON_REGULAR_WORKTREE_PATH", `${r.path} cannot be proven to remain a regular worktree file before mutation`, { path: r.path });
+      }
+    }
+    for (const r of results) {
+      const worktreePath = join(top, r.path);
+      try {
+        deps.replaceFileAtomically(worktreePath, r.resolved, r.mode);
+      } catch (err) {
+        return {
+          exitCode: 1,
+          verdict: "OPERATIONAL_ERROR",
+          code: "ATOMIC_REPLACE_FAILED",
+          message: `could not atomically replace ${r.path}: ${String(err.message ?? err).split("\n")[0]}`,
+          mutated: Boolean(err?.mutated),
+          path: r.path,
+        };
+      }
+      try {
+        const expectedOid = deps.git(["hash-object", "--stdin"], { cwd: top, input: r.resolved }).trim();
+        deps.git(["add", "--", r.path], { cwd: top });
+        const staged = parseStagedEntry(deps.git(["ls-files", "--stage", "--full-name", "--", r.path], { cwd: top }), r.path);
+        if (!staged || staged.mode !== r.mode || staged.oid !== expectedOid) {
+          return {
+            exitCode: 1,
+            verdict: "OPERATIONAL_ERROR",
+            code: "POSTCONDITION_FAILED",
+            message: `${r.path} did not stage as the proven regular-file mode/blob after atomic replacement`,
+            mutated: true,
+            path: r.path,
+          };
+        }
+      } catch (err) {
+        return {
+          exitCode: 1,
+          verdict: "OPERATIONAL_ERROR",
+          code: "POSTCONDITION_FAILED",
+          message: `could not verify staged postcondition for ${r.path}: ${String(err.message ?? err).split("\n")[0]}`,
+          mutated: true,
+          path: r.path,
+        };
+      }
     }
   }
   return {
