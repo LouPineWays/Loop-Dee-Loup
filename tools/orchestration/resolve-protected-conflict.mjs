@@ -166,8 +166,8 @@ export function proveHunk({ prText, baseText, targetText, reviewedText }) {
     if (!sameDeletionMask(prAlign, targetAlign)) {
       return fail("PR_SIDE_REWRITES_BASE", "the PR side deletes or rewrites base content that the target side does not delete identically");
     }
-    if (tokenSubsequence(target, pr)) return { ok: true, resolved: prText };
-    if (tokenSubsequence(pr, target)) return { ok: true, resolved: targetText };
+    if (uniqueContiguousIndex(pr, target).unique) return { ok: true, resolved: prText };
+    if (uniqueContiguousIndex(target, pr).unique) return { ok: true, resolved: targetText };
     return fail("COMPETING_CHANGE", "shared base rewrite still leaves competing non-containing content");
   }
 
