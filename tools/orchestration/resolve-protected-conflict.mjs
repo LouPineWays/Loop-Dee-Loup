@@ -869,24 +869,39 @@ function parseStagedEntry(lsFilesStage, expectedPath) {
 }
 
 export async function resolveProtectedConflict(
-  { repo, pr, token, reviewedHead, paths = [], apply = false, cwd = process.cwd() },
+  { repo, pr, token, reviewedHead, controlIssue = null, executionIssue = null, paths = [], apply = false, cwd = process.cwd() },
   deps = defaultDeps(),
 ) {
   const prGiven = pr !== undefined && pr !== null && !Number.isNaN(pr);
   if (
     (prGiven && (!Number.isInteger(pr) || pr <= 0)) ||
     (token !== undefined && token !== null && (typeof token !== "string" || !token)) ||
+    (controlIssue !== null && controlIssue !== undefined && (!Number.isInteger(controlIssue) || controlIssue <= 0)) ||
+    (executionIssue !== null && executionIssue !== undefined && (!Number.isInteger(executionIssue) || executionIssue <= 0)) ||
     typeof reviewedHead !== "string" ||
     !SHA_RE.test(reviewedHead) ||
     typeof repo !== "string" ||
     !repo
   ) {
-    return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: "--reviewed-head <sha> and a repository are required; --pr/--binding-token, when given, must be well-formed" };
+    return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: "--reviewed-head <sha> and a repository are required; --pr/--binding-token/--control-issue/--execution-issue, when given, must be well-formed" };
   }
+  const explicitPathClasses = new Map();
   for (const p of paths) {
-    if (!PROTECTED_PATHS.includes(p)) {
-      return closed("PATH_NOT_ELIGIBLE", `${p} is not an eligible protected operating-contract path (${PROTECTED_PATHS.join(", ")})`);
+    if (PROTECTED_PATHS.includes(p)) {
+      explicitPathClasses.set(p, classifyMechanicalIntegrationPath(p));
+      continue;
     }
+    const classified = classifyMechanicalIntegrationPath(p);
+    if (!classified.eligible) {
+      return closed("PATH_NOT_ELIGIBLE", `${p} is not a registered executor-substrate component eligible for deterministic merge integration`);
+    }
+    if (!controlIssue || !executionIssue) {
+      return closed(
+        "MECHANICAL_INTEGRATION_AUTHORITY_MISSING",
+        `${p} is executor substrate (${classified.component}); explicit control/execution identity is required for deterministic integration`,
+      );
+    }
+    explicitPathClasses.set(p, classified);
   }
   const g = (args) => deps.git(args, { cwd }).trim();
   let top, head, reviewed;
@@ -949,6 +964,17 @@ export async function resolveProtectedConflict(
   } catch {
     return closed("REVIEWED_HEAD_NOT_ANCESTOR", "the reviewed head is not an ancestor of the corrected head");
   }
+
+  let correctionProvenance = null;
+  if (head.toLowerCase() !== reviewed.toLowerCase()) {
+    const proof = await proveAcceptedCorrectionHead(
+      { repo, controlIssue, executionIssue, pr, reviewed, head, cwd },
+      deps,
+    );
+    if (!proof.ok) return proof;
+    correctionProvenance = proof;
+  }
+
   try {
     deps.git(["merge-base", "--is-ancestor", mergeHead, head], { cwd });
     return closed("TARGET_ALREADY_MERGED", "MERGE_HEAD is already contained in HEAD");
@@ -968,6 +994,9 @@ export async function resolveProtectedConflict(
   if (!unmerged) return closed("MALFORMED_INDEX", "could not parse the index's unmerged entries");
   const targets = paths.length ? paths : [...unmerged.keys()].filter((p) => PROTECTED_PATHS.includes(p));
   if (targets.length === 0) return closed("NO_PROTECTED_CONFLICT", "no unmerged eligible protected path in this checkout");
+  const pathClasses = new Map(
+    targets.map((p) => [p, explicitPathClasses.get(p) ?? classifyMechanicalIntegrationPath(p)]),
+  );
 
   const results = [];
   for (const path of targets) {
@@ -1024,15 +1053,21 @@ export async function resolveProtectedConflict(
         { path },
       );
     }
-    if (headEntry.oid !== reviewedEntry.oid || headEntry.mode !== reviewedEntry.mode) {
+    if (!correctionProvenance && (headEntry.oid !== reviewedEntry.oid || headEntry.mode !== reviewedEntry.mode)) {
       return closed("UNREVIEWED_POST_REVIEW_CONTENT", `${path} at the corrected head differs from the Stage 1 reviewed head in content or mode`, { path });
     }
 
+    const pathClass = pathClasses.get(path);
+    if (!PROTECTED_PATHS.includes(path) && (!pathClass || !pathClass.eligible)) {
+      return closed("PATH_NOT_ELIGIBLE", `${path} is not a registered executor-substrate component`, { path });
+    }
+
     const content = (oid) => deps.git(["cat-file", "blob", oid], { cwd });
+    const acceptedText = correctionProvenance ? content(headEntry.oid) : content(reviewedEntry.oid);
     const diff3 = deps.mergeFile({ ours: content(headEntry.oid), base: content(baseEntry.oid), theirs: content(targetEntry.oid) });
-    const proof = proveFile({ diff3Output: diff3, reviewedText: content(reviewedEntry.oid), targetText: content(targetEntry.oid) });
+    const proof = proveFile({ diff3Output: diff3, reviewedText: acceptedText, targetText: content(targetEntry.oid) });
     if (!proof.ok) return closed(proof.code, proof.reason, { path, hunk: proof.hunk });
-    results.push({ path, resolved: proof.resolved, hunks: proof.hunks, mode: targetEntry.mode });
+    results.push({ path, component: pathClass?.component ?? null, resolved: proof.resolved, hunks: proof.hunks, mode: targetEntry.mode });
   }
 
   // Every proof held. Re-check every write target as a regular file immediately before the
@@ -1091,7 +1126,10 @@ export async function resolveProtectedConflict(
     exitCode: 0,
     verdict: apply ? "RESOLVED" : "WOULD_RESOLVE",
     mutated: apply,
-    paths: results.map((r) => ({ path: r.path, hunks: r.hunks })),
+    paths: results.map((r) => ({ path: r.path, component: r.component, hunks: r.hunks })),
+    acceptedContent: correctionProvenance
+      ? { source: "correction-satisfied-head", controlIssue, executionIssue, commits: correctionProvenance.commits }
+      : { source: "stage1-reviewed-head" },
   };
 }
 
@@ -1104,6 +1142,8 @@ function parseArgs(argv) {
     else if (a === "--pr") args.pr = Number(argv[++i]);
     else if (a === "--binding-token") args.token = argv[++i];
     else if (a === "--reviewed-head") args.reviewedHead = argv[++i];
+    else if (a === "--control-issue") args.controlIssue = Number(argv[++i]);
+    else if (a === "--execution-issue") args.executionIssue = Number(argv[++i]);
     else if (a === "--repo") args.repo = argv[++i];
     else return { error: `unknown argument ${a}` };
   }
