@@ -335,10 +335,58 @@ function git(args, { cwd, input } = {}) {
   return execFileSync("git", args, { cwd, encoding: "utf8", input, stdio: ["pipe", "pipe", "pipe"] });
 }
 
+function parseControlBullet(body, label) {
+  const prefix = `- **${label}:**`;
+  const line = String(body ?? "").split(/\r?\n/).find((candidate) => candidate.startsWith(prefix));
+  return line ? line.slice(prefix.length).trim() : null;
+}
+
+function parseIssueRef(value) {
+  const m = /^#(\d+)$/.exec(String(value ?? "").trim());
+  return m ? Number(m[1]) : null;
+}
+
+function parseCorrectionSatisfied(value) {
+  const m = /^correction-satisfied at ([0-9a-f]{7,64}) \(reviewed ([0-9a-f]{7,64})\)$/i.exec(String(value ?? "").trim());
+  return m ? { correctedHead: m[1].toLowerCase(), reviewedHead: m[2].toLowerCase() } : null;
+}
+
+export function commitMessageReferencesIssue(message, issue) {
+  if (!Number.isInteger(issue) || issue <= 0) return false;
+  const re = new RegExp(`(^|[^0-9])#${issue}(?![0-9])`);
+  return re.test(String(message ?? ""));
+}
+
+async function proveAcceptedCorrectionHead({ repo, controlIssue, executionIssue, pr, reviewed, head, cwd }, deps) {
+  if (!Number.isInteger(controlIssue) || controlIssue <= 0 || !Number.isInteger(executionIssue) || executionIssue <= 0) {
+    return closed("UNREVIEWED_POST_REVIEW_CONTENT", "corrected head differs from reviewed head without exact control/execution identity");
+  }
+  let control;
+  try { control = await deps.readIssue({ repo, issue: controlIssue }); }
+  catch (err) { return closed("CORRECTION_PROVENANCE_UNVERIFIED", `could not read control Issue #${controlIssue}: ${String(err.message ?? err).split("\n")[0]}`); }
+  if (control?.state !== "OPEN") return closed("CORRECTION_PROVENANCE_UNVERIFIED", `control Issue #${controlIssue} is not OPEN`);
+  const body = control?.body ?? "";
+  const stage1 = parseCorrectionSatisfied(parseControlBullet(body, "Stage 1"));
+  if (parseIssueRef(parseControlBullet(body, "Execution")) !== executionIssue || parseIssueRef(parseControlBullet(body, "PR")) !== pr || !stage1 || stage1.correctedHead !== head.toLowerCase() || stage1.reviewedHead !== reviewed.toLowerCase()) {
+    return closed("CORRECTION_PROVENANCE_UNVERIFIED", `control Issue #${controlIssue} does not bind Execution #${executionIssue}, PR #${pr}, and the exact correction-satisfied heads`);
+  }
+  let commits;
+  try { commits = deps.git(["rev-list", "--reverse", `${reviewed}..${head}`], { cwd }).trim().split("\n").filter(Boolean); }
+  catch (err) { return closed("CORRECTION_PROVENANCE_UNVERIFIED", `could not enumerate correction commits: ${String(err.message ?? err).split("\n")[0]}`); }
+  if (commits.length === 0) return closed("CORRECTION_PROVENANCE_UNVERIFIED", "no correction commits found between reviewed and corrected heads");
+  for (const commit of commits) {
+    let message;
+    try { message = deps.git(["show", "-s", "--format=%B", commit], { cwd }); }
+    catch (err) { return closed("CORRECTION_PROVENANCE_UNVERIFIED", `could not read correction commit ${commit}: ${String(err.message ?? err).split("\n")[0]}`); }
+    if (!commitMessageReferencesIssue(message, executionIssue)) return closed("CORRECTION_PROVENANCE_UNVERIFIED", `correction commit ${commit} is not attributable to execution Issue #${executionIssue}`);
+  }
+  return { ok: true, commits };
+}
 export function defaultDeps() {
   return {
     git: (args, opts) => git(args, opts),
     readPr: ({ repo, pr }) => readGithubPr({ repo, number: pr, fields: ["headRefOid", "baseRefName", "state"] }),
+    readIssue: ({ repo, issue }) => readGithubIssue({ repo, number: issue, fields: ["body", "state"] }),
     readBranchTip: ({ repo, branch }) =>
       JSON.parse(
         execFileSync("gh", ["api", `repos/${repo}/git/ref/heads/${branch}`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
