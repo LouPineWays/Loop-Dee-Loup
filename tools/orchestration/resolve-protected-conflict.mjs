@@ -353,7 +353,7 @@ function parseCorrectionSatisfied(value) {
 
 export function commitMessageReferencesIssue(message, issue) {
   if (!Number.isInteger(issue) || issue <= 0) return false;
-  const re = new RegExp(`(^|[^0-9])#${issue}(?![0-9])`);
+  const re = new RegExp(`(^|[^\\w/])#${issue}(?!\\w)`);
   return re.test(String(message ?? ""));
 }
 
