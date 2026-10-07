@@ -160,7 +160,8 @@ export function proveHunk({ prText, baseText, targetText, reviewedText }) {
   // same base tokens. The insertions that replace those tokens are then composed per gap below:
   // same-gap text needs unique contiguous containment, while a separate PR-only addition can
   // still be preserved when its target anchors remain intact.
-  if (prAlign.some((x) => x < 0) && !sameDeletionMask(prAlign, targetAlign)) {
+  const sharedRewrite = prAlign.some((x) => x < 0);
+  if (sharedRewrite && !sameDeletionMask(prAlign, targetAlign)) {
     return fail("PR_SIDE_REWRITES_BASE", "the PR side deletes or rewrites base content that the target side does not delete identically");
   }
 
@@ -180,6 +181,16 @@ export function proveHunk({ prText, baseText, targetText, reviewedText }) {
     if (targetIns.has(gap)) {
       const te = targetIns.get(gap);
       const tt = te.map((e) => e.token);
+      // When both sides deleted the same base token(s), this insertion is the replacement text:
+      // require exact equality there. A prefix/suffix such as "not " can reverse an instruction
+      // even while containing the target tokens verbatim. Separate PR-only additions remain
+      // composable at other, intact gaps below.
+      if (sharedRewrite) {
+        if (tt.join("") !== toks.join("")) {
+          return fail("COMPETING_CHANGE", "shared base rewrite has non-identical replacement text");
+        }
+        continue;
+      }
       if (uniqueContiguousIndex(tt, toks).unique) continue;
       const targetInPr = uniqueContiguousIndex(toks, tt);
       if (!targetInPr.unique) return fail("COMPETING_CHANGE", "same-gap additions are non-containing or ambiguously repeated");
