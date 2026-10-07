@@ -121,7 +121,9 @@ export function defaultLocalGit(cwd) {
       return top ? normalizePathForComparison(top) : null;
     },
     remoteBranch: (branch) => {
-      if (git(["remote", "get-url", "origin"], { cwd, allowFail: true }) === null) return null; // no origin: nothing can be pushed
+      // Three-way result: sha = present, null = origin readable and branch CONFIRMED absent,
+      // undefined = unprovable (no origin, or lookup failed). Unprovable is never "absent" (#970).
+      if (git(["remote", "get-url", "origin"], { cwd, allowFail: true }) === null) return undefined;
       const out = git(["ls-remote", "--heads", "origin", branch], { cwd, allowFail: true });
       if (out === null) return undefined; // unreadable
       const m = /^([0-9a-f]{40})\s/i.exec(out);
@@ -153,7 +155,19 @@ export function inspectLocalSuccessor(
   // historical attempt is not this attempt's local state.
   const re = new RegExp(`^${prefix}${Number.isInteger(attempt) && attempt > 0 ? attempt : "\\d+"}$`);
   const branches = localGit.branches(`${prefix}*`).filter((b) => re.test(b.name));
-  if (branches.length === 0) return null;
+  if (branches.length === 0) {
+    // Audit #970: a canonical successor pushed by an interrupted worker may exist only on origin.
+    // Positively confirm remote absence before the caller may treat this as "no successor".
+    const expected = Number.isInteger(attempt) && attempt > 0 ? `${prefix}${attempt}` : `${prefix}*`;
+    const remoteOnly = localGit.remoteBranch(expected);
+    if (remoteOnly === null) return null;
+    return ambiguous(
+      remoteOnly === undefined
+        ? "cannot read origin to prove no successor branch was already pushed; not authorizing a new successor"
+        : `successor branch ${expected} already exists on origin (${remoteOnly}) with no local copy and no open PR; reuse it (fetch and check it out) instead of creating another`,
+      { branch: expected, remoteSha: remoteOnly ?? null },
+    );
+  }
   if (branches.length > 1) return ambiguous(`multiple local successor branches (${branches.map((b) => b.name).join(", ")})`, { branches: branches.map((b) => b.name) });
   const { name: branch, sha: tip } = branches[0];
   const base = { branch, tip, target };
