@@ -1513,6 +1513,7 @@ test("runNextReviewTransitionGate: control-Issue mode with a correction-satisfie
       ghPrStateImpl: async () => ({ headRefOid: "somesupersededhead", state: "OPEN" }),
       stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      listStage1TriggerHeadsImpl: async () => [],
       checkCorrectionDeltaImpl: async () => ({
         exitCode: 2,
         state: "HEAD_MISMATCH",
