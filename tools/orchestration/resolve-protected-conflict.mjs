@@ -869,7 +869,7 @@ function parseStagedEntry(lsFilesStage, expectedPath) {
 }
 
 export async function resolveProtectedConflict(
-  { repo, pr, token, reviewedHead, controlIssue = null, executionIssue = null, paths = [], apply = false, cwd = process.cwd() },
+  { repo, pr, token, reviewedHead, controlIssue = null, executionIssue = null, paths = [], includeExecutorSubstrate = false, apply = false, cwd = process.cwd() },
   deps = defaultDeps(),
 ) {
   const prGiven = pr !== undefined && pr !== null && !Number.isNaN(pr);
@@ -992,8 +992,19 @@ export async function resolveProtectedConflict(
 
   const unmerged = parseUnmerged(deps.git(["ls-files", "-u", "--full-name"], { cwd: top }));
   if (!unmerged) return closed("MALFORMED_INDEX", "could not parse the index's unmerged entries");
-  const targets = paths.length ? paths : [...unmerged.keys()].filter((p) => PROTECTED_PATHS.includes(p));
-  if (targets.length === 0) return closed("NO_PROTECTED_CONFLICT", "no unmerged eligible protected path in this checkout");
+  if (includeExecutorSubstrate && (!controlIssue || !executionIssue)) {
+    return closed(
+      "MECHANICAL_INTEGRATION_AUTHORITY_MISSING",
+      "--all-executor-substrate requires exact --control-issue and --execution-issue identities",
+    );
+  }
+  const targets = paths.length
+    ? paths
+    : [...unmerged.keys()].filter((p) => {
+        if (PROTECTED_PATHS.includes(p)) return true;
+        return includeExecutorSubstrate && classifyMechanicalIntegrationPath(p).eligible;
+      });
+  if (targets.length === 0) return closed("NO_PROTECTED_CONFLICT", "no unmerged eligible protected/executor-substrate path in this checkout");
   const pathClasses = new Map(
     targets.map((p) => [p, explicitPathClasses.get(p) ?? classifyMechanicalIntegrationPath(p)]),
   );
@@ -1138,6 +1149,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--apply") args.apply = true;
+    else if (a === "--all-executor-substrate") args.includeExecutorSubstrate = true;
     else if (a === "--path") args.paths.push(argv[++i]);
     else if (a === "--pr") args.pr = Number(argv[++i]);
     else if (a === "--binding-token") args.token = argv[++i];
