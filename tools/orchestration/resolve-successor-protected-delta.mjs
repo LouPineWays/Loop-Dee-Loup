@@ -60,11 +60,97 @@ import {
   parseUnmerged,
   proveAcceptedCorrectionHead,
   proveFile,
+  tokenize,
 } from "./resolve-protected-conflict.mjs";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 
 const SHA40 = /^[0-9a-f]{40}$/i;
 const isPosInt = (n) => Number.isInteger(n) && n > 0;
+
+const wordTokens = (text) => tokenize(String(text ?? "")).filter((t) => !/^\s+$/.test(t));
+function tokenCounts(text) {
+  const m = new Map();
+  for (const t of wordTokens(text)) m.set(t, (m.get(t) ?? 0) + 1);
+  return m;
+}
+// Tokens a commit's path-limited diff adds / removes (-U0, renames off).
+function diffTokens(deps, top, commit, path) {
+  const out = deps.git(["diff-tree", "-p", "--no-commit-id", "--no-renames", "-U0", "-r", commit, "--", path], { cwd: top });
+  const added = [];
+  const removed = [];
+  for (const line of out.split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) added.push(line.slice(1));
+    else if (line.startsWith("-")) removed.push(line.slice(1));
+  }
+  return { added: wordTokens(added.join("\n")), removed: wordTokens(removed.join("\n")) };
+}
+const blobAt = (deps, top, rev, path) => {
+  try {
+    return deps.git(["cat-file", "blob", `${rev}:${path}`], { cwd: top });
+  } catch {
+    return "";
+  }
+};
+
+// Issue #980 Stage 1 correction: the protected result must be exactly the later-target contract
+// plus only accepted protected changes from the predecessor's reviewed/correction outcome.
+// Ancestry alone proves neither, so this checks content: (1) every intervening successor commit
+// (target tip..HEAD) that touched the path added only words already present in the target tip
+// blob or added by an accepted (target-unreachable) predecessor commit, and HEAD still carries
+// every target-tip word unless an accepted commit removed it; (2) the picked commit is not
+// inherited from target history, and its net-added words survive in the effective reviewed
+// (or, for a correction-range pick, corrected) blob -- an introduced-then-reverted clause fails.
+function proveProtectedProvenance({ deps, top, path, baseTip, head, picked, pickedParent, reviewed, corrected, pickedInReviewed }) {
+  const fail = (code, reason) => closed(code, reason, { path });
+  let intervening;
+  let accepted;
+  try {
+    intervening = deps.git(["rev-list", "--parents", `${baseTip}..${head}`], { cwd: top }).split("\n").filter(Boolean).map((l) => l.split(" "));
+    accepted = deps.git(["rev-list", corrected, `^${baseTip}`], { cwd: top }).split("\n").filter(Boolean);
+  } catch (err) {
+    return fail("SUCCESSOR_HISTORY_UNPROVEN", `could not enumerate successor/predecessor history: ${String(err.message ?? err).split("\n")[0]}`);
+  }
+  if (intervening.some((c) => c.length !== 2)) {
+    return fail("SUCCESSOR_HISTORY_UNPROVEN", "successor history since the target tip contains a merge or root commit; protected provenance cannot be proven");
+  }
+  if (!accepted.some((c) => c.toLowerCase() === picked.toLowerCase())) {
+    return fail("PICKED_COMMIT_NOT_ACCEPTED", `cherry-picked commit ${picked} is inherited from target history or outside the predecessor's accepted delta`);
+  }
+  const acceptedAdded = new Set();
+  const acceptedRemoved = new Set();
+  try {
+    for (const c of accepted) {
+      const d = diffTokens(deps, top, c, path);
+      d.added.forEach((t) => acceptedAdded.add(t));
+      d.removed.forEach((t) => acceptedRemoved.add(t));
+    }
+    const baseCounts = tokenCounts(blobAt(deps, top, baseTip, path));
+    for (const [commit] of intervening) {
+      const d = diffTokens(deps, top, commit, path);
+      if (d.added.some((t) => !baseCounts.has(t) && !acceptedAdded.has(t))) {
+        return fail("SUCCESSOR_HISTORY_UNPROVEN", `successor commit ${commit} added protected text not present in the target and not from an accepted predecessor commit`);
+      }
+    }
+    const headCounts = tokenCounts(blobAt(deps, top, head, path));
+    for (const [t, n] of baseCounts) {
+      if ((headCounts.get(t) ?? 0) < n && !acceptedRemoved.has(t)) {
+        return fail("SUCCESSOR_HISTORY_UNPROVEN", "successor HEAD dropped target protected text that no accepted predecessor commit removed");
+      }
+    }
+    const pickedCounts = tokenCounts(blobAt(deps, top, picked, path));
+    const parentCounts = tokenCounts(blobAt(deps, top, pickedParent, path));
+    const effectiveCounts = tokenCounts(blobAt(deps, top, pickedInReviewed ? reviewed : corrected, path));
+    for (const [t, n] of pickedCounts) {
+      if (n > (parentCounts.get(t) ?? 0) && (effectiveCounts.get(t) ?? 0) < n) {
+        return fail("PICKED_DELTA_NOT_EFFECTIVE", "the picked protected addition is not present in the effective reviewed/corrected content (reverted or superseded)");
+      }
+    }
+  } catch (err) {
+    return fail("SUCCESSOR_HISTORY_UNPROVEN", `could not prove protected provenance: ${String(err.message ?? err).split("\n")[0]}`);
+  }
+  return null;
+}
 
 export async function resolveSuccessorProtectedDelta(
   { repo, controlIssue, executionIssue, predecessorPr, reviewedHead, correctedHead, apply = false, cwd = process.cwd() },
@@ -162,9 +248,10 @@ export async function resolveSuccessorProtectedDelta(
   // Accepted content: the control Issue must bind this exact correction-satisfied pair (the
   // governing authority link); the picked commit is then either reviewed history or inside the
   // attributable reviewed..corrected range.
-  const proof = await proveAcceptedCorrectionHead({ repo, controlIssue, executionIssue, pr: predecessorPr, reviewed, head: corrected, cwd }, deps);
-  if (!proof.ok) return proof;
-  if (!isAncestor(picked, reviewed) && !proof.commits.some((c) => c.toLowerCase() === picked.toLowerCase())) {
+  const correctionProof = await proveAcceptedCorrectionHead({ repo, controlIssue, executionIssue, pr: predecessorPr, reviewed, head: corrected, cwd }, deps);
+  if (!correctionProof.ok) return correctionProof;
+  const pickedInReviewed = isAncestor(picked, reviewed);
+  if (!pickedInReviewed && !correctionProof.commits.some((c) => c.toLowerCase() === picked.toLowerCase())) {
     return closed("PICKED_COMMIT_NOT_ACCEPTED", `cherry-picked commit ${picked} is not inside the attributable reviewed..corrected range`);
   }
 
@@ -203,6 +290,10 @@ export async function resolveSuccessorProtectedDelta(
     if (entries.some((e) => e.mode !== headEntry.mode)) {
       return closed("MODE_MISMATCH", `${path} changes file mode across HEAD / picked commit / its parent; mode choices are not resolved mechanically`, { path });
     }
+    const prov = proveProtectedProvenance({
+      deps, top, path, baseTip: snap.baseTip, head, picked, pickedParent, reviewed, corrected, pickedInReviewed,
+    });
+    if (prov) return prov;
     const st = unmerged.get(path);
     if (st) {
       if (!st[1] || !st[2] || !st[3]) return closed("NOT_A_CONTENT_CONFLICT", `${path} is not a three-stage content conflict`, { path });
@@ -228,55 +319,74 @@ export async function resolveSuccessorProtectedDelta(
     results.push({ path, resolved: proof.resolved, hunks: proof.hunks, mode: headEntry.mode, wasUnmerged: Boolean(st) });
   }
 
-  // Idempotent re-entry: every path already staged (stage 0) as exactly the proven blob.
-  const alreadyApplied = (r) => {
-    if (r.wasUnmerged) return false;
-    const expected = deps.git(["hash-object", "--stdin"], { cwd: top, input: r.resolved }).trim();
-    const staged = parseStagedEntry(deps.git(["ls-files", "--stage", "--full-name", "--", r.path], { cwd: top }), r.path);
-    return Boolean(staged && staged.oid === expected && staged.mode === r.mode);
-  };
-  if (results.every(alreadyApplied)) {
-    return { exitCode: 0, verdict: "ALREADY_RESOLVED", mutated: false, paths: results.map((r) => ({ path: r.path, hunks: r.hunks })) };
+  // Expected blobs are hashed before any write so a hashing failure can never follow a mutation.
+  try {
+    for (const r of results) {
+      r.expectedOid = deps.git(["hash-object", "--stdin"], { cwd: top, input: r.resolved }).trim();
+      r.alreadyStaged = false;
+      if (!r.wasUnmerged) {
+        const staged = parseStagedEntry(deps.git(["ls-files", "--stage", "--full-name", "--", r.path], { cwd: top }), r.path);
+        r.alreadyStaged = Boolean(staged && staged.oid === r.expectedOid && staged.mode === r.mode);
+      }
+    }
+  } catch (err) {
+    return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: `could not evaluate staged protected state: ${String(err.message ?? err).split("\n")[0]}`, mutated: false };
   }
-  if (results.some((r) => !r.wasUnmerged)) {
-    return closed("NOT_A_CONTENT_CONFLICT", "a protected path touched by this pick is staged as something other than the proven result", {
-      path: results.find((r) => !r.wasUnmerged && !alreadyApplied(r)).path,
-    });
+  // A touched path that is already staged must be exactly the proven result; otherwise refuse
+  // before any write. Staged-correct paths are left alone while unmerged ones are applied.
+  const mismatched = results.find((r) => !r.wasUnmerged && !r.alreadyStaged);
+  if (mismatched) {
+    return closed("NOT_A_CONTENT_CONFLICT", "a protected path touched by this pick is staged as something other than the proven result", { path: mismatched.path });
+  }
+  const pending = results.filter((r) => r.wasUnmerged);
+  if (pending.length === 0) {
+    return { exitCode: 0, verdict: "ALREADY_RESOLVED", mutated: false, paths: results.map((r) => ({ path: r.path, hunks: r.hunks })) };
   }
 
   if (apply) {
-    // Revalidate live identity immediately before the first protected write.
+    // Revalidate live identity and local HEAD immediately before the first protected write.
     try {
       const again = await live();
       const fail = checkLive(again);
       if (fail) return fail;
+      if (g(["rev-parse", "HEAD"]).toLowerCase() !== head.toLowerCase()) {
+        return closed("SUCCESSOR_IDENTITY_UNVERIFIED", "successor HEAD moved after the provenance proof");
+      }
     } catch (err) {
-      return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: `could not re-read live state before mutation: ${String(err.message ?? err).split("\n")[0]}` };
+      return { exitCode: 1, verdict: "OPERATIONAL_ERROR", message: `could not re-read live state before mutation: ${String(err.message ?? err).split("\n")[0]}`, mutated: false };
     }
-    for (const r of results) {
+    for (const r of pending) {
       try {
         if (!deps.isRegularFile(join(top, r.path))) return closed("NON_REGULAR_WORKTREE_PATH", `${r.path} stopped being a regular worktree file`, { path: r.path });
       } catch {
         return closed("NON_REGULAR_WORKTREE_PATH", `${r.path} cannot be proven to remain a regular worktree file`, { path: r.path });
       }
     }
-    for (const r of results) {
+    // From here any failure may follow a worktree change: never report mutated:false.
+    const applied = [];
+    for (const r of pending) {
+      let replaced = false;
       try {
         deps.replaceFileAtomically(join(top, r.path), r.resolved, r.mode);
-        const expected = deps.git(["hash-object", "--stdin"], { cwd: top, input: r.resolved }).trim();
+        replaced = true;
         deps.git(["add", "--", r.path], { cwd: top });
         const staged = parseStagedEntry(deps.git(["ls-files", "--stage", "--full-name", "--", r.path], { cwd: top }), r.path);
-        if (!staged || staged.mode !== r.mode || staged.oid !== expected) {
-          return { exitCode: 1, verdict: "OPERATIONAL_ERROR", code: "POSTCONDITION_FAILED", message: `${r.path} did not stage as the proven blob`, mutated: true, path: r.path };
+        if (!staged || staged.mode !== r.mode || staged.oid !== r.expectedOid) {
+          return {
+            exitCode: 1, verdict: "OPERATIONAL_ERROR", code: "POSTCONDITION_FAILED", message: `${r.path} did not stage as the proven blob`,
+            mutated: true, path: r.path, appliedPaths: applied,
+          };
         }
+        applied.push(r.path);
       } catch (err) {
         return {
           exitCode: 1,
           verdict: "OPERATIONAL_ERROR",
           code: "ATOMIC_REPLACE_FAILED",
           message: `could not apply ${r.path}: ${String(err.message ?? err).split("\n")[0]}`,
-          mutated: Boolean(err?.mutated),
+          mutated: replaced || applied.length > 0 || Boolean(err?.mutated),
           path: r.path,
+          appliedPaths: applied,
         };
       }
     }
@@ -285,7 +395,7 @@ export async function resolveSuccessorProtectedDelta(
     exitCode: 0,
     verdict: apply ? "RESOLVED" : "WOULD_RESOLVE",
     mutated: apply,
-    paths: results.map((r) => ({ path: r.path, hunks: r.hunks })),
+    paths: pending.map((r) => ({ path: r.path, hunks: r.hunks })),
     pickedCommit: picked,
   };
 }

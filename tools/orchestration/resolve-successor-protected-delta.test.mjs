@@ -39,13 +39,20 @@ function buildFixture({
   successorBranch = "issue-868-successor-of-869-attempt-1",
   correctionMessage = "Apply correction (#868)",
   correctionTouchesAgents = false,
+  claude = false, // also track CLAUDE.md with identical text so two protected paths conflict
+  revert = false, // reviewed head reverts the clause introduced by the picked first commit
+  successorNovel = false, // successor commit (before the pick) adds unreviewed protected text
 } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "ldl-rspd-test-")));
   const repo = join(root, "repo");
   execFileSync("git", ["init", "-q", "-b", "main", repo]);
   sh(repo, "config", "user.email", "t@example.com");
   sh(repo, "config", "user.name", "t");
-  const w = (f, t) => writeFileSync(join(repo, f), t);
+  const w0 = (f, t) => writeFileSync(join(repo, f), t);
+  const w = (f, t) => {
+    w0(f, t);
+    if (claude && f === "AGENTS.md") w0("CLAUDE.md", t);
+  };
   w("AGENTS.md", HEADER + base + FOOTER);
   w("code.txt", "base code\n");
   sh(repo, "add", ".");
@@ -54,7 +61,13 @@ function buildFixture({
   w("AGENTS.md", HEADER + reviewed + FOOTER);
   if (otherConflict) w("code.txt", "pred code\n");
   sh(repo, "commit", "-q", "-am", "reviewed change (#868)");
-  const reviewedSha = sh(repo, "rev-parse", "HEAD");
+  let reviewedSha = sh(repo, "rev-parse", "HEAD");
+  const firstSha = reviewedSha;
+  if (revert) {
+    w("AGENTS.md", HEADER + base + FOOTER);
+    sh(repo, "commit", "-q", "-am", "revert clause (#868)");
+    reviewedSha = sh(repo, "rev-parse", "HEAD");
+  }
   if (correctionTouchesAgents) w("AGENTS.md", HEADER + reviewed.replace("Keep it short.", "Rule five covers epsilon. Keep it short.") + FOOTER);
   else w("code2.txt", "correction\n");
   sh(repo, "add", ".");
@@ -66,7 +79,11 @@ function buildFixture({
   sh(repo, "commit", "-q", "-am", "target advance");
   const tip = sh(repo, "rev-parse", "HEAD");
   sh(repo, "checkout", "-q", "-b", successorBranch);
-  const picked = pick === "correction" || pick === "unattributed" ? correctedSha : reviewedSha;
+  if (successorNovel) {
+    w("AGENTS.md", HEADER + target + FOOTER + "Smuggled unreviewed obligation.\n");
+    sh(repo, "commit", "-q", "-am", "worker edit");
+  }
+  const picked = pick === "correction" || pick === "unattributed" ? correctedSha : revert ? firstSha : reviewedSha;
   try {
     sh(repo, "cherry-pick", picked);
   } catch {
@@ -101,6 +118,7 @@ const args = (fx, extra = {}) => ({
 });
 
 const agents = (fx) => readFileSync(join(fx.repo, "AGENTS.md"), "utf8");
+const claudeMd = (fx) => readFileSync(join(fx.repo, "CLAUDE.md"), "utf8");
 const unmerged = (fx) =>
   [...new Set(sh(fx.repo, "ls-files", "-u").split("\n").filter(Boolean).map((l) => l.split("\t")[1]))];
 
@@ -316,4 +334,129 @@ test("malformed arguments are an operational error, not a verdict", async () => 
   const r = await resolveSuccessorProtectedDelta({ repo: "o/r", controlIssue: 1, executionIssue: 2, predecessorPr: 3, reviewedHead: "abc", correctedHead: "def" }, {});
   assert.equal(r.exitCode, 1);
   assert.equal(r.verdict, "OPERATIONAL_ERROR");
+});
+
+test("provenance: unreviewed protected text authored in the successor before the pick is refused", async () => {
+  const fx = buildFixture({ successorNovel: true });
+  try {
+    const before = agents(fx);
+    assert.match(before, /<<<<<<</);
+    const r = await resolveSuccessorProtectedDelta({ ...args(fx), apply: true }, depsFor(fx));
+    assert.equal(r.verdict, "FAIL_CLOSED", JSON.stringify(r));
+    assert.equal(r.code, "SUCCESSOR_HISTORY_UNPROVEN");
+    assertUntouched(fx, before);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("provenance: a clause introduced then reverted before the reviewed head is refused", async () => {
+  const fx = buildFixture({ revert: true });
+  try {
+    const before = agents(fx);
+    assert.match(before, /<<<<<<</);
+    const r = await resolveSuccessorProtectedDelta({ ...args(fx), apply: true }, depsFor(fx));
+    assert.equal(r.verdict, "FAIL_CLOSED", JSON.stringify(r));
+    assert.equal(r.code, "PICKED_DELTA_NOT_EFFECTIVE");
+    assertUntouched(fx, before);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("mixed status: a correctly staged protected path is left alone while the unmerged one is resolved", async () => {
+  const fx = buildFixture({ claude: true });
+  try {
+    assert.deepEqual(unmerged(fx).sort(), ["AGENTS.md", "CLAUDE.md"]);
+    writeFileSync(join(fx.repo, "CLAUDE.md"), HEADER + EXPECTED + FOOTER);
+    sh(fx.repo, "add", "CLAUDE.md");
+    assert.deepEqual(unmerged(fx), ["AGENTS.md"]);
+    const r = await resolveSuccessorProtectedDelta({ ...args(fx), apply: true }, depsFor(fx));
+    assert.equal(r.verdict, "RESOLVED", JSON.stringify(r));
+    assert.deepEqual(r.paths.map((p) => p.path), ["AGENTS.md"]);
+    assert.deepEqual(unmerged(fx), []);
+    assert.equal(agents(fx), HEADER + EXPECTED + FOOTER);
+    assert.equal(claudeMd(fx), HEADER + EXPECTED + FOOTER);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("mixed status: all-staged exact is ALREADY_RESOLVED; a wrongly staged path refuses before any write", async () => {
+  const fx = buildFixture({ claude: true });
+  try {
+    writeFileSync(join(fx.repo, "CLAUDE.md"), HEADER + EXPECTED.replace("delta", "zeta") + FOOTER);
+    sh(fx.repo, "add", "CLAUDE.md");
+    const before = agents(fx);
+    const r = await resolveSuccessorProtectedDelta({ ...args(fx), apply: true }, depsFor(fx));
+    assert.equal(r.verdict, "FAIL_CLOSED");
+    assert.equal(r.code, "NOT_A_CONTENT_CONFLICT");
+    assert.equal(r.mutated, false);
+    assertUntouched(fx, before);
+  } finally {
+    fx.cleanup();
+  }
+  const fx2 = buildFixture({ claude: true });
+  try {
+    for (const f of ["AGENTS.md", "CLAUDE.md"]) {
+      writeFileSync(join(fx2.repo, f), HEADER + EXPECTED + FOOTER);
+      sh(fx2.repo, "add", f);
+    }
+    const r = await resolveSuccessorProtectedDelta({ ...args(fx2), apply: true }, depsFor(fx2));
+    assert.equal(r.verdict, "ALREADY_RESOLVED", JSON.stringify(r));
+    assert.equal(r.mutated, false);
+  } finally {
+    fx2.cleanup();
+  }
+});
+
+test("failure injection: any error after a replacement reports mutated:true (never a zero-mutation refusal)", async () => {
+  // git add / ls-files failing after a successful atomic replace.
+  for (const failing of ["add", "ls-files"]) {
+    const fx = buildFixture();
+    try {
+      const base = depsFor(fx);
+      let armed = false;
+      const deps = {
+        ...base,
+        replaceFileAtomically: (...a) => {
+          base.replaceFileAtomically(...a);
+          armed = true;
+        },
+        git: (a, o) => {
+          if (armed && a[0] === failing) throw new Error(`injected ${failing} failure`);
+          return base.git(a, o);
+        },
+      };
+      const r = await resolveSuccessorProtectedDelta({ ...args(fx), apply: true }, deps);
+      assert.equal(r.exitCode, 1, JSON.stringify(r));
+      assert.equal(r.verdict, "OPERATIONAL_ERROR");
+      assert.equal(r.mutated, true, failing);
+      assert.equal(r.path, "AGENTS.md");
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test("failure injection: first path applied then second path fails reports partial mutation", async () => {
+  const fx = buildFixture({ claude: true });
+  try {
+    const base = depsFor(fx);
+    let replaced = 0;
+    const deps = {
+      ...base,
+      replaceFileAtomically: (...a) => {
+        if (replaced++ === 1) throw new Error("injected second-path failure");
+        base.replaceFileAtomically(...a);
+      },
+    };
+    const r = await resolveSuccessorProtectedDelta({ ...args(fx), apply: true }, deps);
+    assert.equal(r.verdict, "OPERATIONAL_ERROR", JSON.stringify(r));
+    assert.equal(r.mutated, true);
+    assert.deepEqual(r.appliedPaths, ["AGENTS.md"]);
+    assert.equal(r.path, "CLAUDE.md");
+  } finally {
+    fx.cleanup();
+  }
 });
