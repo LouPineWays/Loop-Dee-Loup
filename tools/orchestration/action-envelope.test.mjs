@@ -43,6 +43,8 @@ test("getActionEnvelope: every ready-dispatch-gate.mjs and next-review-transitio
     "STAGE2_TRIGGER_REQUIRED",
     "STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED",
     "STAGE2_EVIDENCE_REAUDIT_READY",
+    "STAGE2_UNUSABLE_REPLACEMENT_PREPARATION_REQUIRED",
+    "STAGE2_UNUSABLE_REPLACEMENT_READY",
   ];
   const known = knownEnvelopeStates();
   for (const state of expected) assert.ok(known.includes(state), `missing envelope for ${state}`);
@@ -56,7 +58,7 @@ test("getActionEnvelope: every ready-dispatch-gate.mjs and next-review-transitio
 test("contextSensitiveEnvelopeStates: names exactly the context-derived states", () => {
   assert.deepEqual(
     [...contextSensitiveEnvelopeStates()].sort(),
-    ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", "STAGE2_EVIDENCE_REAUDIT_READY"].sort(),
+    ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", "STAGE2_EVIDENCE_REAUDIT_READY", "STAGE2_UNUSABLE_REPLACEMENT_READY"].sort(),
   );
 });
 

@@ -104,6 +104,24 @@ export const TRANSITIONS = Object.freeze({
     postcondition: "control Issue reads Lifecycle AUDIT with Stage 2 naming the replacement audit AND exactly the reviewer trigger exists on it",
     invalidation: ["replacement audit closed or no longer unique", "trigger comment deleted"],
   },
+  // Issue #985: a first unusable genuine Stage 2 response. Prepare the one same-target replacement
+  // audit (idempotent; unusable-audit-recovery.mjs re-proves the lineage itself).
+  STAGE2_UNUSABLE_REPLACEMENT_PREPARATION_REQUIRED: {
+    preState: "STAGE2_UNUSABLE_REPLACEMENT_PREPARATION_REQUIRED",
+    action: "prepare-unusable-audit-replacement",
+    verifier: "unusable-replacement-readback",
+    postcondition: "exactly one OPEN pending unusable-response replacement audit bound to the unusable response exists",
+    invalidation: ["predecessor audit changed", "replacement audit closed or superseded"],
+  },
+  // Issue #985: project the prepared replacement onto the control Issue, then post the one
+  // idempotent reviewer trigger (same completion contract as STAGE2_EVIDENCE_REAUDIT_READY).
+  STAGE2_UNUSABLE_REPLACEMENT_READY: {
+    preState: "STAGE2_UNUSABLE_REPLACEMENT_READY",
+    action: "finalize-audit-breakpoint-then-post-stage2-reviewer-trigger",
+    verifier: "unusable-replacement-projection-and-trigger-readback",
+    postcondition: "control Issue reads Lifecycle AUDIT with Stage 2 naming the replacement audit AND exactly the reviewer trigger exists on it",
+    invalidation: ["replacement audit closed or no longer unique", "trigger comment deleted"],
+  },
   STAGE2_CLOSE_READY: {
     preState: "STAGE2_CLOSE_READY",
     action: "close-audit",

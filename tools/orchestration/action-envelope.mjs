@@ -335,6 +335,21 @@ const ENVELOPES = {
     mode: ENVELOPE_MODES.BOUNDED,
     authorizedActions: ["write-control-snapshot", "post-stage2-reviewer-trigger"],
   },
+  // Issue #985 (live #859/#860/PR #865/Audit #866): a FIRST unusable genuine Stage 2 response. One
+  // deterministic step -- create (or recover) the single same-target replacement Audit via
+  // unusable-audit-recovery.mjs -- then stop; a fresh gate invocation afterward resolves
+  // STAGE2_UNUSABLE_REPLACEMENT_READY. Never a retrigger or coaching of the unusable thread.
+  STAGE2_UNUSABLE_REPLACEMENT_PREPARATION_REQUIRED: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["run-unusable-audit-recovery-prepare"],
+  },
+  // Issue #985: the single replacement exists but the control Stage 2 pointer still names the
+  // preserved predecessor: project it, then post the one idempotent reviewer trigger (same ordered
+  // pair STAGE2_EVIDENCE_REAUDIT_READY authorizes).
+  STAGE2_UNUSABLE_REPLACEMENT_READY: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["write-control-snapshot", "post-stage2-reviewer-trigger"],
+  },
   // Issue #646 (the #487/#643/#644/#645 live reproduction): reconcileStage2CorrectionPr found
   // an already-open, work-Issue-linked correction PR while re-evaluating what would otherwise
   // be STAGE2_CORRECTION_REQUIRED -- the PR boundary was already crossed by a prior (possibly
@@ -484,7 +499,7 @@ export function getActionEnvelope(state, context = {}) {
   // carries no `controlIssue`), so the finalizer step is the direct-reference verification
   // continuation instead of a control write -- same split STAGE2_PREPARATION_REQUIRED's
   // AUDIT_READY continuation already makes above.
-  if (state === "STAGE2_EVIDENCE_REAUDIT_READY") {
+  if (state === "STAGE2_EVIDENCE_REAUDIT_READY" || state === "STAGE2_UNUSABLE_REPLACEMENT_READY") {
     const hasControl = typeof context.controlIssue === "number";
     return {
       mode: entry.mode,
@@ -719,7 +734,7 @@ export function requiresPreBoundNonIsolatedDispatch(authorizedActions) {
 export function contextSensitiveEnvelopeStates() {
   // Issue #883: STAGE2_EVIDENCE_REAUDIT_READY derives its finalize action from whether the verdict
   // carries a control Issue; an omitted context would silently degrade to the direct-reference form.
-  return ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", "STAGE2_EVIDENCE_REAUDIT_READY"];
+  return ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", "STAGE2_EVIDENCE_REAUDIT_READY", "STAGE2_UNUSABLE_REPLACEMENT_READY"];
 }
 
 // Issue #858 (control #571; fresh recurrence of #761's lost-verdict failure at #457/#856/PR #857):

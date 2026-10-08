@@ -768,6 +768,12 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/evidence-correction.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
   { dest: "tools/orchestration/evidence-correction.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/orchestration/next-review-transition-gate.mjs", dependsOnDest: "tools/orchestration/evidence-correction.mjs" },
+  // Issue #985: unusable-audit-recovery.mjs hard-imports exports from evidence-correction.mjs,
+  // lifecycle-gate.mjs and ready-dispatch-gate.mjs, and the gate hard-imports it.
+  { dest: "tools/orchestration/unusable-audit-recovery.mjs", dependsOnDest: "tools/orchestration/evidence-correction.mjs" },
+  { dest: "tools/orchestration/unusable-audit-recovery.mjs", dependsOnDest: "tools/review-watch/lifecycle-gate.mjs" },
+  { dest: "tools/orchestration/unusable-audit-recovery.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
+  { dest: "tools/orchestration/next-review-transition-gate.mjs", dependsOnDest: "tools/orchestration/unusable-audit-recovery.mjs" },
   // Issue #901: runner-bound continuations. The three gate entrypoints, action-envelope.mjs,
   // launcher-run.mjs hard-import control-plane-continuation.mjs; an unmanaged preserved copy would
   // fail at ESM load time.

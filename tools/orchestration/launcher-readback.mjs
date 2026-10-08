@@ -19,6 +19,7 @@ import { parseControlBullet, verifyRoutedDispatchManifest } from "./ready-dispat
 import { parseStage2Verdict } from "../review-watch/lifecycle-gate.mjs";
 import { findExistingTrigger } from "../review-watch/trigger.mjs";
 import { evaluateEvidenceCorrection, Status as EvidenceStatus } from "./evidence-correction.mjs";
+import { evaluateUnusableRecovery, Status as UnusableStatus } from "./unusable-audit-recovery.mjs";
 const NO_MANIFEST_POINTER = "Execution Plan Index has no settled Dispatch manifest pointer";
 
 const MERGE_STATES = new Set(["STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2"]);
@@ -69,6 +70,7 @@ export function buildReadEffect(deps) {
   const { repo, controlIssue, executionIssue, readIssue, readComments, readPr } = deps;
   const verifyManifest = deps.verifyManifest ?? ((a) => verifyRoutedDispatchManifest(a));
   const readEvidenceCorrection = deps.readEvidenceCorrection ?? ((a) => evaluateEvidenceCorrection(a));
+  const readUnusableRecovery = deps.readUnusableRecovery ?? ((a) => evaluateUnusableRecovery(a));
 
   async function readControl() {
     return readIssue({ repo, number: controlIssue });
@@ -183,6 +185,37 @@ export function buildReadEffect(deps) {
     return stage2Prepared({ auditIssue: replacement });
   }
 
+  // Issue #985: unusable-response replacement preparation. Effect present only when the recovery
+  // evaluator (the authoritative lineage proof) reports exactly one OPEN pending replacement bound
+  // to the unusable response; still ELIGIBLE (no replacement yet) is absent (prepare is
+  // idempotent); any other evaluator state is non-authoritative evidence and fails closed.
+  async function unusableReplacementPreparation(verdict) {
+    const predecessor = issueNumberOf(verdict?.predecessorAuditIssue ?? verdict?.auditIssue);
+    if (!predecessor) return bad("audit:none", "audit:none", "verdict names no predecessor audit issue");
+    const target = `audit#${predecessor}`;
+    const state = await readUnusableRecovery({ repo, auditIssue: predecessor });
+    if (state?.status === UnusableStatus.ELIGIBLE) return ev(target, "absent", false);
+    if (state?.status !== UnusableStatus.REPLACEMENT_EXISTS) return bad(target, target, `unusable recovery read-back is ${state?.status ?? "unreadable"}`);
+    if (state.replacement?.state !== "OPEN" || state.replacement.pending !== true) {
+      return bad(target, target, "unusable-response replacement is not an OPEN pending audit");
+    }
+    return ev(target, "present", true, { replacementAuditIssue: state.replacement.number });
+  }
+
+  // Issue #985: replacement projection + trigger. Same completion contract as the prepared audit,
+  // with the replacement re-proven by the recovery evaluator as the single authoritative successor.
+  async function unusableReplacementReady(verdict) {
+    const replacement = issueNumberOf(verdict?.replacementAuditIssue);
+    const predecessor = issueNumberOf(verdict?.predecessorAuditIssue);
+    if (!replacement || !predecessor) return bad("audit:none", "audit:none", "verdict names no replacement/predecessor audit issue");
+    const target = `audit#${replacement}`;
+    const proof = await readUnusableRecovery({ repo, auditIssue: predecessor });
+    if (proof?.status !== UnusableStatus.REPLACEMENT_EXISTS || proof.replacement?.number !== replacement) {
+      return bad(target, target, "replacement audit is not the single unusable-recovery-bound successor of the predecessor");
+    }
+    return stage2Prepared({ auditIssue: replacement });
+  }
+
   async function stage2Close(verdict) {
     const audit = issueNumberOf(verdict?.auditIssue);
     if (!audit) return bad("audit:none", "audit:none", "verdict names no audit issue");
@@ -275,6 +308,10 @@ export function buildReadEffect(deps) {
             return await evidenceReauditPreparation(verdict);
           case "STAGE2_EVIDENCE_REAUDIT_READY":
             return await evidenceReauditReady(verdict);
+          case "STAGE2_UNUSABLE_REPLACEMENT_PREPARATION_REQUIRED":
+            return await unusableReplacementPreparation(verdict);
+          case "STAGE2_UNUSABLE_REPLACEMENT_READY":
+            return await unusableReplacementReady(verdict);
           case "STAGE2_CLOSE_READY":
             return await stage2Close(verdict);
           case "STAGE1_CORRECTION_FINALIZATION_REQUIRED":

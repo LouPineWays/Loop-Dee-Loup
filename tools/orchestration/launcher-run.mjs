@@ -163,6 +163,8 @@ const NEXT_COMMAND_STATES = new Set([
   "STAGE2_AUDIT_ALREADY_PREPARED",
   "STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED",
   "STAGE2_EVIDENCE_REAUDIT_READY",
+  "STAGE2_UNUSABLE_REPLACEMENT_PREPARATION_REQUIRED",
+  "STAGE2_UNUSABLE_REPLACEMENT_READY",
   "STAGE2_CLOSE_READY",
   "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
 ]);
@@ -268,7 +270,7 @@ export function buildDeps({
         if (control.length !== 1) throw new Error("close verdict has no single control-terminalization segment to finalize");
         return io.node(control[0].file, control[0].args);
       }
-      if (state === "STAGE2_AUDIT_ALREADY_PREPARED" || state === "STAGE2_EVIDENCE_REAUDIT_READY") {
+      if (state === "STAGE2_AUDIT_ALREADY_PREPARED" || state === "STAGE2_EVIDENCE_REAUDIT_READY" || state === "STAGE2_UNUSABLE_REPLACEMENT_READY") {
         // The trigger already exists (read-back); only the control projection is missing.
         const fin = parseNextCommand(verdict.nextCommand).filter((c) => c.canonical === "tools/orchestration/finalize-audit-breakpoint.mjs");
         if (fin.length !== 1) throw new Error("prepared-audit verdict has no single finalize-audit-breakpoint segment");
