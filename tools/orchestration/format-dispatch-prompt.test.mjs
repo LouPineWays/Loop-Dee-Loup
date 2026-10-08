@@ -841,7 +841,7 @@ test("formatConflictRecoveryWorkerDispatchPrompt stays under the 700-char refere
   const resolverPath = BINDING.scriptPath.replace("pr-head-checkout-preflight.mjs", "resolve-protected-conflict.mjs");
   const withControl = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding: BINDING });
   const preflightPath = BINDING.scriptPath.replace("pr-head-checkout-preflight.mjs", "successor-integration-preflight.mjs");
-  const successorLen = renderConflictRecoverySuccessorClause({ preflightPath, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD }).length;
+  const successorLen = renderConflictRecoverySuccessorClause({ preflightPath, controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD }).length;
   const withControlProse =
     withControl.length - BINDING.path.length - BINDING.scriptPath.length - resolverPath.length - CONFLICT_RECOVERY_PROTECTED_CLAUSE.length - successorLen;
   assert.ok(withControlProse < 700, `expected < 700 chars, got ${withControlProse}`);
@@ -1440,6 +1440,9 @@ test("conflict-recovery prompt gives mutually exclusive predecessor/successor ta
   assert.equal(prompt.split(`--expect-predecessor-head ${CORRECTED_HEAD}`).length - 1, 2);
   assert.match(prompt, /--expect-target <saved-target-sha>/);
   assert.match(prompt, /push the successor branch \(not the predecessor binding refspec\)/);
+  // Issue #980: protected cherry-pick conflicts go to the controller-side delta helper, never a worker edit.
+  assert.match(prompt, /AGENTS\.md\/CLAUDE\.md cherry-pick conflict => never hand-edit; run node ".*resolve-successor-protected-delta\.mjs" --control-issue 666 --execution-issue 638 --predecessor-pr 640 --reviewed-head <control Stage 1 reviewed head> --corrected-head [0-9a-f]{40} --apply/);
+  assert.ok(prompt.indexOf("resolve-successor-protected-delta.mjs") > prompt.indexOf("NO_SUCCESSOR =>"));
   assert.match(prompt, /Addresses #638/);
   assert.match(prompt, /Supersedes #640/);
   assert.match(prompt, /fresh Stage 1/);
