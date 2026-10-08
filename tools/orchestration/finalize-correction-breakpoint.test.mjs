@@ -897,7 +897,9 @@ test("verifyFinalizedCorrectionBody: #997 recovery read-back rejects a started o
     assert.equal(result.ok, false, stage2);
     assert.match(result.reason, /Stage 2/);
   }
-  assert.equal(verifyFinalizedCorrectionBody(composed.body.replace("- **Stage 2:** none\\n", ""), args).ok, true);
+  const withoutStage2 = composed.body.replace("- **Stage 2:** none\n", "");
+  assert.notEqual(withoutStage2, composed.body);
+  assert.equal(verifyFinalizedCorrectionBody(withoutStage2, args).ok, true);
 });
 
 test("run(): #997 fails closed if Stage 2 becomes active between snapshot write and fresh read-back", async () => {
