@@ -203,6 +203,15 @@ export async function evaluateUnusableRecovery({ repo, auditIssue }, io = defaul
   if (replacement.state !== "OPEN") {
     return refuse(Status.AMBIGUOUS, `replacement #${replacement.number} exists but is ${replacement.state}`, { ...base, replacementNumber: Number(replacement.number) });
   }
+  // The adopted replacement must name the same PR as the audited target, not merely the same merge
+  // commit and work Issue (a mismatched Merged PR field would otherwise be projected and triggered).
+  if (parseMergedPrNumber(replacement.body ?? "") !== pr) {
+    return refuse(
+      Status.AMBIGUOUS,
+      `replacement #${replacement.number}'s Merged PR field does not name PR #${pr}`,
+      { ...base, replacementNumber: Number(replacement.number) },
+    );
+  }
   // Bind the replacement's provenance to THIS unusable response: it must cite it and postdate it.
   if (!String(replacement.body ?? "").includes(responseUrl) || !(new Date(replacement.createdAt).getTime() > responseMs)) {
     return refuse(
@@ -281,6 +290,24 @@ export async function runPrepare({ repo, auditIssue, dryRun = false }, io = defa
       exitCode: 2,
       state: "UNUSABLE_RECOVERY_AMBIGUOUS",
       reason: `lineage changed before the replacement could be created (${recheck.status}: ${recheck.reason})`,
+      auditIssue: Number(auditIssue),
+    };
+  }
+  // The discovery/post-create trust predicate only recognizes issues authored by the audit's own
+  // controlling account, so a different authorized account must not create the replacement.
+  let viewerLogin = null;
+  try {
+    viewerLogin = (await io.ghGet("user"))?.login ?? null;
+  } catch {
+    viewerLogin = null;
+  }
+  if (!viewerLogin || viewerLogin !== evaluated.trustedLogin) {
+    return {
+      exitCode: 2,
+      state: "UNUSABLE_RECOVERY_AMBIGUOUS",
+      reason:
+        `the current GitHub account ${JSON.stringify(viewerLogin)} is not the predecessor audit's controlling account ` +
+        `${JSON.stringify(evaluated.trustedLogin)}; refusing to create a replacement that lineage discovery would not recognize`,
       auditIssue: Number(auditIssue),
     };
   }

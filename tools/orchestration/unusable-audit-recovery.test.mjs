@@ -146,7 +146,8 @@ function makeIo(world) {
       return withHtmlUrls(world.comments[m[1]] ?? [], m[1]);
     },
     ghGet: async (path) => {
-      const m = /^repos\/o\/r\/issues\/(\d+)$/.exec(path);
+      if (path === "user") return { login: world.viewer ?? FOUNDER };
+      const m =/^repos\/o\/r\/issues\/(\d+)$/.exec(path);
       if (!m) throw new Error(`unexpected ghGet path ${path}`);
       const i = world.issues[m[1]];
       if (!i) throw new Error("404");
@@ -300,6 +301,23 @@ test("prepare: creates exactly one replacement, bound to the unusable response; 
   assert.equal(world.issues[AUDIT].body, auditBody());
   assert.equal(world.comments[AUDIT].length, 2);
   assert.equal(world.posts.some((p) => /comments$/.test(p.path)), false);
+});
+
+test("prepare: a different authorized account refuses before creating anything", async () => {
+  const world = makeWorld({ viewer: "other-account" });
+  const r = await runPrepare({ repo: REPO, auditIssue: AUDIT }, makeIo(world));
+  assert.equal(r.exitCode, 2);
+  assert.equal(r.state, "UNUSABLE_RECOVERY_AMBIGUOUS");
+  assert.equal(world.posts.length, 0);
+});
+
+test("evaluate: a replacement whose Merged PR names a different PR is AMBIGUOUS, never adopted", async () => {
+  const world = makeWorld();
+  const good = composeReplacementAuditBody(auditBody(), { predecessor: AUDIT, workIssue: WORK, mergeCommit: MERGE, responseUrl: ELIGIBLE_URL });
+  const bad = good.split(`/pull/${PR}`).join(`/pull/${PR + 7}`).split(`#${PR}`).join(`#${PR + 7}`);
+  assert.notEqual(bad, good);
+  world.issues[900] = { number: 900, state: "OPEN", created_at: ts(80), author: FOUNDER, body: bad };
+  assert.equal((await evaluateUnusableRecovery({ repo: REPO, auditIssue: AUDIT }, makeIo(world))).status, Status.AMBIGUOUS);
 });
 
 test("prepare: dry run composes without mutating", async () => {
