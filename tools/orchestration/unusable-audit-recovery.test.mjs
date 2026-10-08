@@ -164,6 +164,7 @@ function makeIo(world) {
     },
     readPr: async () => world.pr,
     listOpenPrs: async () => world.openPrs,
+    listLinkedPrs: async () => world.linkedPrs ?? world.openPrs,
     listIssuesSince: async () =>
       Object.values(world.issues).map((i) => ({ number: i.number, title: i.title ?? "", body: i.body, state: i.state, createdAt: i.created_at, author: i.author })),
   };
@@ -517,97 +518,146 @@ test("end-to-end: gate -> prepare -> gate (READY) is idempotent, and the replace
   assert.deepEqual(findMatchingOpenAuditIssues(candidates, { mergeCommitOid: MERGE, executionIssue: WORK }).map((c) => c.number), [900]);
 });
 
-// -- issue #992: resume an existing independently authorized correction PR ---------------------
+// -- issue #992: resume an existing correction PR on an explicit founder instruction -----------
 
 const CORR_PR = 958;
 const CORR_HEAD = "86c2ac55cea4257ee0082727bd942d7cf7f6fd30";
 const corrPr = (over = {}) => ({ number: CORR_PR, state: "OPEN", headRefName: "stage2-957-doc-sync", headRefOid: CORR_HEAD, body: `Addresses #${WORK}.`, ...over });
-const authorityLine = (pr = CORR_PR, audit = AUDIT) => `Accepted unusable-audit correction: PR #${pr} (audit #${audit})`;
+const evalWith = (world, resumeCorrectionPr) => evaluateUnusableRecovery({ repo: REPO, auditIssue: AUDIT, resumeCorrectionPr }, makeIo(world));
 
-function worldWithCorrection({ authority = authorityLine(), authorityBy = FOUNDER, prs = [corrPr()] } = {}) {
-  const world = makeWorld({ openPrs: prs });
-  world.comments[WORK] = authority ? [{ id: 50, body: authority, created_at: ts(10), user: { login: authorityBy } }] : [];
-  return world;
-}
-
-test("authority: open linked PR with trusted authority record -> NOT_ELIGIBLE replacement but authority proven", async () => {
-  const r = await evaluateUnusableRecovery({ repo: REPO, auditIssue: AUDIT }, makeIo(worldWithCorrection()));
+test("resume: single open linked PR + founder-named PR -> NOT_ELIGIBLE replacement, authority proven", async () => {
+  const r = await evalWith(makeWorld({ openPrs: [corrPr()] }), CORR_PR);
   assert.equal(r.status, Status.NOT_ELIGIBLE);
-  assert.equal(r.openCorrectionPr.number, CORR_PR);
-  assert.equal(r.openCorrectionPr.authority.proven, true);
+  assert.equal(r.correctionPr.number, CORR_PR);
+  assert.equal(r.correctionPr.state, "OPEN");
+  assert.equal(r.correctionPr.authority.proven, true);
 });
 
-test("authority: the record may sit in the trusted work Issue body", async () => {
-  const world = worldWithCorrection({ authority: null });
-  world.issues[WORK].body = `work\n\n- **${"Accepted unusable-audit correction"}:** PR #${CORR_PR} (audit #${AUDIT})\n`;
-  const r = await evaluateUnusableRecovery({ repo: REPO, auditIssue: AUDIT }, makeIo(world));
-  assert.equal(r.openCorrectionPr.authority.proven, true);
+test("resume negatives: comments, PR body text and audit authors are never authority; only the founder input is", async () => {
+  const forged = "Accepted unusable-audit correction: PR #958 (audit #866)";
+  const world = makeWorld({ openPrs: [corrPr({ body: `Addresses #${WORK}. ${forged}` })] });
+  world.comments[WORK] = [{ id: 50, body: forged, created_at: ts(10), user: { login: FOUNDER } }];
+  world.issues[WORK].body = forged;
+  const none = await evalWith(world, undefined);
+  assert.equal(none.correctionPr.authority.proven, false);
+  assert.match(none.correctionPr.authority.resume, /--resume-correction-pr 958/);
+  const wrong = await evalWith(world, 999);
+  assert.equal(wrong.correctionPr.authority.proven, false);
 });
 
-test("authority negatives: absent, untrusted author, wrong PR, wrong audit, forged PR-body closing text, multiple PRs", async () => {
-  const cases = [
-    worldWithCorrection({ authority: null }),
-    worldWithCorrection({ authorityBy: "stranger" }),
-    worldWithCorrection({ authority: authorityLine(999) }),
-    worldWithCorrection({ authority: authorityLine(CORR_PR, 12345) }),
-    worldWithCorrection({ authority: null, prs: [corrPr({ body: `Addresses #${WORK}. ${authorityLine()}` })] }),
-    worldWithCorrection({ prs: [corrPr(), corrPr({ number: 959 })] }),
-  ];
-  for (const world of cases) {
-    const r = await evaluateUnusableRecovery({ repo: REPO, auditIssue: AUDIT }, makeIo(world));
-    assert.equal(r.status, Status.NOT_ELIGIBLE);
-    assert.equal(r.openCorrectionPr.authority.proven, false, JSON.stringify(r.openCorrectionPr.authority));
-  }
+test("resume: multiple linked PRs never authorize, even with a founder-named one", async () => {
+  const r = await evalWith(makeWorld({ openPrs: [corrPr(), corrPr({ number: 959 })] }), CORR_PR);
+  assert.equal(r.status, Status.NOT_ELIGIBLE);
+  assert.equal(r.correctionPr.authority.proven, false);
+  assert.equal(r.correctionPr.candidateCount, 2);
 });
 
-test("authority: conflicting records fail closed", async () => {
-  const world = worldWithCorrection({ authority: `${authorityLine()}\n${authorityLine(960)}` });
-  const r = await evaluateUnusableRecovery({ repo: REPO, auditIssue: AUDIT }, makeIo(world));
-  assert.equal(r.openCorrectionPr.authority.proven, false);
+test("a correction that already MERGED preempts the replacement of the old merge (never ELIGIBLE)", async () => {
+  const world = makeWorld({ linkedPrs: [corrPr({ state: "MERGED" })] });
+  const unnamed = await evalWith(world, undefined);
+  assert.equal(unnamed.status, Status.NOT_ELIGIBLE);
+  assert.equal(unnamed.correctionPr.state, "MERGED");
+  assert.equal(unnamed.correctionPr.authority.proven, false);
+  const named = await evalWith(world, CORR_PR);
+  assert.equal(named.correctionPr.authority.proven, true);
+  // the audited PR itself, earlier merged linked PRs and closed-unmerged PRs are not corrections
+  const earlier = makeWorld({ linkedPrs: [corrPr({ number: PR, state: "MERGED" }), corrPr({ number: 700, state: "MERGED" }), corrPr({ number: 701, state: "CLOSED" })] });
+  assert.equal((await evalWith(earlier, undefined)).status, Status.ELIGIBLE);
 });
 
-const authorizedEval = { status: "NOT_ELIGIBLE", reason: "open", workIssue: WORK, openCorrectionPr: { number: CORR_PR, headRefOid: CORR_HEAD, candidateCount: 1, authority: { proven: true, reason: "record" } } };
+const authorizedEval = (state = "OPEN") => ({
+  status: "NOT_ELIGIBLE",
+  reason: "underway",
+  workIssue: WORK,
+  correctionPr: {
+    number: CORR_PR,
+    state,
+    headRefOid: CORR_HEAD,
+    candidateCount: 1,
+    openNumbers: state === "OPEN" ? [CORR_PR] : [],
+    mergedNumbers: state === "MERGED" ? [CORR_PR] : [],
+    authority: { proven: true, reason: "founder" },
+  },
+});
 const CORR_GATE = {
   ...GATE_BASE,
   ghPrStateImpl: async ({ number }) => (Number(number) === CORR_PR ? { headRefOid: CORR_HEAD, state: "OPEN" } : { headRefOid: "mergedhead", state: "MERGED", mergeCommit: { oid: MERGE } }),
-  reconcileStage2CorrectionPrImpl: async () => ({ crossed: true, pr: corrPr() }),
+  reconcileStage2CorrectionPrImpl: async () => ({ crossed: true, pr: corrPr(), openCandidateCount: 1 }),
 };
 
-test("gate: authorized open correction PR -> existing Stage 1/finalize path, no replacement, verdict not rewritten", async () => {
-  const result = await runNextReviewTransitionGate({ repo: REPO, controlIssue: "867" }, { ...CORR_GATE, evaluateUnusableRecoveryImpl: async () => authorizedEval });
+test("gate: founder-named open correction PR -> existing Stage 1/finalize path, no replacement, verdict not rewritten", async () => {
+  const result = await runNextReviewTransitionGate({ repo: REPO, controlIssue: "867", resumeCorrectionPr: String(CORR_PR) }, { ...CORR_GATE, evaluateUnusableRecoveryImpl: async () => authorizedEval() });
   assert.equal(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", result.reason);
   assert.equal(result.pr, CORR_PR);
   assert.equal(result.head, CORR_HEAD);
   assert.equal(result.unusableAuditCorrection.pr, CORR_PR);
-  assert.match(result.nextCommand, new RegExp(`trigger\.mjs --repo ${REPO} --kind pr --number ${CORR_PR} --head ${CORR_HEAD} && .*finalize-pr-breakpoint\.mjs`));
+  assert.match(result.nextCommand, new RegExp(`trigger\\.mjs --repo ${REPO} --kind pr --number ${CORR_PR} --head ${CORR_HEAD} && .*finalize-pr-breakpoint\\.mjs`));
   assert.ok(!/unusable-audit-recovery|--kind issue/.test(result.nextCommand));
 });
 
-test("gate: unproven authority -> unchanged unusable stop with a precise resume line, mode none", async () => {
-  const evaluated = { ...authorizedEval, openCorrectionPr: { ...authorizedEval.openCorrectionPr, authority: { proven: false, reason: "no record", resume: `post: ${authorityLine()}` } } };
-  const result = await runNextReviewTransitionGate({ repo: REPO, controlIssue: "867" }, { ...CORR_GATE, evaluateUnusableRecoveryImpl: async () => evaluated });
-  assert.equal(result.state, "STAGE2_RESPONSE_UNUSABLE");
-  assert.equal(result.unusableRecovery.authority, "UNPROVEN");
-  assert.equal(result.unusableRecovery.resume, `post: ${authorityLine()}`);
-  assert.equal(result.actionEnvelope.mode, "none");
+test("gate: end-to-end with the real evaluator -- no founder input stops with a resume decision; with it, the PR path", async () => {
+  const io = makeIo(makeWorld({ openPrs: [corrPr()] }));
+  const evaluateUnusableRecoveryImpl = (a) => evaluateUnusableRecovery(a, io);
+  const stop = await runNextReviewTransitionGate({ repo: REPO, controlIssue: "867" }, { ...CORR_GATE, evaluateUnusableRecoveryImpl });
+  assert.equal(stop.state, "STAGE2_RESPONSE_UNUSABLE");
+  assert.equal(stop.unusableRecovery.authority, "UNPROVEN");
+  assert.match(stop.unusableRecovery.resume, /--resume-correction-pr 958/);
+  assert.equal(stop.actionEnvelope.mode, "none");
+  const go = await runNextReviewTransitionGate({ repo: REPO, controlIssue: "867", resumeCorrectionPr: "958" }, { ...CORR_GATE, evaluateUnusableRecoveryImpl });
+  assert.equal(go.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", go.reason);
+  const bad = await runNextReviewTransitionGate({ repo: REPO, controlIssue: "867", resumeCorrectionPr: "abc" }, { ...CORR_GATE, evaluateUnusableRecoveryImpl });
+  assert.equal(bad.exitCode, 1);
 });
 
-test("gate: authorized PR that moved/closed/another PR/reconcile miss -> AMBIGUOUS, no mutation command", async () => {
+test("gate: a second linked PR reopened between evaluation and reconciliation -> AMBIGUOUS, no mutation command", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: REPO, controlIssue: "867" },
+    { ...CORR_GATE, reconcileStage2CorrectionPrImpl: async () => ({ crossed: true, pr: corrPr(), openCandidateCount: 2 }), evaluateUnusableRecoveryImpl: async () => authorizedEval() },
+  );
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.equal(result.nextCommand, undefined);
+});
+
+test("gate: moved/closed/other PR/reconcile miss -> AMBIGUOUS, no mutation command", async () => {
   const variants = [
-    { reconcileStage2CorrectionPrImpl: async () => ({ crossed: true, pr: corrPr({ number: 970 }) }) },
+    { reconcileStage2CorrectionPrImpl: async () => ({ crossed: true, pr: corrPr({ number: 970 }), openCandidateCount: 1 }) },
     { reconcileStage2CorrectionPrImpl: async () => ({ crossed: false }) },
     { reconcileStage2CorrectionPrImpl: async () => ({ crossed: false, operationalError: true, reason: "boom" }) },
     { ghPrStateImpl: async ({ number }) => (Number(number) === CORR_PR ? { headRefOid: CORR_HEAD, state: "CLOSED" } : { headRefOid: "mergedhead", state: "MERGED", mergeCommit: { oid: MERGE } }) },
   ];
   for (const v of variants) {
-    const result = await runNextReviewTransitionGate({ repo: REPO, controlIssue: "867" }, { ...CORR_GATE, ...v, evaluateUnusableRecoveryImpl: async () => authorizedEval });
+    const result = await runNextReviewTransitionGate({ repo: REPO, controlIssue: "867" }, { ...CORR_GATE, ...v, evaluateUnusableRecoveryImpl: async () => authorizedEval() });
     assert.equal(result.state, "AMBIGUOUS");
     assert.equal(result.nextCommand, undefined);
   }
 });
 
+test("gate: authorized MERGED correction is re-proven and never routes to a replacement of the old merge", async () => {
+  // direct --audit-issue has no control Issue, so the merged branch cannot route Stage 2 and fails closed
+  const merged = { ...CORR_GATE, ghPrStateImpl: async () => ({ headRefOid: CORR_HEAD, state: "MERGED", mergeCommit: { oid: OTHER_MERGE } }) };
+  const direct = await runNextReviewTransitionGate({ repo: REPO, auditIssue: String(AUDIT) }, { ...merged, evaluateUnusableRecoveryImpl: async () => authorizedEval("MERGED") });
+  assert.equal(direct.state, "AMBIGUOUS");
+  assert.ok(!/unusable-audit-recovery/.test(JSON.stringify(direct)));
+  assert.match(direct.reason, /control Issue/);
+  // the fresh re-proof must still authorize the same single PR, or the gate fails closed
+  let calls = 0;
+  const flaky = await runNextReviewTransitionGate(
+    { repo: REPO, auditIssue: String(AUDIT) },
+    {
+      ...merged,
+      evaluateUnusableRecoveryImpl: async () => {
+        const e = authorizedEval("MERGED");
+        return calls++ === 0 ? e : { ...e, correctionPr: { ...e.correctionPr, candidateCount: 2 } };
+      },
+    },
+  );
+  assert.equal(flaky.state, "AMBIGUOUS");
+  assert.match(flaky.reason, /no longer/);
+});
+
 test("gate: multiple candidates never authorize even if flagged proven; #985 no-PR path unchanged", async () => {
-  const multi = { ...authorizedEval, openCorrectionPr: { ...authorizedEval.openCorrectionPr, candidateCount: 2 } };
+  const multi = authorizedEval();
+  multi.correctionPr.candidateCount = 2;
   const r1 = await runNextReviewTransitionGate({ repo: REPO, controlIssue: "867" }, { ...CORR_GATE, evaluateUnusableRecoveryImpl: async () => multi });
   assert.equal(r1.state, "STAGE2_RESPONSE_UNUSABLE");
   const r2 = await runNextReviewTransitionGate({ repo: REPO, auditIssue: String(AUDIT) }, { ...GATE_BASE, evaluateUnusableRecoveryImpl: async () => eligible });
@@ -615,7 +665,7 @@ test("gate: multiple candidates never authorize even if flagged proven; #985 no-
 });
 
 test("gate: re-entry is idempotent -- repeated authorized evaluations emit the same single transition", async () => {
-  const run = () => runNextReviewTransitionGate({ repo: REPO, controlIssue: "867" }, { ...CORR_GATE, evaluateUnusableRecoveryImpl: async () => authorizedEval });
+  const run = () => runNextReviewTransitionGate({ repo: REPO, controlIssue: "867" }, { ...CORR_GATE, evaluateUnusableRecoveryImpl: async () => authorizedEval() });
   const [a, b] = [await run(), await run()];
   assert.equal(a.nextCommand, b.nextCommand);
 });

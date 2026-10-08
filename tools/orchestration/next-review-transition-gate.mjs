@@ -303,6 +303,7 @@ import {
   describeExecutionConflict,
   findNearDuplicateBulletLabels,
   findOpenExecutionLinkedPr,
+  referencesExecutionIssue,
   defaultOpenExecutionLinkedPrList,
 } from "./ready-dispatch-gate.mjs";
 import { run as stage1Run } from "../review-watch/stage1-gate.mjs";
@@ -1460,7 +1461,12 @@ export async function reconcileStage2CorrectionPr({ repo, workIssue }, { ghPrLis
   }
   const pr = findOpenExecutionLinkedPr(prList, workIssue);
   if (!pr) return { crossed: false };
-  return { crossed: true, pr };
+  // Issue #992: the full open-candidate count lets an action-bearing caller re-prove uniqueness at
+  // the action boundary instead of trusting the number of the one PR this selection happened to pick.
+  const openCandidateCount = (Array.isArray(prList) ? prList : []).filter(
+    (p) => referencesExecutionIssue(p ?? {}, workIssue) && String(p?.state ?? "").toUpperCase() === "OPEN",
+  ).length;
+  return { crossed: true, pr, openCandidateCount };
 }
 
 // Pure. Composes the exact real (non-dry-run) command a controller must run to finalize a
@@ -1529,10 +1535,21 @@ async function resolvePostMerge(
   };
   let verdict = resolvePostMergeVerdict({ postAudit }, context);
 
-  // Issue #992: set only when an unusable (NOT backed NOT CLEAN) audit has exactly one open
-  // execution-linked correction PR whose independent authority is durably proven. Enters the
+  // Issue #992: set only when an unusable (NOT backed NOT CLEAN) audit has exactly one open or
+  // merged execution-linked correction PR that an explicit founder instruction names. Enters the
   // shared open/merged correction-PR resolution below without fabricating a verdict.
   let unusableCorrection = null;
+  // Issue #992: fresh re-evaluation with the same founder-supplied resume input; returns the
+  // descriptor only while it still authorizes exactly the same single PR in the same state.
+  const reproveUnusableCorrection = async () => {
+    try {
+      const again = await evaluateUnusableRecoveryImpl({ repo, auditIssue: context.auditIssue });
+      const c = again?.correctionPr;
+      return c?.authority?.proven === true && c.candidateCount === 1 && c.number === unusableCorrection.pr && c.state === unusableCorrection.state ? c : null;
+    } catch {
+      return null;
+    }
+  };
 
   // Issue #985: a FIRST unusable genuine reviewer response may recover through exactly one fresh
   // same-target replacement Audit; anything else keeps the unchanged STAGE2_RESPONSE_UNUSABLE stop.
@@ -1549,18 +1566,30 @@ async function resolvePostMerge(
   // no-work-issue state, issue #190) -- there is no execution-linked PR convention to search
   // against without one.
   if ((verdict.state === "STAGE2_CORRECTION_REQUIRED" || unusableCorrection) && typeof verdict.workIssue === "number") {
-    const reconciliation = await reconcileStage2CorrectionPrImpl({ repo, workIssue: verdict.workIssue });
-    if (unusableCorrection && !reconciliation.operationalError && reconciliation.pr?.number !== unusableCorrection.pr) {
-      // Fail closed: never resume a PR other than the one whose authority was proven, and never
-      // fall through to a correction-worker dispatch for an unusable audit.
+    let reconciliation;
+    if (unusableCorrection?.state === "MERGED") {
+      // The authorized correction already merged, so the open-PR search cannot see it. Re-prove the
+      // unique candidate set fresh (same founder-named PR, still the only one) and let the merged
+      // branch below do its own live merge-identity read.
+      const fresh = await reproveUnusableCorrection();
+      reconciliation = fresh
+        ? { crossed: true, pr: { number: unusableCorrection.pr, headRefOid: fresh.headRefOid }, openCandidateCount: 1 }
+        : { crossed: false, operationalError: true, reason: "the authorized merged correction PR is no longer the single unambiguous candidate" };
+    } else {
+      reconciliation = await reconcileStage2CorrectionPrImpl({ repo, workIssue: verdict.workIssue });
+    }
+    if (unusableCorrection && !reconciliation.operationalError && (reconciliation.pr?.number !== unusableCorrection.pr || reconciliation.openCandidateCount !== 1)) {
+      // Fail closed: re-prove uniqueness at the action boundary. Never resume a PR other than the
+      // one the founder named, never when a competing linked PR is open, and never fall through to
+      // a correction-worker dispatch for an unusable audit.
       const failedVerdict = {
         state: "AMBIGUOUS",
         stopAfter: true,
         ...context,
         postAudit,
         reason:
-          `unusable audit #${context.auditIssue}'s authorized correction PR #${unusableCorrection.pr} is no longer the single open ` +
-          `execution-linked PR (reconciliation found ${reconciliation.pr ? `#${reconciliation.pr.number}` : "none"}); refusing to resume it`,
+          `unusable audit #${context.auditIssue}'s authorized correction PR #${unusableCorrection.pr} is no longer the single execution-linked ` +
+          `candidate (reconciliation found ${reconciliation.pr ? `#${reconciliation.pr.number}` : "none"}, ${reconciliation.openCandidateCount ?? "unknown"} open); refusing to resume it`,
       };
       return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
     }
@@ -1615,6 +1644,16 @@ async function resolvePostMerge(
           reason:
             `operational failure independently re-verifying live state for execution-linked correction PR ` +
             `#${pr.number} before authorizing its open-PR finalization path: ${err.message}`,
+        };
+        return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
+      }
+      if (unusableCorrection && livePrState?.state !== unusableCorrection.state) {
+        const failedVerdict = {
+          state: "AMBIGUOUS",
+          stopAfter: true,
+          ...context,
+          postAudit,
+          reason: `authorized correction PR #${pr.number} was ${unusableCorrection.state} when authorized but is now ${JSON.stringify(livePrState?.state ?? null)}; re-run the gate to re-prove state before any action`,
         };
         return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
       }
@@ -1803,15 +1842,15 @@ async function resolveUnusableRecoveryRouting({ repo, context, postAudit, verdic
   }
   switch (evaluated?.status) {
     case UnusableRecoveryStatus.NOT_ELIGIBLE: {
-      // Issue #992: an open execution-linked correction PR is the one NOT_ELIGIBLE shape that may
-      // still advance, and only when its independent authority is durably proven.
-      const open = evaluated.openCorrectionPr;
-      if (open) {
-        if (open.authority?.proven === true && open.candidateCount === 1 && typeof evaluated.workIssue === "number") {
+      // Issue #992: an open or merged execution-linked correction PR is the one NOT_ELIGIBLE shape
+      // that may still advance, and only on an explicit founder instruction naming that exact PR.
+      const corr = evaluated.correctionPr;
+      if (corr) {
+        if (corr.authority?.proven === true && corr.candidateCount === 1 && typeof evaluated.workIssue === "number") {
           return {
             state: "STAGE2_UNUSABLE_CORRECTION_PR_AUTHORIZED",
             workIssue: evaluated.workIssue,
-            unusableCorrection: { pr: open.number, authority: open.authority.reason },
+            unusableCorrection: { pr: corr.number, state: corr.state, authority: corr.authority.reason },
           };
         }
         return {
@@ -1819,10 +1858,10 @@ async function resolveUnusableRecoveryRouting({ repo, context, postAudit, verdic
           unusableRecovery: {
             status: evaluated.status,
             reason: evaluated.reason,
-            openCorrectionPr: open.number,
+            correctionPrs: { open: corr.openNumbers, merged: corr.mergedNumbers },
             authority: "UNPROVEN",
-            authorityReason: open.authority?.reason ?? "no authority evaluation reported",
-            ...(open.authority?.resume ? { resume: open.authority.resume } : {}),
+            authorityReason: corr.authority?.reason ?? "no authority evaluation reported",
+            ...(corr.authority?.resume ? { resume: corr.authority.resume } : {}),
           },
         };
       }
@@ -2580,6 +2619,13 @@ async function runNextReviewTransitionGateCore(
     evaluateUnusableRecoveryImpl = evaluateUnusableRecovery,
   } = {},
 ) {
+  if (args.resumeCorrectionPr !== undefined) {
+    const n = Number(args.resumeCorrectionPr);
+    if (!Number.isInteger(n) || n <= 0) return { exitCode: 1, message: "--resume-correction-pr must be a positive PR number." };
+    // Issue #992: the founder's explicit resume instruction, handed only to the unusable-recovery evaluation.
+    const baseEvaluate = evaluateUnusableRecoveryImpl;
+    evaluateUnusableRecoveryImpl = (a, ...rest) => baseEvaluate({ ...a, resumeCorrectionPr: n }, ...rest);
+  }
   let repo = args.repo;
   if (!repo) {
     const identity = resolveRepoIdentityImpl();
@@ -3081,6 +3127,7 @@ async function main() {
     issue: raw.issue,
     auditIssue: raw["audit-issue"],
     stage1Disposition: raw["stage1-disposition"],
+    resumeCorrectionPr: raw["resume-correction-pr"],
   });
   if (controlPlaneWitness) result.controlPlaneWitness = controlPlaneWitness;
   if (result.exitCode === 1) {

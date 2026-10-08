@@ -34,7 +34,7 @@
 // Tests: node --test tools/orchestration/unusable-audit-recovery.test.mjs
 
 import { createHash } from "node:crypto";
-import { resolveRepoIdentity, findOpenExecutionLinkedPr, referencesExecutionIssue } from "./ready-dispatch-gate.mjs";
+import { resolveRepoIdentity, referencesExecutionIssue, defaultGhPrList } from "./ready-dispatch-gate.mjs";
 import {
   defaultIo,
   readIssueRest,
@@ -89,61 +89,44 @@ export function composeReplacementAuditBody(predecessorBody, { predecessor, work
   return replaceVerdictField(withProvenance, "PENDING");
 }
 
-// Issue #992: the independent-authority record for resuming an existing open execution-linked
-// correction PR while a Stage 2 Audit is mechanically unusable (and therefore not a backed NOT
-// CLEAN). Neither the PR's own `Addresses #N` link nor reviewer prose is authority: the PR author
-// controls the former and the latter is not a machine-readable disposition. The authority is one
-// explicit line on the work Issue (its body, or a comment) written by the audit's own trusted
-// login, naming BOTH this exact open PR and this exact unusable audit.
-export const CORRECTION_AUTHORITY_LABEL = "Accepted unusable-audit correction";
-const AUTHORITY_LINE = /^\s*(?:[-*]\s*)?(?:\*\*)?Accepted unusable-audit correction:?(?:\*\*)?:?\s*PR\s*#(\d+)\s*\(\s*audit\s*#(\d+)\s*\)\s*$/gim;
-
-export function parseCorrectionAuthorityRefs(text) {
-  const refs = [];
-  for (const m of String(text ?? "").replace(/\r\n/g, "\n").matchAll(AUTHORITY_LINE)) refs.push({ pr: Number(m[1]), audit: Number(m[2]) });
-  return refs;
-}
-
-export function correctionAuthorityLine(pr, auditIssue) {
-  return `${CORRECTION_AUTHORITY_LABEL}: PR #${pr} (audit #${auditIssue})`;
-}
-
-export async function evaluateCorrectionAuthority({ repo, auditIssue, workIssue, trustedLogin, candidates, io }) {
-  const missing = (reason, pr) => ({
-    proven: false,
-    reason,
-    ...(pr ? { resume: `post, as ${trustedLogin ?? "the trusted owner"}, on Issue #${workIssue} (body or comment): ${correctionAuthorityLine(pr, auditIssue)}` } : {}),
+// Issue #992: resuming an existing correction PR while a Stage 2 Audit is mechanically unusable
+// (and therefore not a backed NOT CLEAN). Authority to mutate is never read from GitHub content --
+// not a PR body's `Addresses #N`, not reviewer prose, and not even a trusted owner-authored comment
+// (AGENTS.md § Execution authority boundary). It comes only from an explicit founder instruction,
+// which the invoking session passes in as `resumeCorrectionPr`. This module only re-proves, from
+// live GitHub state, that the founder-named PR is the one unambiguous candidate.
+export function evaluateCorrectionResume({ auditIssue, workIssue, auditedPr, candidates, resumeCorrectionPr }) {
+  const open = candidates.filter((p) => String(p?.state ?? "").toUpperCase() === "OPEN");
+  const merged = candidates.filter((p) => String(p?.state ?? "").toUpperCase() === "MERGED" && Number(p.number) > Number(auditedPr));
+  const pool = [...open, ...merged];
+  const descriptor = (authority) => ({
+    openNumbers: open.map((p) => Number(p.number)),
+    mergedNumbers: merged.map((p) => Number(p.number)),
+    candidateCount: pool.length,
+    ...(pool.length === 1
+      ? { number: Number(pool[0].number), state: String(pool[0].state).toUpperCase(), headRefOid: pool[0].headRefOid ?? null }
+      : {}),
+    authority,
   });
-  if (candidates.length !== 1) {
-    return missing(`${candidates.length} open execution-linked PRs reference #${workIssue}; exactly one is required to resume a correction`);
+  if (pool.length !== 1) {
+    return descriptor({
+      proven: false,
+      reason: `${pool.length} execution-linked correction PRs (open or merged after PR #${auditedPr}) reference #${workIssue}; exactly one is required, and none is resumed automatically`,
+    });
   }
-  const prNumber = Number(candidates[0].number);
-  if (!trustedLogin) return missing("the audit issue's trusted author could not be determined", prNumber);
-  const work = await readIssueRest(io, repo, workIssue);
-  const sources = [];
-  if (work.author === trustedLogin) sources.push(work.body);
-  const comments = await io.ghApi(`repos/${repo}/issues/${workIssue}/comments`);
-  for (const c of Array.isArray(comments) ? comments : []) {
-    if (c?.user?.login === trustedLogin) sources.push(c.body ?? "");
+  const only = Number(pool[0].number);
+  const resume = `founder decision: confirm PR #${only} is the intended correction of unusable audit #${auditIssue}, then re-run next-review-transition-gate.mjs with --resume-correction-pr ${only}`;
+  if (resumeCorrectionPr === undefined || resumeCorrectionPr === null) {
+    return descriptor({ proven: false, reason: `PR #${only} is linked to #${workIssue}, but no founder instruction authorizes resuming it`, resume });
   }
-  const refs = sources.flatMap(parseCorrectionAuthorityRefs).filter((r) => r.audit === Number(auditIssue));
-  if (refs.length === 0) {
-    return missing(
-      `no trusted authority record on work Issue #${workIssue} names PR #${prNumber} as the independently authorized correction of unusable audit #${auditIssue}`,
-      prNumber,
-    );
+  if (Number(resumeCorrectionPr) !== only) {
+    return descriptor({ proven: false, reason: `the founder-named PR #${resumeCorrectionPr} is not the single linked correction PR (#${only})`, resume });
   }
-  if (new Set(refs.map((r) => r.pr)).size !== 1) {
-    return missing(`trusted authority records on work Issue #${workIssue} name conflicting correction PRs for audit #${auditIssue}`);
-  }
-  if (refs[0].pr !== prNumber) {
-    return missing(`the authority record names PR #${refs[0].pr}, but the open execution-linked PR is #${prNumber}`, prNumber);
-  }
-  return { proven: true, reason: `trusted authority record on work Issue #${workIssue} names PR #${prNumber} for unusable audit #${auditIssue}` };
+  return descriptor({ proven: true, reason: `explicit founder instruction names the single linked correction PR #${only} for unusable audit #${auditIssue}` });
 }
 
 // Independently re-derives the recovery state for `auditIssue` from GitHub state alone.
-export async function evaluateUnusableRecovery({ repo, auditIssue }, io = defaultIo, { bot = DEFAULT_BOT } = {}) {
+export async function evaluateUnusableRecovery({ repo, auditIssue, resumeCorrectionPr }, io = defaultIo, { bot = DEFAULT_BOT } = {}) {
   const audit = await readIssueRest(io, repo, auditIssue);
   const body = audit.body;
   if (!hasCanonicalAuditShape(body)) return refuse(Status.NOT_ELIGIBLE, "audit issue lacks the complete canonical Stage 2 audit shape");
@@ -178,23 +161,21 @@ export async function evaluateUnusableRecovery({ repo, auditIssue }, io = defaul
     return refuse(Status.NOT_ELIGIBLE, `PR #${pr} is not MERGED at the audited exact merge commit ${mergeCommit}`);
   }
   if (isPositiveInteger(workIssue)) {
-    const openPrs = await io.listOpenPrs({ repo });
-    const openPr = findOpenExecutionLinkedPr(openPrs, workIssue);
-    if (openPr) {
-      // Issue #992: still NOT_ELIGIBLE for a replacement (no competing same-target audit while a
-      // source correction is underway), but expose the single candidate and whether its
-      // independent correction authority is durably proven so the gate can resume that PR.
-      const candidates = (Array.isArray(openPrs) ? openPrs : []).filter(
-        (p) => referencesExecutionIssue(p ?? {}, workIssue) && String(p?.state ?? "").toUpperCase() === "OPEN",
-      );
-      const authority = await evaluateCorrectionAuthority({ repo, auditIssue: Number(auditIssue), workIssue, trustedLogin: audit.author, candidates, io });
-      return refuse(Status.NOT_ELIGIBLE, `open execution-linked PR #${openPr.number} exists: a source correction is already underway`, {
-        openCorrectionPr: {
-          number: Number(openPr.number),
-          headRefOid: openPr.headRefOid ?? null,
-          candidateCount: candidates.length,
-          authority,
-        },
+    // Open AND merged linked PRs: a correction that already merged must preempt a replacement of the
+    // original merge, never be invisible to it (Stage 1 finding on PR #993).
+    const listLinked = io.listLinkedPrs ?? (io === defaultIo ? (a) => defaultGhPrList(a) : null);
+    const linked = listLinked ? await listLinked({ repo, executionIssue: workIssue }) : await io.listOpenPrs({ repo });
+    const candidates = (Array.isArray(linked) ? linked : []).filter(
+      (p) => referencesExecutionIssue(p ?? {}, workIssue) && Number(p.number) !== Number(pr),
+    );
+    const underway = candidates.filter((p) => {
+      const st = String(p?.state ?? "").toUpperCase();
+      return st === "OPEN" || (st === "MERGED" && Number(p.number) > Number(pr));
+    });
+    if (underway.length > 0) {
+      const correctionPr = evaluateCorrectionResume({ auditIssue: Number(auditIssue), workIssue, auditedPr: pr, candidates: underway, resumeCorrectionPr });
+      return refuse(Status.NOT_ELIGIBLE, `execution-linked correction PR(s) exist (${underway.map((p) => `#${p.number}`).join(", ")}): a source correction is already underway or merged`, {
+        correctionPr,
         workIssue,
         pr,
         mergeCommit,
