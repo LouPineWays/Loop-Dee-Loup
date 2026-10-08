@@ -643,12 +643,18 @@ export const CONFLICT_RECOVERY_PROTECTED_CLAUSE =
 // branch point, not automatically a founder interrupt. Fixed template text (path/numbers aside),
 // excluded from the 700-char prose budget exactly like the protected clause; see
 // docs/bounded-review-cycle.md § Successor integration PR.
-export function renderConflictRecoverySuccessorClause({ preflightPath, issue, pr, correctedHead }) {
+// Issue #980 (control #967): a successor cherry-pick conflict in a protected operating-contract file
+// is resolved only by the controller-side delta helper (sibling of the preflight), never by a
+// worker edit; its exit 2 stops. Other conflicts stay worker-owned.
+export function renderConflictRecoverySuccessorClause({ preflightPath, controlIssue, issue, pr, correctedHead }) {
+  const deltaPath = preflightPath.replace(/successor-integration-preflight.mjs$/, "resolve-successor-protected-delta.mjs");
+  const protectedDelta =
+    `AGENTS.md/CLAUDE.md cherry-pick conflict => never hand-edit; run node "${deltaPath}" --control-issue ${controlIssue} --execution-issue ${issue} --predecessor-pr ${pr} --reviewed-head <control Stage 1 reviewed head> --corrected-head ${correctedHead} --apply (exit 2 => stop; other conflicts are yours)`;
   return (
     `founder/product/security/authority ambiguity => founder interrupt; ordinary technical integration of the settled outcome => ` +
     `one successor PR: node "${preflightPath}" --execution-issue ${issue} --predecessor-pr ${pr} --expect-predecessor-head ${correctedHead}. ` +
     `SUCCESSOR_EXISTS => reuse that PR and never create/push another. LOCAL_SUCCESSOR_LIVE_OWNED => stop (a worker already owns it). LOCAL_SUCCESSOR_RESUMABLE => resume its returned path/branch, never a new branch or binding. LOCAL_SUCCESSOR_STALE_RECLAIMABLE => rerun with --reclaim true, then treat as NO_SUCCESSOR. FAIL_CLOSED => stop. NO_SUCCESSOR => save returned target.sha+branch, ` +
-    `git merge --abort, create that branch from target, re-integrate only the accepted outcome, then immediately before push rerun the same ` +
+    `git merge --abort, create that branch from target, re-integrate only the accepted outcome (${protectedDelta}), then immediately before push rerun the same ` +
     `preflight with --expect-predecessor-head ${correctedHead} --expect-target <saved-target-sha> --worktree <successor worktree path> and require NO_SUCCESSOR with the same branch; push the successor branch (not the ` +
     `predecessor binding refspec), open PR with "Addresses #${issue}" + "Supersedes #${pr}", request fresh Stage 1 on its live head, run ` +
     `finalize-pr-breakpoint.mjs, release the predecessor binding, and stop; never rebase/force-push/re-review #${pr} or run its correction finalizer; ` +
@@ -760,6 +766,7 @@ export function formatConflictRecoveryWorkerDispatchPrompt({
     hasControlIssue && hasExecutionIssue
       ? renderConflictRecoverySuccessorClause({
           preflightPath: siblingAuthoritativeScript(scriptPath, "successor-integration-preflight.mjs"),
+          controlIssue,
           issue,
           pr,
           correctedHead,
@@ -1072,6 +1079,7 @@ function main() {
     typeof fields?.checkoutBinding?.scriptPath === "string"
       ? renderConflictRecoverySuccessorClause({
           preflightPath: siblingAuthoritativeScript(fields.checkoutBinding.scriptPath, "successor-integration-preflight.mjs"),
+          controlIssue: fields.controlIssue,
           issue: fields.issue,
           pr: fields.pr,
           correctedHead: fields.correctedHead,

@@ -386,7 +386,7 @@ export function commitMessageReferencesIssue(message, issue) {
   return re.test(String(message ?? ""));
 }
 
-async function proveAcceptedCorrectionHead({ repo, controlIssue, executionIssue, pr, reviewed, head, cwd }, deps) {
+export async function proveAcceptedCorrectionHead({ repo, controlIssue, executionIssue, pr, reviewed, head, cwd }, deps) {
   if (!Number.isInteger(controlIssue) || controlIssue <= 0 || !Number.isInteger(executionIssue) || executionIssue <= 0) {
     return closed("UNREVIEWED_POST_REVIEW_CONTENT", "corrected head differs from reviewed head without exact control/execution identity");
   }
@@ -458,11 +458,11 @@ export function defaultDeps() {
   };
 }
 
-function closed(code, reason, extra = {}) {
+export function closed(code, reason, extra = {}) {
   return { exitCode: 2, verdict: "FAIL_CLOSED", code, reason, mutated: false, ...extra };
 }
 
-function parseUnmerged(lsFilesU) {
+export function parseUnmerged(lsFilesU) {
   const byPath = new Map();
   for (const line of lsFilesU.split("\n")) {
     if (!line.trim()) continue;
@@ -476,7 +476,7 @@ function parseUnmerged(lsFilesU) {
 
 const REGULAR_GIT_FILE_MODES = new Set(["100644", "100755"]);
 
-function isRegularGitFileMode(mode) {
+export function isRegularGitFileMode(mode) {
   return REGULAR_GIT_FILE_MODES.has(mode);
 }
 
@@ -511,14 +511,14 @@ export function replaceRegularFileAtomically(path, text, mode) {
   }
 }
 
-function parseTreeEntry(lsTree, expectedPath) {
+export function parseTreeEntry(lsTree, expectedPath) {
   const line = lsTree.trim();
   const m = /^(\d+) ([^ ]+) ([0-9a-f]+)\t(.+)$/.exec(line);
   if (!m || m[4] !== expectedPath) return null;
   return { mode: m[1], type: m[2], oid: m[3] };
 }
 
-function parseStagedEntry(lsFilesStage, expectedPath) {
+export function parseStagedEntry(lsFilesStage, expectedPath) {
   const line = lsFilesStage.trim();
   const m = /^(\d+) ([0-9a-f]+) 0\t(.+)$/.exec(line);
   if (!m || m[3] !== expectedPath) return null;

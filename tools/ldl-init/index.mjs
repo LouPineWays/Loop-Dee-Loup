@@ -729,6 +729,11 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/successor-local-state.mjs", dependsOnDest: "tools/orchestration/pr-head-checkout-preflight.mjs" },
   // Stage 1 on PR #952: the formatter operationally requires the managed successor preflight it renders.
   { dest: "tools/orchestration/format-dispatch-prompt.mjs", dependsOnDest: "tools/orchestration/successor-integration-preflight.mjs" },
+  // Issue #980: resolve-successor-protected-delta.mjs hard-imports the protected-conflict proof helpers and the
+  // repository-identity helper; the formatter renders it into the successor route.
+  { dest: "tools/orchestration/resolve-successor-protected-delta.mjs", dependsOnDest: "tools/orchestration/resolve-protected-conflict.mjs" },
+  { dest: "tools/orchestration/resolve-successor-protected-delta.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
+  { dest: "tools/orchestration/format-dispatch-prompt.mjs", dependsOnDest: "tools/orchestration/resolve-successor-protected-delta.mjs" },
   { dest: "tools/orchestration/reconcile-control-blocker.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/orchestration/transition-guard.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/orchestration/verify-audit-ready.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
