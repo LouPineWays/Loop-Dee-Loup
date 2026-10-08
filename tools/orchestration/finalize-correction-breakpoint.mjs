@@ -46,6 +46,13 @@
 //     already lists), only whether a corrected head has reached deterministic Stage 1
 //     satisfaction without a second Codex round.
 //
+// Issue #996 (interrupted initial PR breakpoint): for an OPEN PR whose control is still exactly
+// `READY` / `PR: none` / `Stage 1: none` / `Stage 2: none` (first-round findings were corrected before
+// the initial breakpoint was projected), after all the same evidence checks pass this script projects
+// `PR: #<pr>`, the correction-satisfied `Stage 1` disposition and `Lifecycle: REVIEW` in one validated
+// write and verifies the read-back. Any other shape (another PR pointer, an existing Stage 1 value, a
+// started Stage 2, a different Lifecycle) stays fail-closed.
+
 // Fails closed (`CORRECTION_BREAKPOINT_UNVERIFIED`) rather than reporting ordinary success
 // whenever the durable transition cannot be established or verified:
 //   - the control Issue's own Execution pointer does not resolve to `--execution-issue`;
@@ -101,8 +108,9 @@ import {
   parseHeadingField,
   upsertControlBullet,
   parseExecutionPointer,
+  isLegacyStage2NotStartedSentinel,
 } from "./ready-dispatch-gate.mjs";
-import { verifyExecutionMatches, verifyPrLinkage, verifyPrHeadIsCurrent } from "./finalize-pr-breakpoint.mjs";
+import { verifyExecutionMatches, verifyPrLinkage, verifyPrHeadIsCurrent, canonicalizePreStage2Bullet } from "./finalize-pr-breakpoint.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 import { checkCorrectionDelta } from "../review-watch/stage1-correction-gate.mjs";
 import { extractUrlPointerKinds } from "./control-field-validator.mjs";
@@ -133,6 +141,12 @@ function isPositiveInteger(value) {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
 
+function isAbsentOrNone(value, { legacy = false } = {}) {
+  if (value === null || value === undefined) return true;
+  const v = value.trim();
+  return /^none$/i.test(v) || (legacy && isLegacyStage2NotStartedSentinel(v));
+}
+
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -151,6 +165,27 @@ export function correctionSatisfiedDispositionValue({ correctedHead, reviewedHea
 // PR/Stage 2 -- it only ever exists once those are already durably established.
 export function composeCorrectionControlBody(body, { pr, correctedHead, reviewedHead, merged = false }) {
   const currentLifecycle = parseControlBullet(body, "Lifecycle") ?? parseHeadingField(body, "State");
+  // Issue #996 (live #867/#992/PR #993): an OPEN PR whose first-round Stage 1 findings were corrected
+  // before the initial PR breakpoint was ever projected leaves the control at READY / PR none /
+  // Stage 1 none. Neither the initial finalizer (needs Stage 1 evidence at the current head) nor this
+  // one (needs REVIEW/CORRECTION) can then proceed. The caller has already verified Execution match,
+  // linkage, live head and correction evidence, so this exact untouched-initial shape -- and only it --
+  // is projected to the REVIEW state with the PR pointer in the same write.
+  const isUntouchedInitialShape =
+    !merged &&
+    currentLifecycle !== null &&
+    currentLifecycle.trim() === "READY" &&
+    isAbsentOrNone(parseControlBullet(body, "PR")) &&
+    isAbsentOrNone(parseControlBullet(body, "Stage 1")) &&
+    isAbsentOrNone(parseControlBullet(body, "Stage 2"), { legacy: true });
+  if (isUntouchedInitialShape) {
+    body = upsertControlBullet(body, "PR", `#${pr}`);
+    const stage1Value = correctionSatisfiedDispositionValue({ correctedHead, reviewedHead });
+    let next = upsertControlBullet(body, "Stage 1", stage1Value);
+    next = canonicalizePreStage2Bullet(next);
+    next = upsertControlBullet(next, "Lifecycle", "REVIEW");
+    return { ok: true, body: next, stage1Value, initialRecovery: true };
+  }
   const allowedLifecycles = merged ? ALLOWED_LIFECYCLE_FOR_MERGED_CORRECTION : ALLOWED_LIFECYCLE_FOR_CORRECTION;
   if (currentLifecycle === null || !allowedLifecycles.has(currentLifecycle.trim())) {
     return {
@@ -218,7 +253,17 @@ export function composeCorrectionControlBody(body, { pr, correctedHead, reviewed
 // Pure. Re-parses a freshly-read control body and confirms it actually carries the exact
 // `Stage 1` correction-satisfied bullet just composed -- distinct from trusting
 // `write-control-snapshot.mjs`'s own return value.
-export function verifyFinalizedCorrectionBody(freshBody, { correctedHead, reviewedHead }) {
+export function verifyFinalizedCorrectionBody(freshBody, { correctedHead, reviewedHead, pr = null, initialRecovery = false }) {
+  if (initialRecovery) {
+    const prField = parseControlBullet(freshBody, "PR");
+    if (prField === null || prField.trim() !== `#${pr}`) {
+      return { ok: false, reason: `fresh read-back's PR bullet is ${JSON.stringify(prField)}, expected "#${pr}"` };
+    }
+    const lifecycle = parseControlBullet(freshBody, "Lifecycle") ?? parseHeadingField(freshBody, "State");
+    if (lifecycle === null || lifecycle.trim() !== "REVIEW") {
+      return { ok: false, reason: `fresh read-back's Lifecycle is ${JSON.stringify(lifecycle)}, expected "REVIEW"` };
+    }
+  }
   const expected = correctionSatisfiedDispositionValue({ correctedHead, reviewedHead });
   const stage1Field = parseControlBullet(freshBody, "Stage 1");
   if (stage1Field === null || stage1Field.trim() !== expected) {
@@ -445,7 +490,7 @@ export async function run(
   } catch (err) {
     return unverified({ pr, reason: `post-write read-back failed: ${err.message}` });
   }
-  const verification = verifyFinalizedCorrectionBody(freshBody, { correctedHead, reviewedHead });
+  const verification = verifyFinalizedCorrectionBody(freshBody, { correctedHead, reviewedHead, pr, initialRecovery: composed.initialRecovery === true });
   if (!verification.ok) {
     return unverified({ pr, reason: verification.reason });
   }
