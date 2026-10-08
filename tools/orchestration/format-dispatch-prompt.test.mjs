@@ -819,9 +819,9 @@ test("formatConflictRecoveryWorkerDispatchPrompt mandates finalize-correction-br
 // --verify-binding before any other step, mirroring the equivalent findings-correction test.
 test("formatConflictRecoveryWorkerDispatchPrompt names the pre-bound checkout and mandates --verify-binding before the recovery instructions", () => {
   const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding: BINDING });
-  assert.ok(prompt.includes(`Pre-bound checkout: ${BINDING.path}.`));
+  assert.ok(prompt.includes(`Pre-bound predecessor checkout: ${BINDING.path}.`));
   assert.ok(prompt.includes(`node "${BINDING.scriptPath}" --verify-binding ${BINDING.token} --pr 640`));
-  assert.match(prompt, /pushRefspec/);
+  assert.doesNotMatch(prompt, /pushRefspec/);
   assert.ok(prompt.indexOf("--verify-binding") < prompt.indexOf("Successor-first"));
   assert.ok(prompt.includes(`--release-binding ${BINDING.token}`));
 });
@@ -1445,7 +1445,7 @@ test("conflict-recovery prompt is successor-first: preflight before any work, no
   assert.match(prompt, new RegExp(`--execution-issue 638 --predecessor-pr 640 --expect-predecessor-head ${CORRECTED_HEAD}`));
   assert.equal(prompt.split(`--expect-predecessor-head ${CORRECTED_HEAD}`).length - 1, 2);
   assert.match(prompt, /--expect-target <saved-target-sha>/);
-  assert.match(prompt, /create that branch from target \(never from this checkout\)/);
+  assert.match(prompt, /create that branch in a new separate worktree from <target\.sha> \(never from the predecessor checkout\)/);
   assert.match(prompt, /requirements, semantic delta and regression evidence only/);
   assert.match(prompt, /never blindly cherry-pick\/replay predecessor commits or carry old-main merge commits/);
   assert.match(prompt, /preserving newer target behavior/);
@@ -1466,8 +1466,24 @@ test("conflict-recovery prompt is successor-first: preflight before any work, no
 
 });
 
+test("successor-first prompt: predecessor checkout is verify/read only, target is fetched and verified, SUCCESSOR_EXISTS is idempotent (issue #987 Stage 1 correction)", () => {
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding: BINDING });
+  assert.match(prompt, /--verify-binding .* --pr 640 \(nonzero: CHECKOUT_BINDING_UNVERIFIED 640, stop\)/);
+  assert.doesNotMatch(prompt, /work only there/);
+  assert.match(prompt, /use it only for verification\/reads and never mutate or push from it; all source edits happen only in the separate successor worktree/);
+  assert.match(prompt, /git fetch origin <target\.ref> and require git rev-parse --verify <target\.sha>\^\{commit\} to equal target\.sha \(else stop, no PR\)/);
+  assert.ok(prompt.indexOf("git fetch origin") < prompt.indexOf("create that branch in a new separate worktree from <target.sha>"));
+  assert.match(prompt, /SUCCESSOR_EXISTS => never create\/push another or replay NO_SUCCESSOR steps/);
+  assert.match(prompt, /run trigger\.mjs for that exact live head only if not already requested \(idempotent, never a second trigger\)/);
+  assert.match(prompt, /run finalize-pr-breakpoint\.mjs if the control PR pointer is not already it, release the predecessor binding/);
+  assert.match(prompt, /mismatched\/ambiguous state => stop, never overwrite the pointer/);
+  assert.match(prompt, /LOCAL_SUCCESSOR_RESUMABLE => resume/);
+});
+
 test("conflict-recovery prompt without a control/execution pair keeps exit 2 as a founder interrupt (no successor route)", () => {
   const prompt = formatConflictRecoveryWorkerDispatchPrompt({ issue: 638, pr: 640, reviewedHead: "a".repeat(40), checkoutBinding: BINDING });
   assert.doesNotMatch(prompt, /successor-integration-preflight/);
   assert.match(prompt, /exit 2 => founder interrupt\./);
+  assert.match(prompt, /work only there/);
+  assert.doesNotMatch(prompt, /separate successor worktree/);
 });

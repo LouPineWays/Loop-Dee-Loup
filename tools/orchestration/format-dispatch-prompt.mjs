@@ -379,6 +379,19 @@ function assertCheckoutBinding(checkoutBinding, callerName = "formatStage1Correc
 // P1) extends the same pre-spawn-reservation invariant from the findings-bearing Stage 1
 // correction template to the conflict-recovery template below, so this text (and its
 // budget-exclusion treatment in main()'s `bindingAllowance`) is shared rather than duplicated.
+// Issue #987 (Stage 1 correction): the successor route must not tell the worker to "work only" in
+// the predecessor checkout; that checkout is for verification/reads. Source mutation happens in
+// the separate successor worktree.
+function renderSuccessorPredecessorCheckoutClause({ path, token, scriptPath, pr }) {
+  return (
+    `Pre-bound predecessor checkout: ${path}. From it, first run node "${scriptPath}" ` +
+    `--verify-binding ${token} --pr ${pr} (nonzero: CHECKOUT_BINDING_UNVERIFIED ${pr}, stop); use it only for ` +
+    `verification/reads and never mutate or push from it; all source edits happen only in the separate successor worktree.
+
+`
+  );
+}
+
 function renderPreBoundCheckoutClause({ path, token, scriptPath, pr }) {
   return (
     `Pre-bound checkout: ${path}. From it, first run node "${scriptPath}" ` +
@@ -654,8 +667,9 @@ export function renderConflictRecoverySuccessorClause({ preflightPath, controlIs
     `Successor-first (gate confirmed CONFLICTING): never merge the target into #${pr}, run resolve-protected-conflict.mjs, rebase, force-push, rewrite or re-review it; it stays historical. ` +
     `founder/product/security/authority ambiguity => founder interrupt; ordinary technical integration of the settled outcome => ` +
     `one successor PR: node "${preflightPath}" --execution-issue ${issue} --predecessor-pr ${pr} --expect-predecessor-head ${correctedHead}. ` +
-    `SUCCESSOR_EXISTS => reuse that PR and never create/push another. LOCAL_SUCCESSOR_LIVE_OWNED => stop (a worker already owns it). LOCAL_SUCCESSOR_RESUMABLE => resume its returned path/branch, never a new branch or binding. LOCAL_SUCCESSOR_STALE_RECLAIMABLE => rerun with --reclaim true, then treat as NO_SUCCESSOR. FAIL_CLOSED => stop. NO_SUCCESSOR => save returned target.sha+branch, ` +
-    `create that branch from target (never from this checkout), implement on current target only the accepted outcome: read Execution Issue #${issue} and #${pr} with its Stage 1 findings for requirements, semantic delta and regression evidence only; ` +
+    `SUCCESSOR_EXISTS => never create/push another or replay NO_SUCCESSOR steps; verify its head, body ("Addresses #${issue}" + "Supersedes #${pr}") and Stage 1 state, run trigger.mjs for that exact live head only if not already requested (idempotent, never a second trigger), run finalize-pr-breakpoint.mjs if the control PR pointer is not already it, release the predecessor binding${token ? ` (--release-binding ${token})` : ""} and stop; mismatched/ambiguous state => stop, never overwrite the pointer. LOCAL_SUCCESSOR_LIVE_OWNED => stop (a worker already owns it). LOCAL_SUCCESSOR_RESUMABLE => resume its returned path/branch, never a new branch or binding. LOCAL_SUCCESSOR_STALE_RECLAIMABLE => rerun with --reclaim true, then treat as NO_SUCCESSOR. FAIL_CLOSED => stop. NO_SUCCESSOR => save returned target.sha+branch+target.ref, ` +
+    `run git fetch origin <target.ref> and require git rev-parse --verify <target.sha>^{commit} to equal target.sha (else stop, no PR), ` +
+    `create that branch in a new separate worktree from <target.sha> (never from the predecessor checkout), implement on current target only the accepted outcome: read Execution Issue #${issue} and #${pr} with its Stage 1 findings for requirements, semantic delta and regression evidence only; ` +
     `never blindly cherry-pick/replay predecessor commits or carry old-main merge commits; reproduce only still-applicable behavior with minimal diff, preserving newer target behavior, then rerun verification (${protectedDelta}); immediately before push rerun the same ` +
     `preflight with --expect-predecessor-head ${correctedHead} --expect-target <saved-target-sha> --worktree <successor worktree path> and require NO_SUCCESSOR with the same branch; push the successor branch (not the ` +
     `predecessor binding refspec), open PR with "Addresses #${issue}" + "Supersedes #${pr}", request fresh Stage 1 on its live head, run ` +
@@ -781,7 +795,7 @@ export function formatConflictRecoveryWorkerDispatchPrompt({
       `Conflict-recovery worker dispatch.${executionLine} PR: #${pr}.${controlLine}
 
 ` +
-      renderPreBoundCheckoutClause({ path, token, scriptPath, pr }) +
+      renderSuccessorPredecessorCheckoutClause({ path, token, scriptPath, pr }) +
       successorClause
     );
   }
