@@ -1751,7 +1751,7 @@ async function resolvePostMerge(
           };
           return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
         }
-        return resolveStalePointerCorrectionRecovery(
+        const recovered = await resolveStalePointerCorrectionRecovery(
           {
             repo,
             body: controlBody,
@@ -1770,6 +1770,42 @@ async function resolvePostMerge(
           },
           { checkCorrectionDeltaImpl, compareImpl, reconcileExistingStage2AuditIssueImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
         );
+        // PR #1002 Stage 1 P1: reconciliation above can read Stage 1 and audit state after
+        // the initial merged-correction uniqueness check. Re-prove the complete candidate
+        // set at this branch's own action boundary, not only on the open-PR path below.
+        // Stage 2 preparation dispatch is action-bearing even without a nextCommand.
+        if (unusableCorrection && (recovered?.nextCommand || recovered?.state === "STAGE2_PREPARATION_REQUIRED")) {
+          const fresh = await reproveUnusableCorrection();
+          let latestLivePr = null;
+          if (fresh && fresh.number === Number(pr.number) && fresh.headRefOid === head) {
+            try {
+              latestLivePr = await ghPrStateImpl({ repo, number: Number(pr.number) });
+            } catch {
+              // An unreadable live PR is not proof of an unchanged action target.
+            }
+          }
+          if (
+            !fresh ||
+            fresh.number !== Number(pr.number) ||
+            fresh.headRefOid !== head ||
+            latestLivePr?.state !== "MERGED" ||
+            latestLivePr?.headRefOid !== head ||
+            latestLivePr?.mergeCommit?.oid !== mergeCommitOid
+          ) {
+            const failedVerdict = {
+              state: "AMBIGUOUS",
+              stopAfter: true,
+              ...context,
+              postAudit,
+              reason:
+                `authorized merged correction PR #${pr.number} is no longer proven to be the sole execution-linked candidate ` +
+                `at head ${head} and merge ${mergeCommitOid} after Stage 1/audit reconciliation; ` +
+                "refusing to authorize another Stage 2 transition",
+            };
+            return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
+          }
+        }
+        return recovered;
       }
       // Stage 2 audit finding on this PR (#753, P1): the branch above only special-cases
       // `livePrState.state === "MERGED"`; everything else previously fell through unconditionally
