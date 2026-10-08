@@ -307,6 +307,9 @@
 // Tests: node --test tools/review-watch/lifecycle-gate.test.mjs
 
 import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { readGithubIssue, readGithubPr, readGithubPrClosingEvidence } from "../orchestration/github-read.mjs";
 import { endpointsFor, findAllMatches } from "./poll.mjs";
 import { findExistingTrigger, findCommentById } from "./trigger.mjs";
@@ -3189,12 +3192,45 @@ function walkRepoIssuesOnce({ repo, runImpl, limit }) {
 // back) so a malformed/wrong-target response is an operational failure, never inferred progress.
 const normalizeEol = (t) => String(t ?? "").replace(/\r\n/g, "\n");
 
+// Issue #973: the remote/cloud profile of Audit #972 failed `gh api ... --input -` with `unexpected
+// end of JSON input` -- the CLI saw an empty/truncated stdin although the same JSON was supplied.
+// That specific failure shape (and only it) is retried once over the same REST endpoint with the
+// identical payload read from a private temp file (`--input <file>`), so no stdin pipe is involved.
+// Retry is restricted to PATCH: the verdict/body/close mutations are idempotent for a fixed payload,
+// while a POST comment may already have persisted even when the client receives no usable response.
+// Caller response validation remains unchanged.
+const isStdinJsonTransportFailure = (err) =>
+  /unexpected end of JSON input/i.test(`${err?.message ?? ""}
+${err?.stderr ?? ""}`);
+
+function ghRestJsonViaFile(method, path, json, runImpl) {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-gh-rest-"));
+  const file = join(dir, "payload.json");
+  try {
+    writeFileSync(file, json, { encoding: "utf8", mode: 0o600 });
+    return runImpl("gh", ["api", "-X", method, path, "--input", file], {
+      encoding: "utf8",
+      maxBuffer: 20 * 1024 * 1024,
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function ghRestJson(method, path, payload, runImpl = execFileSync) {
-  const raw = runImpl("gh", ["api", "-X", method, path, "--input", "-"], {
-    encoding: "utf8",
-    input: JSON.stringify(payload),
-    maxBuffer: 20 * 1024 * 1024,
-  });
+  const json = JSON.stringify(payload);
+  if (typeof json !== "string" || json.length < 2) throw new Error(`refusing empty REST payload for ${method} ${path}`);
+  let raw;
+  try {
+    raw = runImpl("gh", ["api", "-X", method, path, "--input", "-"], {
+      encoding: "utf8",
+      input: json,
+      maxBuffer: 20 * 1024 * 1024,
+    });
+  } catch (err) {
+    if (!isStdinJsonTransportFailure(err) || String(method).toUpperCase() !== "PATCH") throw err;
+    raw = ghRestJsonViaFile(method, path, json, runImpl);
+  }
   try {
     return JSON.parse(raw);
   } catch {

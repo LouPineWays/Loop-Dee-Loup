@@ -4580,3 +4580,65 @@ test("defaultGhIssueList: a mid-scan deletion that shifts unseen entries across 
   };
   assert.deepEqual(defaultGhIssueList({ repo: REPO }, { runImpl: once }).map((c) => c.number), [40]);
 });
+
+// Issue #973: `gh api --input -` stdin JSON failure recovery (file-based retry, same endpoint).
+import { readFileSync as readFileSync973, existsSync as existsSync973 } from "node:fs";
+const stdinFailure973 = () => Object.assign(new Error("Command failed: gh api\nunexpected end of JSON input"), { stderr: "unexpected end of JSON input" });
+function stdinThenFile973(res, calls) {
+  return (cmd, args, opts) => {
+    const i = args.indexOf("--input");
+    const entry = { args, input: opts.input, file: args[i + 1] };
+    if (args[i + 1] === "-") {
+      calls.push(entry);
+      throw stdinFailure973();
+    }
+    entry.fileBody = readFileSync973(args[i + 1], "utf8");
+    calls.push(entry);
+    return JSON.stringify(res);
+  };
+}
+
+test("#973 stdin 'unexpected end of JSON input' is retried once via --input <file>, preserving the multi-line body", () => {
+  const calls = [];
+  const body = "### Verdict\n\nNOT CLEAN\n\n### Other\nline1\nline2 \"q\" \ ünï\n";
+  defaultGhEditAuditVerdict(
+    { repo: restRepo, auditIssue: 5, body },
+    stdinThenFile973({ number: 5, html_url: "https://github.com/owner/repo/issues/5", body }, calls),
+  );
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].file, "-");
+  assert.deepEqual(calls[1].args.slice(0, 4), ["api", "-X", "PATCH", "repos/owner/repo/issues/5"]);
+  assert.equal(JSON.parse(calls[1].fileBody).body, body);
+  assert.equal(existsSync973(calls[1].file), false, "temp payload removed");
+});
+
+test("#973 stdin JSON transport failure on POST comments is not retried", () => {
+  const calls = [];
+  assert.throws(
+    () => ghRestCommentIssue(
+      { repo: restRepo, auditIssue: 5, body: "recorded verdict" },
+      (cmd, args) => {
+        calls.push(args);
+        throw stdinFailure973();
+      },
+    ),
+    /unexpected end of JSON input/,
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][2], "POST");
+  assert.equal(calls[0].at(-1), "-");
+});
+
+test("#973 file retry still fails closed on wrong identity, body mismatch, malformed response, and non-matching errors", () => {
+  const body = "x";
+  const edit = (run) => () => ghRestEditIssueBody({ repo: restRepo, auditIssue: 5, body }, run);
+  assert.throws(edit(stdinThenFile973({ number: 6, html_url: "https://github.com/owner/repo/issues/6", body }, [])), /identity/);
+  assert.throws(edit(stdinThenFile973({ number: 5, html_url: "https://github.com/owner/repo/issues/5", body: "other" }, [])), /does not match/);
+  assert.throws(edit((c, a) => { if (a.at(-1) === "-") throw stdinFailure973(); return "not json"; }), /malformed/);
+  // A different failure (e.g. denied access) is never retried.
+  const calls = [];
+  assert.throws(edit((c, a, o) => { calls.push(a); throw new Error("HTTP 403"); }), /403/);
+  assert.equal(calls.length, 1);
+  // The file transport failing too is surfaced, not swallowed.
+  assert.throws(edit((c, a) => { throw stdinFailure973(); }), /unexpected end of JSON input/);
+});
