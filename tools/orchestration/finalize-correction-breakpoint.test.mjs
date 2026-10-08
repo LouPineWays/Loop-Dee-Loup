@@ -886,3 +886,30 @@ test("verifyFinalizedCorrectionBody: #996 recovery read-back rejects a body miss
   assert.equal(verifyFinalizedCorrectionBody(composed.body, args).ok, true);
   assert.equal(verifyFinalizedCorrectionBody(composed.body.replace("#573", "none"), args).ok, false);
 });
+
+test("verifyFinalizedCorrectionBody: #997 recovery read-back rejects a started or legacy Stage 2, accepts an absent bullet", () => {
+  const composed = composeCorrectionControlBody(READY_BODY, { pr: 573, correctedHead: CORRECTED, reviewedHead: REVIEWED });
+  const args = { correctedHead: CORRECTED, reviewedHead: REVIEWED, pr: 573, initialRecovery: true };
+  for (const stage2 of ["#900", "not started"]) {
+    const altered = composed.body.replace("**Stage 2:** none", `**Stage 2:** ${stage2}`);
+    assert.notEqual(altered, composed.body);
+    const result = verifyFinalizedCorrectionBody(altered, args);
+    assert.equal(result.ok, false, stage2);
+    assert.match(result.reason, /Stage 2/);
+  }
+  assert.equal(verifyFinalizedCorrectionBody(composed.body.replace("- **Stage 2:** none\\n", ""), args).ok, true);
+});
+
+test("run(): #997 fails closed if Stage 2 becomes active between snapshot write and fresh read-back", async () => {
+  const { state, deps } = readyDeps(READY_BODY, {
+    writeControlSnapshotImpl: async ({ proposedBody }) => {
+      state.writes.push(proposedBody);
+      state.body = proposedBody.replace("**Stage 2:** none", "**Stage 2:** #900");
+      return { exitCode: 0, state: "WRITTEN" };
+    },
+  });
+  const result = await run(READY_ARGS, deps);
+  assert.equal(state.writes.length, 1);
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /Stage 2/);
+});
