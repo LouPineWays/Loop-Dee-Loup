@@ -172,6 +172,24 @@ export async function evaluateUnusableRecovery({ repo, auditIssue, resumeCorrect
       const st = String(p?.state ?? "").toUpperCase();
       return st === "OPEN" || (st === "MERGED" && Number(p.number) > Number(pr));
     });
+    // Stage 2 audit #1001 finding 1: a linked PR numbered after the audited PR that is neither OPEN nor
+    // MERGED (CLOSED without merging, or any unrecognized state) is a correction attempt whose terminal
+    // disposition is unreconciled. With no open/merged correction for a founder to name, it fails closed
+    // rather than leaving the old-merge replacement path eligible. (Candidates numbered at or below the
+    // audited PR provably predate it and cannot be corrections of it.)
+    const unreconciled = candidates.filter((p) => {
+      const st = String(p?.state ?? "").toUpperCase();
+      return Number(p.number) > Number(pr) && st !== "OPEN" && st !== "MERGED";
+    });
+    if (underway.length === 0 && unreconciled.length > 0) {
+      return refuse(
+        Status.NOT_ELIGIBLE,
+        `execution-linked correction PR(s) ${unreconciled.map((p) => `#${p.number} (${String(p?.state ?? "").toUpperCase() || "unknown"})`).join(", ")} ` +
+          `numbered after audited PR #${pr} were not merged and their disposition is not reconciled; refusing a replacement audit of the ` +
+          "original merge until a founder decides how that closed correction attempt relates to this audit",
+        { closedCorrectionPrs: unreconciled.map((p) => Number(p.number)), workIssue, pr, mergeCommit },
+      );
+    }
     if (underway.length > 0) {
       const correctionPr = evaluateCorrectionResume({ auditIssue: Number(auditIssue), workIssue, auditedPr: pr, candidates: underway, resumeCorrectionPr });
       return refuse(Status.NOT_ELIGIBLE, `execution-linked correction PR(s) exist (${underway.map((p) => `#${p.number}`).join(", ")}): a source correction is already underway or merged`, {

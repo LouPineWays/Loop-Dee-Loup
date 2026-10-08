@@ -1657,6 +1657,16 @@ async function resolvePostMerge(
         };
         return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
       }
+      if (unusableCorrection && livePrState?.headRefOid !== head) {
+        const failedVerdict = {
+          state: "AMBIGUOUS",
+          stopAfter: true,
+          ...context,
+          postAudit,
+          reason: `authorized correction PR #${pr.number}'s live head ${JSON.stringify(livePrState?.headRefOid ?? null)} differs from the reconciled head ${head}; re-run the gate to re-prove the head before any action`,
+        };
+        return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
+      }
       if (livePrState?.state === "MERGED") {
         // The correction PR already merged. Never finalize/re-trigger it as if it were still
         // pending its first Stage 1 breakpoint. When a control Issue is known, route it through
@@ -1783,6 +1793,25 @@ async function resolvePostMerge(
         };
         return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
       }
+      if (unusableCorrection) {
+        // Stage 2 audit #1001 finding 2: immediately before emitting the action-bearing command, freshly
+        // re-prove the complete open+merged candidate set (a competitor that merged since the first
+        // evaluation is counted here, not just open ones) is still exactly the founder-named PR, in the
+        // same state, at the same head the command is about to be composed from.
+        const fresh = await reproveUnusableCorrection();
+        if (!fresh || fresh.number !== Number(pr.number) || fresh.headRefOid !== head) {
+          const failedVerdict = {
+            state: "AMBIGUOUS",
+            stopAfter: true,
+            ...context,
+            postAudit,
+            reason:
+              `authorized correction PR #${pr.number} is no longer the single open-or-merged execution-linked candidate at head ${head} ` +
+              `on a fresh re-evaluation (${fresh ? `candidate #${fresh.number} at ${fresh.headRefOid ?? "unknown head"}` : "authority or uniqueness no longer proven"}); refusing to emit a mutating command`,
+          };
+          return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
+        }
+      }
       const crossedVerdict = {
         state: "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
         stopAfter: true,
@@ -1871,6 +1900,7 @@ async function resolveUnusableRecoveryRouting({ repo, context, postAudit, verdic
           status: evaluated.status,
           reason: evaluated.reason,
           ...(evaluated.predecessorAuditIssue != null ? { predecessorAuditIssue: evaluated.predecessorAuditIssue } : {}),
+          ...(evaluated.closedCorrectionPrs ? { closedCorrectionPrs: evaluated.closedCorrectionPrs } : {}),
         },
       };
     }
