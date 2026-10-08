@@ -182,7 +182,12 @@ export function inspectLocalSuccessor(
   if (wts.length > 1) return ambiguous("branch is checked out in more than one worktree", { ...base, paths: wts.map((w) => w.path) });
   const wt = wts[0] && existsSync(wts[0].path) ? wts[0] : null;
   const remoteSha = localGit.remoteBranch(branch);
-  const remote = { remoteSha: remoteSha ?? null, pushed: Boolean(remoteSha) };
+  // Audit #972: unprovable origin (undefined) must fail closed for every classification, not only
+  // reclaimable ones; never collapse it into remoteSha:null / pushed:false.
+  if (remoteSha === undefined) {
+    return ambiguous("cannot read origin to prove whether the successor branch was already pushed; not authorizing", base);
+  }
+  const remote = { remoteSha, pushed: Boolean(remoteSha) };
   // A pushed (or unprovably-unpushed) attempt must never be retired as local-only: recreating the
   // branch would collide with the divergent remote ref and strand the required successor PR.
   const reclaimable = (payload) =>
