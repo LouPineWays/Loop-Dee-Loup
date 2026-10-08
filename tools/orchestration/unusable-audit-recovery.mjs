@@ -34,7 +34,7 @@
 // Tests: node --test tools/orchestration/unusable-audit-recovery.test.mjs
 
 import { createHash } from "node:crypto";
-import { resolveRepoIdentity, findOpenExecutionLinkedPr } from "./ready-dispatch-gate.mjs";
+import { resolveRepoIdentity, referencesExecutionIssue, defaultGhPrList } from "./ready-dispatch-gate.mjs";
 import {
   defaultIo,
   readIssueRest,
@@ -89,8 +89,44 @@ export function composeReplacementAuditBody(predecessorBody, { predecessor, work
   return replaceVerdictField(withProvenance, "PENDING");
 }
 
+// Issue #992: resuming an existing correction PR while a Stage 2 Audit is mechanically unusable
+// (and therefore not a backed NOT CLEAN). Authority to mutate is never read from GitHub content --
+// not a PR body's `Addresses #N`, not reviewer prose, and not even a trusted owner-authored comment
+// (AGENTS.md § Execution authority boundary). It comes only from an explicit founder instruction,
+// which the invoking session passes in as `resumeCorrectionPr`. This module only re-proves, from
+// live GitHub state, that the founder-named PR is the one unambiguous candidate.
+export function evaluateCorrectionResume({ auditIssue, workIssue, auditedPr, candidates, resumeCorrectionPr }) {
+  const open = candidates.filter((p) => String(p?.state ?? "").toUpperCase() === "OPEN");
+  const merged = candidates.filter((p) => String(p?.state ?? "").toUpperCase() === "MERGED" && Number(p.number) > Number(auditedPr));
+  const pool = [...open, ...merged];
+  const descriptor = (authority) => ({
+    openNumbers: open.map((p) => Number(p.number)),
+    mergedNumbers: merged.map((p) => Number(p.number)),
+    candidateCount: pool.length,
+    ...(pool.length === 1
+      ? { number: Number(pool[0].number), state: String(pool[0].state).toUpperCase(), headRefOid: pool[0].headRefOid ?? null }
+      : {}),
+    authority,
+  });
+  if (pool.length !== 1) {
+    return descriptor({
+      proven: false,
+      reason: `${pool.length} execution-linked correction PRs (open or merged after PR #${auditedPr}) reference #${workIssue}; exactly one is required, and none is resumed automatically`,
+    });
+  }
+  const only = Number(pool[0].number);
+  const resume = `founder decision: confirm PR #${only} is the intended correction of unusable audit #${auditIssue}, then re-run next-review-transition-gate.mjs with --resume-correction-pr ${only}`;
+  if (resumeCorrectionPr === undefined || resumeCorrectionPr === null) {
+    return descriptor({ proven: false, reason: `PR #${only} is linked to #${workIssue}, but no founder instruction authorizes resuming it`, resume });
+  }
+  if (Number(resumeCorrectionPr) !== only) {
+    return descriptor({ proven: false, reason: `the founder-named PR #${resumeCorrectionPr} is not the single linked correction PR (#${only})`, resume });
+  }
+  return descriptor({ proven: true, reason: `explicit founder instruction names the single linked correction PR #${only} for unusable audit #${auditIssue}` });
+}
+
 // Independently re-derives the recovery state for `auditIssue` from GitHub state alone.
-export async function evaluateUnusableRecovery({ repo, auditIssue }, io = defaultIo, { bot = DEFAULT_BOT } = {}) {
+export async function evaluateUnusableRecovery({ repo, auditIssue, resumeCorrectionPr }, io = defaultIo, { bot = DEFAULT_BOT } = {}) {
   const audit = await readIssueRest(io, repo, auditIssue);
   const body = audit.body;
   if (!hasCanonicalAuditShape(body)) return refuse(Status.NOT_ELIGIBLE, "audit issue lacks the complete canonical Stage 2 audit shape");
@@ -125,8 +161,26 @@ export async function evaluateUnusableRecovery({ repo, auditIssue }, io = defaul
     return refuse(Status.NOT_ELIGIBLE, `PR #${pr} is not MERGED at the audited exact merge commit ${mergeCommit}`);
   }
   if (isPositiveInteger(workIssue)) {
-    const openPr = findOpenExecutionLinkedPr(await io.listOpenPrs({ repo }), workIssue);
-    if (openPr) return refuse(Status.NOT_ELIGIBLE, `open execution-linked PR #${openPr.number} exists: a source correction is already underway`);
+    // Open AND merged linked PRs: a correction that already merged must preempt a replacement of the
+    // original merge, never be invisible to it (Stage 1 finding on PR #993).
+    const listLinked = io.listLinkedPrs ?? (io === defaultIo ? (a) => defaultGhPrList(a) : null);
+    const linked = listLinked ? await listLinked({ repo, executionIssue: workIssue }) : await io.listOpenPrs({ repo });
+    const candidates = (Array.isArray(linked) ? linked : []).filter(
+      (p) => referencesExecutionIssue(p ?? {}, workIssue) && Number(p.number) !== Number(pr),
+    );
+    const underway = candidates.filter((p) => {
+      const st = String(p?.state ?? "").toUpperCase();
+      return st === "OPEN" || (st === "MERGED" && Number(p.number) > Number(pr));
+    });
+    if (underway.length > 0) {
+      const correctionPr = evaluateCorrectionResume({ auditIssue: Number(auditIssue), workIssue, auditedPr: pr, candidates: underway, resumeCorrectionPr });
+      return refuse(Status.NOT_ELIGIBLE, `execution-linked correction PR(s) exist (${underway.map((p) => `#${p.number}`).join(", ")}): a source correction is already underway or merged`, {
+        correctionPr,
+        workIssue,
+        pr,
+        mergeCommit,
+      });
+    }
   }
 
   // The unusable evidence is re-proven from the audit thread itself, never taken from a caller.
