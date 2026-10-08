@@ -3196,9 +3196,9 @@ const normalizeEol = (t) => String(t ?? "").replace(/\r\n/g, "\n");
 // end of JSON input` -- the CLI saw an empty/truncated stdin although the same JSON was supplied.
 // That specific failure shape (and only it) is retried once over the same REST endpoint with the
 // identical payload read from a private temp file (`--input <file>`), so no stdin pipe is involved.
-// The retry is safe: every call here is idempotent for a fixed payload (PATCH to a fixed body/state;
-// the comment POST is only reached after a failed request that never produced a response), and the
-// response is validated by the callers exactly as before.
+// Retry is restricted to PATCH: the verdict/body/close mutations are idempotent for a fixed payload,
+// while a POST comment may already have persisted even when the client receives no usable response.
+// Caller response validation remains unchanged.
 const isStdinJsonTransportFailure = (err) =>
   /unexpected end of JSON input/i.test(`${err?.message ?? ""}
 ${err?.stderr ?? ""}`);
@@ -3228,7 +3228,7 @@ function ghRestJson(method, path, payload, runImpl = execFileSync) {
       maxBuffer: 20 * 1024 * 1024,
     });
   } catch (err) {
-    if (!isStdinJsonTransportFailure(err)) throw err;
+    if (!isStdinJsonTransportFailure(err) || String(method).toUpperCase() !== "PATCH") throw err;
     raw = ghRestJsonViaFile(method, path, json, runImpl);
   }
   try {
