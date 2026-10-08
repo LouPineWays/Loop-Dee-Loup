@@ -4612,6 +4612,23 @@ test("#973 stdin 'unexpected end of JSON input' is retried once via --input <fil
   assert.equal(existsSync973(calls[1].file), false, "temp payload removed");
 });
 
+test("#973 stdin JSON transport failure on POST comments is not retried", () => {
+  const calls = [];
+  assert.throws(
+    () => ghRestCommentIssue(
+      { repo: restRepo, auditIssue: 5, body: "recorded verdict" },
+      (cmd, args) => {
+        calls.push(args);
+        throw stdinFailure973();
+      },
+    ),
+    /unexpected end of JSON input/,
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][2], "POST");
+  assert.equal(calls[0].at(-1), "-");
+});
+
 test("#973 file retry still fails closed on wrong identity, body mismatch, malformed response, and non-matching errors", () => {
   const body = "x";
   const edit = (run) => () => ghRestEditIssueBody({ repo: restRepo, auditIssue: 5, body }, run);
