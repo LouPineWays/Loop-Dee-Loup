@@ -379,6 +379,19 @@ function assertCheckoutBinding(checkoutBinding, callerName = "formatStage1Correc
 // P1) extends the same pre-spawn-reservation invariant from the findings-bearing Stage 1
 // correction template to the conflict-recovery template below, so this text (and its
 // budget-exclusion treatment in main()'s `bindingAllowance`) is shared rather than duplicated.
+// Issue #987 (Stage 1 correction): the successor route must not tell the worker to "work only" in
+// the predecessor checkout; that checkout is for verification/reads. Source mutation happens in
+// the separate successor worktree.
+function renderSuccessorPredecessorCheckoutClause({ path, token, scriptPath, pr }) {
+  return (
+    `Pre-bound predecessor checkout: ${path}. From it, first run node "${scriptPath}" ` +
+    `--verify-binding ${token} --pr ${pr} (nonzero: CHECKOUT_BINDING_UNVERIFIED ${pr}, stop); use it only for ` +
+    `verification/reads and never mutate or push from it; all source edits happen only in the separate successor worktree.
+
+`
+  );
+}
+
 function renderPreBoundCheckoutClause({ path, token, scriptPath, pr }) {
   return (
     `Pre-bound checkout: ${path}. From it, first run node "${scriptPath}" ` +
@@ -646,18 +659,21 @@ export const CONFLICT_RECOVERY_PROTECTED_CLAUSE =
 // Issue #980 (control #967): a successor cherry-pick conflict in a protected operating-contract file
 // is resolved only by the controller-side delta helper (sibling of the preflight), never by a
 // worker edit; its exit 2 stops. Other conflicts stay worker-owned.
-export function renderConflictRecoverySuccessorClause({ preflightPath, controlIssue, issue, pr, correctedHead }) {
+export function renderConflictRecoverySuccessorClause({ preflightPath, controlIssue, issue, pr, correctedHead, token = null }) {
   const deltaPath = preflightPath.replace(/successor-integration-preflight.mjs$/, "resolve-successor-protected-delta.mjs");
   const protectedDelta =
     `AGENTS.md/CLAUDE.md cherry-pick conflict => never hand-edit; run node "${deltaPath}" --control-issue ${controlIssue} --execution-issue ${issue} --predecessor-pr ${pr} --reviewed-head <control Stage 1 reviewed head> --corrected-head ${correctedHead} --apply (exit 2 => stop; other conflicts are yours)`;
   return (
+    `Successor-first (gate confirmed CONFLICTING): never merge the target into #${pr}, run resolve-protected-conflict.mjs, rebase, force-push, rewrite or re-review it; it stays historical. ` +
     `founder/product/security/authority ambiguity => founder interrupt; ordinary technical integration of the settled outcome => ` +
     `one successor PR: node "${preflightPath}" --execution-issue ${issue} --predecessor-pr ${pr} --expect-predecessor-head ${correctedHead}. ` +
-    `SUCCESSOR_EXISTS => reuse that PR and never create/push another. LOCAL_SUCCESSOR_LIVE_OWNED => stop (a worker already owns it). LOCAL_SUCCESSOR_RESUMABLE => resume its returned path/branch, never a new branch or binding. LOCAL_SUCCESSOR_STALE_RECLAIMABLE => rerun with --reclaim true, then treat as NO_SUCCESSOR. FAIL_CLOSED => stop. NO_SUCCESSOR => save returned target.sha+branch, ` +
-    `git merge --abort, create that branch from target, re-integrate only the accepted outcome (${protectedDelta}), then immediately before push rerun the same ` +
+    `SUCCESSOR_EXISTS => never create/push another or replay NO_SUCCESSOR steps; verify its head, body ("Addresses #${issue}" + "Supersedes #${pr}") and Stage 1 state, run trigger.mjs for that exact live head only if not already requested (idempotent, never a second trigger), run finalize-pr-breakpoint.mjs if the control PR pointer is not already it, release the predecessor binding${token ? ` (--release-binding ${token})` : ""} and stop; mismatched/ambiguous state => stop, never overwrite the pointer. LOCAL_SUCCESSOR_LIVE_OWNED => stop (a worker already owns it). LOCAL_SUCCESSOR_RESUMABLE => resume its returned path/branch, never a new branch or binding. LOCAL_SUCCESSOR_STALE_RECLAIMABLE => rerun with --reclaim true, then treat as NO_SUCCESSOR. FAIL_CLOSED => stop. NO_SUCCESSOR => save returned target.sha+branch+target.ref, ` +
+    `run git fetch origin <target.ref> and require git rev-parse --verify <target.sha>^{commit} to equal target.sha (else stop, no PR), ` +
+    `create that branch in a new separate worktree from <target.sha> (never from the predecessor checkout), implement on current target only the accepted outcome: read Execution Issue #${issue} and #${pr} with its Stage 1 findings for requirements, semantic delta and regression evidence only; ` +
+    `never blindly cherry-pick/replay predecessor commits or carry old-main merge commits; reproduce only still-applicable behavior with minimal diff, preserving newer target behavior, then rerun verification (${protectedDelta}); immediately before push rerun the same ` +
     `preflight with --expect-predecessor-head ${correctedHead} --expect-target <saved-target-sha> --worktree <successor worktree path> and require NO_SUCCESSOR with the same branch; push the successor branch (not the ` +
     `predecessor binding refspec), open PR with "Addresses #${issue}" + "Supersedes #${pr}", request fresh Stage 1 on its live head, run ` +
-    `finalize-pr-breakpoint.mjs, release the predecessor binding, and stop; never rebase/force-push/re-review #${pr} or run its correction finalizer; ` +
+    `finalize-pr-breakpoint.mjs, release the predecessor binding${token ? ` (--release-binding ${token})` : ""}, and stop; never run its correction finalizer; ` +
     `no re-review, merge, or Stage 2 of the predecessor here.`
   );
 }
@@ -770,20 +786,30 @@ export function formatConflictRecoveryWorkerDispatchPrompt({
           issue,
           pr,
           correctedHead,
+          token,
         })
       : null;
+  if (successorClause !== null) {
+    // Issue #987: confirmed CONFLICTING + split control/execution => successor-first; no predecessor merge.
+    return (
+      `Conflict-recovery worker dispatch.${executionLine} PR: #${pr}.${controlLine}
+
+` +
+      renderSuccessorPredecessorCheckoutClause({ path, token, scriptPath, pr }) +
+      successorClause
+    );
+  }
   const resolverCommand =
     `${CONFLICT_RECOVERY_PROTECTED_CLAUSE}: node "${resolverScriptPath}" --reviewed-head ${reviewedHeadArg}` +
     `${integrationArgs} --apply`;
   const completion =
-    successorClause === null
-      ? `exit 0 => verify/push via the binding; run tools/orchestration/finalize-correction-breakpoint.mjs; ` +
-        `nonzero=CORRECTION_BREAKPOINT_UNVERIFIED; --release-binding ${token}; stop; exit 2 => founder interrupt. ` +
-        `no re-review, merge, or Stage 2.`
-      : `exit 0=>verify/push predecessor; run tools/orchestration/finalize-correction-breakpoint.mjs; ` +
-        `nonzero=CORRECTION_BREAKPOINT_UNVERIFIED; --release-binding ${token}; stop. exit 2 => ${successorClause}`;
+    `exit 0 => verify/push via the binding; run tools/orchestration/finalize-correction-breakpoint.mjs; ` +
+    `nonzero=CORRECTION_BREAKPOINT_UNVERIFIED; --release-binding ${token}; stop; exit 2 => founder interrupt. ` +
+    `no re-review, merge, or Stage 2.`;
   return (
-    `Conflict-recovery worker dispatch.${executionLine} PR: #${pr}.${controlLine}\n\n` +
+    `Conflict-recovery worker dispatch.${executionLine} PR: #${pr}.${controlLine}
+
+` +
     renderPreBoundCheckoutClause({ path, token, scriptPath, pr }) +
     `Merge target (never rebase/force-push); semantic/security => founder interrupt. ` +
     `${resolverCommand}; ${completion}`
@@ -1083,10 +1109,11 @@ function main() {
           issue: fields.issue,
           pr: fields.pr,
           correctedHead: fields.correctedHead,
+          token: fields.checkoutBinding.token,
         }).length
       : 0;
   const templateAllowance =
-    (formatter === formatConflictRecoveryWorkerDispatchPrompt ? CONFLICT_RECOVERY_PROTECTED_CLAUSE.length : 0) + successorAllowance;
+    (formatter === formatConflictRecoveryWorkerDispatchPrompt && successorAllowance === 0 ? CONFLICT_RECOVERY_PROTECTED_CLAUSE.length : 0) + successorAllowance;
   let prompt;
   try {
     prompt = assertReferenceOnly(formatter(fields), REFERENCE_ONLY_THRESHOLD_CHARS + bindingAllowance + templateAllowance);

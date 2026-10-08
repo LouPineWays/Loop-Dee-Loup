@@ -803,13 +803,13 @@ test("formatConflictRecoveryWorkerDispatchPrompt requires an explicit reviewedHe
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt mandates a real merge commit (never rebase/force-push) and fails closed to a founder interrupt for a semantic conflict", () => {
-  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding: BINDING });
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ issue: 638, pr: 640, reviewedHead: "a".repeat(40), checkoutBinding: BINDING });
   assert.match(prompt, /never rebase\/force-push/);
   assert.match(prompt, /semantic\/security => founder interrupt/);
 });
 
 test("formatConflictRecoveryWorkerDispatchPrompt mandates finalize-correction-breakpoint.mjs, naming its fail-closed CORRECTION_BREAKPOINT_UNVERIFIED reference, and forbids merge/Stage 2/re-review here", () => {
-  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding: BINDING });
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ issue: 638, pr: 640, reviewedHead: "a".repeat(40), checkoutBinding: BINDING });
   assert.match(prompt, /finalize-correction-breakpoint\.mjs/);
   assert.match(prompt, /CORRECTION_BREAKPOINT_UNVERIFIED/);
   assert.match(prompt, /no re-review, merge, or Stage 2/);
@@ -819,10 +819,10 @@ test("formatConflictRecoveryWorkerDispatchPrompt mandates finalize-correction-br
 // --verify-binding before any other step, mirroring the equivalent findings-correction test.
 test("formatConflictRecoveryWorkerDispatchPrompt names the pre-bound checkout and mandates --verify-binding before the recovery instructions", () => {
   const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding: BINDING });
-  assert.ok(prompt.includes(`Pre-bound checkout: ${BINDING.path}.`));
+  assert.ok(prompt.includes(`Pre-bound predecessor checkout: ${BINDING.path}.`));
   assert.ok(prompt.includes(`node "${BINDING.scriptPath}" --verify-binding ${BINDING.token} --pr 640`));
-  assert.match(prompt, /pushRefspec/);
-  assert.ok(prompt.indexOf("--verify-binding") < prompt.indexOf("Merge target"));
+  assert.doesNotMatch(prompt, /pushRefspec/);
+  assert.ok(prompt.indexOf("--verify-binding") < prompt.indexOf("Successor-first"));
   assert.ok(prompt.includes(`--release-binding ${BINDING.token}`));
 });
 
@@ -864,20 +864,24 @@ test("formatConflictRecoveryWorkerDispatchPrompt routes protected-file conflicts
     { issue: 638, pr: 640, reviewedHead: "a".repeat(40), checkoutBinding: BINDING },
   ]) {
     const prompt = formatConflictRecoveryWorkerDispatchPrompt(args);
-    assert.ok(prompt.includes(CONFLICT_RECOVERY_PROTECTED_CLAUSE));
-    assert.match(prompt, /Protected\/executor-substrate conflicts: never hand-edit to bypass authority/);
-    assert.match(prompt, /C:\/Loop-Dee-Loup\/tools\/orchestration\/resolve-protected-conflict\.mjs/);
-    assert.match(prompt, args.controlIssue ? /--reviewed-head <control Stage 1 reviewed head>/ : new RegExp(`--reviewed-head ${"a".repeat(40)}`));
     if (args.controlIssue) {
-      assert.match(prompt, /--control-issue 666 --execution-issue 638 --all-executor-substrate --apply/);
-    } else {
+      // Issue #987: successor-first never mandates the same-PR resolver; the protected-delta helper is the only protected path.
+      assert.doesNotMatch(prompt, /node "[^"]*resolve-protected-conflict\.mjs"/);
+      assert.match(prompt, /never hand-edit; run node ".*resolve-successor-protected-delta\.mjs"/);
       assert.doesNotMatch(prompt, /--all-executor-substrate/);
+    } else {
+      assert.ok(prompt.includes(CONFLICT_RECOVERY_PROTECTED_CLAUSE));
+      assert.match(prompt, /Protected\/executor-substrate conflicts: never hand-edit to bypass authority/);
+      assert.match(prompt, /C:\/Loop-Dee-Loup\/tools\/orchestration\/resolve-protected-conflict\.mjs/);
+      assert.match(prompt, new RegExp(`--reviewed-head ${"a".repeat(40)}`));
+      assert.doesNotMatch(prompt, /--all-executor-substrate/);
+      assert.match(prompt, /no re-review, merge, or Stage 2/);
+      assert.ok(prompt.indexOf("--verify-binding") < prompt.indexOf("resolve-protected-conflict.mjs"));
     }
     assert.doesNotMatch(prompt, /node tools\/orchestration\/resolve-protected-conflict\.mjs/);
     assert.ok(!/--force|--no-verify/i.test(prompt));
-    assert.match(prompt, /never rebase\/force-push/);
-    assert.match(prompt, /no re-review, merge, or Stage 2/);
-    assert.ok(prompt.indexOf("--verify-binding") < prompt.indexOf("resolve-protected-conflict.mjs"));
+    assert.match(prompt, /never rebase\/force-push|rebase, force-push/);
+    assert.match(prompt, /re-review/);
   }
 });
 
@@ -1431,29 +1435,55 @@ test("#924: findings correction template mandates the execution Issue in every c
 
 // Issue #950: exit 2 of the deterministic resolver is a branch point, not a blanket founder
 // interrupt, when a split control/execution flow can name a successor route.
-test("conflict-recovery prompt gives mutually exclusive predecessor/successor tails and rechecks target before successor push", () => {
+test("conflict-recovery prompt is successor-first: preflight before any work, no predecessor merge or resolver (issue #987)", () => {
   const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding: BINDING });
-  assert.ok(prompt.indexOf("resolve-protected-conflict.mjs") < prompt.indexOf("successor-integration-preflight.mjs"));
-  assert.match(prompt, /exit 0=>verify\/push predecessor/);
-  assert.match(prompt, /exit 2 => founder\/product\/security\/authority ambiguity => founder interrupt/);
+  assert.ok(prompt.indexOf("--verify-binding") < prompt.indexOf("successor-integration-preflight.mjs"));
+  assert.match(prompt, /Successor-first \(gate confirmed CONFLICTING\): never merge the target into #640, run resolve-protected-conflict\.mjs, rebase, force-push, rewrite or re-review it/);
+  assert.doesNotMatch(prompt, /node "[^"]*resolve-protected-conflict\.mjs"/);
+  assert.doesNotMatch(prompt, /git merge --abort|Merge target|exit 0=>|finalize-correction-breakpoint/);
+  assert.doesNotMatch(prompt, /git merge (origin|main)/);
   assert.match(prompt, new RegExp(`--execution-issue 638 --predecessor-pr 640 --expect-predecessor-head ${CORRECTED_HEAD}`));
   assert.equal(prompt.split(`--expect-predecessor-head ${CORRECTED_HEAD}`).length - 1, 2);
   assert.match(prompt, /--expect-target <saved-target-sha>/);
+  assert.match(prompt, /create that branch in a new separate worktree from <target\.sha> \(never from the predecessor checkout\)/);
+  assert.match(prompt, /requirements, semantic delta and regression evidence only/);
+  assert.match(prompt, /never blindly cherry-pick\/replay predecessor commits or carry old-main merge commits/);
+  assert.match(prompt, /preserving newer target behavior/);
   assert.match(prompt, /push the successor branch \(not the predecessor binding refspec\)/);
-  // Issue #980: protected cherry-pick conflicts go to the controller-side delta helper, never a worker edit.
   assert.match(prompt, /AGENTS\.md\/CLAUDE\.md cherry-pick conflict => never hand-edit; run node ".*resolve-successor-protected-delta\.mjs" --control-issue 666 --execution-issue 638 --predecessor-pr 640 --reviewed-head <control Stage 1 reviewed head> --corrected-head [0-9a-f]{40} --apply/);
   assert.ok(prompt.indexOf("resolve-successor-protected-delta.mjs") > prompt.indexOf("NO_SUCCESSOR =>"));
+  for (const status of ["SUCCESSOR_EXISTS", "LOCAL_SUCCESSOR_LIVE_OWNED", "LOCAL_SUCCESSOR_RESUMABLE", "LOCAL_SUCCESSOR_STALE_RECLAIMABLE", "FAIL_CLOSED"]) {
+    assert.match(prompt, new RegExp(status));
+  }
+  assert.match(prompt, /founder\/product\/security\/authority ambiguity => founder interrupt/);
   assert.match(prompt, /Addresses #638/);
   assert.match(prompt, /Supersedes #640/);
   assert.match(prompt, /fresh Stage 1/);
-  assert.match(prompt, /never rebase\/force-push\/re-review #640/);
-  const successorTail = prompt.slice(prompt.indexOf("exit 2 =>"));
-  assert.doesNotMatch(successorTail, /finalize-correction-breakpoint\.mjs/);
-  assert.match(successorTail, /finalize-pr-breakpoint\.mjs/);
+  assert.match(prompt, /finalize-pr-breakpoint\.mjs/);
+  assert.match(prompt, /no re-review, merge, or Stage 2 of the predecessor/);
+  assert.ok(prompt.includes(`--release-binding ${BINDING.token}`));
+  assert.ok(!/--force|--no-verify/i.test(prompt.replace("force-push", "")));
+
+});
+
+test("successor-first prompt: predecessor checkout is verify/read only, target is fetched and verified, SUCCESSOR_EXISTS is idempotent (issue #987 Stage 1 correction)", () => {
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({ controlIssue: 666, issue: 638, pr: 640, correctedHead: CORRECTED_HEAD, checkoutBinding: BINDING });
+  assert.match(prompt, /--verify-binding .* --pr 640 \(nonzero: CHECKOUT_BINDING_UNVERIFIED 640, stop\)/);
+  assert.doesNotMatch(prompt, /work only there/);
+  assert.match(prompt, /use it only for verification\/reads and never mutate or push from it; all source edits happen only in the separate successor worktree/);
+  assert.match(prompt, /git fetch origin <target\.ref> and require git rev-parse --verify <target\.sha>\^\{commit\} to equal target\.sha \(else stop, no PR\)/);
+  assert.ok(prompt.indexOf("git fetch origin") < prompt.indexOf("create that branch in a new separate worktree from <target.sha>"));
+  assert.match(prompt, /SUCCESSOR_EXISTS => never create\/push another or replay NO_SUCCESSOR steps/);
+  assert.match(prompt, /run trigger\.mjs for that exact live head only if not already requested \(idempotent, never a second trigger\)/);
+  assert.match(prompt, /run finalize-pr-breakpoint\.mjs if the control PR pointer is not already it, release the predecessor binding/);
+  assert.match(prompt, /mismatched\/ambiguous state => stop, never overwrite the pointer/);
+  assert.match(prompt, /LOCAL_SUCCESSOR_RESUMABLE => resume/);
 });
 
 test("conflict-recovery prompt without a control/execution pair keeps exit 2 as a founder interrupt (no successor route)", () => {
   const prompt = formatConflictRecoveryWorkerDispatchPrompt({ issue: 638, pr: 640, reviewedHead: "a".repeat(40), checkoutBinding: BINDING });
   assert.doesNotMatch(prompt, /successor-integration-preflight/);
   assert.match(prompt, /exit 2 => founder interrupt\./);
+  assert.match(prompt, /work only there/);
+  assert.doesNotMatch(prompt, /separate successor worktree/);
 });
