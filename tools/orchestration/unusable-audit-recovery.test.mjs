@@ -693,6 +693,70 @@ test("gate: authorized MERGED correction is re-proven and never routes to a repl
   assert.match(flaky.reason, /no longer/);
 });
 
+test("gate: merged correction re-proves uniqueness and direct head after Stage 1/audit reads (PR #1002 Stage 1 P1)", async () => {
+  const mergedControl = CONTROL_BODY.replace("- **Stage 1:** requested", `- **Stage 1:** satisfied at ${CORR_HEAD}`);
+  const mergedState = async ({ number }) =>
+    Number(number) === CORR_PR
+      ? { headRefOid: CORR_HEAD, state: "MERGED", mergeCommit: { oid: OTHER_MERGE } }
+      : { headRefOid: "mergedhead", state: "MERGED", mergeCommit: { oid: MERGE } };
+  const base = {
+    ...CORR_GATE,
+    ghIssueViewImpl: async ({ number }) => ({ body: Number(number) === AUDIT ? auditBody() : mergedControl, state: "OPEN" }),
+    ghPrStateImpl: mergedState,
+    reconcileExistingStage2AuditIssueImpl: async () => ({ exitCode: 0, state: "NONE_FOUND" }),
+  };
+  const run = async (lateEvaluation = (e) => e, overrides = {}) => {
+    let evaluations = 0;
+    return runNextReviewTransitionGate(
+      { repo: REPO, controlIssue: "867", resumeCorrectionPr: String(CORR_PR) },
+      {
+        ...base,
+        ...overrides,
+        evaluateUnusableRecoveryImpl: async () => {
+          const e = authorizedEval("MERGED");
+          return ++evaluations >= 3 ? lateEvaluation(e) : e;
+        },
+      },
+    );
+  };
+
+  const valid = await run();
+  assert.equal(valid.state, "STAGE2_PREPARATION_REQUIRED", valid.reason);
+  assert.equal(valid.pr, CORR_PR);
+
+  const competitor = await run((e) => ({
+    ...e,
+    correctionPr: { ...e.correctionPr, candidateCount: 2, mergedNumbers: [CORR_PR, 999] },
+  }));
+  assert.equal(competitor.state, "AMBIGUOUS");
+  assert.equal(competitor.nextCommand, undefined);
+
+  const movedCandidate = await run((e) => ({
+    ...e,
+    correctionPr: { ...e.correctionPr, headRefOid: "f".repeat(40) },
+  }));
+  assert.equal(movedCandidate.state, "AMBIGUOUS");
+
+  let correctionReads = 0;
+  const movedLive = await run((e) => e, {
+    ghPrStateImpl: async (args) => {
+      const original = await mergedState(args);
+      return Number(args.number) === CORR_PR && ++correctionReads >= 2
+        ? { ...original, headRefOid: "e".repeat(40) }
+        : original;
+    },
+  });
+  assert.equal(movedLive.state, "AMBIGUOUS");
+  assert.equal(movedLive.nextCommand, undefined);
+
+  const prepared = await run(
+    (e) => ({ ...e, correctionPr: { ...e.correctionPr, candidateCount: 2 } }),
+    { reconcileExistingStage2AuditIssueImpl: async () => ({ exitCode: 0, state: "FOUND", auditIssue: 900 }) },
+  );
+  assert.equal(prepared.state, "AMBIGUOUS");
+  assert.equal(prepared.nextCommand, undefined);
+});
+
 test("gate: multiple candidates never authorize even if flagged proven; #985 no-PR path unchanged", async () => {
   const multi = authorizedEval();
   multi.correctionPr.candidateCount = 2;
