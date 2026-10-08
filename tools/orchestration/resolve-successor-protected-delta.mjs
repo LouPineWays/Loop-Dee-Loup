@@ -73,18 +73,6 @@ function tokenCounts(text) {
   for (const t of wordTokens(text)) m.set(t, (m.get(t) ?? 0) + 1);
   return m;
 }
-// Tokens a commit's path-limited diff adds / removes (-U0, renames off).
-function diffTokens(deps, top, commit, path) {
-  const out = deps.git(["diff-tree", "-p", "--no-commit-id", "--no-renames", "-U0", "-r", commit, "--", path], { cwd: top });
-  const added = [];
-  const removed = [];
-  for (const line of out.split("\n")) {
-    if (line.startsWith("+++") || line.startsWith("---")) continue;
-    if (line.startsWith("+")) added.push(line.slice(1));
-    else if (line.startsWith("-")) removed.push(line.slice(1));
-  }
-  return { added: wordTokens(added.join("\n")), removed: wordTokens(removed.join("\n")) };
-}
 const blobAt = (deps, top, rev, path) => {
   try {
     return deps.git(["cat-file", "blob", `${rev}:${path}`], { cwd: top });
@@ -95,10 +83,11 @@ const blobAt = (deps, top, rev, path) => {
 
 // Issue #980 Stage 1 correction: the protected result must be exactly the later-target contract
 // plus only accepted protected changes from the predecessor's reviewed/correction outcome.
-// Ancestry alone proves neither, so this checks content: (1) every intervening successor commit
-// (target tip..HEAD) that touched the path added only words already present in the target tip
-// blob or added by an accepted (target-unreachable) predecessor commit, and HEAD still carries
-// every target-tip word unless an accepted commit removed it; (2) the picked commit is not
+// Ancestry alone proves neither, so this checks content: (1) exact ordered replay -- every
+// intervening successor commit (target tip..HEAD) that touched the path must equal its parent blob
+// with exactly one accepted (target-unreachable) predecessor commit's path change merged in, each
+// accepted commit used at most once and in predecessor order (no token-membership heuristic);
+// (2) the picked commit is not
 // inherited from target history, and its net-added words survive in the effective reviewed
 // (or, for a correction-range pick, corrected) blob -- an introduced-then-reverted clause fails.
 function proveProtectedProvenance({ deps, top, path, baseTip, head, picked, pickedParent, reviewed, corrected, pickedInReviewed }) {
@@ -117,26 +106,40 @@ function proveProtectedProvenance({ deps, top, path, baseTip, head, picked, pick
   if (!accepted.some((c) => c.toLowerCase() === picked.toLowerCase())) {
     return fail("PICKED_COMMIT_NOT_ACCEPTED", `cherry-picked commit ${picked} is inherited from target history or outside the predecessor's accepted delta`);
   }
-  const acceptedAdded = new Set();
-  const acceptedRemoved = new Set();
   try {
-    for (const c of accepted) {
-      const d = diffTokens(deps, top, c, path);
-      d.added.forEach((t) => acceptedAdded.add(t));
-      d.removed.forEach((t) => acceptedRemoved.add(t));
+    // Exact ordered replay (Stage 2 audit #982): every intervening successor commit that changed
+    // the protected path must be byte-for-byte the live parent blob with exactly one accepted
+    // predecessor commit's path change merged in (accepted commits used at most once, in
+    // predecessor order). Token membership is never sufficient: a same-vocabulary rewrite or a
+    // repeated-token deletion cannot reproduce an accepted commit's own delta.
+    const acceptedPath = [];
+    for (const l of deps.git(["rev-list", "--reverse", "--parents", corrected, `^${baseTip}`], { cwd: top }).split("\n").filter(Boolean)) {
+      const [c, ...ps] = l.split(" ");
+      if (ps.length !== 1) return fail("SUCCESSOR_HISTORY_UNPROVEN", `accepted predecessor commit ${c} is a merge or root commit; protected provenance cannot be proven`);
+      const after = blobAt(deps, top, c, path);
+      const before = blobAt(deps, top, ps[0], path);
+      if (after !== before) acceptedPath.push({ after, before });
     }
-    const baseCounts = tokenCounts(blobAt(deps, top, baseTip, path));
-    for (const [commit] of intervening) {
-      const d = diffTokens(deps, top, commit, path);
-      if (d.added.some((t) => !baseCounts.has(t) && !acceptedAdded.has(t))) {
-        return fail("SUCCESSOR_HISTORY_UNPROVEN", `successor commit ${commit} added protected text not present in the target and not from an accepted predecessor commit`);
+    let next = 0;
+    for (const [commit, parent] of [...intervening].reverse()) {
+      const after = blobAt(deps, top, commit, path);
+      const before = blobAt(deps, top, parent, path);
+      if (after === before) continue;
+      let matched = -1;
+      for (let i = next; i < acceptedPath.length && matched < 0; i++) {
+        const diff3 = deps.mergeFile({ ours: acceptedPath[i].after, base: acceptedPath[i].before, theirs: before });
+        let replay = null;
+        if (!/^(<{7}|\|{7}|={7}|>{7})( |$)/m.test(diff3)) replay = diff3;
+        else {
+          const pf = proveFile({ diff3Output: diff3, reviewedText: acceptedPath[i].after, targetText: before });
+          if (pf.ok) replay = pf.resolved;
+        }
+        if (replay !== null && replay === after) matched = i;
       }
-    }
-    const headCounts = tokenCounts(blobAt(deps, top, head, path));
-    for (const [t, n] of baseCounts) {
-      if ((headCounts.get(t) ?? 0) < n && !acceptedRemoved.has(t)) {
-        return fail("SUCCESSOR_HISTORY_UNPROVEN", "successor HEAD dropped target protected text that no accepted predecessor commit removed");
+      if (matched < 0) {
+        return fail("SUCCESSOR_HISTORY_UNPROVEN", `successor commit ${commit} changed the protected path in a way that is not exactly one accepted predecessor commit's change applied to its parent`);
       }
+      next = matched + 1;
     }
     const pickedCounts = tokenCounts(blobAt(deps, top, picked, path));
     const parentCounts = tokenCounts(blobAt(deps, top, pickedParent, path));
