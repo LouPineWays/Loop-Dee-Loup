@@ -73,8 +73,12 @@
 //         NOT_SATISFIED (reviewed head lacks findings-provenance, or the corrected head is not
 //           a strict, non-diverged descendant of the reviewed head)        -> AMBIGUOUS
 //         HEAD_MISMATCH (the disposition names a different head than the one currently being
-//           gated — a stale or superseded disposition)                    -> NO_ACTION_YET,
-//           same as no disposition being present at all
+//           gated — a stale or superseded disposition)                    -> probe the narrow
+//           #954 stale-continuation case: if the recorded corrected head is a strict ancestor of
+//           the live head, the same reviewed findings round is still bound, and the existing
+//           correction/provenance proof succeeds at that live head -> STAGE1_CORRECTION_FINALIZATION_REQUIRED;
+//           if no later correction can be proved -> NO_ACTION_YET; operational/untrustworthy
+//           comparison or provenance evidence -> AMBIGUOUS
 //         an operational error from checkCorrectionDelta itself           -> AMBIGUOUS
 //     - stage1-gate PENDING with findings-bearing unbound genuine matches -> AMBIGUOUS
 //     - stage1-gate PENDING otherwise                   -> NO_ACTION_YET
