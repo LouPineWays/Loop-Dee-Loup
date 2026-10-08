@@ -263,6 +263,12 @@ export function verifyFinalizedCorrectionBody(freshBody, { correctedHead, review
     if (lifecycle === null || lifecycle.trim() !== "REVIEW") {
       return { ok: false, reason: `fresh read-back's Lifecycle is ${JSON.stringify(lifecycle)}, expected "REVIEW"` };
     }
+    // Stage 1 finding on PR #997: the open-PR initial recovery is pre-Stage-2.
+    // A concurrent edit must not turn a successful read-back into a REVIEW/active-audit contradiction.
+    const stage2Field = parseControlBullet(freshBody, "Stage 2");
+    if (!isAbsentOrNone(stage2Field)) {
+      return { ok: false, reason: `fresh read-back's Stage 2 bullet is ${JSON.stringify(stage2Field)}, expected "none" or absent (Stage 2 unstarted)` };
+    }
   }
   const expected = correctionSatisfiedDispositionValue({ correctedHead, reviewedHead });
   const stage1Field = parseControlBullet(freshBody, "Stage 1");
