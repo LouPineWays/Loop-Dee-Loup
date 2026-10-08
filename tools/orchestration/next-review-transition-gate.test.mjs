@@ -1060,6 +1060,8 @@ test("runNextReviewTransitionGate: direct --audit-issue mode resolves RESPONSE_U
           reportEvidence: { backed: false, hasGenuineResponse: true, genuineResponsesSeen: 1 },
         };
       },
+      // Issue #985: the bounded replacement evaluator is faked like every other composed check.
+      evaluateUnusableRecoveryImpl: async () => ({ status: "NOT_ELIGIBLE", reason: "fixture" }),
     },
   );
   assert.equal(result.exitCode, 4);

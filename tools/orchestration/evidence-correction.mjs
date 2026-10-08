@@ -193,7 +193,7 @@ export function parseEvidenceCorrectionResult(body, { host = DEFAULT_HOST } = {}
 }
 
 // Pure. Appends `extra` as new lines at the end of the `### <label>` block of an issue body.
-function appendToFormBlock(body, label, extra) {
+export function appendToFormBlock(body, label, extra) {
   const lines = normalizeEol(body).split("\n");
   const idx = lines.findIndex((l) => l.trim() === `### ${label}`);
   if (idx === -1) return null;
@@ -280,7 +280,7 @@ export const defaultIo = {
   listIssuesSince: (args) => listIssuesSince(args),
 };
 
-async function readIssueRest(io, repo, number) {
+export async function readIssueRest(io, repo, number) {
   const payload = await io.ghGet(`repos/${repo}/issues/${number}`);
   if (!payload || Number(payload.number) !== Number(number) || payload.pull_request) {
     throw new Error(`REST response for ${repo}#${number} is not that Issue`);
@@ -299,7 +299,7 @@ async function readIssueRest(io, repo, number) {
 
 const refuse = (status, reason, extra = {}) => ({ status, reason, ...extra });
 
-function parseMergedPrNumber(body) {
+export function parseMergedPrNumber(body) {
   const block = parseFormFieldBlock(body, "Merged PR");
   if (!block) return null;
   const m = /\/pull\/(\d+)\b/.exec(block) ?? /#(\d+)\b/.exec(block);

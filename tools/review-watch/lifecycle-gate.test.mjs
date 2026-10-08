@@ -19,6 +19,7 @@ import {
   checkCloseWorkIssue,
   checkMergeReady,
   checkPostAudit,
+  parseUnusableReplacementRef,
   checkRecordVerdict as checkRecordVerdictRaw,
   ghRestEditIssueBody,
   ghRestCommentIssue,
@@ -4641,4 +4642,31 @@ test("#973 file retry still fails closed on wrong identity, body mismatch, malfo
   assert.equal(calls.length, 1);
   // The file transport failing too is surfaced, not swallowed.
   assert.throws(edit((c, a) => { throw stdinFailure973(); }), /unexpected end of JSON input/);
+});
+
+// -- issue #985: unusable-response replacement audit supersedes its preserved predecessor --------
+
+test("checkPostAudit: TRIGGER_REQUIRED for an unusable-response replacement whose OPEN predecessor is still listed (issue #985: projected-but-untriggered boundary)", async () => {
+  const predecessorBody = renderedCanonicalAuditBody({ workIssue: 151, verdict: "PENDING" });
+  const replacementBody = predecessorBody.replace(
+    "Stage 1 inline review at frozen head `abc123` found no issues.",
+    "Stage 1 inline review at frozen head `abc123` found no issues. Unusable-response replacement audit of audit issue #159 " +
+      "(issue #985): the prior Stage 2 PENDING verdict on issue #159 was never settled.",
+  );
+  assert.notEqual(replacementBody, predecessorBody);
+  assert.equal(parseUnusableReplacementRef(replacementBody), 159);
+  assert.equal(parseUnusableReplacementRef(predecessorBody), null);
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) => (number === 160 ? { body: replacementBody, state: "OPEN" } : { body: "", state: "OPEN" }),
+      ghApiImpl: async () => [],
+      ghIssueListImpl: async () => [
+        { number: 159, state: "OPEN", body: predecessorBody, createdAt: "2026-08-20T00:00:00Z" },
+        { number: 160, state: "OPEN", body: replacementBody, createdAt: "2026-08-20T01:00:00Z" },
+      ],
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "TRIGGER_REQUIRED");
 });

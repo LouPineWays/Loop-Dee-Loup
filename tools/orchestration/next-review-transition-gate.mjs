@@ -347,6 +347,7 @@ import { getActionEnvelope, getCorrectionContinuation } from "./action-envelope.
 import { bindVerdictContinuation } from "./control-plane-continuation.mjs";
 // Issue #883: the deterministic evidence-only Stage 2 correction evaluator.
 import { evaluateEvidenceCorrection, Status as EvidenceStatus } from "./evidence-correction.mjs";
+import { evaluateUnusableRecovery, Status as UnusableRecoveryStatus } from "./unusable-audit-recovery.mjs";
 // Issue #678 Stage 1 correction (PR #714, finding 1): persists this gate's own verdict to a
 // side channel at the exact moment main() is about to print it, so action-envelope-hook.mjs
 // can still observe a bounded/none verdict when a downstream pipeline stage (e.g.
@@ -1044,6 +1045,10 @@ function exitCodeFor(state) {
     // as STAGE2_TRIGGER_REQUIRED, never an outstanding source correction.
     case "STAGE2_EVIDENCE_REAUDIT_PREPARATION_REQUIRED":
     case "STAGE2_EVIDENCE_REAUDIT_READY":
+    // Issue #985: the unusable-response replacement verdicts name one concrete required next
+    // command each (prepare the single replacement; project + trigger it) -- same bucket.
+    case "STAGE2_UNUSABLE_REPLACEMENT_PREPARATION_REQUIRED":
+    case "STAGE2_UNUSABLE_REPLACEMENT_READY":
       return 0;
     case "STAGE1_CORRECTION_REQUIRED":
     // Issue #837: names the one concrete, non-blocking finalize step a stranded corrected head
@@ -1486,6 +1491,7 @@ async function resolvePostMerge(
     checkCorrectionDeltaImpl = checkCorrectionDelta,
     compareImpl = defaultCompare,
     evaluateEvidenceCorrectionImpl = evaluateEvidenceCorrection,
+    evaluateUnusableRecoveryImpl = evaluateUnusableRecovery,
     listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
     readCorrectionCommitsImpl = defaultReadCorrectionCommits,
     readTargetCommitsImpl = defaultReadTargetBranchCommits,
@@ -1522,6 +1528,13 @@ async function resolvePostMerge(
     ...(effectiveControlIssue != null ? { controlIssue: effectiveControlIssue } : {}),
   };
   const verdict = resolvePostMergeVerdict({ postAudit }, context);
+
+  // Issue #985: a FIRST unusable genuine reviewer response may recover through exactly one fresh
+  // same-target replacement Audit; anything else keeps the unchanged STAGE2_RESPONSE_UNUSABLE stop.
+  if (verdict.state === "STAGE2_RESPONSE_UNUSABLE") {
+    const routed = await resolveUnusableRecoveryRouting({ repo, context, postAudit, verdict }, { evaluateUnusableRecoveryImpl });
+    return { exitCode: exitCodeFor(routed.state), ...routed };
+  }
 
   // Issue #646: STAGE2_CORRECTION_REQUIRED is the one verdict this reconciliation step can
   // still override -- every other verdict above is left exactly as resolvePostMergeVerdict
@@ -1739,6 +1752,79 @@ async function resolvePostMerge(
   return { exitCode: exitCodeFor(verdict.state), ...verdict };
 }
 
+// Issue #985: routes a first unusable genuine Stage 2 response through the bounded one-replacement
+// recovery (tools/orchestration/unusable-audit-recovery.mjs). Only a durably re-proven, exact
+// PR/work/merge-identity result authorizes the single replacement; an exhausted bound (the audit is
+// itself a replacement) keeps the unchanged STAGE2_RESPONSE_UNUSABLE founder interrupt, now carrying
+// the predecessor reference; any operational failure or ambiguous provenance fails closed to
+// AMBIGUOUS -- never a pointer mutation, a new audit, a same-thread retrigger, or reviewer coaching.
+async function resolveUnusableRecoveryRouting({ repo, context, postAudit, verdict }, { evaluateUnusableRecoveryImpl }) {
+  const ambiguous = (reason) => ({ state: "AMBIGUOUS", stopAfter: true, ...context, postAudit, reason });
+  let evaluated;
+  try {
+    evaluated = await evaluateUnusableRecoveryImpl({ repo, auditIssue: context.auditIssue });
+  } catch (err) {
+    return ambiguous(`unusable-response recovery evaluation failed operationally, refusing to create a replacement audit on unverified state: ${err.message}`);
+  }
+  switch (evaluated?.status) {
+    case UnusableRecoveryStatus.NOT_ELIGIBLE:
+      return {
+        ...verdict,
+        unusableRecovery: {
+          status: evaluated.status,
+          reason: evaluated.reason,
+          ...(evaluated.predecessorAuditIssue != null ? { predecessorAuditIssue: evaluated.predecessorAuditIssue } : {}),
+        },
+      };
+    case UnusableRecoveryStatus.ELIGIBLE:
+      return {
+        state: "STAGE2_UNUSABLE_REPLACEMENT_PREPARATION_REQUIRED",
+        stopAfter: true,
+        ...context,
+        workIssue: evaluated.workIssue,
+        pr: evaluated.pr,
+        mergeCommit: evaluated.mergeCommit,
+        predecessorAuditIssue: context.auditIssue,
+        unusableResponseUrl: evaluated.responseUrl,
+        nextCommand: `node tools/orchestration/unusable-audit-recovery.mjs prepare --repo ${repo} --audit-issue ${context.auditIssue}`,
+      };
+    case UnusableRecoveryStatus.REPLACEMENT_EXISTS: {
+      if (!evaluated.replacement?.pending) {
+        return ambiguous(
+          `replacement audit #${evaluated.replacement?.number} already carries a non-pending verdict while the current Stage 2 pointer ` +
+            `still names predecessor #${context.auditIssue}; refusing to project or trigger it`,
+        );
+      }
+      const replacement = evaluated.replacement.number;
+      const triggerCommand = `node tools/review-watch/trigger.mjs --repo ${repo} --kind issue --number ${replacement}`;
+      const finalizeCommand =
+        typeof context.controlIssue === "number"
+          ? `node tools/orchestration/finalize-audit-breakpoint.mjs --control-issue ${context.controlIssue} ` +
+            `--execution-issue ${evaluated.workIssue} --pr ${evaluated.pr} --audit-issue ${replacement} ` +
+            `--stale-audit-issue ${context.auditIssue} --revalidate-uniqueness true`
+          : `node tools/orchestration/finalize-audit-breakpoint.mjs --execution-issue ${evaluated.workIssue} ` +
+            `--pr ${evaluated.pr} --audit-issue ${replacement} --revalidate-uniqueness true`;
+      return {
+        state: "STAGE2_UNUSABLE_REPLACEMENT_READY",
+        stopAfter: true,
+        ...context,
+        workIssue: evaluated.workIssue,
+        pr: evaluated.pr,
+        mergeCommit: evaluated.mergeCommit,
+        predecessorAuditIssue: context.auditIssue,
+        unusableResponseUrl: evaluated.responseUrl,
+        replacementAuditIssue: replacement,
+        nextCommand: `${finalizeCommand} && ${triggerCommand}`,
+      };
+    }
+    default:
+      return ambiguous(
+        `unusable-response recovery state is ${JSON.stringify(evaluated?.status ?? null)}: ${evaluated?.reason ?? "no reason reported"} -- ` +
+          "ambiguous or mismatched replacement provenance fails closed; no pointer mutation, no new audit",
+      );
+  }
+}
+
 // Issue #883: routes a recorded NOT CLEAN (no correction PR) through the evidence-only recovery
 // evaluation. Source-defect and not-yet-evidenced cases stay STAGE2_CORRECTION_REQUIRED (the
 // correction worker classifies semantically and, for evidence-only, ends at `evidence-
@@ -1891,7 +1977,7 @@ async function resolveMergedPrWithSettledStage2(
     checkCorrectionDeltaImpl,
     compareImpl = defaultCompare,
     ghPrStateImpl = defaultGhPrState,
-    evaluateEvidenceCorrectionImpl,
+    evaluateEvidenceCorrectionImpl, evaluateUnusableRecoveryImpl,
     listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
     readCorrectionCommitsImpl = defaultReadCorrectionCommits,
     readTargetCommitsImpl = defaultReadTargetBranchCommits,
@@ -1904,7 +1990,7 @@ async function resolveMergedPrWithSettledStage2(
   if (typeof mergeCommitOid !== "string" || !mergeCommitOid.trim()) {
     return resolvePostMerge(
       { repo, auditIssue, controlIssue: controlIssueNumber },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, compareImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, compareImpl, evaluateEvidenceCorrectionImpl, evaluateUnusableRecoveryImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
     );
   }
 
@@ -1953,7 +2039,7 @@ async function resolveMergedPrWithSettledStage2(
     // own merge, so it owns the transition unchanged.
     return resolvePostMerge(
       { repo, auditIssue, controlIssue: controlIssueNumber },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, compareImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, compareImpl, evaluateEvidenceCorrectionImpl, evaluateUnusableRecoveryImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
     );
   }
 
@@ -2432,6 +2518,7 @@ async function runNextReviewTransitionGateCore(
     reconcileStage2CorrectionPrImpl = reconcileStage2CorrectionPr,
     reconcileExistingStage2AuditIssueImpl = reconcileExistingStage2AuditIssue,
     evaluateEvidenceCorrectionImpl = evaluateEvidenceCorrection,
+    evaluateUnusableRecoveryImpl = evaluateUnusableRecovery,
   } = {},
 ) {
   let repo = args.repo;
@@ -2451,7 +2538,7 @@ async function runNextReviewTransitionGateCore(
   if (args.auditIssue) {
     return resolvePostMerge(
       { repo, auditIssue: args.auditIssue, controlIssue: null },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, compareImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, compareImpl, evaluateEvidenceCorrectionImpl, evaluateUnusableRecoveryImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
     );
   }
   if (args.pr) {
@@ -2579,7 +2666,7 @@ async function runNextReviewTransitionGateCore(
           mergeCommitOid: prState.mergeCommit?.oid,
           headRefOid: prState.headRefOid,
         },
-        { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl, checkCorrectionDeltaImpl, compareImpl, ghPrStateImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+        { ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkPostAuditImpl, reconcileStage2CorrectionPrImpl, checkCorrectionDeltaImpl, compareImpl, ghPrStateImpl, evaluateEvidenceCorrectionImpl, evaluateUnusableRecoveryImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
       );
     }
     if (prState.state === "OPEN") {
@@ -2615,7 +2702,7 @@ async function runNextReviewTransitionGateCore(
     // Stage 2 reference remains the only active post-review pointer, exactly as before #537.
     return resolvePostMerge(
       { repo, auditIssue: auditRef.issue, controlIssue: controlIssueNumber },
-      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, compareImpl, evaluateEvidenceCorrectionImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+      { checkPostAuditImpl, reconcileStage2CorrectionPrImpl, ghPrStateImpl, ghIssueViewImpl, reconcileExistingStage2AuditIssueImpl, checkCorrectionDeltaImpl, compareImpl, evaluateEvidenceCorrectionImpl, evaluateUnusableRecoveryImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
     );
   }
 

@@ -622,6 +622,22 @@ export function parseEvidenceRecoveryRef(body) {
   return match ? Number(match[1]) : null;
 }
 
+// Pure. Issue #985: the structured provenance marker the single fresh replacement Audit carries in
+// its own "Stage 1 inline review disposition" block when the first genuine reviewer response on a
+// predecessor Audit for the same exact PR/work/merge target was unusable under the completed-report
+// contract (tools/orchestration/unusable-audit-recovery.mjs). Returns the predecessor audit issue
+// number, or null when absent. Same trust boundary as parseEvidenceRecoveryRef: only the controlling
+// session composes this field, before ever triggering the reviewer. The block also carries the
+// established "prior Stage 2 PENDING verdict on issue #N" phrase (parseCorrectsAuditRef) so the
+// preserved predecessor is retired by the ordinary correction-chain close once the replacement
+// reaches a backed CLEAN.
+export function parseUnusableReplacementRef(body) {
+  const block = parseFormFieldBlock(body, "Stage 1 inline review disposition");
+  if (!block) return null;
+  const match = /\bUnusable-response replacement audit of audit issue #(\d+)/.exec(block);
+  return match ? Number(match[1]) : null;
+}
+
 const SHA_TOKEN_PATTERN = /\b[0-9a-f]{7,40}\b/i;
 
 // Pure. Reads the audit-control-issue template's "Exact merge commit" field — the target
@@ -2264,7 +2280,9 @@ export function findMatchingOpenAuditIssues(candidates, { mergeCommitOid, execut
   const supersededPredecessors = new Set();
   for (const candidate of candidates ?? []) {
     const body = candidate.body ?? "";
-    const predecessor = parseEvidenceRecoveryRef(body);
+    // Issue #985: an unusable-response replacement audit supersedes its preserved predecessor the
+    // same way (same exact merge/work identity, predecessor kept as historical evidence).
+    const predecessor = parseEvidenceRecoveryRef(body) ?? parseUnusableReplacementRef(body);
     if (predecessor === null || !hasCanonicalAuditShape(body)) continue;
     const candidateMergeCommit = parseMergeCommitRef(body);
     if (!candidateMergeCommit || candidateMergeCommit.toLowerCase() !== String(mergeCommitOid).toLowerCase()) continue;
