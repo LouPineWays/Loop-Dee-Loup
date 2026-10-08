@@ -782,3 +782,136 @@ test("run(): merged recovery with a missing PR pointer still fails closed on wro
   const otherPr = await runMerged(REVIEW_BODY.replace("#573", "#574"));
   assert.equal(otherPr.result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
 });
+
+// -- Issue #996: interrupted initial PR breakpoint (open PR, control still READY / PR none) -------
+
+const READY_BODY = `### State
+
+READY
+
+## Current state
+
+- **Execution:** #570
+- **Route:** implementation worker
+- **PR:** none
+- **Stage 1:** none
+- **Stage 2:** none
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+const READY_ARGS = { repo: "owner/repo", controlIssue: 571, executionIssue: 570, pr: 573, reviewedHead: REVIEWED, correctedHead: CORRECTED };
+
+function readyDeps(initialBody, overrides = {}) {
+  const state = { body: initialBody, writes: [] };
+  return {
+    state,
+    deps: {
+      ghIssueViewImpl: async () => state.body,
+      ghPrViewImpl: makePrViewStub(LINKED_PR_VIEW_570),
+      checkCorrectionDeltaImpl: async () => correctionSatisfied(),
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        state.writes.push(proposedBody);
+        state.body = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+      ...overrides,
+    },
+  };
+}
+
+test("run(): #996 open PR with control READY/PR none/Stage 1 none projects PR, REVIEW and the correction disposition in one verified write", async () => {
+  const { state, deps } = readyDeps(READY_BODY);
+  const result = await run(READY_ARGS, deps);
+  assert.equal(result.state, "FINALIZED");
+  assert.equal(state.writes.length, 1);
+  assert.match(state.body, /\*\*PR:\*\* #573/);
+  assert.match(state.body, /\*\*Stage 1:\*\* correction-satisfied at 0009c54b/);
+  assert.match(state.body, /REVIEW/);
+});
+
+test("run(): #996 re-entry after the recovery write is a normal REVIEW correction finalization (idempotent)", async () => {
+  const { state, deps } = readyDeps(READY_BODY);
+  await run(READY_ARGS, deps);
+  const again = await run(READY_ARGS, deps);
+  assert.equal(again.state, "FINALIZED");
+});
+
+test("run(): #996 does not recover when the PR pointer names another PR", async () => {
+  const { state, deps } = readyDeps(READY_BODY.replace("**PR:** none", "**PR:** #999"));
+  const result = await run(READY_ARGS, deps);
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.equal(state.writes.length, 0);
+});
+
+test("run(): #996 does not recover when Stage 1 already carries a disposition (a second review round / real state)", async () => {
+  const { state, deps } = readyDeps(READY_BODY.replace("**Stage 1:** none", "**Stage 1:** requested"));
+  const result = await run(READY_ARGS, deps);
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.equal(state.writes.length, 0);
+});
+
+test("run(): #996 does not recover when Stage 2 is already started", async () => {
+  const { state, deps } = readyDeps(READY_BODY.replace("**Stage 2:** none", "**Stage 2:** #900"));
+  const result = await run(READY_ARGS, deps);
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.equal(state.writes.length, 0);
+});
+
+test("run(): #996 does not recover from a non-READY lifecycle that is not REVIEW/CORRECTION", async () => {
+  const { state, deps } = readyDeps(READY_BODY.replace("READY", "EXECUTING"));
+  const result = await run(READY_ARGS, deps);
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.equal(state.writes.length, 0);
+});
+
+test("run(): #996 does not recover for a foreign execution Issue, a moved head, or unproven correction evidence", async () => {
+  for (const [name, overrides, args] of [
+    ["foreign execution", {}, { ...READY_ARGS, executionIssue: 571 }],
+    ["moved head", { ghPrViewImpl: makePrViewStub({ ...LINKED_PR_VIEW_570, headRefOid: "f".repeat(40) }) }, READY_ARGS],
+    ["unproven correction", { checkCorrectionDeltaImpl: async () => notSatisfied("no findings") }, READY_ARGS],
+  ]) {
+    const { state, deps } = readyDeps(READY_BODY, overrides);
+    const result = await run(args, deps);
+    assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED", name);
+    assert.equal(state.writes.length, 0, name);
+  }
+});
+
+test("verifyFinalizedCorrectionBody: #996 recovery read-back rejects a body missing the PR pointer or REVIEW", () => {
+  const composed = composeCorrectionControlBody(READY_BODY, { pr: 573, correctedHead: CORRECTED, reviewedHead: REVIEWED });
+  assert.equal(composed.ok, true);
+  assert.equal(composed.initialRecovery, true);
+  const args = { correctedHead: CORRECTED, reviewedHead: REVIEWED, pr: 573, initialRecovery: true };
+  assert.equal(verifyFinalizedCorrectionBody(composed.body, args).ok, true);
+  assert.equal(verifyFinalizedCorrectionBody(composed.body.replace("#573", "none"), args).ok, false);
+});
+
+test("verifyFinalizedCorrectionBody: #997 recovery read-back rejects a started or legacy Stage 2, accepts an absent bullet", () => {
+  const composed = composeCorrectionControlBody(READY_BODY, { pr: 573, correctedHead: CORRECTED, reviewedHead: REVIEWED });
+  const args = { correctedHead: CORRECTED, reviewedHead: REVIEWED, pr: 573, initialRecovery: true };
+  for (const stage2 of ["#900", "not started"]) {
+    const altered = composed.body.replace("**Stage 2:** none", `**Stage 2:** ${stage2}`);
+    assert.notEqual(altered, composed.body);
+    const result = verifyFinalizedCorrectionBody(altered, args);
+    assert.equal(result.ok, false, stage2);
+    assert.match(result.reason, /Stage 2/);
+  }
+  const withoutStage2 = composed.body.replace("- **Stage 2:** none\n", "");
+  assert.notEqual(withoutStage2, composed.body);
+  assert.equal(verifyFinalizedCorrectionBody(withoutStage2, args).ok, true);
+});
+
+test("run(): #997 fails closed if Stage 2 becomes active between snapshot write and fresh read-back", async () => {
+  const { state, deps } = readyDeps(READY_BODY, {
+    writeControlSnapshotImpl: async ({ proposedBody }) => {
+      state.writes.push(proposedBody);
+      state.body = proposedBody.replace("**Stage 2:** none", "**Stage 2:** #900");
+      return { exitCode: 0, state: "WRITTEN" };
+    },
+  });
+  const result = await run(READY_ARGS, deps);
+  assert.equal(state.writes.length, 1);
+  assert.equal(result.state, "CORRECTION_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /Stage 2/);
+});
