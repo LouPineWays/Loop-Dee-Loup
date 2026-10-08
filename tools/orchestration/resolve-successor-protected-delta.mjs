@@ -118,7 +118,7 @@ function proveProtectedProvenance({ deps, top, path, baseTip, head, picked, pick
       if (ps.length !== 1) return fail("SUCCESSOR_HISTORY_UNPROVEN", `accepted predecessor commit ${c} is a merge or root commit; protected provenance cannot be proven`);
       const after = blobAt(deps, top, c, path);
       const before = blobAt(deps, top, ps[0], path);
-      if (after !== before) acceptedPath.push({ after, before });
+      if (after !== before) acceptedPath.push({ commit: c, after, before });
     }
     let next = 0;
     for (const [commit, parent] of [...intervening].reverse()) {
@@ -140,6 +140,11 @@ function proveProtectedProvenance({ deps, top, path, baseTip, head, picked, pick
         return fail("SUCCESSOR_HISTORY_UNPROVEN", `successor commit ${commit} changed the protected path in a way that is not exactly one accepted predecessor commit's change applied to its parent`);
       }
       next = matched + 1;
+    }
+    // The in-progress picked commit must not precede an accepted commit already replayed in HEAD.
+    const pickedIdx = acceptedPath.findIndex((e) => e.commit.toLowerCase() === picked.toLowerCase());
+    if (pickedIdx >= 0 && pickedIdx < next) {
+      return fail("SUCCESSOR_HISTORY_UNPROVEN", `picked commit ${picked} precedes an accepted predecessor commit already replayed in the successor; protected commits would be reordered`);
     }
     const pickedCounts = tokenCounts(blobAt(deps, top, picked, path));
     const parentCounts = tokenCounts(blobAt(deps, top, pickedParent, path));
