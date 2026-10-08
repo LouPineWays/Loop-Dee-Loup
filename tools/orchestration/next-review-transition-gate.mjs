@@ -1527,13 +1527,20 @@ async function resolvePostMerge(
     auditIssue: resolvedAuditIssue,
     ...(effectiveControlIssue != null ? { controlIssue: effectiveControlIssue } : {}),
   };
-  const verdict = resolvePostMergeVerdict({ postAudit }, context);
+  let verdict = resolvePostMergeVerdict({ postAudit }, context);
+
+  // Issue #992: set only when an unusable (NOT backed NOT CLEAN) audit has exactly one open
+  // execution-linked correction PR whose independent authority is durably proven. Enters the
+  // shared open/merged correction-PR resolution below without fabricating a verdict.
+  let unusableCorrection = null;
 
   // Issue #985: a FIRST unusable genuine reviewer response may recover through exactly one fresh
   // same-target replacement Audit; anything else keeps the unchanged STAGE2_RESPONSE_UNUSABLE stop.
   if (verdict.state === "STAGE2_RESPONSE_UNUSABLE") {
     const routed = await resolveUnusableRecoveryRouting({ repo, context, postAudit, verdict }, { evaluateUnusableRecoveryImpl });
-    return { exitCode: exitCodeFor(routed.state), ...routed };
+    if (routed.state !== "STAGE2_UNUSABLE_CORRECTION_PR_AUTHORIZED") return { exitCode: exitCodeFor(routed.state), ...routed };
+    unusableCorrection = routed.unusableCorrection;
+    verdict = { ...verdict, workIssue: routed.workIssue };
   }
 
   // Issue #646: STAGE2_CORRECTION_REQUIRED is the one verdict this reconciliation step can
@@ -1541,8 +1548,22 @@ async function resolvePostMerge(
   // computed it. Skipped entirely when there is no real work Issue to search for (the explicit
   // no-work-issue state, issue #190) -- there is no execution-linked PR convention to search
   // against without one.
-  if (verdict.state === "STAGE2_CORRECTION_REQUIRED" && typeof verdict.workIssue === "number") {
+  if ((verdict.state === "STAGE2_CORRECTION_REQUIRED" || unusableCorrection) && typeof verdict.workIssue === "number") {
     const reconciliation = await reconcileStage2CorrectionPrImpl({ repo, workIssue: verdict.workIssue });
+    if (unusableCorrection && !reconciliation.operationalError && reconciliation.pr?.number !== unusableCorrection.pr) {
+      // Fail closed: never resume a PR other than the one whose authority was proven, and never
+      // fall through to a correction-worker dispatch for an unusable audit.
+      const failedVerdict = {
+        state: "AMBIGUOUS",
+        stopAfter: true,
+        ...context,
+        postAudit,
+        reason:
+          `unusable audit #${context.auditIssue}'s authorized correction PR #${unusableCorrection.pr} is no longer the single open ` +
+          `execution-linked PR (reconciliation found ${reconciliation.pr ? `#${reconciliation.pr.number}` : "none"}); refusing to resume it`,
+      };
+      return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
+    }
     if (reconciliation.operationalError) {
       // Fail closed rather than silently falling through to an ordinary correction-worker
       // dispatch on an operational failure -- an unverified "no PR exists yet" claim is exactly
@@ -1727,6 +1748,7 @@ async function resolvePostMerge(
         state: "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
         stopAfter: true,
         ...context,
+        ...(unusableCorrection ? { unusableAuditCorrection: unusableCorrection } : {}),
         workIssue: verdict.workIssue,
         pr: Number(pr.number),
         head,
@@ -1740,6 +1762,19 @@ async function resolvePostMerge(
       };
       return { exitCode: exitCodeFor(crossedVerdict.state), ...crossedVerdict };
     }
+  }
+
+  if (unusableCorrection) {
+    // reconciliation found no PR (it closed or merged unseen between reads): never dispatch a
+    // correction worker or a replacement audit for an unusable audit on that unverified state.
+    const failedVerdict = {
+      state: "AMBIGUOUS",
+      stopAfter: true,
+      ...context,
+      postAudit,
+      reason: `unusable audit #${context.auditIssue}'s authorized correction PR #${unusableCorrection.pr} was not found open on reconciliation; refusing a replacement audit or correction-worker dispatch on unverified state`,
+    };
+    return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
   }
 
   // Issue #883: no correction PR exists, so this NOT CLEAN is either a source defect awaiting
@@ -1767,7 +1802,30 @@ async function resolveUnusableRecoveryRouting({ repo, context, postAudit, verdic
     return ambiguous(`unusable-response recovery evaluation failed operationally, refusing to create a replacement audit on unverified state: ${err.message}`);
   }
   switch (evaluated?.status) {
-    case UnusableRecoveryStatus.NOT_ELIGIBLE:
+    case UnusableRecoveryStatus.NOT_ELIGIBLE: {
+      // Issue #992: an open execution-linked correction PR is the one NOT_ELIGIBLE shape that may
+      // still advance, and only when its independent authority is durably proven.
+      const open = evaluated.openCorrectionPr;
+      if (open) {
+        if (open.authority?.proven === true && open.candidateCount === 1 && typeof evaluated.workIssue === "number") {
+          return {
+            state: "STAGE2_UNUSABLE_CORRECTION_PR_AUTHORIZED",
+            workIssue: evaluated.workIssue,
+            unusableCorrection: { pr: open.number, authority: open.authority.reason },
+          };
+        }
+        return {
+          ...verdict,
+          unusableRecovery: {
+            status: evaluated.status,
+            reason: evaluated.reason,
+            openCorrectionPr: open.number,
+            authority: "UNPROVEN",
+            authorityReason: open.authority?.reason ?? "no authority evaluation reported",
+            ...(open.authority?.resume ? { resume: open.authority.resume } : {}),
+          },
+        };
+      }
       return {
         ...verdict,
         unusableRecovery: {
@@ -1776,6 +1834,7 @@ async function resolveUnusableRecoveryRouting({ repo, context, postAudit, verdic
           ...(evaluated.predecessorAuditIssue != null ? { predecessorAuditIssue: evaluated.predecessorAuditIssue } : {}),
         },
       };
+    }
     case UnusableRecoveryStatus.ELIGIBLE:
       return {
         state: "STAGE2_UNUSABLE_REPLACEMENT_PREPARATION_REQUIRED",
