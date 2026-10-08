@@ -182,6 +182,17 @@ test("the caller's own worktree is CALLER_OWNED so the pre-push re-check keeps t
   assert.equal(r.branch, BRANCH);
 });
 
+test("missing origin fails closed for caller-owned, live-owned and resumable-with-unpushed-commit (audit #972)", () => {
+  const f = fixture();
+  commitIn(f.wtPath, "w.txt", "work\n");
+  g(f.repo, "remote", "remove", "origin");
+  const caller = inspect(f, { callerWorktree: f.wtPath, cwd: f.wtPath }, { probeOccupancy: () => "OCCUPIED" });
+  assert.equal(caller.state, "FAIL_CLOSED");
+  assert.match(caller.reason, /cannot read origin/);
+  assert.equal(inspect(f, {}, { probeOccupancy: () => "OCCUPIED" }).state, "FAIL_CLOSED");
+  assert.equal(inspect(f).state, "FAIL_CLOSED");
+});
+
 test("a declared --worktree that is not the process's actual checkout fails closed (no CALLER_OWNED)", () => {
   const f = fixture();
   const r = inspect(f, { callerWorktree: f.wtPath }, { probeOccupancy: () => "OCCUPIED" });
