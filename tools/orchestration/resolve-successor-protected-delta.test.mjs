@@ -41,6 +41,8 @@ function buildFixture({
   correctionTouchesAgents = false,
   claude = false, // also track CLAUDE.md with identical text so two protected paths conflict
   revert = false, // reviewed head reverts the clause introduced by the picked first commit
+  successorEdit = null, // successor commit (before the pick) rewrites the target AGENTS.md body via this fn
+  correctionFooter = false, // correction edits only the footer (non-adjacent to the reviewed clause)
   successorNovel = false, // successor commit (before the pick) adds unreviewed protected text
 } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "ldl-rspd-test-")));
@@ -68,7 +70,8 @@ function buildFixture({
     sh(repo, "commit", "-q", "-am", "revert clause (#868)");
     reviewedSha = sh(repo, "rev-parse", "HEAD");
   }
-  if (correctionTouchesAgents) w("AGENTS.md", HEADER + reviewed.replace("Keep it short.", "Rule five covers epsilon. Keep it short.") + FOOTER);
+  if (correctionFooter) w("AGENTS.md", HEADER + reviewed + FOOTER.replace("Trailing section.", "Trailing section extended."));
+  else if (correctionTouchesAgents) w("AGENTS.md", HEADER + reviewed.replace("Keep it short.", "Rule five covers epsilon. Keep it short.") + FOOTER);
   else w("code2.txt", "correction\n");
   sh(repo, "add", ".");
   sh(repo, "commit", "-q", "-m", correctionMessage);
@@ -82,6 +85,10 @@ function buildFixture({
   if (successorNovel) {
     w("AGENTS.md", HEADER + target + FOOTER + "Smuggled unreviewed obligation.\n");
     sh(repo, "commit", "-q", "-am", "worker edit");
+  }
+  if (successorEdit) {
+    w("AGENTS.md", HEADER + successorEdit(target) + FOOTER);
+    sh(repo, "commit", "-q", "-am", "worker rewrite");
   }
   const picked = pick === "correction" || pick === "unattributed" ? correctedSha : revert ? firstSha : reviewedSha;
   try {
@@ -456,6 +463,53 @@ test("failure injection: first path applied then second path fails reports parti
     assert.equal(r.mutated, true);
     assert.deepEqual(r.appliedPaths, ["AGENTS.md"]);
     assert.equal(r.path, "CLAUDE.md");
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("provenance: a same-vocabulary reorder of target protected text in the successor is refused", async () => {
+  const fx = buildFixture({
+    successorEdit: (t) => {
+      const [one, two, rest] = [t.slice(0, t.indexOf(" Rule two")), t.slice(t.indexOf(" Rule two"), t.indexOf(" Keep")), t.slice(t.indexOf(" Keep"))];
+      return `${two.trim()} ${one}${rest}`;
+    },
+  });
+  try {
+    const before = agents(fx);
+    const r = await resolveSuccessorProtectedDelta({ ...args(fx), apply: true }, depsFor(fx));
+    assert.equal(r.verdict, "FAIL_CLOSED", JSON.stringify(r));
+    assert.equal(r.code, "SUCCESSOR_HISTORY_UNPROVEN");
+    assertUntouched(fx, before);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("provenance: a picked commit that precedes an already-replayed later accepted commit is refused", async () => {
+  const fx = buildFixture({ pick: "correction", correctionFooter: true, target: TARGET });
+  try {
+    // Correction commit B already replayed cleanly in HEAD; reviewed commit A is then picked out of order.
+    try { sh(fx.repo, "cherry-pick", fx.reviewed); } catch { /* conflict expected */ }
+    assert.deepEqual(unmerged(fx), ["AGENTS.md"]);
+    const before = agents(fx);
+    const r = await resolveSuccessorProtectedDelta({ ...args(fx), apply: true }, depsFor(fx));
+    assert.equal(r.verdict, "FAIL_CLOSED", JSON.stringify(r));
+    assert.equal(r.code, "SUCCESSOR_HISTORY_UNPROVEN");
+    assertUntouched(fx, before);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("provenance: deleting one occurrence of a repeated target token in the successor is refused", async () => {
+  const fx = buildFixture({ successorEdit: (t) => t.replace("when beta holds.", "when beta.") });
+  try {
+    const before = agents(fx);
+    const r = await resolveSuccessorProtectedDelta({ ...args(fx), apply: true }, depsFor(fx));
+    assert.equal(r.verdict, "FAIL_CLOSED", JSON.stringify(r));
+    assert.equal(r.code, "SUCCESSOR_HISTORY_UNPROVEN");
+    assertUntouched(fx, before);
   } finally {
     fx.cleanup();
   }
