@@ -774,6 +774,11 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/unusable-audit-recovery.mjs", dependsOnDest: "tools/review-watch/lifecycle-gate.mjs" },
   { dest: "tools/orchestration/unusable-audit-recovery.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
   { dest: "tools/orchestration/next-review-transition-gate.mjs", dependsOnDest: "tools/orchestration/unusable-audit-recovery.mjs" },
+  // Issue #1005: verify-audit-ready.mjs, finalize-audit-breakpoint.mjs and evidence-correction.mjs
+  // hard-import scope-baseline.mjs (exact-merge change-scope baseline).
+  { dest: "tools/orchestration/verify-audit-ready.mjs", dependsOnDest: "tools/orchestration/scope-baseline.mjs" },
+  { dest: "tools/orchestration/finalize-audit-breakpoint.mjs", dependsOnDest: "tools/orchestration/scope-baseline.mjs" },
+  { dest: "tools/orchestration/evidence-correction.mjs", dependsOnDest: "tools/orchestration/scope-baseline.mjs" },
   // Issue #901: runner-bound continuations. The three gate entrypoints, action-envelope.mjs,
   // launcher-run.mjs hard-import control-plane-continuation.mjs; an unmanaged preserved copy would
   // fail at ESM load time.

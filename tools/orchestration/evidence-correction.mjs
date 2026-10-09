@@ -53,6 +53,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { resolveRepoIdentity, findOpenExecutionLinkedPr, defaultGhOpenPrList } from "./ready-dispatch-gate.mjs";
 import { readGithubPr } from "./github-read.mjs";
+import { checkScopeBaseline, ScopeState, substituteScopeBase, defaultReadCommit } from "./scope-baseline.mjs";
 import {
   DEFAULT_BOT,
   defaultGhApi,
@@ -215,7 +216,28 @@ export function appendToFormBlock(body, label, extra) {
 // disposition" field. The block carries both the evidence-recovery marker
 // (parseEvidenceRecoveryRef — bounds the lineage) and the established correction-chain phrase
 // (parseCorrectsAuditRef — lets close-audit retire this preserved predecessor on a backed CLEAN).
-export function composeReplacementAuditBody(predecessorBody, { predecessor, workIssue, mergeCommit, resultUrl }) {
+export function composeReplacementAuditBody(predecessorBody, { predecessor, workIssue, mergeCommit, resultUrl, checklistCorrection = null }) {
+  if (checklistCorrection) {
+    // Issue #1005: corrected-checklist variant. Same marker/phrases (lineage bound, supersession and
+    // correction-chain retirement are unchanged); the only content change is the one proven-stale SHA
+    // replaced by the merge's actual first parent inside the Verification checklist field.
+    const note =
+      `Evidence-recovery re-audit of audit issue #${predecessor} (issue #1005, corrected-checklist variant): the prior Stage 2 ` +
+      `NOT CLEAN verdict on issue #${predecessor} reported that its mandatory change-scope check used base ` +
+      `${checklistCorrection.staleBase}, which is not exact merge commit ${mergeCommit}'s first parent ` +
+      `${checklistCorrection.firstParent}. No source changed since the exact merge; this fresh audit's Verification checklist ` +
+      `replaces only that base SHA with the first parent and is otherwise identical. The completed report is ${resultUrl}. ` +
+      `This is the single permitted evidence-recovery re-audit for this exact PR/work/merge lineage, and it must render its ` +
+      `own independent verdict. #${predecessor} and its report are preserved unchanged as historical evidence.`;
+    const corrected = replaceChecklistField(
+      predecessorBody,
+      substituteScopeBase(parseVerificationChecklistRef(predecessorBody) ?? "", checklistCorrection.staleBase, checklistCorrection.firstParent, mergeCommit),
+    );
+    if (corrected === null) return null;
+    const withNote = appendToFormBlock(corrected, "Stage 1 inline review disposition", note);
+    if (withNote === null) return null;
+    return replaceVerdictField(withNote, "PENDING");
+  }
   const provenance =
     `Evidence-recovery re-audit of audit issue #${predecessor} (issue #883): the prior Stage 2 NOT CLEAN verdict on ` +
     `issue #${predecessor} was satisfied by evidence alone, with no source change since exact merge commit ` +
@@ -271,6 +293,14 @@ function listIssuesSince({ repo, since }) {
   throw new Error(`issue listing exceeded ${MAX_ISSUE_LIST_PAGES} pages without reaching ${since} -- refusing to treat it as exhaustive`);
 }
 
+function listPrFiles({ repo, number }) {
+  const raw = execFileSync("gh", ["api", "--paginate", "--slurp", `repos/${repo}/pulls/${number}/files?per_page=100`], {
+    encoding: "utf8",
+    maxBuffer: 50 * 1024 * 1024,
+  });
+  return JSON.parse(raw).flat().map((f) => f.filename);
+}
+
 export const defaultIo = {
   ghApi: (path) => defaultGhApi(path),
   ghGet: (path) => ghGet(path),
@@ -278,6 +308,9 @@ export const defaultIo = {
   readPr: ({ repo, number }) => readGithubPr({ repo, number, fields: ["state", "mergeCommit", "mergedAt"] }),
   listOpenPrs: ({ repo }) => defaultGhOpenPrList({ repo }),
   listIssuesSince: (args) => listIssuesSince(args),
+  // Issue #1005: exact-merge topology and the PR's own file list, for the checklist-baseline proof.
+  readCommit: ({ repo, sha }) => defaultReadCommit({ repo, sha }),
+  listPrFiles: ({ repo, number }) => listPrFiles({ repo, number }),
 };
 
 export async function readIssueRest(io, repo, number) {
@@ -293,6 +326,107 @@ export async function readIssueRest(io, repo, number) {
     createdAt: payload.created_at,
     author: payload.user?.login ?? null,
   };
+}
+
+// -- Issue #1005: corrected-checklist baseline proof ---------------------------------------------
+//
+// A recorded NOT CLEAN whose only finding is that the audit's own mandatory change-scope command
+// used a stale base (live: Audit #1004, PR #958) is not a source defect and not missing evidence;
+// cloning the unchanged checklist (the #883 route) would hand a fresh reviewer the same impossible
+// check. The authority to correct it is purely deterministic -- no executor claim, no keyword
+// parsing of reviewer prose -- and every condition below is re-derived from GitHub:
+//   1. the predecessor checklist's `git diff <base> <exact merge>` has exactly one distinct
+//      full-SHA base and it is not the merge commit's actual first parent (scope-baseline.mjs);
+//   2. the merge's own changed-file list (first parent -> merge) is complete and equals the merged
+//      PR's file list, so the truthful range really isolates the PR;
+//   3. the backed NOT CLEAN report itself names both the stale base and the true first parent and
+//      its severity table totals exactly one finding of P2/P3 severity (no P0/P1, nothing else);
+//   4. the mechanical substitution of that one SHA inside the checklist field alone yields a
+//      checklist whose scope baseline verifies OK.
+
+const SEVERITY_ROW = /^\s*\|\s*(P[0-3])\s*\|\s*(\d+)\s*\|\s*$/gim;
+
+// Pure. Returns { P0, P1, P2, P3 } counts from the report's severity table, or null if not exactly
+// all four rows are present.
+export function parseSeverityCounts(reportText) {
+  const counts = {};
+  for (const m of normalizeEol(reportText).matchAll(SEVERITY_ROW)) {
+    if (counts[m[1].toUpperCase()] !== undefined) return null;
+    counts[m[1].toUpperCase()] = Number(m[2]);
+  }
+  return ["P0", "P1", "P2", "P3"].every((k) => Number.isInteger(counts[k])) ? counts : null;
+}
+
+// Pure. Replaces the "Verification checklist" field's text with `replacement`, touching nothing else.
+export function replaceChecklistField(body, replacement) {
+  const block = parseFormFieldBlock(body, "Verification checklist");
+  if (block === null) return null;
+  const headingIdx = body.indexOf("### Verification checklist");
+  const at = headingIdx === -1 ? -1 : body.indexOf(block, headingIdx);
+  if (at === -1) return null;
+  return body.slice(0, at) + replacement + body.slice(at + block.length);
+}
+
+// Pure. The text of the report's Findings section (heading to the next heading of equal or higher level),
+// or "" when there is none.
+export function extractFindingsSection(reportText) {
+  const lines = normalizeEol(reportText).split("\n");
+  const head = /^(#{1,6})\s*\*{0,2}\s*findings?\b/i;
+  const start = lines.findIndex((l) => head.test(l));
+  if (start === -1) return "";
+  const level = head.exec(lines[start])[1].length;
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    const m = /^(#{1,6})\s/.exec(lines[i]);
+    if (m && m[1].length <= level) {
+      end = i;
+      break;
+    }
+  }
+  return lines.slice(start, end).join("\n");
+}
+
+// Re-derives the checklist-baseline proof. Never throws on a read failure: unprovable => not proven.
+async function proveChecklistBaselineCorrection(io, { repo, pr, body, mergeCommit, reportComment }) {
+  const no = (reason) => ({ proven: false, reason });
+  const checklist = parseVerificationChecklistRef(body);
+  if (!checklist) return no("audit has no verification checklist");
+  if (typeof io.readCommit !== "function" || typeof io.listPrFiles !== "function") return no("topology readers unavailable");
+  let commit;
+  let prFiles;
+  try {
+    commit = await io.readCommit({ repo, sha: mergeCommit });
+    prFiles = await io.listPrFiles({ repo, number: pr });
+  } catch (err) {
+    return no(`could not read merge topology or PR files: ${err.message}`);
+  }
+  const scope = checkScopeBaseline({ checklist, mergeCommit, commit });
+  if (scope.state !== ScopeState.STALE_SCOPE_BASELINE) return no(`checklist scope baseline state is ${scope.state}, not a stale full-SHA base`);
+  if (scope.offending.some((o) => !FULL_SHA.test(o.base))) return no("a non-SHA scope base is present alongside the stale one");
+  const stale = [...new Set(scope.offending.map((o) => o.base.toLowerCase()))];
+  if (stale.length !== 1) return no("more than one distinct stale scope base");
+  const staleBase = stale[0];
+  const firstParent = scope.firstParent;
+  const files = scope.files;
+  const prSorted = Array.isArray(prFiles) ? [...prFiles].sort() : null;
+  if (!files || !prSorted || files.length === 0 || files.length !== prSorted.length || files.some((f, i) => f !== prSorted[i])) {
+    return no("the merge's first-parent change list is incomplete or does not equal the merged PR's file list");
+  }
+  // The baseline defect must be the report's own finding: both SHAs must appear inside the report's
+  // Findings section (not merely anywhere, e.g. the checklist walkthrough), so a different unrelated
+  // P2/P3 finding cannot ride on a report that happens to mention both SHAs elsewhere.
+  const findingsText = extractFindingsSection(reportComment?.body ?? "").toLowerCase();
+  if (!findingsText.includes(staleBase) || !findingsText.includes(firstParent)) {
+    return no("the independent NOT CLEAN report's Findings section does not name both the stale base and the merge's true first parent");
+  }
+  const sev = parseSeverityCounts(reportComment?.body ?? "");
+  if (!sev || sev.P0 !== 0 || sev.P1 !== 0 || sev.P2 + sev.P3 !== 1) {
+    return no("the NOT CLEAN report's severity table is not exactly one P2/P3 finding with no P0/P1");
+  }
+  const corrected = substituteScopeBase(checklist, staleBase, firstParent, mergeCommit);
+  const after = checkScopeBaseline({ checklist: corrected, mergeCommit, commit });
+  if (after.state !== ScopeState.OK) return no("the mechanically corrected checklist still fails the scope baseline");
+  return { proven: true, staleBase, firstParent, correctedChecklist: corrected, files };
 }
 
 // -- Evaluation ---------------------------------------------------------------------------------
@@ -426,6 +560,17 @@ export async function evaluateEvidenceCorrection({ repo, auditIssue }, io = defa
   };
 
   if (!latest) {
+    // Issue #1005: no recorded evidence result -- but a recorded NOT CLEAN whose sole finding is a
+    // demonstrably stale audit-checklist scope baseline is satisfied by deterministic proof alone.
+    const checklist = await proveChecklistBaselineCorrection(io, { repo, pr, body, mergeCommit, reportComment });
+    if (checklist.proven) {
+      return finishSatisfied({
+        resultUrl: reportUrl,
+        resultAtMs: reportMs,
+        checklistCorrection: { staleBase: checklist.staleBase, firstParent: checklist.firstParent },
+        correctedChecklist: checklist.correctedChecklist,
+      });
+    }
     if (replacement) {
       return refuse(
         Status.AMBIGUOUS,
@@ -464,32 +609,52 @@ export async function evaluateEvidenceCorrection({ repo, auditIssue }, io = defa
     if (problem) return refuse(Status.INCOMPLETE, `evidence not verified: ${problem}`, base);
   }
 
-  const resultUrl = comment.html_url;
-  if (!replacement) return { status: Status.SATISFIED, reason: "evidence correction durably satisfied", resultUrl, replacement: null, ...base };
+  return finishSatisfied({ resultUrl: comment.html_url, resultAtMs: new Date(comment.created_at).getTime() });
 
-  if (replacement.state !== "OPEN") {
-    return refuse(Status.AMBIGUOUS, `re-audit #${replacement.number} exists but is ${replacement.state}`, { ...base, resultUrl });
+  // Shared tail for both satisfied routes (recorded evidence result, or issue #1005 deterministic
+  // checklist-baseline proof). The single re-audit must cite the satisfying artifact and postdate it.
+  function finishSatisfied({ resultUrl, resultAtMs, checklistCorrection = null, correctedChecklist = null }) {
+    const extra = checklistCorrection ? { checklistCorrection, correctedChecklist } : {};
+    if (!replacement) return { status: Status.SATISFIED, reason: "evidence correction durably satisfied", resultUrl, replacement: null, ...extra, ...base };
+
+    if (replacement.state !== "OPEN") {
+      return refuse(Status.AMBIGUOUS, `re-audit #${replacement.number} exists but is ${replacement.state}`, { ...base, resultUrl, ...extra });
+    }
+    // Bind the replacement's provenance to THIS verified result: it must cite it and have been created after it.
+    if (!String(replacement.body ?? "").includes(resultUrl) || !(new Date(replacement.createdAt).getTime() > resultAtMs)) {
+      return refuse(
+        Status.AMBIGUOUS,
+        `re-audit #${replacement.number} is not bound to the verified evidence result ${resultUrl} (it must cite it and postdate it)`,
+        { ...base, resultUrl, ...extra },
+      );
+    }
+    if (checklistCorrection) {
+      // The checklist-correction replacement must carry exactly the mechanically corrected checklist
+      // and name the same PR; anything else is not the one authorized corrected successor.
+      if (parseMergedPrNumber(replacement.body ?? "") !== pr) {
+        return refuse(Status.AMBIGUOUS, `re-audit #${replacement.number}'s Merged PR field does not name PR #${pr}`, { ...base, resultUrl, ...extra });
+      }
+      if (parseVerificationChecklistRef(replacement.body ?? "") !== correctedChecklist) {
+        return refuse(
+          Status.AMBIGUOUS,
+          `re-audit #${replacement.number}'s verification checklist is not exactly the mechanically corrected checklist`,
+          { ...base, resultUrl, ...extra },
+        );
+      }
+    }
+    return {
+      status: Status.SATISFIED,
+      reason: "evidence correction durably satisfied; its single re-audit already exists",
+      resultUrl,
+      replacement: {
+        number: Number(replacement.number),
+        state: replacement.state,
+        pending: checkPreAuditPendingState(replacement.body ?? "").ok,
+      },
+      ...extra,
+      ...base,
+    };
   }
-  // Bind the replacement's provenance to THIS verified result: it must cite the result comment and
-  // have been created after it.
-  if (!String(replacement.body ?? "").includes(resultUrl) || !(new Date(replacement.createdAt).getTime() > new Date(comment.created_at).getTime())) {
-    return refuse(
-      Status.AMBIGUOUS,
-      `re-audit #${replacement.number} is not bound to the verified evidence result ${resultUrl} (it must cite it and postdate it)`,
-      { ...base, resultUrl },
-    );
-  }
-  return {
-    status: Status.SATISFIED,
-    reason: "evidence correction durably satisfied; its single re-audit already exists",
-    resultUrl,
-    replacement: {
-      number: Number(replacement.number),
-      state: replacement.state,
-      pending: checkPreAuditPendingState(replacement.body ?? "").ok,
-    },
-    ...base,
-  };
 }
 
 // -- Subcommands --------------------------------------------------------------------------------
@@ -588,9 +753,14 @@ export async function runPrepare({ repo, auditIssue, dryRun = false }, io = defa
     workIssue: evaluated.workIssue,
     mergeCommit: evaluated.mergeCommit,
     resultUrl: evaluated.resultUrl,
+    checklistCorrection: evaluated.checklistCorrection ?? null,
   });
   const validate = (candidateBody) => {
     if (!candidateBody) return "body could not be composed";
+    if (evaluated.checklistCorrection) {
+      if (parseVerificationChecklistRef(candidateBody) !== evaluated.correctedChecklist) return "replacement body's checklist is not exactly the corrected checklist";
+      if (parseMergedPrNumber(candidateBody) !== evaluated.pr) return "replacement body's merged PR drifted";
+    }
     if (!hasCanonicalAuditShape(candidateBody)) return "replacement body lost the canonical Stage 2 audit shape";
     const pending = checkPreAuditPendingState(candidateBody);
     if (!pending.ok) return `replacement body is not in the canonical pre-audit pending state: ${pending.errors.join("; ")}`;
@@ -601,7 +771,9 @@ export async function runPrepare({ repo, auditIssue, dryRun = false }, io = defa
   };
   const problem = validate(body);
   if (problem) return { exitCode: 2, state: "EVIDENCE_AMBIGUOUS", reason: problem, auditIssue: Number(auditIssue) };
-  const title = `[Audit] Evidence-recovery re-audit of PR #${evaluated.pr} (${evaluated.mergeCommit}) after Audit #${auditIssue} NOT CLEAN`;
+  const title = evaluated.checklistCorrection
+    ? `[Audit] Corrected-checklist re-audit of PR #${evaluated.pr} (${evaluated.mergeCommit}) after Audit #${auditIssue} NOT CLEAN`
+    : `[Audit] Evidence-recovery re-audit of PR #${evaluated.pr} (${evaluated.mergeCommit}) after Audit #${auditIssue} NOT CLEAN`;
   if (dryRun) return { exitCode: 0, state: "REAUDIT_DRY_RUN", auditIssue: Number(auditIssue), title, body };
 
   // Re-prove the whole lineage immediately before the mutation: still satisfied, still no

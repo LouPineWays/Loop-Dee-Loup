@@ -1162,3 +1162,65 @@ test("runDirectReferenceVerification(): revalidateUniqueness true refuses when a
   });
   assert.equal(off.state, "AUDIT_VERIFIED");
 });
+
+// -- issue #1005: pre-trigger exact-merge change-scope baseline ----------------------------------
+const SCOPE_MERGE = "d34db33fd34db33fd34db33fd34db33fd34db33f";
+const SCOPE_PARENT = "182c4d9c621bdb7feb547bf6626566f9d4edbcf9";
+const SCOPE_STALE = "c2f3676e251ec6b3192c854634d0339d4daa841b";
+const scopeAuditView = (base) => ({
+  ...MATCHING_AUDIT_VIEW,
+  body: MATCHING_AUDIT_VIEW.body.replace(
+    "1. Confirm the change works as described.",
+    `1. Confirm the change works as described.\n2. Confirm \`git diff ${base} ${SCOPE_MERGE}\` touches only the intended files.`,
+  ),
+});
+const scopeCommit = { sha: SCOPE_MERGE, parents: [SCOPE_PARENT], files: ["a"], filesComplete: true };
+
+async function runScope(base, commit) {
+  let controlBody = REVIEW_BODY;
+  const result = await run(
+    { repo: "o/r", controlIssue: 445, executionIssue: 440, pr: 558, auditIssue: 559 },
+    {
+      ghIssueViewImpl: async () => controlBody,
+      ghPrViewImpl: async () => MERGED_PR_VIEW,
+      ghAuditIssueViewImpl: async () => scopeAuditView(base),
+      readCommitImpl: async () => commit,
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        controlBody = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  return { result, controlBody };
+}
+
+test("run(): #1005 first-parent change-scope baseline finalizes", async () => {
+  const { result } = await runScope(SCOPE_PARENT, scopeCommit);
+  assert.equal(result.state, "FINALIZED");
+});
+
+test("run(): #1005 stale PR-base change-scope baseline is rejected before projection (no control write)", async () => {
+  const { result, controlBody } = await runScope(SCOPE_STALE, scopeCommit);
+  assert.equal(result.state, "AUDIT_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /STALE_SCOPE_BASELINE/);
+  assert.equal(controlBody, REVIEW_BODY);
+});
+
+test("run(): #1005 unprovable merge parent fails closed", async () => {
+  const { result } = await runScope(SCOPE_PARENT, { ...scopeCommit, parents: [] });
+  assert.equal(result.state, "AUDIT_BREAKPOINT_UNVERIFIED");
+  assert.match(result.reason, /MERGE_PARENT_UNPROVEN/);
+});
+
+test("runDirectReferenceVerification(): #1005 stale baseline is rejected", async () => {
+  const bad = await runDirectReferenceVerification(
+    { repo: "o/r", executionIssue: 440, pr: 558, auditIssue: 559 },
+    { ghPrViewImpl: async () => MERGED_PR_VIEW, ghAuditIssueViewImpl: async () => scopeAuditView(SCOPE_STALE), readCommitImpl: async () => scopeCommit },
+  );
+  assert.equal(bad.state, "AUDIT_BREAKPOINT_UNVERIFIED");
+  const good = await runDirectReferenceVerification(
+    { repo: "o/r", executionIssue: 440, pr: 558, auditIssue: 559 },
+    { ghPrViewImpl: async () => MERGED_PR_VIEW, ghAuditIssueViewImpl: async () => scopeAuditView(SCOPE_PARENT), readCommitImpl: async () => scopeCommit },
+  );
+  assert.notEqual(good.state, "AUDIT_BREAKPOINT_UNVERIFIED");
+});

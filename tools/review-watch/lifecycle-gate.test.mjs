@@ -4670,3 +4670,23 @@ test("checkPostAudit: TRIGGER_REQUIRED for an unusable-response replacement whos
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "TRIGGER_REQUIRED");
 });
+
+test("checkPostAudit: TRIGGER_BLOCKED_UNVERIFIED — a stale change-scope base introduced before the delayed trigger is rejected (issue #1005 Stage 1 correction)", async () => {
+  const clean = renderedCanonicalAuditBody({ workIssue: 151, verdict: "PENDING" });
+  const merge = /### Exact merge commit\s+([0-9a-f]{40})/i.exec(clean)[1];
+  const parent = "1".repeat(40);
+  const stale = "2".repeat(40);
+  const body = clean.replace(/(### Verification checklist\s*\n\n)/, `$1git diff ${stale} ${merge}\n`);
+  assert.notEqual(body, clean);
+  const result = await checkPostAudit(
+    { repo: "owner/repo", "audit-issue": 160 },
+    {
+      ghIssueViewImpl: async ({ number }) => (number === 160 ? { body, state: "OPEN" } : { body: "", state: "OPEN" }),
+      ghApiImpl: async () => [],
+      ghIssueListImpl: ghIssueListMatchingSelf({ number: 160, body }),
+      readCommitImpl: async () => ({ sha: merge, parents: [parent], files: ["a"], filesComplete: true }),
+    },
+  );
+  assert.equal(result.state, "TRIGGER_BLOCKED_UNVERIFIED");
+  assert.match(result.message, /STALE_SCOPE_BASELINE/);
+});
