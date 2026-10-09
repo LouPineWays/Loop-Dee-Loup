@@ -217,6 +217,9 @@ test("negative: report that does not independently name both SHAs, or has extra/
     // Audit #1011: two actual finding entries but a severity table claiming exactly one.
     report({ extraFindings: ["", "2. **Unrelated source defect** — something else is broken."] }),
     report({ extraFindings: ["- an unrelated bulleted finding"] }),
+    report({ extraFindings: [" 2. **Indented unrelated source defect** — something else is broken."] }),
+    report({ extraFindings: [" - indented unrelated bulleted finding"] }),
+    report({ extraFindings: ["  - two-space-indented unrelated finding"] }),
     // Zero recognizable finding entries.
     report().replace("1. **Finding** —", "Finding:"),
     // Unrelated finding; both SHAs only appear in the checklist walkthrough (P1 Stage 1 finding).
@@ -226,6 +229,14 @@ test("negative: report that does not independently name both SHAs, or has extra/
     world.comments[AUDIT][1].body = rep;
     assert.notEqual((await evaluate(world)).status, Status.SATISFIED);
   }
+});
+
+test("nested Markdown supporting evidence remains within the sole finding", async () => {
+  const world = makeWorld();
+  world.comments[AUDIT][1].body = report({
+    extraFindings: ["   - nested supporting detail", "   1. nested numbered detail"],
+  });
+  assert.equal((await evaluate(world)).status, Status.SATISFIED);
 });
 
 test("negative: wrong merge, underway correction PR, mutated or duplicated successor all fail closed", async () => {
