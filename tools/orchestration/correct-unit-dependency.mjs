@@ -118,7 +118,7 @@ import { execFileSync } from "node:child_process";
 import { writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { runParseExecutionPlan, parseBulletBlock, WORKER_UNIT_FIELDS, WORKER_UNIT_HEADING } from "./parse-execution-plan.mjs";
+import { runParseExecutionPlan, parseBulletBlock, stripKnownAttributionSuffix, WORKER_UNIT_FIELDS, WORKER_UNIT_HEADING } from "./parse-execution-plan.mjs";
 import { validateDependsOn } from "./format-execution-plan.mjs";
 import { extractDependencyUnitIds, hasUnrecognizedDependencyWording, formatPrerequisitesDependencies } from "./dependency-grammar.mjs";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
@@ -267,8 +267,10 @@ export function findBulletFieldSpan(lines, label) {
   }
   if (startIdx === -1) return null;
 
-  let endIdx = lines.length;
-  for (let i = startIdx + 1; i < lines.length; i++) {
+  // Issue #1040: a single known trailing attribution block is outside every field span.
+  const canonicalEnd = stripKnownAttributionSuffix(lines.join("\n")).split("\n").length;
+  let endIdx = canonicalEnd;
+  for (let i = startIdx + 1; i < canonicalEnd; i++) {
     const line = lines[i];
     if (/^-\s/.test(line)) {
       endIdx = i;
