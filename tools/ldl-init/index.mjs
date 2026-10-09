@@ -677,6 +677,12 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/correct-unit-dependency.mjs", dependsOnDest: "tools/orchestration/dependency-grammar.mjs" },
   { dest: "tools/orchestration/correct-unit-dependency.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
   { dest: "tools/orchestration/correct-unit-dependency.mjs", dependsOnDest: "tools/orchestration/prepare-dispatch-manifest.mjs" },
+  // Issue #856: parse-execution-plan.mjs (planLevelRouteFailure) and the new
+  // correct-plan-index-route.mjs hard-import these managed modules.
+  { dest: "tools/orchestration/parse-execution-plan.mjs", dependsOnDest: "tools/orchestration/dependency-grammar.mjs" },
+  { dest: "tools/orchestration/correct-plan-index-route.mjs", dependsOnDest: "tools/orchestration/parse-execution-plan.mjs" },
+  { dest: "tools/orchestration/correct-plan-index-route.mjs", dependsOnDest: "tools/orchestration/correct-unit-dependency.mjs" },
+  { dest: "tools/orchestration/correct-plan-index-route.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
   // Issue #729 Stage 1 review finding (P2, on PR #730): next-review-transition-gate.mjs's own
   // #729 Stage 2 preparation-result recovery now hard-imports `findMatchingOpenAuditIssues` (and
   // reuses `defaultGhIssueList`) from tools/review-watch/lifecycle-gate.mjs -- a named export a

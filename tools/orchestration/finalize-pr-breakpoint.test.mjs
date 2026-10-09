@@ -609,3 +609,11 @@ test("run(): re-reads the control Issue immediately before composing/writing so 
   assert.equal(result.exitCode, 0);
   assert.match(writeCalls[0], /- \*\*Blocker:\*\* waiting on founder input recorded mid-flight/, "the concurrently-recorded Blocker must survive into the composed write, not be clobbered by the stale pre-fetch body");
 });
+
+test("composeFinalizedControlBody: from ROUTED (all-units-DONE Integration/PR recovery or unit-owned PR breakpoint, issue #856), transitions to REVIEW", () => {
+  const routedBody = READY_BODY.replace("- **Lifecycle:** READY", "- **Lifecycle:** ROUTED");
+  const result = composeFinalizedControlBody(routedBody, { pr: 453, stage1Value: "requested" });
+  assert.equal(result.ok, true);
+  assert.match(result.body, /- \*\*Lifecycle:\*\* REVIEW/);
+  assert.match(result.body, /- \*\*PR:\*\* #453/);
+});

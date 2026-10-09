@@ -115,7 +115,7 @@ import { existsSync, readdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runParseExecutionPlan, parseBulletBlock } from "./parse-execution-plan.mjs";
+import { runParseExecutionPlan, planLevelRouteFailure, parseBulletBlock } from "./parse-execution-plan.mjs";
 import { extractDependencyUnitIds, hasUnrecognizedDependencyWording } from "./dependency-grammar.mjs";
 
 const REPO_ROOT = path.resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -541,6 +541,27 @@ export async function runPrepareDispatchManifest(
 
   const entries = buildManifestEntries(parsed.plan, { fileExists, skillNames, personaNames });
   const body = formatDispatchManifestBody(parsed.plan, entries);
+
+  // Issue #856: a plan whose Integration/PR route does not establish a mechanically consumable
+  // PR-breakpoint owner (the #389/#390 bare "none" shape) must never reach manifest persistence
+  // or unit dispatch -- applied to dry probes too, so ready-dispatch-gate.mjs surfaces it as
+  // REPLAN_REQUIRED before the controller ever runs Route/Prepare.
+  const planLevelFailure = planLevelRouteFailure(parsed.plan);
+  if (planLevelFailure) {
+    return {
+      exitCode: 3,
+      ok: false,
+      state: "REPLAN_REQUIRED",
+      repo: parsed.repo,
+      executionIssue: parsed.executionIssue,
+      replanRequiredUnitIds: ["PLAN-INDEX"],
+      planLevelReason: planLevelFailure,
+      planIndexUrl: parsed.plan?.planIndex?.url ?? null,
+      entries,
+      body,
+      message: `prepare-dispatch-manifest.mjs: manifest cannot be created -- ${planLevelFailure}. Lifecycle must not advance to ROUTED; replan first (issue #856).`,
+    };
+  }
 
   if (commentId || create) {
     // Stage 1 review finding on PR #420: a manifest containing any unroutable unit must

@@ -87,7 +87,7 @@
 //     }],
 //     "planIndex": {
 //       "planState": "PLANNED", "dependencies": "none", "dispatchManifest": "none",
-//       "integrationRoute": "none", "sharedContractUrl": "<real comment URL>",
+//       "integrationRoute": "integration worker", "sharedContractUrl": "<real comment URL>",
 //       "units": [{ "unitId": "497-A", "state": "PLANNED", "outcome": "one-line outcome",
 //                    "commentUrl": "<real comment URL>" }]
 //     }
@@ -111,6 +111,8 @@ import path from "node:path";
 import {
   parseExecutionPlan,
   parseUnitListItem,
+  classifyIntegrationRoute,
+  unitOwnedRouteErrors,
   runParseExecutionPlan,
   WORKER_UNIT_FIELDS,
 } from "./parse-execution-plan.mjs";
@@ -367,7 +369,7 @@ export function validateSharedContractInput(sharedContract) {
 // invocation composes, and a Plan Index bullet/entry with no URL is not a valid artifact —
 // the `--publish` CLI path resolves real URLs from what it just posted before ever calling
 // this validator, rather than this function itself growing a "URLs optional" mode.
-export function validatePlanIndexInput(planIndex, { executionIssue, repo } = {}) {
+export function validatePlanIndexInput(planIndex, { executionIssue, repo, workerUnits } = {}) {
   const errors = [];
   if (!planIndex) return errors;
 
@@ -385,6 +387,32 @@ export function validatePlanIndexInput(planIndex, { executionIssue, repo } = {})
       errors.push(`Plan Index: missing required field "${key}"`);
     } else if (hasEmbeddedNewline(planIndex[key])) {
       errors.push(`Plan Index: field "${key}" must not contain an embedded newline`);
+    }
+  }
+
+  // Issue #856: the PR-breakpoint owner must be explicit and mechanically consumable before any
+  // unit is dispatched. A bare "none" (the #389/#390 stranded shape) is rejected; see
+  // classifyIntegrationRoute for the three accepted forms.
+  if (isNonEmptyString(planIndex.integrationRoute) && !hasEmbeddedNewline(planIndex.integrationRoute)) {
+    const route = classifyIntegrationRoute(planIndex.integrationRoute);
+    if (route.kind === "legacy-none" || route.kind === "unknown") {
+      errors.push(
+        `Plan Index: "integrationRoute" ${JSON.stringify(planIndex.integrationRoute)} does not establish a PR-breakpoint owner; ` +
+          'use "integration worker", "unit-owned: <UnitID>" (that unit runs the Stage 1 trigger + finalize-pr-breakpoint.mjs), ' +
+          'or "no-pr: <reason>" for an execution that produces no review-worthy repository change (issue #856)',
+      );
+    } else if (route.kind === "unit-owned") {
+      const unitIds = (planIndex.units ?? []).map((u) => u?.unitId);
+      if (!unitIds.includes(route.unitId)) {
+        errors.push(`Plan Index: "integrationRoute" names unit-owned unit ${JSON.stringify(route.unitId)}, which is not in the Units list`);
+      } else if (Array.isArray(workerUnits)) {
+        const depsByUnit = Object.fromEntries(
+          workerUnits.filter((u) => isNonEmptyString(u?.unitId)).map((u) => [u.unitId, Array.isArray(u.dependsOn) ? u.dependsOn : []]),
+        );
+        const owner = workerUnits.find((u) => u?.unitId === route.unitId);
+        const ownerText = `${owner?.observableCompletionCondition ?? ""} ${owner?.durableOutputStateExpected ?? ""}`;
+        errors.push(...unitOwnedRouteErrors({ ownerId: route.unitId, depsByUnit, ownerText }).map((e) => `Plan Index: ${e}`));
+      }
     }
   }
 
@@ -527,7 +555,7 @@ export function validatePlanInput(input, { repo } = {}) {
   }
 
   if (input.planIndex) {
-    errors.push(...validatePlanIndexInput(input.planIndex, { executionIssue: input.executionIssue, repo }));
+    errors.push(...validatePlanIndexInput(input.planIndex, { executionIssue: input.executionIssue, repo, workerUnits: input.workerUnits }));
     if (input.workerUnits !== undefined && Array.isArray(input.planIndex.units)) {
       const planIndexUnitIds = new Set(
         input.planIndex.units.filter((u) => isNonEmptyString(u?.unitId)).map((u) => u.unitId),

@@ -61,6 +61,7 @@
 
 import { execFileSync } from "node:child_process";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
+import { extractDependencyUnitIds } from "./dependency-grammar.mjs";
 
 const PLAN_INDEX_HEADING = /^## Execution Plan Index \(v1\)$/;
 const SHARED_CONTRACT_HEADING = /^## Shared Contract \(v1\)$/;
@@ -96,6 +97,92 @@ function escapeRegExp(text) {
 // heading is only recognized on its own line — never merely mentioned in prose.
 export function findHeadingComments(comments, headingRegex) {
   return (comments ?? []).filter((c) => (c.body ?? "").split("\n").some((line) => headingRegex.test(line.trim())));
+}
+
+// Pure. Issue #856: classifies a Plan Index `- **Integration/PR route:**` value. Valid
+// values a plan may be authored (or dispatched) with:
+//   `integration worker`      -- a normal Integration/PR stage/worker runs after every unit is DONE.
+//   `unit-owned: <UnitID>`    -- that unit's own worker owns the PR breakpoint (Stage 1 trigger +
+//                                finalize-pr-breakpoint.mjs before it may report success).
+//   `no-pr: <reason>`         -- the execution genuinely produces no review-worthy repository change.
+// A bare `none` (the #389/#390 stranded shape), a missing value, or anything else is not a
+// mechanically consumable PR owner: `legacy-none` / `unknown` / `missing`. `undefined` (an
+// injected parser result that never supplied the field) is reported as `unsupplied` so callers
+// can skip the check for such partial fixtures; a real parse always yields a string or null.
+export function classifyIntegrationRoute(value) {
+  if (value === undefined) return { kind: "unsupplied" };
+  if (typeof value !== "string" || !value.trim()) return { kind: "missing" };
+  const v = value.trim();
+  if (/^none$/i.test(v)) return { kind: "legacy-none" };
+  if (/^integration worker$/i.test(v)) return { kind: "integration" };
+  const owned = /^unit-owned:\s*(\S+)\s*$/i.exec(v);
+  if (owned) return { kind: "unit-owned", unitId: owned[1] };
+  const noPr = /^no-pr:\s*(\S.*)$/i.exec(v);
+  if (noPr) return { kind: "no-pr", reason: noPr[1].trim() };
+  return { kind: "unknown" };
+}
+
+// Pure. Issue #856 (Stage 1 findings on PR #857): errors for a `unit-owned: <UnitID>` route.
+// `depsByUnit` maps every plan unit ID to its direct dependency unit IDs. The owner must be
+// transitively ordered after every sibling (otherwise it can open the PR and move the control
+// to REVIEW while siblings are unfinished), and its contract text must name both
+// `finalize-pr-breakpoint.mjs` and a concrete `--control-issue <N>` pointer (the unit dispatch
+// envelope carries only the execution Issue and unit/shared-contract URLs).
+export function unitOwnedRouteErrors({ ownerId, depsByUnit, ownerText }) {
+  const errors = [];
+  const allIds = Object.keys(depsByUnit ?? {});
+  const reached = new Set();
+  const stack = [...(depsByUnit?.[ownerId] ?? [])];
+  while (stack.length > 0) {
+    const id = stack.pop();
+    if (reached.has(id)) continue;
+    reached.add(id);
+    stack.push(...(depsByUnit?.[id] ?? []));
+  }
+  const unordered = allIds.filter((id) => id !== ownerId && !reached.has(id));
+  if (unordered.length > 0) {
+    errors.push(
+      `unit-owned PR breakpoint unit ${ownerId} must transitively depend on every other unit; not ordered after: ${unordered.join(", ")}`,
+    );
+  }
+  const text = String(ownerText ?? "");
+  if (!/finalize-pr-breakpoint\.mjs/.test(text)) {
+    errors.push(
+      `unit-owned PR breakpoint unit ${ownerId} must name finalize-pr-breakpoint.mjs in its "observableCompletionCondition" or "durableOutputStateExpected" so it cannot finish without the durable PR/Stage 1 handoff`,
+    );
+  }
+  if (!/--control-issue\s+#?\d+/.test(text)) {
+    errors.push(
+      `unit-owned PR breakpoint unit ${ownerId} must carry a concrete controlling-Issue pointer (e.g. "--control-issue <N>") in its completion/durable-output text, since unit dispatch supplies only the execution Issue`,
+    );
+  }
+  return errors;
+}
+
+// Pure. Issue #856: the single plan-level Integration/PR route failure reason for a parsed plan
+// (`parseExecutionPlan`'s `plan`), or null when the route establishes a mechanically consumable
+// PR-breakpoint owner. Shared by prepare-dispatch-manifest.mjs, ready-dispatch-gate.mjs and
+// correct-plan-index-route.mjs so all three agree on what a valid route is.
+export function planLevelRouteFailure(plan) {
+  const raw = plan?.planIndex?.integrationRoute;
+  const route = classifyIntegrationRoute(raw);
+  if (route.kind === "legacy-none" || route.kind === "unknown" || route.kind === "missing") {
+    return `Plan Index "Integration/PR route" is ${JSON.stringify(raw ?? null)}, which does not establish a PR-breakpoint owner (use "integration worker", "unit-owned: <UnitID>", or "no-pr: <reason>")`;
+  }
+  if (route.kind === "unit-owned") {
+    const units = plan?.units ?? {};
+    if (!Object.keys(units).includes(route.unitId)) {
+      return `Plan Index "Integration/PR route" names unit-owned unit ${route.unitId}, which is not a plan unit`;
+    }
+    const depsByUnit = Object.fromEntries(
+      Object.entries(units).map(([id, u]) => [id, extractDependencyUnitIds(u?.prerequisitesDependencies)]),
+    );
+    const owner = units[route.unitId];
+    const ownerText = `${owner?.observableCompletionCondition ?? ""} ${owner?.durableOutputStateExpected ?? ""}`;
+    const errors = unitOwnedRouteErrors({ ownerId: route.unitId, depsByUnit, ownerText });
+    if (errors.length > 0) return `Plan Index "Integration/PR route": ${errors.join("; ")}`;
+  }
+  return null;
 }
 
 // Pure. Deterministic "latest" tie-break among same-heading comments — see the module
