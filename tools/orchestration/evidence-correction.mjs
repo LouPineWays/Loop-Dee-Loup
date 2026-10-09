@@ -386,15 +386,21 @@ export function extractFindingsSection(reportText) {
   return lines.slice(start, end).join("\n");
 }
 
-// Pure. The top-level finding entries (unindented numbered or bulleted items) of a Findings section,
-// each as its full text through the next entry. Audit #1011: the severity table alone does not prove
-// how many findings the report contains, so the entries are counted directly.
+// Pure. Count top-level findings, including Markdown list items indented by up to three spaces.
+// A child list begins at or beyond its parent's content column, not at any fixed indentation.
+// Audit #1011: cross-check actual entries instead of trusting the severity table alone.
 export function parseFindingEntries(findingsText) {
   const lines = normalizeEol(findingsText).split("\n").slice(1);
   const entries = [];
+  let contentIndent = null;
   for (const line of lines) {
-    if (/^(?:\d+[.)]|[-*+])\s+\S/.test(line)) entries.push([line]);
-    else if (entries.length > 0) entries[entries.length - 1].push(line);
+    const marker = /^( {0,3})(?:\d+[.)]|[-*+])[ \t]+(?=\S)/.exec(line);
+    if (marker && (contentIndent === null || marker[1].length < contentIndent)) {
+      entries.push([line]);
+      contentIndent = marker[0].length;
+    } else if (entries.length > 0) {
+      entries[entries.length - 1].push(line);
+    }
   }
   return entries.map((e) => e.join("\n"));
 }
