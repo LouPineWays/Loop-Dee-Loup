@@ -48,12 +48,12 @@ function auditBody({ base = STALE, verdict = "NOT CLEAN" } = {}) {
   ].join("\n");
 }
 
-function report({ counts = { P0: 0, P1: 0, P2: 1, P3: 0 }, mentions = [STALE, PARENT] } = {}) {
+function report({ counts = { P0: 0, P1: 0, P2: 1, P3: 0 }, mentions = [STALE, PARENT], extraFindings = [] } = {}) {
   return [
     "# Stage 2 Audit Report", "", `Exact merge commit: \`${MERGE}\``, "",
     "| Severity | Count |", "| --- | ---: |",
     ...Object.entries(counts).map(([k, v]) => `| ${k} | ${v} |`), "",
-    "### Findings", "", `Finding: baseline ${mentions.join(" and ")}.`, "",
+    "### Findings", "", `1. **Finding** — baseline ${mentions.join(" and ")}.`, ...extraFindings, "",
     "### Verification checklist", "",
     "1. Confirm A — CONFIRMED",
     "2. Confirm the diff — NOT CONFIRMED: stale baseline", "",
@@ -214,6 +214,11 @@ test("negative: report that does not independently name both SHAs, or has extra/
     report({ counts: { P0: 0, P1: 1, P2: 0, P3: 0 } }),
     report({ counts: { P0: 0, P1: 0, P2: 2, P3: 0 } }),
     report({ counts: { P0: 0, P1: 0, P2: 0, P3: 0 } }),
+    // Audit #1011: two actual finding entries but a severity table claiming exactly one.
+    report({ extraFindings: ["", "2. **Unrelated source defect** — something else is broken."] }),
+    report({ extraFindings: ["- an unrelated bulleted finding"] }),
+    // Zero recognizable finding entries.
+    report().replace("1. **Finding** —", "Finding:"),
     // Unrelated finding; both SHAs only appear in the checklist walkthrough (P1 Stage 1 finding).
     report({ mentions: ["an unrelated defect"] }).replace("2. Confirm the diff", `2. Confirm ${STALE} and ${PARENT}`),
   ]) {
