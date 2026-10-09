@@ -71,7 +71,14 @@
 // to feed straight into `poll.mjs --since` — with human-readable detail (posted/url) on
 // stderr.
 //
-// Exit codes: 0 = success, 1 = operational error (bad/missing args, a rejected
+// First-trigger compatibility (issue #1029): for the FIRST `--kind pr` trigger on a PR, GitHub's
+// live mergeability for the exact --head is witnessed first (first-review-compat.mjs). Exit 3 =
+// positively confirmed CONFLICTING: nothing is posted and the message names the bounded
+// current-target continuation (successor-integration-preflight.mjs); it is ordinary integration,
+// not a founder interrupt. UNKNOWN/read errors/moving target fail closed with exit 1. MERGEABLE,
+// including a branch merely behind its target, posts normally.
+//
+// Exit codes: 0 = success, 3 = first-review current-target conflict (above), 1 = operational error (bad/missing args, a rejected
 // --ack-repeat-round flag, `gh` failure, or an unexpected response shape from the comments
 // read), 2 = blocked — an earlier head on this PR already received a genuine response; this
 // is a founder interrupt with no automated override (see the Cross-head block comment above).
@@ -81,6 +88,8 @@
 import { execFileSync } from "node:child_process";
 import { endpointsFor, findAllMatches } from "./poll.mjs";
 import { isGenuineResponse } from "./genuine-response.mjs";
+import { checkFirstReviewCompat, COMPAT_OK, COMPAT_CONFLICT } from "./first-review-compat.mjs";
+import { readGithubPr } from "../orchestration/github-read.mjs";
 
 const TRIGGER_TEXT = "@codex review";
 const DEFAULT_BOT = "chatgpt-codex-connector[bot]";
@@ -231,7 +240,10 @@ export function findExistingTrigger(comments, { head } = {}) {
 
 // `ghApiImpl` and `ghPostImpl` are injected so tests can drive `run` end-to-end without
 // touching the real network or `gh` CLI.
-export async function run(args, { ghApiImpl = defaultGhApi, ghPostImpl = defaultGhPost } = {}) {
+export async function run(
+  args,
+  { ghApiImpl = defaultGhApi, ghPostImpl = defaultGhPost, compatImpl = defaultCompat } = {},
+) {
   const { repo, kind, number, head } = args;
   const force = args.force === "true" || args.force === "1";
 
@@ -368,6 +380,37 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPostImpl = default
     }
   }
 
+  // Issue #1029: the FIRST Stage 1 trigger on a PR (no earlier trigger round at any head) is gated
+  // on current-target compatibility. A positively confirmed CONFLICTING head never consumes the
+  // one reviewer trigger; later rounds (corrections at a new head) are governed by the existing
+  // cross-head block and the post-review conflict gate (#1022), not this check.
+  if (kind === "pr" && head && findTriggerRounds(comments ?? []).length === 0) {
+    const compat = await compatImpl({ repo, number, head });
+    if (compat.verdict === COMPAT_CONFLICT) {
+      return {
+        exitCode: 3,
+        compat,
+        message:
+          `Not requesting the first Stage 1 review of ${repo}#${number} at ${head}: GitHub reports it CONFLICTING ` +
+          `with ${compat.target.ref} (${compat.target.sha}). This is ordinary integration, not a founder interrupt: ` +
+          `run \`node tools/orchestration/successor-integration-preflight.mjs --execution-issue <execution> ` +
+          `--predecessor-pr ${number} --expect-predecessor-head ${head}\` and follow docs/bounded-review-cycle.md ` +
+          `§ Pre-first-review current-target compatibility (one fresh PR on current target, then its own first ` +
+          `trigger; no rebase, no force-push, no trigger on this head).`,
+      };
+    }
+    if (compat.verdict !== COMPAT_OK) {
+      return {
+        exitCode: 1,
+        compat,
+        message:
+          `Not requesting the first Stage 1 review of ${repo}#${number} at ${head}: current-target compatibility ` +
+          `is unproven (${compat.reason}). Fail closed; re-run once GitHub reports mergeability, never infer a ` +
+          `conflict or compatibility.`,
+      };
+    }
+  }
+
   let posted;
   try {
     posted = await ghPostImpl({ repo, kind, number, head });
@@ -376,6 +419,21 @@ export async function run(args, { ghApiImpl = defaultGhApi, ghPostImpl = default
   }
 
   return { exitCode: 0, timestamp: posted.created_at, posted: true, url: posted.html_url ?? null };
+}
+
+function defaultCompat({ repo, number, head }) {
+  return checkFirstReviewCompat({
+    repo,
+    number,
+    head,
+    readPr: ({ repo: r, number: n }) =>
+      readGithubPr({ repo: r, number: n, fields: ["state", "headRefOid", "baseRefName", "mergeable"] }),
+    readTarget: ({ repo: r, ref }) => {
+      const out = execFileSync("gh", ["api", `repos/${r}/commits/${encodeURIComponent(ref)}`], { encoding: "utf8" });
+      return JSON.parse(out)?.sha;
+    },
+    sleep: (ms) => new Promise((res) => setTimeout(res, ms)),
+  });
 }
 
 function defaultGhApi(path) {
@@ -509,6 +567,7 @@ async function main() {
     console.log(result.timestamp);
   } else {
     console.error(result.message);
+    if (result.compat) console.error(JSON.stringify({ firstReviewCompat: result.compat }));
   }
   process.exit(result.exitCode);
 }
