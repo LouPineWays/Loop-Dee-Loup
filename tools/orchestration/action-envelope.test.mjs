@@ -37,6 +37,7 @@ test("getActionEnvelope: every ready-dispatch-gate.mjs and next-review-transitio
     "STAGE1_CORRECTION_REQUIRED",
     "STAGE1_CORRECTION_FINALIZATION_REQUIRED",
     "CHECKOUT_BINDING_UNVERIFIED",
+    "KNOWN_SCOPE_AUTHORITY_MISSING",
     "STAGE2_PREPARATION_REQUIRED",
     "STAGE2_AUDIT_ALREADY_PREPARED",
     "STAGE2_PREPARATION_BLOCKED_ON_STAGE1",
@@ -1155,4 +1156,12 @@ test("STAGE1_SATISFIED_MERGE_CONFLICT: bounded reserve -> dispatch-conflict-reco
   const c = getCorrectionContinuation("STAGE1_SATISFIED_MERGE_CONFLICT", { controlIssue: 963 });
   assert.equal(c.steps.length, 2);
   assert.match(c.steps[0], /pr-head-checkout-preflight\.mjs --reserve-from-gate/);
+});
+
+test("#1031 KNOWN_SCOPE_AUTHORITY_MISSING: terminal zero-action; any follow-on action is a violation", () => {
+  assert.equal(classifyEnvelopeCompliance("KNOWN_SCOPE_AUTHORITY_MISSING", []).status, "compliant");
+  for (const action of ["reserve-correction-checkout", "dispatch-correction-worker"]) {
+    assert.equal(classifyEnvelopeCompliance("KNOWN_SCOPE_AUTHORITY_MISSING", [action]).status, "violation");
+  }
+  assert.deepEqual(getActionEnvelope("STAGE1_CORRECTION_REQUIRED").authorizedActions, ["reserve-correction-checkout", "dispatch-correction-worker"]);
 });

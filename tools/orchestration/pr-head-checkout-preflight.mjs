@@ -158,6 +158,7 @@ import { parseWorktreeListPorcelain } from "./worktree-preflight.mjs";
 import { normalizePathForComparison } from "./classify-primary-path-lock.mjs";
 import { getActionEnvelope } from "./action-envelope.mjs";
 import { persistVerdictHandoff, readVerdictHandoff } from "./verdict-handoff.mjs";
+import { checkExecutorSubstrateAuthority } from "./executor-substrate-authority.mjs";
 
 // Issue #703 Stage 1 correction (P1 finding on PR #710): this process's own absolute path to
 // itself -- the controller's authoritative copy of this script, loaded from wherever the
@@ -842,6 +843,139 @@ export async function releaseBinding(
   return { exitCode: 0, verdict: "RELEASED", path: worktree.path, removed: true };
 }
 
+// ---------------------------------------------------------------------------------------------
+// Issue #1031 (control #1032; live #1029/PR #1030): pre-reservation known-scope authority check.
+//
+// The prepared mutation intent is an OPTIONAL fenced ```json block in the live execution Issue
+// body carrying `plannedMutationPaths` (evidence of intended edits, never permission). Grants are
+// read separately from `executorSubstrate` entries in any fenced json block of the same body (the
+// existing durable grant shape). Absent intent = no completeness claim, ordinary dispatch (the
+// worker-time STOP_AND_PROPOSE guard still applies). Present-but-malformed/ambiguous, stale, or
+// unreadable = fail closed before any reservation. Classification and grant evaluation reuse
+// `executor-substrate-authority.mjs`; no second classifier exists here.
+// ---------------------------------------------------------------------------------------------
+const SCOPE_STATE = "KNOWN_SCOPE_AUTHORITY_MISSING";
+
+function jsonFenceBlocks(body) {
+  const blocks = [];
+  const re = /```json[^\S\r\n]*\r?\n([\s\S]*?)\r?\n[^\S\r\n]*```/gi;
+  let m;
+  while ((m = re.exec(String(body ?? ""))) !== null) blocks.push(m[1]);
+  return blocks;
+}
+
+// Issue #1031 Stage 1 correction (P2): `JSON.parse` silently keeps the last of two same-object
+// duplicate keys, so a repeated `plannedMutationPaths`/`executorSubstrate` could hide an earlier
+// substrate path. Scans already-syntactically-valid JSON text and returns the first key repeated
+// within ONE object (nested objects and sibling blocks are tracked separately), else null.
+export function findDuplicateJsonKey(text) {
+  const stack = [];
+  const src = String(text);
+  for (let i = 0; i < src.length; i += 1) {
+    const c = src[i];
+    if (c === "{") stack.push({ object: true, keys: new Set(), expectKey: true });
+    else if (c === "[") stack.push({ object: false });
+    else if (c === "}" || c === "]") stack.pop();
+    else if (c === ",") {
+      const top = stack[stack.length - 1];
+      if (top?.object) top.expectKey = true;
+    } else if (c === '"') {
+      let j = i + 1;
+      while (j < src.length && src[j] !== '"') j += src[j] === "\\" ? 2 : 1;
+      const top = stack[stack.length - 1];
+      if (top?.object && top.expectKey) {
+        const key = JSON.parse(src.slice(i, j + 1));
+        if (top.keys.has(key)) return key;
+        top.keys.add(key);
+        top.expectKey = false;
+      }
+      i = j;
+    }
+  }
+  return null;
+}
+
+// Noncanonical spellings (residual `.`/empty segments, backslashes, padding) are rejected rather
+// than canonicalized: the shared classifier strips only one leading `./`, so an alias such as
+// `././tools/...` would otherwise classify as ordinary work product (Stage 1 review, P2).
+function isCanonicalPlannedPath(path) {
+  if (typeof path !== "string" || path === "" || path !== path.trim() || path.includes("\\") || path.startsWith("/")) return false;
+  const rest = path.startsWith("./") ? path.slice(2) : path;
+  return rest.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
+}
+
+// Returns { intent: null } (absent), { intent, authority } (valid), or { error } (fail closed).
+export function parsePreparedMutationIntent(body) {
+  let intent = null;
+  let grantAmbiguity = null;
+  const grants = [];
+  for (const raw of jsonFenceBlocks(body)) {
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      if (raw.includes("plannedMutationPaths")) return { error: "prepared mutation intent block is not valid JSON" };
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const dup = raw.includes("plannedMutationPaths") || raw.includes("executorSubstrate") ? findDuplicateJsonKey(raw) : null;
+    if (dup !== null) {
+      const msg = `duplicate JSON key ${JSON.stringify(dup)} in one object is ambiguous`;
+      if (Object.prototype.hasOwnProperty.call(parsed, "plannedMutationPaths")) return { error: msg };
+      grantAmbiguity ??= msg;
+    }
+    if (Array.isArray(parsed.executorSubstrate)) grants.push(...parsed.executorSubstrate);
+    else if (parsed.executorSubstrate !== undefined) return { error: "executorSubstrate must be an array of component grants" };
+    if (Object.prototype.hasOwnProperty.call(parsed, "plannedMutationPaths")) {
+      if (intent) return { error: "multiple prepared mutation intent blocks are ambiguous" };
+      intent = parsed;
+    }
+  }
+  if (!intent) return { intent: null };
+  if (grantAmbiguity) return { error: grantAmbiguity };
+  const paths = intent.plannedMutationPaths;
+  if (!Array.isArray(paths) || paths.length === 0 || paths.some((x) => typeof x !== "string" || x.trim() === "")) {
+    return { error: "plannedMutationPaths must be a non-empty array of path strings" };
+  }
+  if (!paths.every(isCanonicalPlannedPath)) {
+    return { error: "plannedMutationPaths must be canonical repository-relative paths (no '.', '..', empty segments, or backslashes)" };
+  }
+  return { intent, authority: { executorSubstrate: grants } };
+}
+
+// Strictly before any `reserve(...)` side effect. Returns null to proceed, else a terminal result.
+async function checkKnownScopeAuthority(gate, { repo, readIssueImpl }) {
+  const stop = (verdict, reason, extra = {}) => ({
+    exitCode: 2,
+    output: { state: SCOPE_STATE, pr: gate.pr, verdict, reason, ...extra, stopAfter: true, actionEnvelope: getActionEnvelope(SCOPE_STATE) },
+  });
+  if (!isPositiveInteger(gate.issue)) return null; // no execution Issue to consult: ordinary dispatch
+  let issue;
+  try {
+    issue = await readIssueImpl({ repo, number: gate.issue, fields: ["body", "state"] });
+  } catch (err) {
+    return stop("PLANNED_SCOPE_UNVERIFIED", `could not read execution Issue #${gate.issue} to check prepared scope: ${reasonOf(err)}`);
+  }
+  const parsed = parsePreparedMutationIntent(issue?.body);
+  if (parsed.error) return stop("PLANNED_SCOPE_MALFORMED", `execution Issue #${gate.issue}: ${parsed.error}`);
+  if (!parsed.intent) return null;
+  const { intent, authority } = parsed;
+  for (const [key, live] of [["executionIssue", gate.issue], ["pr", gate.pr], ["head", gate.head]]) {
+    if (intent[key] !== undefined && live !== undefined && String(intent[key]).toLowerCase() !== String(live).toLowerCase()) {
+      return stop("PLANNED_SCOPE_STALE", `prepared intent ${key} ${JSON.stringify(intent[key])} does not match the live verdict ${JSON.stringify(live)}; stale intent is never authorization`);
+    }
+  }
+  const check = checkExecutorSubstrateAuthority({ changes: intent.plannedMutationPaths.map((path) => ({ path })), authority });
+  if (check.allowed) return null;
+  const p = check.proposal;
+  const components = p.unauthorizedComponents.length > 0 ? p.unauthorizedComponents.join(", ") : "an unregistered executor-substrate path or invalid grant";
+  return stop(
+    "SUBSTRATE_AUTHORITY_MISSING",
+    `prepared mutation scope on execution Issue #${gate.issue} lacks an exact durable grant for: ${components}; add a component-scoped grant (component, paths, intendedChange, verification) to the Issue, then re-run. No checkout was reserved.`,
+    { unauthorizedComponents: p.unauthorizedComponents, paths: p.paths, authorityProblems: p.authorityProblems },
+  );
+}
+
 // Pipeline stage between `next-review-transition-gate.mjs` and `format-dispatch-prompt.mjs`:
 // a findings-bearing STAGE1_CORRECTION_REQUIRED verdict, or a STAGE1_CORRECTION_SATISFIED_
 // MERGE_CONFLICT verdict (issue #665's conflict-recovery worker -- Stage 1 review finding on
@@ -868,6 +1002,11 @@ export async function reserveFromGate(gate, { repo, cwd } = {}, deps = {}) {
     return { exitCode: 0, output: gate };
   }
   const expectedHead = isOrdinaryConflict ? gate.reviewedHead : isConflictRecovery ? gate.correctedHead : null;
+  if (isFindingsCorrection) {
+    const readIssueImpl = deps.readIssueImpl ?? ((a) => readGithubIssue(a));
+    const blocked = await checkKnownScopeAuthority(gate, { repo, readIssueImpl });
+    if (blocked) return blocked;
+  }
   // An ordinary-satisfied conflict verdict without a provable reviewed head must never reserve unpinned.
   const result =
     isOrdinaryConflict && !/^[0-9a-f]{40}$/i.test(String(gate.reviewedHead ?? ""))

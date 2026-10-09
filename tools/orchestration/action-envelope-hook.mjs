@@ -437,6 +437,34 @@ export function detectBoundedVerdict(command, stdout) {
   return verdict.actionEnvelope.mode === "bounded" ? verdict : null;
 }
 
+// Issue #1031 Stage 1 correction (P1): the standalone Stage 1 correction preflight
+// (`pr-head-checkout-preflight.mjs --reserve-from-gate`) can replace a bounded
+// STAGE1_CORRECTION_REQUIRED verdict with the terminal zero-action KNOWN_SCOPE_AUTHORITY_MISSING
+// verdict before any reservation. It is not a lifecycle gate (it stays out of
+// GATE_SCRIPT_BASENAMES so gate-rerun protection is unchanged), so its terminal verdict is
+// recognized here by this exact script + flag + state + "none" mode only, and replaces the stale
+// bounded marker; no other preflight output is ever marked.
+const TERMINAL_PREFLIGHT_STATES = new Set(["KNOWN_SCOPE_AUTHORITY_MISSING"]);
+
+export function invokesReserveFromGatePreflight(command) {
+  if (typeof command !== "string" || command.length === 0) return false;
+  for (const segment of command.split(/&&|\|\|?|;/)) {
+    const tokens = segment.trim().split(/\s+/).filter(Boolean);
+    const nodeIdx = tokens.indexOf("node");
+    if (nodeIdx === -1) continue;
+    const script = stripSurroundingQuotes(tokens[nodeIdx + 1] ?? "");
+    if ((script.split(/[\\/]/).pop() ?? "") === "pr-head-checkout-preflight.mjs" && tokens.includes("--reserve-from-gate")) return true;
+  }
+  return false;
+}
+
+export function detectTerminalPreflightVerdict(command, stdout) {
+  if (!invokesReserveFromGatePreflight(command)) return null;
+  const verdict = extractVerdict(stdout);
+  if (!verdict || !TERMINAL_PREFLIGHT_STATES.has(verdict.state)) return null;
+  return verdict.actionEnvelope.mode === "none" ? verdict : null;
+}
+
 function markerPath(sessionId) {
   return join(STATE_DIR, `${sanitizeSessionId(sessionId)}.json`);
 }
@@ -934,7 +962,7 @@ export function markObservedVerdict(sessionId, command, stdout, { agentId, exist
     existingMarker: existingMarker !== undefined ? existingMarker : readMarker(sessionId),
     workerOriginated: typeof agentId === "string" && agentId.length > 0,
   };
-  const noneVerdict = detectNoActionVerdict(command, stdout);
+  const noneVerdict = detectNoActionVerdict(command, stdout) ?? detectTerminalPreflightVerdict(command, stdout);
   if (noneVerdict) {
     writeMarker(sessionId, noneVerdict, markOpts);
     return;

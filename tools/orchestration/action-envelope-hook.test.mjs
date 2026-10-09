@@ -1123,3 +1123,45 @@ test("invokedGateScriptBasenames: recognizes gates invoked through control-plane
   );
   assert.deepEqual(invokedGateScriptBasenames("node tools/orchestration/control-plane-bootstrap.mjs worktree-preflight"), []);
 });
+
+// -- Issue #1031 Stage 1 correction (PR #1033, P1): terminal standalone preflight verdict -------
+
+test("#1031 terminal KNOWN_SCOPE_AUTHORITY_MISSING from the standalone preflight replaces the stale bounded marker", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ldl-action-envelope-hook-test-"));
+  process.env.LDL_ACTION_ENVELOPE_STATE_DIR = dir;
+  const mod = await import(`./action-envelope-hook.mjs?isolate=${Date.now()}-1031`);
+  const sid = "session-1031-terminal";
+  const cmd = 'node "$CLAUDE_PROJECT_DIR/tools/orchestration/pr-head-checkout-preflight.mjs" --reserve-from-gate --from-handoff --control-issue 514';
+  const terminal = JSON.stringify({
+    state: "KNOWN_SCOPE_AUTHORITY_MISSING",
+    verdict: "SUBSTRATE_AUTHORITY_MISSING",
+    stopAfter: true,
+    actionEnvelope: { mode: "none", authorizedActions: [] },
+  });
+  const bounded = {
+    state: "STAGE1_CORRECTION_REQUIRED",
+    actionEnvelope: { mode: "bounded", authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"] },
+  };
+  mod.writeMarker(sid, bounded);
+  assert.equal(mod.readMarker(sid).mode, "bounded");
+  // Failure path (nonzero exit) and success path (stdout) both publish the terminal marker.
+  for (const hook of ["failure", "success"]) {
+    mod.writeMarker(sid, bounded);
+    mod.markObservedVerdict(sid, cmd, hook === "failure" ? `${terminal}\n` : terminal);
+    const marker = mod.readMarker(sid);
+    assert.equal(marker.state, "KNOWN_SCOPE_AUTHORITY_MISSING");
+    assert.equal(marker.mode, "none");
+    assert.deepEqual(marker.authorizedActions, []);
+    assert.equal(mod.decidePreToolUse(marker).permissionDecision, "deny");
+  }
+  // Negative controls: other preflight outputs, other flags, other scripts never mark.
+  const ok = JSON.stringify({ state: "STAGE1_CORRECTION_REQUIRED", actionEnvelope: { mode: "bounded", authorizedActions: ["dispatch-correction-worker"] } });
+  assert.equal(mod.detectTerminalPreflightVerdict(cmd, ok), null);
+  assert.equal(mod.detectTerminalPreflightVerdict("node tools/orchestration/pr-head-checkout-preflight.mjs --pr 5", terminal), null);
+  assert.equal(mod.detectTerminalPreflightVerdict("node tools/orchestration/other.mjs --reserve-from-gate", terminal), null);
+  assert.equal(mod.detectTerminalPreflightVerdict(cmd, JSON.stringify({ state: "NO_ACTION_YET", actionEnvelope: { mode: "none" } })), null);
+  // Gate-rerun recognition is unchanged: the preflight is not a lifecycle gate script.
+  assert.deepEqual(mod.invokedGateScriptBasenames(cmd), []);
+  rmSync(dir, { recursive: true, force: true });
+  delete process.env.LDL_ACTION_ENVELOPE_STATE_DIR;
+});

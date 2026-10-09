@@ -313,6 +313,10 @@ const ENVELOPES = {
   // and the general "missing required action" protection above is deliberately left unchanged --
   // this adds a distinct, correctly-modeled terminal state instead of relaxing that check.
   CHECKOUT_BINDING_UNVERIFIED: { mode: ENVELOPE_MODES.NONE, authorizedActions: [] },
+  // Issue #1031: terminal pre-reservation verdict from `pr-head-checkout-preflight.mjs` when the
+  // execution Issue's prepared mutation scope lacks an exact durable executor-substrate grant (or
+  // is malformed/stale/unreadable). No checkout was reserved and nothing may follow.
+  KNOWN_SCOPE_AUTHORITY_MISSING: { mode: ENVELOPE_MODES.NONE, authorizedActions: [] },
   STAGE2_CORRECTION_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-correction-worker"] },
   // This table row is the superset (real gated work issue exists, plus a real thin control
   // Issue to terminalize) shape, kept here only as the documentation default for this state.
