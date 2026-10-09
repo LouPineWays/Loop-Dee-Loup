@@ -110,6 +110,14 @@
 //     findings-bearing/strict-descendant requirements would reject them, so the dispatched
 //     worker is instead routed through the ordinary closing-reference repair with no
 //     correction-satisfied disposition manufactured.
+//     - Issue #1023 (live #963/#964/PR #1021): on the two ordinary-satisfied RESPONSE_RECEIVED
+//       paths above (clean-pass, or findings with a head-scoped satisfied disposition), in a
+//       control/execution flow, the live GitHub mergeable state is read before the merge verdict:
+//         CONFLICTING -> STAGE1_SATISFIED_MERGE_CONFLICT (carries reviewedHead only; authorizes the
+//           one successor-first conflict-recovery worker, never a merge, Stage 2 setup, or a
+//           predecessor re-review); UNKNOWN -> NO_ACTION_YET; operational error -> AMBIGUOUS;
+//           MERGEABLE -> the unchanged STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2. EXEMPT and
+//           direct-reference (no control/execution) flows are unchanged.
 //     - stage1-gate RESPONSE_RECEIVED without a clean-pass or findings preamble -> NO_ACTION_YET
 //     - anything else (operational error from either check, or a combination this gate does
 //       not recognize)                                   -> AMBIGUOUS
@@ -492,6 +500,48 @@ function hasFindingsStage1Response(stage1) {
   });
 }
 
+// Issue #1023 (control #1022; live #963/#964/PR #1021): an ORDINARY Stage 1 satisfied PR
+// (RESPONSE_RECEIVED, clean or head-scoped satisfied) can become genuinely CONFLICTING against its
+// current target after the review. Before this, that evidence always returned the merge verdict and
+// the merge action then failed (HTTP 405) with no deterministic route. `mergeConflict` is `null`
+// whenever the caller did not fetch it (direct-reference/no-control invocations, or a direct unit
+// call into this pure function), which preserves the unchanged merge verdict. EXEMPT is deliberately
+// out of scope. The new verdict carries `reviewedHead` (the exact head Stage 1 was satisfied at) and
+// NEVER a correctedHead: an ordinary satisfied PR has no correction-satisfied reviewed/corrected pair
+// and none is fabricated here.
+function ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeReady }) {
+  if (mergeConflict) {
+    if (!hasTrustworthyExitCode(mergeConflict) || mergeConflict.exitCode === 1) {
+      return {
+        state: "AMBIGUOUS",
+        stopAfter: true,
+        ...context,
+        stage1,
+        mergeReady,
+        reason: `mergeability check for an ordinary Stage 1 satisfied merge failed operationally: ${mergeConflict.message}`,
+      };
+    }
+    if (mergeConflict.mergeable === "CONFLICTING") {
+      if (typeof context.head !== "string" || !/^[0-9a-f]{40}$/i.test(context.head)) {
+        return {
+          state: "AMBIGUOUS",
+          stopAfter: true,
+          ...context,
+          stage1,
+          mergeReady,
+          reason: "confirmed CONFLICTING ordinary Stage 1 satisfied PR has no provable 40-character reviewed head; failing closed",
+        };
+      }
+      return { state: "STAGE1_SATISFIED_MERGE_CONFLICT", stopAfter: true, ...context, reviewedHead: context.head };
+    }
+    if (mergeConflict.mergeable === "UNKNOWN") {
+      // Never inferred as a conflict and never authorizes merge on unconfirmed evidence: wait and recheck.
+      return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
+    }
+  }
+  return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
+}
+
 export function resolvePreMergeVerdict(
   { stage1, mergeReady, stage1Disposition = null, correctionDelta = null, mergeConflict = null, unfinalizedCorrection = null },
   context = {},
@@ -735,7 +785,7 @@ export function resolvePreMergeVerdict(
     // automated-sync classifier at all.
     if (hasFindingsStage1Response(stage1)) {
       if (stage1DispositionSatisfiedAtHead && isMergeReadyState(mergeReady.state)) {
-        return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
+        return ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeReady });
       }
       // The one genuinely findings-bearing path: #611's #438/PR #610 regression.
       // finalize-correction-breakpoint.mjs remains mandatory here.
@@ -743,7 +793,7 @@ export function resolvePreMergeVerdict(
     }
     if (isCleanStage1Response(stage1)) {
       if (isMergeReadyState(mergeReady.state)) {
-        return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
+        return ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeReady });
       }
       // Stage 1 review finding on PR #613 (P1): a clean-pass response has no findings either --
       // same closing-reference-only reasoning as the EXEMPT branch above.
@@ -1060,6 +1110,8 @@ function exitCodeFor(state) {
     // needs -- same bucket as its STAGE1_CORRECTION_REQUIRED sibling.
     case "STAGE1_CORRECTION_FINALIZATION_REQUIRED":
     case "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT":
+    // Issue #1023: ordinary satisfied analog; same bounded corrective-action bucket.
+    case "STAGE1_SATISFIED_MERGE_CONFLICT":
     case "STAGE2_CORRECTION_REQUIRED":
     // Issue #646: STAGE2_CORRECTION_PR_NEEDS_FINALIZATION names a concrete, non-blocking
     // corrective action too (run the trigger/finalize nextCommand) -- same exit-code bucket as
@@ -1417,6 +1469,27 @@ async function resolvePreMerge(
     correctionDelta.state === "CORRECTION_SATISFIED" &&
     mergeReady &&
     mergeReady.exitCode === 0
+  ) {
+    try {
+      mergeConflict = await checkMergeConflictImpl({ repo, number: pr });
+    } catch (err) {
+      mergeConflict = { exitCode: 1, message: `mergeability check threw: ${err.message}` };
+    }
+  }
+
+  // Issue #1023: the ordinary-satisfied analog, fetched only in a control/execution flow (the only
+  // flow with a successor route) and only when the evidence would otherwise authorize the merge verdict.
+  if (
+    mergeConflict === null &&
+    controlIssue != null &&
+    Number.isInteger(issue) &&
+    stage1.state === "RESPONSE_RECEIVED" &&
+    mergeReady &&
+    mergeReady.exitCode === 0 &&
+    isMergeReadyState(mergeReady.state) &&
+    (hasFindingsStage1Response(stage1)
+      ? stage1DispositionMatchesHead(parseAffirmativeStage1Disposition(stage1Disposition), head)
+      : isCleanStage1Response(stage1))
   ) {
     try {
       mergeConflict = await checkMergeConflictImpl({ repo, number: pr });
