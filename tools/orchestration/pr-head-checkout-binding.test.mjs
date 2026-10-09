@@ -780,6 +780,9 @@ test("#1031 present-but-malformed or ambiguous intent fails closed without reser
     // Audit #1035: a malformed grant fence is never masked by another valid grant.
     `${issueBody({ planned: P1029, grants: [G_REVIEW, G_AUTH] })}\n\n${FENCE}json\n{"executorSubstrate": [oops\n${FENCE}`,
     `${FENCE}json\n{"executorSubstrate": [oops\n${FENCE}\n\n${issueBody({ planned: P1029, grants: [G_REVIEW, G_AUTH] })}`,
+    // Stage 1 P1: a Unicode-escaped member name in a malformed fence is still a grant key.
+    `${issueBody({ planned: P1029, grants: [G_REVIEW, G_AUTH] })}\n\n${FENCE}json\n{"executor\\u0053ubstrate": [oops\n${FENCE}`,
+    `${FENCE}json\n{"plannedMutation\\u0050aths": [oops\n${FENCE}`,
   ];
   for (const body of cases) {
     const r = await scoped(t, body);
