@@ -115,7 +115,7 @@ import { existsSync, readdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runParseExecutionPlan, classifyIntegrationRoute, parseBulletBlock } from "./parse-execution-plan.mjs";
+import { runParseExecutionPlan, planLevelRouteFailure, parseBulletBlock } from "./parse-execution-plan.mjs";
 import { extractDependencyUnitIds, hasUnrecognizedDependencyWording } from "./dependency-grammar.mjs";
 
 const REPO_ROOT = path.resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -546,13 +546,7 @@ export async function runPrepareDispatchManifest(
   // PR-breakpoint owner (the #389/#390 bare "none" shape) must never reach manifest persistence
   // or unit dispatch -- applied to dry probes too, so ready-dispatch-gate.mjs surfaces it as
   // REPLAN_REQUIRED before the controller ever runs Route/Prepare.
-  const integrationRoute = classifyIntegrationRoute(parsed.plan?.planIndex?.integrationRoute);
-  const planLevelFailure =
-    integrationRoute.kind === "legacy-none" || integrationRoute.kind === "unknown" || integrationRoute.kind === "missing"
-      ? `Plan Index "Integration/PR route" is ${JSON.stringify(parsed.plan?.planIndex?.integrationRoute ?? null)}, which does not establish a PR-breakpoint owner (use "integration worker", "unit-owned: <UnitID>", or "no-pr: <reason>")`
-      : integrationRoute.kind === "unit-owned" && !Object.keys(parsed.plan?.units ?? {}).includes(integrationRoute.unitId)
-        ? `Plan Index "Integration/PR route" names unit-owned unit ${integrationRoute.unitId}, which is not a plan unit`
-        : null;
+  const planLevelFailure = planLevelRouteFailure(parsed.plan);
   if (planLevelFailure) {
     return {
       exitCode: 3,

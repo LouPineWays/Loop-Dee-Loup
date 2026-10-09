@@ -200,7 +200,7 @@ import { parseStage2Verdict, parseFormField } from "../review-watch/lifecycle-ga
 // Issue #486: the deterministic action-envelope table every verdict below is stamped with.
 import { getActionEnvelope } from "./action-envelope.mjs";
 // Issue #856: shared Plan Index "Integration/PR route" classifier (pure; no import cycle).
-import { classifyIntegrationRoute } from "./parse-execution-plan.mjs";
+import { classifyIntegrationRoute, planLevelRouteFailure } from "./parse-execution-plan.mjs";
 // Issue #678 Stage 1 correction (PR #714, finding 1): persists this gate's own verdict to a
 // side channel at the exact moment main() is about to print it, so action-envelope-hook.mjs
 // can still observe a bounded/none verdict when a downstream pipeline stage (e.g.
@@ -1709,6 +1709,7 @@ export async function verifyRoutedDispatchManifest(
     alreadyDoneUnitIds,
     allUnitsDone,
     integrationRoute: parsed.plan.planIndex.integrationRoute,
+    routeFailure: planLevelRouteFailure(parsed.plan),
   };
 }
 
@@ -1825,6 +1826,24 @@ export async function probeReplanRequired(
 // Named "...Core" and wrapped below (issue #486) so every verdict this returns picks up its
 // `actionEnvelope` field in exactly one place, rather than at each of this function's many
 // individual return sites.
+// Issue #856 (Stage 1 findings on PR #857): a Plan Index whose Integration/PR route does not
+// establish a valid PR-breakpoint owner is REPLAN_REQUIRED even when a verified Dispatch
+// Manifest already exists -- never projected to ROUTED and never dispatched.
+function planRouteReplanRequiredVerdict({ controlIssue, resolvedRepo, executionIssue, planIndexUrl, reason }) {
+  return {
+    exitCode: 12,
+    state: "REPLAN_REQUIRED",
+    stopAfter: true,
+    controlIssue: Number(controlIssue),
+    repo: resolvedRepo,
+    executionIssue,
+    planIndexUrl: planIndexUrl ?? null,
+    replanRequiredUnitIds: ["PLAN-INDEX"],
+    reason,
+    route: "planning worker",
+  };
+}
+
 async function checkReadyDispatchCore(
   { repo, controlIssue },
   {
@@ -2064,6 +2083,15 @@ async function checkReadyDispatchCore(
           `while evaluating PLAN_READY: ${manifestProbe.reason}`,
       };
     }
+    if (manifestProbe.ok && manifestProbe.routeFailure) {
+      return planRouteReplanRequiredVerdict({
+        controlIssue,
+        resolvedRepo,
+        executionIssue: result.executionIssue,
+        planIndexUrl: manifestProbe.planIndexUrl,
+        reason: manifestProbe.routeFailure,
+      });
+    }
     if (manifestProbe.ok) {
       // Issue #856: the control must stop advertising the planning worker once routing is
       // verified -- the stage actually reached is unit execution.
@@ -2163,12 +2191,23 @@ async function checkReadyDispatchCore(
     // transition is never another unit wave. Resolve the post-unit PR continuation from the
     // Plan Index's own Integration/PR route, reusing the existing Integration/PR dispatch and
     // the #456 execution-linked-PR reconciliation (no second lifecycle writer).
+    if (manifestCheck.routeFailure) {
+      return planRouteReplanRequiredVerdict({
+        controlIssue,
+        resolvedRepo,
+        executionIssue: result.executionIssue,
+        planIndexUrl: manifestCheck.planIndexUrl,
+        reason: manifestCheck.routeFailure,
+      });
+    }
     if (manifestCheck.allUnitsDone) {
       const integrationRoute = classifyIntegrationRoute(manifestCheck.integrationRoute);
-      if (["integration", "legacy-none", "unit-owned"].includes(integrationRoute.kind)) {
+      if (["integration", "unit-owned", "no-pr"].includes(integrationRoute.kind)) {
+        // A PR linked only by the permitted `issue-<N>-...` branch name is invisible to the
+        // search-based default listing, so the production default also enumerates open PRs.
         const reconciliation = await reconcileReadyPrBreakpoint(
           { repo: resolvedRepo, executionIssue: result.executionIssue },
-          { ghPrListImpl },
+          { ghPrListImpl: ghPrListImpl === defaultGhPrList ? defaultOpenExecutionLinkedPrList : ghPrListImpl },
         );
         if (reconciliation.operationalError) {
           return {
@@ -2188,6 +2227,15 @@ async function checkReadyDispatchCore(
               `every unit is DONE and execution Issue #${result.executionIssue} already has a linked PR (${reconciliation.pr.url}, state ${reconciliation.pr.state}) -- ` +
                 `the PR/Stage 1 breakpoint has already been crossed even though Lifecycle is still "ROUTED"; do not redispatch, reconcile toward post-PR handling instead`,
             ],
+          };
+        }
+        if (integrationRoute.kind === "no-pr") {
+          return {
+            exitCode: 1,
+            message:
+              `Execution complete without a PR for ${resolvedRepo}#${result.executionIssue}: every unit is DONE, the plan's Integration/PR route is ` +
+              `"no-pr: ${integrationRoute.reason}", and no execution-linked PR exists. There is no PR/Stage 1 breakpoint to dispatch or finalize; ` +
+              `this is a deterministic stop, not a crossed PR boundary -- record the no-PR completion on the control Issue and close the execution Issue.`,
           };
         }
         if (integrationRoute.kind === "unit-owned") {

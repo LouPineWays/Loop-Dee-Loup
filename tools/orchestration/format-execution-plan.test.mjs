@@ -902,10 +902,41 @@ test("validatePlanInput: unit-owned route requires a plan unit and a worker unit
     withRoute("unit-owned: 999-A", {
       workerUnits: [
         validWorkerUnit("999-A", {
-          observableCompletionCondition: "PR open, Stage 1 requested, and finalize-pr-breakpoint.mjs reports success.",
+          observableCompletionCondition: "PR open, Stage 1 requested, and finalize-pr-breakpoint.mjs --control-issue 1000 reports success.",
         }),
       ],
     }),
   );
   assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+
+  const noControl = validatePlanInput(
+    withRoute("unit-owned: 999-A", {
+      workerUnits: [validWorkerUnit("999-A", { observableCompletionCondition: "PR open and finalize-pr-breakpoint.mjs reports success." })],
+    }),
+  );
+  assert.equal(noControl.ok, false);
+  assert.ok(noControl.errors.some((e) => /controlling-Issue pointer/.test(e)));
+});
+
+test("validatePlanInput: unit-owned owner must transitively depend on every sibling unit (#856 Stage 1 finding)", () => {
+  const owner = (dependsOn) =>
+    validWorkerUnit("999-B", {
+      dependsOn,
+      observableCompletionCondition: "PR open and finalize-pr-breakpoint.mjs --control-issue 1000 reports success.",
+    });
+  const base = validInput();
+  const mk = (ownerDeps) => ({
+    ...base,
+    workerUnits: [validWorkerUnit("999-A"), owner(ownerDeps)],
+    planIndex: {
+      ...base.planIndex,
+      integrationRoute: "unit-owned: 999-B",
+      units: [validPlanIndexUnit("999-A"), validPlanIndexUnit("999-B", { commentUrl: commentUrl(102) })],
+    },
+  });
+  const unordered = validatePlanInput(mk([]));
+  assert.equal(unordered.ok, false);
+  assert.ok(unordered.errors.some((e) => /transitively depend on every other unit/.test(e)), JSON.stringify(unordered.errors));
+  const ordered = validatePlanInput(mk(["999-A"]));
+  assert.equal(ordered.ok, true, JSON.stringify(ordered.errors));
 });

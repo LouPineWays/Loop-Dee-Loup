@@ -112,6 +112,7 @@ import {
   parseExecutionPlan,
   parseUnitListItem,
   classifyIntegrationRoute,
+  unitOwnedRouteErrors,
   runParseExecutionPlan,
   WORKER_UNIT_FIELDS,
 } from "./parse-execution-plan.mjs";
@@ -405,14 +406,12 @@ export function validatePlanIndexInput(planIndex, { executionIssue, repo, worker
       if (!unitIds.includes(route.unitId)) {
         errors.push(`Plan Index: "integrationRoute" names unit-owned unit ${JSON.stringify(route.unitId)}, which is not in the Units list`);
       } else if (Array.isArray(workerUnits)) {
+        const depsByUnit = Object.fromEntries(
+          workerUnits.filter((u) => isNonEmptyString(u?.unitId)).map((u) => [u.unitId, Array.isArray(u.dependsOn) ? u.dependsOn : []]),
+        );
         const owner = workerUnits.find((u) => u?.unitId === route.unitId);
-        const text = `${owner?.observableCompletionCondition ?? ""} ${owner?.durableOutputStateExpected ?? ""}`;
-        if (!/finalize-pr-breakpoint\.mjs/.test(text)) {
-          errors.push(
-            `Plan Index: unit-owned PR breakpoint unit ${route.unitId} must name finalize-pr-breakpoint.mjs in its ` +
-              `"observableCompletionCondition" or "durableOutputStateExpected" so it cannot finish without the durable PR/Stage 1 handoff`,
-          );
-        }
+        const ownerText = `${owner?.observableCompletionCondition ?? ""} ${owner?.durableOutputStateExpected ?? ""}`;
+        errors.push(...unitOwnedRouteErrors({ ownerId: route.unitId, depsByUnit, ownerText }).map((e) => `Plan Index: ${e}`));
       }
     }
   }

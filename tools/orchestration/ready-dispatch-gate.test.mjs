@@ -2746,10 +2746,10 @@ test("checkReadyDispatch: true pre-PR negative control -- Lifecycle READY / PR n
 // Manifest-path fixture mirroring manifestFixture() above but allowing each unit's own live
 // Worker Unit Contract `state` to be specified — this reconciliation reads exactly that field
 // (parsed.plan.units[unitId].state), never the Plan Index's own possibly-stale `indexState`.
-function manifestFixtureWithUnitStates({ repo = "LouPineWays/Loop-Dee-Loup", executionIssue = 537, unitStates, manifestUnitLines, integrationRoute }) {
+function manifestFixtureWithUnitStates({ repo = "LouPineWays/Loop-Dee-Loup", executionIssue = 537, unitStates, manifestUnitLines, integrationRoute, unitExtras = {} }) {
   const planIndexUrl = `https://github.com/${repo}/issues/${executionIssue}#issuecomment-100`;
   const manifestUrl = `https://github.com/${repo}/issues/${executionIssue}#issuecomment-200`;
-  const units = Object.fromEntries(Object.entries(unitStates).map(([unitId, state]) => [unitId, { state }]));
+  const units = Object.fromEntries(Object.entries(unitStates).map(([unitId, state]) => [unitId, { state, ...(unitExtras[unitId] ?? {}) }]));
   return {
     repo,
     executionIssue,
@@ -2911,13 +2911,14 @@ const ROUTED_389_BODY =
   "- **Lifecycle:** ROUTED\n- **Execution:** #389\n- **Route:** planning worker\n" +
   "- **PR:** none\n- **Stage 1:** none\n- **Stage 2:** none\n- **Blocker:** none\n- **Founder decision:** none\n";
 
-async function runAllDone({ integrationRoute, prs = [], unitStates, body = ROUTED_389_BODY }) {
+async function runAllDone({ integrationRoute, prs = [], unitStates, body = ROUTED_389_BODY, unitExtras }) {
   const states = unitStates ?? Object.fromEntries(Object.entries(ALL_DONE_UNITS).map(([k, v]) => [k, v.state]));
   const fixture = manifestFixtureWithUnitStates({
     executionIssue: 389,
     unitStates: states,
     manifestUnitLines: ALL_DONE_MANIFEST,
     integrationRoute,
+    unitExtras,
   });
   const { repo, executionIssue, ...impls } = fixture;
   return checkReadyDispatch(
@@ -2925,6 +2926,14 @@ async function runAllDone({ integrationRoute, prs = [], unitStates, body = ROUTE
     { ghIssueViewImpl: async () => ({ body, state: "OPEN" }), ghPrListImpl: async () => prs, ...impls },
   );
 }
+
+const OWNER_389C_EXTRAS = {
+  "389-B": { prerequisitesDependencies: "Depends on 389-A." },
+  "389-C": {
+    prerequisitesDependencies: "Depends on 389-A, 389-B.",
+    observableCompletionCondition: "PR open and finalize-pr-breakpoint.mjs --control-issue 390 reports success.",
+  },
+};
 
 const PR_391 = {
   number: 391,
@@ -2934,14 +2943,11 @@ const PR_391 = {
   body: "Addresses #389",
 };
 
-test("checkReadyDispatch: #389/#390 recurrence -- every unit DONE, Integration/PR route 'none', no PR, control still ROUTED -- reaches READY_TO_DISPATCH_INTEGRATION, never redispatches units (#856)", async () => {
+test("checkReadyDispatch: #389/#390 shape -- every unit DONE with a bare 'none' Integration/PR route is REPLAN_REQUIRED (PLAN-INDEX), never redispatching units or guessing an integration worker (#856)", async () => {
   const result = await runAllDone({ integrationRoute: "none" });
-  assert.equal(result.exitCode, 8);
-  assert.equal(result.state, "READY_TO_DISPATCH_INTEGRATION");
-  assert.equal(result.executionIssue, 389);
-  assert.equal(result.controlIssue, 390);
-  assert.equal(result.route, "integration worker");
-  assert.equal(result.stopAfter, true);
+  assert.equal(result.exitCode, 12);
+  assert.equal(result.state, "REPLAN_REQUIRED");
+  assert.deepEqual(result.replanRequiredUnitIds, ["PLAN-INDEX"]);
   assert.equal(result.dispatchReadyUnitIds, undefined);
 });
 
@@ -2960,20 +2966,48 @@ test("checkReadyDispatch: all units DONE but an execution-linked PR already exis
 });
 
 test("checkReadyDispatch: unit-owned PR route with every unit DONE and no PR fails closed with a repair signal (exit 1), never redispatching (#856)", async () => {
-  const result = await runAllDone({ integrationRoute: "unit-owned: 389-C" });
+  const result = await runAllDone({ integrationRoute: "unit-owned: 389-C", unitExtras: OWNER_389C_EXTRAS });
   assert.equal(result.exitCode, 1);
   assert.match(result.message, /repair/i);
   assert.match(result.message, /389-C/);
 });
 
 test("checkReadyDispatch: unit-owned PR route whose PR exists is NOT_READY toward post-PR handling (#856)", async () => {
-  const result = await runAllDone({ integrationRoute: "unit-owned: 389-C", prs: [PR_391] });
+  const result = await runAllDone({ integrationRoute: "unit-owned: 389-C", prs: [PR_391], unitExtras: OWNER_389C_EXTRAS });
   assert.equal(result.state, "NOT_READY");
 });
 
-test("checkReadyDispatch: genuine no-PR route with every unit DONE does not spawn an Integration/PR stage (#856 negative control)", async () => {
+test("checkReadyDispatch: unit-owned owner not ordered after every sibling is REPLAN_REQUIRED (#856 Stage 1 finding)", async () => {
+  const result = await runAllDone({
+    integrationRoute: "unit-owned: 389-C",
+    unitExtras: { "389-C": { ...OWNER_389C_EXTRAS["389-C"], prerequisitesDependencies: "Depends on 389-A." } },
+  });
+  assert.equal(result.state, "REPLAN_REQUIRED");
+  assert.match(result.reason, /transitively depend on every other unit/);
+});
+
+test("checkReadyDispatch: unit-owned owner lacking a concrete --control-issue pointer is REPLAN_REQUIRED (#856 Stage 1 finding)", async () => {
+  const result = await runAllDone({
+    integrationRoute: "unit-owned: 389-C",
+    unitExtras: {
+      ...OWNER_389C_EXTRAS,
+      "389-C": { ...OWNER_389C_EXTRAS["389-C"], observableCompletionCondition: "finalize-pr-breakpoint.mjs reports success." },
+    },
+  });
+  assert.equal(result.state, "REPLAN_REQUIRED");
+  assert.match(result.reason, /controlling-Issue pointer/);
+});
+
+test("checkReadyDispatch: a malformed 'integration worker - disabled' route is REPLAN_REQUIRED (#856 Stage 1 finding)", async () => {
+  const result = await runAllDone({ integrationRoute: "integration worker - disabled" });
+  assert.equal(result.state, "REPLAN_REQUIRED");
+});
+
+test("checkReadyDispatch: genuine no-PR route with every unit DONE is a deterministic no-PR completion stop, never an Integration/PR dispatch or a crossed-PR claim (#856)", async () => {
   const result = await runAllDone({ integrationRoute: "no-pr: investigation only, no repository change" });
-  assert.notEqual(result.state, "READY_TO_DISPATCH_INTEGRATION");
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /without a PR/);
+  assert.match(result.message, /no-pr: investigation only/);
 });
 
 test("checkReadyDispatch: not-all-DONE still dispatches the pending unit (#856 true pre-execution)", async () => {
@@ -3000,6 +3034,21 @@ test("checkReadyDispatch: READY_TO_PROJECT_ROUTED projects Route away from 'plan
   assert.match(result.proposedBody, /- \*\*Lifecycle:\*\* ROUTED/);
   assert.match(result.proposedBody, /- \*\*Route:\*\* unit workers/);
   assert.doesNotMatch(result.proposedBody, /planning worker/);
+});
+
+test("checkReadyDispatch: PLAN_READY with an already-verified manifest but an invalid route is REPLAN_REQUIRED, never projected to ROUTED (#856 Stage 1 finding)", async () => {
+  const body =
+    "- **Lifecycle:** PLAN_READY\n- **Execution:** #389\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+  const fixture = manifestFixtureWithUnitStates({
+    executionIssue: 389,
+    unitStates: { "389-A": "PLANNED" },
+    manifestUnitLines: ["389-A: route=stronger/general worker dispatch_ready=true note=none"],
+    integrationRoute: "none",
+  });
+  const { repo, executionIssue, ...impls } = fixture;
+  const result = await checkReadyDispatch({ repo, controlIssue: 390 }, { ghIssueViewImpl: async () => ({ body, state: "OPEN" }), ...impls });
+  assert.equal(result.state, "REPLAN_REQUIRED");
+  assert.equal(result.proposedBody, undefined);
 });
 
 test("checkReadyDispatch: PLAN_READY with a bare 'none' Integration/PR route is REPLAN_REQUIRED before any manifest/unit dispatch (#856 pre-dispatch prevention)", async () => {
