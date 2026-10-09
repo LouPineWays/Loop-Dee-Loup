@@ -915,6 +915,8 @@ export function parsePreparedMutationIntent(body) {
       parsed = JSON.parse(raw);
     } catch {
       if (raw.includes("plannedMutationPaths")) return { error: "prepared mutation intent block is not valid JSON" };
+      // A malformed durable grant block must never be masked by another valid grant (Audit #1035).
+      if (raw.includes("executorSubstrate")) grantAmbiguity ??= "executorSubstrate grant block is not valid JSON";
       continue;
     }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;

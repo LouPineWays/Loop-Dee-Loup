@@ -777,6 +777,9 @@ test("#1031 present-but-malformed or ambiguous intent fails closed without reser
     issueBody({ planned: ["ok.test.mjs", 5] }),
     `${FENCE}json\n{"plannedMutationPaths": [oops\n${FENCE}`,
     dup,
+    // Audit #1035: a malformed grant fence is never masked by another valid grant.
+    `${issueBody({ planned: P1029, grants: [G_REVIEW, G_AUTH] })}\n\n${FENCE}json\n{"executorSubstrate": [oops\n${FENCE}`,
+    `${FENCE}json\n{"executorSubstrate": [oops\n${FENCE}\n\n${issueBody({ planned: P1029, grants: [G_REVIEW, G_AUTH] })}`,
   ];
   for (const body of cases) {
     const r = await scoped(t, body);
