@@ -102,6 +102,9 @@ export async function validateCorrectionRange({
 
 // -- shell classification -----------------------------------------------------------------
 
+const SCOPE_OPEN = "\u0000scope-open";
+const SCOPE_CLOSE = "\u0000scope-close";
+
 // Splits a command into command segments on ; && || | & newline, command substitution and
 // subshell delimiters, honoring simple single/double quoting. Each segment is tokenized.
 export function splitShellSegments(command) {
@@ -120,8 +123,13 @@ export function splitShellSegments(command) {
     if (tokens.length) segments.push(tokens);
     tokens = [];
   };
+  let backtickOpen = false;
   for (let i = 0; i < command.length; i += 1) {
     const ch = command[i];
+    if (ch === "\\" && quote !== "'" && command[i + 1] === "\n") {
+      i += 1; // backslash-newline is a line continuation, removed before tokenization
+      continue;
+    }
     if (quote) {
       if (ch === quote) quote = null;
       else if (ch === "\\" && quote === '"' && i + 1 < command.length) {
@@ -138,10 +146,20 @@ export function splitShellSegments(command) {
       has = true;
     } else if (/\s/.test(ch) && ch !== "\n") {
       pushTok();
-    } else if (ch === "\n" || ch === ";" || ch === "&" || ch === "|" || ch === "(" || ch === ")" || ch === "`" || ch === "{" || ch === "}") {
+    } else if (ch === "(" || ch === ")" || ch === "`") {
+      // Subshell / command-substitution scope boundary: emit a marker so directory changes
+      // inside the scope are not carried past it.
+      pushSeg();
+      if (ch === "`") {
+        segments.push([backtickOpen ? SCOPE_CLOSE : SCOPE_OPEN]);
+        backtickOpen = !backtickOpen;
+      } else segments.push([ch === "(" ? SCOPE_OPEN : SCOPE_CLOSE]);
+    } else if (ch === "\n" || ch === ";" || ch === "&" || ch === "|" || ch === "{" || ch === "}") {
       pushSeg();
     } else if (ch === "$" && command[i + 1] === "(") {
       pushSeg();
+      segments.push([SCOPE_OPEN]);
+      i += 1;
     } else {
       cur += ch;
       has = true;
@@ -176,9 +194,26 @@ export function classifyGitPushCommand(command, { baseCwd } = {}) {
   const pushes = [];
   let cwd = baseCwd;
   let cwdUnknown = false;
+  const scopes = [];
   for (let tokens of segments) {
-    // skip leading VAR=value assignments
-    while (tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) tokens = tokens.slice(1);
+    if (tokens.length === 1 && tokens[0] === SCOPE_OPEN) {
+      scopes.push({ cwd, cwdUnknown });
+      continue;
+    }
+    if (tokens.length === 1 && tokens[0] === SCOPE_CLOSE) {
+      // restore the enclosing scope's directory; an unbalanced close fails closed
+      const saved = scopes.pop();
+      if (saved) ({ cwd, cwdUnknown } = saved);
+      else cwdUnknown = true;
+      continue;
+    }
+    // skip leading VAR=value assignments, refusing ones that redirect Git's repository
+    while (tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) {
+      if (/^GIT_(DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|OBJECT_DIRECTORY|CONFIG\w*)=/.test(tokens[0]) && tokens.slice(1).some((t) => t === "git")) {
+        return { push: true, classifiable: false, reason: `\`${tokens[0].split("=")[0]}\` changes which repository Git operates on` };
+      }
+      tokens = tokens.slice(1);
+    }
     if (!tokens.length) continue;
     const first = baseName(tokens[0]);
     if (first === "cd" || first === "pushd" || first === "set-location" || first === "sl") {
@@ -198,6 +233,8 @@ export function classifyGitPushCommand(command, { baseCwd } = {}) {
           if (!v || /[$~%`]/.test(v)) unknown = true;
           else gitCwd = joinPath(gitCwd, v);
           i += 2;
+        } else if (/^--(git-dir|work-tree)(=|$)/.test(t)) {
+          return { push: true, classifiable: false, reason: `git global option \`${t}\` changes which repository the push operates on` };
         } else if (GIT_GLOBAL_WITH_ARG.has(t)) i += 2;
         else i += 1;
       }
@@ -234,16 +271,21 @@ function parsePushArgs(args) {
   const positional = [];
   for (const a of args) {
     if (a.startsWith("-")) {
-      if (PUSH_FLAGS_OK.has(a) || PUSH_FLAGS_FORCE.has(a) || a.startsWith("--force-with-lease") || a.startsWith("--receive-pack") ) continue;
+      if (PUSH_FLAGS_FORCE.has(a) || /^--force/.test(a) || /^-[A-Za-z]*f/.test(a)) {
+        return { error: `force-enabled push option \`${a}\` is refused; correction pushes must be ordinary non-forced pushes` };
+      }
+      if (PUSH_FLAGS_OK.has(a) || a.startsWith("--receive-pack")) continue;
       return { error: `push option \`${a}\` is not recognized by the correction pre-push guard` };
     }
     positional.push(a);
   }
   if (positional.length > 2) return { error: "push names more than one refspec" };
   const refspec = positional.length === 2 ? positional[1] : null;
-  if (positional.length === 1 && /[:\s]/.test(positional[0])) return { error: "push refspec without an explicit remote" };
-  if (refspec === null) return { candidate: "HEAD" };
-  const bare = refspec.replace(/^\+/, "");
+  if (refspec === null) {
+    return { error: "push without an explicit remote and refspec (configured push refspecs could publish unvalidated refs)" };
+  }
+  if (refspec.startsWith("+")) return { error: "force-enabled `+` refspec is refused" };
+  const bare = refspec;
   if (bare === "" || bare.startsWith("^") || bare === "--all" || bare === "--mirror") return { error: "push refspec is a deletion or bulk push" };
   if (bare.includes(":")) {
     const src = bare.split(":")[0];

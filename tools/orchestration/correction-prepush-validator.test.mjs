@@ -116,16 +116,31 @@ test("classifyGitPushCommand: plain, chained, wrapped, and non-push commands", (
   assert.equal(classifyGitPushCommand('echo "git push"', { baseCwd: "/x" }).push, false);
   const p = classifyGitPushCommand("git push -u origin HEAD:refs/heads/b", { baseCwd: "/x" });
   assert.deepEqual(p.pushes, [{ cwd: "/x", candidate: "HEAD" }]);
-  const chained = classifyGitPushCommand("git add . && git commit -m x && git push", { baseCwd: "/x" });
+  const chained = classifyGitPushCommand("git add . && git commit -m x && git push origin HEAD:b", { baseCwd: "/x" });
   assert.equal(chained.push, true);
   assert.equal(chained.classifiable, true);
   assert.equal(classifyGitPushCommand("git -C /repo push origin feat", { baseCwd: "/x" }).pushes[0].cwd, "/repo");
-  assert.equal(classifyGitPushCommand("cd sub && git push", { baseCwd: "/x" }).pushes[0].cwd, "/x/sub");
-  for (const c of ['bash -c "git push"', "eval 'git push'", "git push --all", "git push origin a b", "git push origin :gone", "cd $D && git push"]) {
+  assert.equal(classifyGitPushCommand("cd sub && git push origin HEAD:b", { baseCwd: "/x" }).pushes[0].cwd, "/x/sub");
+  for (const c of ['bash -c "git push"', "eval 'git push'", "git push --all", "git push origin a b", "git push origin :gone", "cd $D && git push origin HEAD:b",
+    "git push", "git push origin", "git push -f origin HEAD:b", "git push --force origin HEAD:b", "git push --force-with-lease origin HEAD:b",
+    "git push origin +HEAD:b", "git push -fu origin HEAD:b", "git --git-dir /bad/.git push origin HEAD:b", "git --work-tree=/w push origin HEAD:b",
+    "GIT_DIR=/bad/.git git push origin HEAD:b", "git -c remote.origin.push=bad:pr push origin"]) {
     const out = classifyGitPushCommand(c, { baseCwd: "/x" });
     assert.equal(out.push, true, c);
     assert.equal(out.classifiable, false, c);
   }
+});
+
+test("classifyGitPushCommand: continuations and subshell scope", () => {
+  const cont = classifyGitPushCommand("git \\\n push origin HEAD:b", { baseCwd: "/x" });
+  assert.equal(cont.classifiable, true);
+  assert.deepEqual(cont.pushes, [{ cwd: "/x", candidate: "HEAD" }]);
+  const sub = classifyGitPushCommand("(cd /safe); git push origin HEAD:b", { baseCwd: "/x" });
+  assert.deepEqual(sub.pushes, [{ cwd: "/x", candidate: "HEAD" }]);
+  const inner = classifyGitPushCommand("(cd /safe && git push origin HEAD:b)", { baseCwd: "/x" });
+  assert.deepEqual(inner.pushes, [{ cwd: "/safe", candidate: "HEAD" }]);
+  const subst = classifyGitPushCommand("echo $(cd /safe); git push origin HEAD:b", { baseCwd: "/x" });
+  assert.deepEqual(subst.pushes, [{ cwd: "/x", candidate: "HEAD" }]);
 });
 
 const marker = {
@@ -170,7 +185,7 @@ test("hook guard end-to-end on a real repo: #962 message denied, reworded allowe
     const r = repoWith([msg]);
     try {
       const m = { correctionCompletion: { ...marker.correctionCompletion, reviewedHead: r.reviewed } };
-      const out = await decideCorrectionPrePush(m, { toolName: "Bash", command: "git push", agentId: "w1", cwd: r.dir });
+      const out = await decideCorrectionPrePush(m, { toolName: "Bash", command: "git push origin HEAD:b", agentId: "w1", cwd: r.dir });
       assert.equal(out.permissionDecision, expected);
     } finally {
       r.cleanup();
