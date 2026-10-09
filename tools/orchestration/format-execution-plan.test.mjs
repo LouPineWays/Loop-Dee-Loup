@@ -78,7 +78,7 @@ function validInput(overrides = {}) {
       planState: "PLANNED",
       dependencies: "none",
       dispatchManifest: "none",
-      integrationRoute: "none",
+      integrationRoute: "integration worker",
       sharedContractUrl: commentUrl(100),
       units: [validPlanIndexUnit("999-A")],
     },
@@ -765,7 +765,7 @@ test("formatPlanIndexBody produces the exact required heading and bullet order, 
   assert.ok(!lines.some((l) => /^-\s*999-A:/.test(l)), "unit entries must not appear as unindented top-level bullets");
   assert.ok(lines.includes("- **Dependencies:** none"));
   assert.ok(lines.includes("- **Dispatch manifest:** none"));
-  assert.ok(lines.includes("- **Integration/PR route:** none"));
+  assert.ok(lines.includes("- **Integration/PR route:** integration worker"));
 });
 
 // ---------------------------------------------------------------------------------------
@@ -865,4 +865,91 @@ test("CLI: a missing --input file fails closed with the documented operational-e
   assert.equal(result.status, 2, `expected operational-error exit code 2, got ${result.status}: ${result.stderr}`);
   assert.match(result.stderr, /could not read --input file/);
   assert.equal(result.stdout, "");
+});
+
+// ---------------------------------------------------------------------------------------
+// Issue #856: the Integration/PR route must establish a mechanically consumable PR owner
+// ---------------------------------------------------------------------------------------
+
+function withRoute(integrationRoute, extra = {}) {
+  const base = validInput();
+  return { ...base, ...extra, planIndex: { ...base.planIndex, integrationRoute } };
+}
+
+test("validatePlanInput rejects a bare 'none' Integration/PR route (the #389/#390 stranded shape) and unknown values (#856)", () => {
+  for (const bad of ["none", "None", "#123", "whatever"]) {
+    const result = validatePlanInput(withRoute(bad));
+    assert.equal(result.ok, false, bad);
+    assert.ok(result.errors.some((e) => /PR-breakpoint owner/.test(e)), bad);
+  }
+});
+
+test("validatePlanInput accepts 'integration worker' and 'no-pr: <reason>' (valid no-PR case preserved) (#856)", () => {
+  assert.equal(validatePlanInput(withRoute("integration worker")).ok, true);
+  assert.equal(validatePlanInput(withRoute("no-pr: investigation only, no repository change")).ok, true);
+});
+
+test("validatePlanInput: unit-owned route requires a plan unit and a worker unit naming finalize-pr-breakpoint.mjs (#856)", () => {
+  const missingUnit = validatePlanInput(withRoute("unit-owned: 999-Z"));
+  assert.equal(missingUnit.ok, false);
+  assert.ok(missingUnit.errors.some((e) => /not in the Units list/.test(e)));
+
+  const noFinalize = validatePlanInput(withRoute("unit-owned: 999-A"));
+  assert.equal(noFinalize.ok, false);
+  assert.ok(noFinalize.errors.some((e) => /finalize-pr-breakpoint\.mjs/.test(e)));
+
+  const ok = validatePlanInput(
+    withRoute("unit-owned: 999-A", {
+      workerUnits: [
+        validWorkerUnit("999-A", {
+          observableCompletionCondition: "PR open, Stage 1 requested, and finalize-pr-breakpoint.mjs --control-issue 1000 reports success.",
+        }),
+      ],
+    }),
+  );
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+
+  const noControl = validatePlanInput(
+    withRoute("unit-owned: 999-A", {
+      workerUnits: [validWorkerUnit("999-A", { observableCompletionCondition: "PR open and finalize-pr-breakpoint.mjs reports success." })],
+    }),
+  );
+  assert.equal(noControl.ok, false);
+  assert.ok(noControl.errors.some((e) => /controlling-Issue pointer/.test(e)));
+});
+
+test("validatePlanInput: unit-owned owner must transitively depend on every sibling unit (#856 Stage 1 finding)", () => {
+  const owner = (dependsOn) =>
+    validWorkerUnit("999-B", {
+      dependsOn,
+      observableCompletionCondition: "PR open and finalize-pr-breakpoint.mjs --control-issue 1000 reports success.",
+    });
+  const base = validInput();
+  const mk = (ownerDeps) => ({
+    ...base,
+    workerUnits: [validWorkerUnit("999-A"), owner(ownerDeps)],
+    planIndex: {
+      ...base.planIndex,
+      integrationRoute: "unit-owned: 999-B",
+      units: [validPlanIndexUnit("999-A"), validPlanIndexUnit("999-B", { commentUrl: commentUrl(102) })],
+    },
+  });
+  const unordered = validatePlanInput(mk([]));
+  assert.equal(unordered.ok, false);
+  assert.ok(unordered.errors.some((e) => /transitively depend on every other unit/.test(e)), JSON.stringify(unordered.errors));
+  const ordered = validatePlanInput(mk(["999-A"]));
+  assert.equal(ordered.ok, true, JSON.stringify(ordered.errors));
+});
+
+test("validatePlanInput: a non-array planIndex.units with a unit-owned route accumulates a validation error instead of throwing (#856 Stage 1 correction)", () => {
+  for (const badUnits of [{}, "999-A", 7, null]) {
+    const input = withRoute("unit-owned: 999-A");
+    input.planIndex = { ...input.planIndex, units: badUnits };
+    let result;
+    assert.doesNotThrow(() => {
+      result = validatePlanInput(input);
+    });
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.some((e) => /Units|units/.test(e)), JSON.stringify(badUnits));
+  }
 });

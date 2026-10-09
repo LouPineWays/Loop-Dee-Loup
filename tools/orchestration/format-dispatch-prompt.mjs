@@ -220,8 +220,8 @@ export function formatPlanningCorrectionWorkerDispatchPrompt({ controlIssue, exe
     `Re-run ready-dispatch-gate.mjs against the Controlling Issue above to recover the Plan Index and ` +
     `failing unit(s). Read the Plan Index and each unit's contract, then correct per ` +
     `AGENTS.md/docs/operating-model.md — use correct-unit-dependency.mjs for an existing unit's ` +
-    `dependency field (format-execution-plan.mjs cannot patch one in place), or format-execution-plan.mjs ` +
-    `only for a new unit. Return a compact confirmation and stop — do not prepare the Dispatch Manifest, ` +
+    `dependency field (format-execution-plan.mjs cannot patch one in place), correct-plan-index-route.mjs ` +
+    `for a PLAN-INDEX route failure, or format-execution-plan.mjs only for a new unit. Return a compact confirmation and stop — do not prepare the Dispatch Manifest, ` +
     `advance Lifecycle, or dispatch units.`
   );
 }

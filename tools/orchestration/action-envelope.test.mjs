@@ -23,6 +23,9 @@ test("getActionEnvelope: every ready-dispatch-gate.mjs and next-review-transitio
     "READY_TO_DISPATCH_UNITS",
     "READY_TO_DISPATCH_INTEGRATION",
     "REPLAN_REQUIRED",
+    "PR_BREAKPOINT_NEEDS_FINALIZATION",
+    "READY_TO_PROJECT_NO_PR_COMPLETION",
+    "POST_UNIT_REPAIR_REQUIRED",
     "AUDIT_ISSUE_DETECTED",
     "AMBIGUOUS",
     "NO_ACTION_YET",
@@ -58,7 +61,7 @@ test("getActionEnvelope: every ready-dispatch-gate.mjs and next-review-transitio
 test("contextSensitiveEnvelopeStates: names exactly the context-derived states", () => {
   assert.deepEqual(
     [...contextSensitiveEnvelopeStates()].sort(),
-    ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", "STAGE2_EVIDENCE_REAUDIT_READY", "STAGE2_UNUSABLE_REPLACEMENT_READY"].sort(),
+    ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", "PR_BREAKPOINT_NEEDS_FINALIZATION", "STAGE2_EVIDENCE_REAUDIT_READY", "STAGE2_UNUSABLE_REPLACEMENT_READY"].sort(),
   );
 });
 

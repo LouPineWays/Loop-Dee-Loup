@@ -1571,3 +1571,46 @@ test("HARD_MODULE_DEPENDENCIES: covers the three importers of verdict-handoff.mj
     assert.ok(HARD_MODULE_DEPENDENCIES.some((e) => e.dest === dest && e.dependsOnDest === dep), dest);
   }
 });
+
+test("HARD_MODULE_DEPENDENCIES: every importer of parse-execution-plan.mjs's route exports refuses atomically on an unmanaged, preserved parser, for init and update alike (#856)", () => {
+  const dep = "tools/orchestration/parse-execution-plan.mjs";
+  for (const dest of [
+    "tools/orchestration/ready-dispatch-gate.mjs",
+    "tools/orchestration/prepare-dispatch-manifest.mjs",
+    "tools/orchestration/format-execution-plan.mjs",
+    "tools/orchestration/finalize-pr-breakpoint.mjs",
+    "tools/orchestration/correct-plan-index-route.mjs",
+  ]) {
+    assert.ok(HARD_MODULE_DEPENDENCIES.some((e) => e.dest === dest && e.dependsOnDest === dep), dest);
+    // findHardDependencyCollisions is the single shared check behind both ldl-init and ldl-update.
+    const collisions = findHardDependencyCollisions({
+      toInstall: [{ destRel: dest, content: Buffer.from("x") }],
+      toSkip: [{ dest: dep, reason: "unmanaged" }],
+    });
+    assert.equal(collisions.length, 1, dest);
+    assert.equal(collisions[0].dest, dep);
+  }
+});
+
+test("run: refuses atomically, writing nothing, when an unmanaged parse-execution-plan.mjs would be preserved beside a managed importer of its route exports (#856)", async (t) => {
+  const root = makeFixtureRoot(t);
+  mkdirSync(join(root, "tools", "orchestration"), { recursive: true });
+  writeFileSync(
+    join(root, "tools", "orchestration", "parse-execution-plan.mjs"),
+    ["export function classifyIntegrationRoute() {}", "export function planLevelRouteFailure() {}", ""].join(String.fromCharCode(10)),
+  );
+  writeFileSync(
+    join(root, "tools", "orchestration", "prepare-dispatch-manifest.mjs"),
+    'import { planLevelRouteFailure } from "./parse-execution-plan.mjs";' + String.fromCharCode(10),
+  );
+  const dest = tempDir(t);
+  mkdirSync(join(dest, "tools", "orchestration"), { recursive: true });
+  writeFileSync(join(dest, "tools", "orchestration", "parse-execution-plan.mjs"), "// consumer-owned, exports nothing LDL needs" + String.fromCharCode(10));
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /parse-execution-plan.mjs/);
+  assert.ok(!existsSync(join(dest, ".ldl", "manifest.json")), "no manifest must be written when the operation is refused");
+  assert.ok(!existsSync(join(dest, "tools", "orchestration", "prepare-dispatch-manifest.mjs")), "no importer may be installed");
+});

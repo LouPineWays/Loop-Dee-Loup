@@ -140,6 +140,19 @@ const ENVELOPES = {
   READY_TO_DISPATCH_UNITS: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-unit-wave"] },
   READY_TO_DISPATCH_INTEGRATION: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-integration-worker"] },
   REPLAN_REQUIRED: { mode: ENVELOPE_MODES.BOUNDED, authorizedActions: ["dispatch-planning-correction-worker"] },
+  // Issue #856 (Stage 1 correction): the recognized post-unit outcomes. PR_BREAKPOINT_NEEDS_FINALIZATION
+  // derives its actions from the verdict's own nextCommand (see getActionEnvelope); the no-PR terminal
+  // projection authorizes exactly the control write plus the execution Issue close; the repair stop
+  // authorizes nothing (the normal blocked/founder-interrupt chat contract).
+  PR_BREAKPOINT_NEEDS_FINALIZATION: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["run-review-watch-trigger", "run-finalize-pr-breakpoint"],
+  },
+  READY_TO_PROJECT_NO_PR_COMPLETION: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["write-control-snapshot", "close-execution-issue"],
+  },
+  POST_UNIT_REPAIR_REQUIRED: { mode: ENVELOPE_MODES.NONE, authorizedActions: [] },
   AUDIT_ISSUE_DETECTED: { mode: ENVELOPE_MODES.CHAIN, authorizedActions: ["run-next-review-transition-gate"] },
 
   // -- next-review-transition-gate.mjs -----------------------------------------------------
@@ -524,7 +537,7 @@ export function getActionEnvelope(state, context = {}) {
   // as a chained segment, which `composeStage2CorrectionFinalizeCommand`'s own direct-reference
   // mode (no thin control Issue to project onto) deliberately omits, so a no-control-Issue
   // reconciliation's envelope never authorizes a control write it has no control Issue for.
-  if (state === "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION") {
+  if (state === "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION" || state === "PR_BREAKPOINT_NEEDS_FINALIZATION") {
     const commands = parseChainedCommands(context.nextCommand);
     const hasTrigger = commands.some((c) => c.scriptName === "trigger.mjs");
     const hasFinalize = commands.some((c) => c.scriptName === "finalize-pr-breakpoint.mjs");
@@ -734,7 +747,7 @@ export function requiresPreBoundNonIsolatedDispatch(authorizedActions) {
 export function contextSensitiveEnvelopeStates() {
   // Issue #883: STAGE2_EVIDENCE_REAUDIT_READY derives its finalize action from whether the verdict
   // carries a control Issue; an omitted context would silently degrade to the direct-reference form.
-  return ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", "STAGE2_EVIDENCE_REAUDIT_READY", "STAGE2_UNUSABLE_REPLACEMENT_READY"];
+  return ["STAGE2_CLOSE_READY", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", "PR_BREAKPOINT_NEEDS_FINALIZATION", "STAGE2_EVIDENCE_REAUDIT_READY", "STAGE2_UNUSABLE_REPLACEMENT_READY"];
 }
 
 // Issue #858 (control #571; fresh recurrence of #761's lost-verdict failure at #457/#856/PR #857):
