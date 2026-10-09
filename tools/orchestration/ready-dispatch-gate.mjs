@@ -1921,6 +1921,33 @@ function planRouteReplanRequiredVerdict({ controlIssue, resolvedRepo, executionI
   };
 }
 
+// Pure. Issue #856: the exact real command that finalizes an already-open, execution-linked PR's
+// PR/Stage 1 breakpoint -- the idempotent Stage 1 trigger at the PR's live head, chained into
+// finalize-pr-breakpoint.mjs (same trigger-then-finalize sequence docs/bounded-review-cycle.md's
+// Integration/PR worker step 6 uses; trigger.mjs's own dedup keeps a retry safe).
+export function composePrBreakpointFinalizeCommand({ repo, controlIssue, executionIssue, pr, head }) {
+  return (
+    `node tools/review-watch/trigger.mjs --repo ${repo} --kind pr --number ${pr} --head ${head} && ` +
+    `node tools/orchestration/finalize-pr-breakpoint.mjs --control-issue ${controlIssue} ` +
+    `--execution-issue ${executionIssue} --pr ${pr} --head ${head}`
+  );
+}
+
+// Issue #856: recognized fail-closed stop for a post-unit state the plan cannot continue
+// mechanically (unit-owned owner missing its PR, a linked PR that is not open). Exit 15, never
+// 1 (operational error) or 3 (fallthrough): the controller stops with the blocked contract.
+function postUnitRepairRequiredVerdict({ controlIssue, resolvedRepo, executionIssue, reason }) {
+  return {
+    exitCode: 15,
+    state: "POST_UNIT_REPAIR_REQUIRED",
+    stopAfter: true,
+    controlIssue: Number(controlIssue),
+    repo: resolvedRepo,
+    executionIssue,
+    reason,
+  };
+}
+
 async function checkReadyDispatchCore(
   { repo, controlIssue },
   {
@@ -2056,6 +2083,11 @@ async function checkReadyDispatchCore(
     READY_TO_PROJECT_PLAN_READY: 10,
     READY_TO_PROJECT_ROUTED: 11,
     REPLAN_REQUIRED: 12,
+    // Issue #856 (Stage 1 correction): the recognized post-unit outcomes -- an existing open PR
+    // to finalize, a genuine no-PR terminal completion, and a fail-closed repair stop. Never 3/4.
+    PR_BREAKPOINT_NEEDS_FINALIZATION: 13,
+    READY_TO_PROJECT_NO_PR_COMPLETION: 14,
+    POST_UNIT_REPAIR_REQUIRED: 15,
   };
 
   // Issue #498 unit 498-A, the 2026-09-10 #500 live-trace fix: before authorizing a fresh
@@ -2295,34 +2327,76 @@ async function checkReadyDispatchCore(
           };
         }
         if (reconciliation.crossed) {
-          return {
-            exitCode: 3,
-            state: "NOT_READY",
-            controlIssue: Number(controlIssue),
-            repo: resolvedRepo,
-            reasons: [
-              `every unit is DONE and execution Issue #${result.executionIssue} already has a linked PR (${reconciliation.pr.url}, state ${reconciliation.pr.state}) -- ` +
-                `the PR/Stage 1 breakpoint has already been crossed even though Lifecycle is still "ROUTED"; do not redispatch, reconcile toward post-PR handling instead`,
-            ],
-          };
+          // Issue #856 (Stage 1 correction): a crossed PR is a recognized bounded outcome, never
+          // generic NOT_READY fallthrough. An OPEN linked PR is finalized exactly once through the
+          // existing idempotent Stage 1 trigger + finalize-pr-breakpoint.mjs path; anything else
+          // (merged/closed, no live head) fails closed to the recognized repair stop.
+          const crossedPr = reconciliation.pr;
+          const head = typeof crossedPr.headRefOid === "string" ? crossedPr.headRefOid.trim() : "";
+          if (String(crossedPr.state ?? "").toUpperCase() === "OPEN" && head && Number.isInteger(crossedPr.number)) {
+            return {
+              exitCode: EXIT_CODES_BY_STATUS.PR_BREAKPOINT_NEEDS_FINALIZATION,
+              state: "PR_BREAKPOINT_NEEDS_FINALIZATION",
+              stopAfter: true,
+              controlIssue: Number(controlIssue),
+              repo: resolvedRepo,
+              executionIssue: result.executionIssue,
+              pr: crossedPr.number,
+              prUrl: crossedPr.url,
+              head,
+              reason:
+                `every unit is DONE and execution Issue #${result.executionIssue} already has open linked PR #${crossedPr.number}, ` +
+                `but the control Issue still records Lifecycle "ROUTED"; finalize the existing PR/Stage 1 breakpoint, do not redispatch`,
+              nextCommand: composePrBreakpointFinalizeCommand({
+                repo: resolvedRepo,
+                controlIssue: Number(controlIssue),
+                executionIssue: result.executionIssue,
+                pr: crossedPr.number,
+                head,
+              }),
+            };
+          }
+          return postUnitRepairRequiredVerdict({
+            controlIssue,
+            resolvedRepo,
+            executionIssue: result.executionIssue,
+            reason:
+              `every unit is DONE and execution Issue #${result.executionIssue} has a linked PR (${crossedPr.url}, state ${crossedPr.state}) that is not an open PR with a known head; ` +
+              `the PR breakpoint cannot be finalized mechanically -- repair required, do not redispatch units or open another PR`,
+          });
         }
         if (integrationRoute.kind === "no-pr") {
+          // Issue #856 (Stage 1 correction): a genuine no-PR completion is a recognized terminal
+          // projection (control -> DONE, execution Issue closed), not an operational error.
+          let proposedBody = data.body ?? "";
+          proposedBody = upsertControlBullet(proposedBody, "Lifecycle", "DONE");
+          proposedBody = upsertControlBullet(proposedBody, "Route", "none");
+          proposedBody = upsertControlBullet(
+            proposedBody,
+            "Terminal result",
+            `Execution complete without a PR (no-pr: ${integrationRoute.reason}); every unit DONE; execution Issue #${result.executionIssue} closed.`,
+          );
           return {
-            exitCode: 1,
-            message:
-              `Execution complete without a PR for ${resolvedRepo}#${result.executionIssue}: every unit is DONE, the plan's Integration/PR route is ` +
-              `"no-pr: ${integrationRoute.reason}", and no execution-linked PR exists. There is no PR/Stage 1 breakpoint to dispatch or finalize; ` +
-              `this is a deterministic stop, not a crossed PR boundary -- record the no-PR completion on the control Issue and close the execution Issue.`,
+            exitCode: EXIT_CODES_BY_STATUS.READY_TO_PROJECT_NO_PR_COMPLETION,
+            state: "READY_TO_PROJECT_NO_PR_COMPLETION",
+            stopAfter: true,
+            controlIssue: Number(controlIssue),
+            repo: resolvedRepo,
+            executionIssue: result.executionIssue,
+            noPrReason: integrationRoute.reason,
+            proposedBody,
           };
         }
         if (integrationRoute.kind === "unit-owned") {
-          return {
-            exitCode: 1,
-            message:
-              `Execution-state repair needed for ${resolvedRepo}#${result.executionIssue}: every unit is DONE and the plan assigns the PR breakpoint to unit ` +
-              `${integrationRoute.unitId}, but no execution-linked PR exists (the owning unit finished without opening a PR and running finalize-pr-breakpoint.mjs). ` +
-              `Do not redispatch units; repair the unit-owned PR breakpoint or correct the plan's Integration/PR route.`,
-          };
+          return postUnitRepairRequiredVerdict({
+            controlIssue,
+            resolvedRepo,
+            executionIssue: result.executionIssue,
+            reason:
+              `every unit is DONE and the plan assigns the PR breakpoint to unit ${integrationRoute.unitId}, but no execution-linked PR exists ` +
+              `(the owning unit finished without opening a PR and running finalize-pr-breakpoint.mjs); do not redispatch units -- ` +
+              `repair the unit-owned PR breakpoint or correct the plan's Integration/PR route`,
+          });
         }
         return {
           exitCode: EXIT_CODES_BY_STATUS.READY_TO_DISPATCH_INTEGRATION,

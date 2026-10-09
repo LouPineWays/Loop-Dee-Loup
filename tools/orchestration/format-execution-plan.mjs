@@ -402,8 +402,12 @@ export function validatePlanIndexInput(planIndex, { executionIssue, repo, worker
           'or "no-pr: <reason>" for an execution that produces no review-worthy repository change (issue #856)',
       );
     } else if (route.kind === "unit-owned") {
-      const unitIds = (planIndex.units ?? []).map((u) => u?.unitId);
-      if (!unitIds.includes(route.unitId)) {
+      // Issue #856 (Stage 1 correction): `units` shape is validated further below; a non-array here
+      // (e.g. `{}`) must accumulate the existing validation error, never throw out of validation.
+      const unitIds = Array.isArray(planIndex.units) ? planIndex.units.map((u) => u?.unitId) : [];
+      if (!Array.isArray(planIndex.units)) {
+        // reported by the Units validation below
+      } else if (!unitIds.includes(route.unitId)) {
         errors.push(`Plan Index: "integrationRoute" names unit-owned unit ${JSON.stringify(route.unitId)}, which is not in the Units list`);
       } else if (Array.isArray(workerUnits)) {
         const depsByUnit = Object.fromEntries(

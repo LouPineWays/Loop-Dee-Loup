@@ -3113,6 +3113,7 @@ const PR_391 = {
   url: "https://github.com/LouPineWays/Loop-Dee-Loup/pull/391",
   state: "OPEN",
   headRefName: "ldl-389-e",
+  headRefOid: "abc123def456abc123def456abc123def456abcd",
   body: "Addresses #389",
 };
 
@@ -3131,23 +3132,35 @@ test("checkReadyDispatch: normal planned path -- every unit DONE with explicit '
   assert.deepEqual(result.actionEnvelope, { mode: "bounded", authorizedActions: ["dispatch-integration-worker"] });
 });
 
-test("checkReadyDispatch: all units DONE but an execution-linked PR already exists -- NOT_READY toward post-PR handling, no duplicate integration dispatch (#856, #456 invariant)", async () => {
+test("checkReadyDispatch: all units DONE but an open execution-linked PR already exists -- bounded PR-breakpoint finalization, no duplicate integration dispatch (#856, #456 invariant)", async () => {
   const result = await runAllDone({ integrationRoute: "integration worker", prs: [PR_391] });
-  assert.equal(result.exitCode, 3);
-  assert.equal(result.state, "NOT_READY");
-  assert.ok(result.reasons.some((r) => r.includes("already has a linked PR")));
+  assert.equal(result.exitCode, 13);
+  assert.equal(result.state, "PR_BREAKPOINT_NEEDS_FINALIZATION");
+  assert.equal(result.stopAfter, true);
+  assert.equal(result.pr, 391);
+  assert.equal(result.nextCommand, "node tools/review-watch/trigger.mjs --repo LouPineWays/Loop-Dee-Loup --kind pr --number 391 --head abc123def456abc123def456abc123def456abcd && node tools/orchestration/finalize-pr-breakpoint.mjs --control-issue 390 --execution-issue 389 --pr 391 --head abc123def456abc123def456abc123def456abcd");
+  assert.deepEqual(result.actionEnvelope, { mode: "bounded", authorizedActions: ["run-review-watch-trigger", "run-finalize-pr-breakpoint"] });
 });
 
-test("checkReadyDispatch: unit-owned PR route with every unit DONE and no PR fails closed with a repair signal (exit 1), never redispatching (#856)", async () => {
+test("checkReadyDispatch: all units DONE with a linked PR that is not open fails closed to the repair stop, never NOT_READY fallthrough (#856)", async () => {
+  const result = await runAllDone({ integrationRoute: "integration worker", prs: [{ ...PR_391, state: "MERGED" }] });
+  assert.equal(result.state, "POST_UNIT_REPAIR_REQUIRED");
+  assert.equal(result.exitCode, 15);
+  assert.deepEqual(result.actionEnvelope, { mode: "none", authorizedActions: [] });
+});
+
+test("checkReadyDispatch: unit-owned PR route with every unit DONE and no PR is the recognized fail-closed repair stop (not an operational error), never redispatching (#856)", async () => {
   const result = await runAllDone({ integrationRoute: "unit-owned: 389-C", unitExtras: OWNER_389C_EXTRAS });
-  assert.equal(result.exitCode, 1);
-  assert.match(result.message, /repair/i);
-  assert.match(result.message, /389-C/);
+  assert.equal(result.state, "POST_UNIT_REPAIR_REQUIRED");
+  assert.equal(result.exitCode, 15);
+  assert.match(result.reason, /repair/i);
+  assert.match(result.reason, /389-C/);
+  assert.deepEqual(result.actionEnvelope, { mode: "none", authorizedActions: [] });
 });
 
-test("checkReadyDispatch: unit-owned PR route whose PR exists is NOT_READY toward post-PR handling (#856)", async () => {
+test("checkReadyDispatch: unit-owned PR route whose open PR exists finalizes the existing PR breakpoint once (#856)", async () => {
   const result = await runAllDone({ integrationRoute: "unit-owned: 389-C", prs: [PR_391], unitExtras: OWNER_389C_EXTRAS });
-  assert.equal(result.state, "NOT_READY");
+  assert.equal(result.state, "PR_BREAKPOINT_NEEDS_FINALIZATION");
 });
 
 test("checkReadyDispatch: unit-owned owner not ordered after every sibling is REPLAN_REQUIRED (#856 Stage 1 finding)", async () => {
@@ -3176,11 +3189,14 @@ test("checkReadyDispatch: a malformed 'integration worker - disabled' route is R
   assert.equal(result.state, "REPLAN_REQUIRED");
 });
 
-test("checkReadyDispatch: genuine no-PR route with every unit DONE is a deterministic no-PR completion stop, never an Integration/PR dispatch or a crossed-PR claim (#856)", async () => {
+test("checkReadyDispatch: genuine no-PR route with every unit DONE is a bounded terminal-completion projection, never an operational error, Integration/PR dispatch, or crossed-PR claim (#856)", async () => {
   const result = await runAllDone({ integrationRoute: "no-pr: investigation only, no repository change" });
-  assert.equal(result.exitCode, 1);
-  assert.match(result.message, /without a PR/);
-  assert.match(result.message, /no-pr: investigation only/);
+  assert.equal(result.exitCode, 14);
+  assert.equal(result.state, "READY_TO_PROJECT_NO_PR_COMPLETION");
+  assert.equal(result.stopAfter, true);
+  assert.ok(result.proposedBody.includes("- **Lifecycle:** DONE"));
+  assert.ok(result.proposedBody.includes("Terminal result:** Execution complete without a PR (no-pr: investigation only"));
+  assert.deepEqual(result.actionEnvelope, { mode: "bounded", authorizedActions: ["write-control-snapshot", "close-execution-issue"] });
 });
 
 test("checkReadyDispatch: not-all-DONE still dispatches the pending unit (#856 true pre-execution)", async () => {

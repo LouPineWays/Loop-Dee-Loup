@@ -102,7 +102,9 @@
 //
 // Usage:
 //   node tools/orchestration/finalize-pr-breakpoint.mjs --control-issue 448 \
-//     --execution-issue 447 --pr 453 --head <sha>
+//     --execution-issue 447 --pr 453 --head <sha> [--unit <UnitID>]
+// `--unit` (issue #856) is the optional unit-owned caller identity; against a `ROUTED` control it
+// must equal the plan's designated unit-owned PR owner.
 //
 // Tests: node --test tools/orchestration/finalize-pr-breakpoint.test.mjs
 
@@ -119,6 +121,7 @@ import {
   isLegacyStage2NotStartedSentinel,
 } from "./ready-dispatch-gate.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
+import { runParseExecutionPlan, classifyIntegrationRoute, planLevelRouteFailure } from "./parse-execution-plan.mjs";
 import { run as stage1GateRun } from "../review-watch/stage1-gate.mjs";
 
 // Lifecycle values this script is authorized to transition *from*. `READY` is the direct
@@ -323,6 +326,45 @@ export function verifyFinalizedBody(freshBody, { pr, stage1Value }) {
   return { ok: true };
 }
 
+// Issue #856 (Stage 1 correction): a `ROUTED` control Issue reaches the PR/Stage 1 breakpoint only
+// from two authorized shapes -- the Integration/PR worker after every plan unit is DONE, or a
+// plan-designated unit-owned PR owner after every sibling is DONE. This module does not trust the
+// caller's claim: it re-reads the live plan and proves the shape from the Plan Index route and the
+// Worker Unit Contract States. Pure over an already-parsed `plan` (parseExecutionPlan's output).
+export function verifyRoutedPostUnitBreakpoint(plan, { unit } = {}) {
+  if (!plan || typeof plan !== "object" || !plan.units || typeof plan.units !== "object") {
+    return { ok: false, reason: "live execution plan is missing or has no units; cannot prove the post-unit PR breakpoint was reached" };
+  }
+  const unitIds = Object.keys(plan.units);
+  if (unitIds.length === 0) return { ok: false, reason: "live execution plan has no units; cannot prove the post-unit PR breakpoint was reached" };
+  const routeFailure = planLevelRouteFailure(plan);
+  if (routeFailure) return { ok: false, reason: routeFailure };
+  const route = classifyIntegrationRoute(plan.planIndex?.integrationRoute);
+  if (route.kind !== "integration" && route.kind !== "unit-owned") {
+    return {
+      ok: false,
+      reason: `Plan Index Integration/PR route is ${JSON.stringify(plan.planIndex?.integrationRoute ?? null)}, which does not authorize a PR breakpoint from ROUTED`,
+    };
+  }
+  const isDone = (id) => /^done\b/i.test(String(plan.units[id]?.state ?? "").trim());
+  if (route.kind === "integration") {
+    if (unit !== undefined && unit !== null) {
+      return { ok: false, reason: `--unit ${unit} supplied but the plan's route is "integration worker", which no unit owns` };
+    }
+    const pending = unitIds.filter((id) => !isDone(id));
+    if (pending.length > 0) return { ok: false, reason: `units not yet DONE (${pending.join(", ")}); the Integration/PR stage is not authorized yet` };
+    return { ok: true, route: "integration" };
+  }
+  if (unit !== undefined && unit !== null && unit !== route.unitId) {
+    return { ok: false, reason: `--unit ${unit} does not own the PR breakpoint; the plan assigns it to unit ${route.unitId}` };
+  }
+  const pending = unitIds.filter((id) => id !== route.unitId && !isDone(id));
+  if (pending.length > 0) {
+    return { ok: false, reason: `unit-owned PR breakpoint (${route.unitId}) reached while sibling units are not DONE (${pending.join(", ")})` };
+  }
+  return { ok: true, route: "unit-owned", owner: route.unitId };
+}
+
 function unverified({ controlIssue, executionIssue, pr, reason }) {
   return {
     exitCode: 2,
@@ -340,8 +382,9 @@ function unverified({ controlIssue, executionIssue, pr, reason }) {
 // the full stage1-gate.mjs `run` (which itself needs its own network injection) — see this
 // script's own test file for the fixture shapes.
 export async function run(
-  { repo, controlIssue, executionIssue, pr, head },
+  { repo, controlIssue, executionIssue, pr, head, unit },
   {
+    parseExecutionPlanImpl = runParseExecutionPlan,
     ghIssueViewImpl = defaultGhIssueView,
     ghPrViewImpl = defaultGhPrView,
     stage1GateRunImpl = stage1GateRun,
@@ -417,6 +460,30 @@ export async function run(
     latestBody = await ghIssueViewImpl({ repo, controlIssue });
   } catch (err) {
     return unverified({ controlIssue, executionIssue, pr, reason: `pre-write control re-read failed: ${err.message}` });
+  }
+
+  // Issue #856: `ROUTED` is accepted only with live-plan proof of an authorized post-unit breakpoint.
+  const latestLifecycle = (parseControlBullet(latestBody, "Lifecycle") ?? parseHeadingField(latestBody, "State") ?? "").trim();
+  if (latestLifecycle === "ROUTED") {
+    let parsed;
+    try {
+      parsed = await parseExecutionPlanImpl({ repo, executionIssue });
+    } catch (err) {
+      return unverified({ controlIssue, executionIssue, pr, reason: `reading the live execution plan threw: ${err.message}` });
+    }
+    if (!parsed || parsed.exitCode !== 0 || !parsed.plan) {
+      const detail = parsed?.message ?? (Array.isArray(parsed?.errors) ? parsed.errors.join("; ") : "unknown");
+      return unverified({
+        controlIssue,
+        executionIssue,
+        pr,
+        reason: `cannot prove the ROUTED post-unit PR breakpoint: live execution plan unreadable (${detail})`,
+      });
+    }
+    const routed = verifyRoutedPostUnitBreakpoint(parsed.plan, { unit });
+    if (!routed.ok) {
+      return unverified({ controlIssue, executionIssue, pr, reason: `refusing ROUTED -> REVIEW: ${routed.reason}` });
+    }
   }
 
   const composed = composeFinalizedControlBody(latestBody, { pr, stage1Value });
@@ -501,7 +568,9 @@ async function main() {
   const pr = args.pr != null ? Number(args.pr) : null;
   const head = args.head ?? null;
 
-  const result = await run({ repo: resolvedRepo, controlIssue, executionIssue, pr, head });
+  const unit = args.unit ?? undefined;
+
+  const result = await run({ repo: resolvedRepo, controlIssue, executionIssue, pr, head, unit });
 
   if (result.exitCode === 1) {
     console.error(result.message);

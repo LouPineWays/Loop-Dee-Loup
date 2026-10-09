@@ -940,3 +940,16 @@ test("validatePlanInput: unit-owned owner must transitively depend on every sibl
   const ordered = validatePlanInput(mk(["999-A"]));
   assert.equal(ordered.ok, true, JSON.stringify(ordered.errors));
 });
+
+test("validatePlanInput: a non-array planIndex.units with a unit-owned route accumulates a validation error instead of throwing (#856 Stage 1 correction)", () => {
+  for (const badUnits of [{}, "999-A", 7, null]) {
+    const input = withRoute("unit-owned: 999-A");
+    input.planIndex = { ...input.planIndex, units: badUnits };
+    let result;
+    assert.doesNotThrow(() => {
+      result = validatePlanInput(input);
+    });
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.some((e) => /Units|units/.test(e)), JSON.stringify(badUnits));
+  }
+});

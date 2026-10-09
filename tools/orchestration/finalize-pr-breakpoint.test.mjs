@@ -617,3 +617,104 @@ test("composeFinalizedControlBody: from ROUTED (all-units-DONE Integration/PR re
   assert.match(result.body, /- \*\*Lifecycle:\*\* REVIEW/);
   assert.match(result.body, /- \*\*PR:\*\* #453/);
 });
+
+// -- Issue #856 Stage 1 correction: ROUTED -> REVIEW requires live-plan proof -----------------
+
+const ROUTED_BODY = READY_BODY.replace("- **Lifecycle:** READY", "- **Lifecycle:** ROUTED");
+
+function routedPlan({ route = "integration worker", states = {}, ownerText } = {}) {
+  const unitState = (id) => states[id] ?? "DONE";
+  return {
+    planIndex: { integrationRoute: route },
+    units: {
+      "447-A": { state: unitState("447-A"), prerequisitesDependencies: "none" },
+      "447-B": {
+        state: unitState("447-B"),
+        prerequisitesDependencies: "Depends on 447-A.",
+        observableCompletionCondition: ownerText ?? "PR open and finalize-pr-breakpoint.mjs --control-issue 448 reports success.",
+        durableOutputStateExpected: "",
+      },
+    },
+  };
+}
+
+async function runRouted({ plan, parsed, unit, head = "579188a" }) {
+  let currentBody = ROUTED_BODY;
+  const writes = [];
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 448, executionIssue: 447, pr: 453, head, unit },
+    {
+      parseExecutionPlanImpl: async () => parsed ?? { exitCode: 0, plan },
+      ghIssueViewImpl: async () => currentBody,
+      ghPrViewImpl: makePrViewStub(LINKED_PR_VIEW_447),
+      stage1GateRunImpl: makeStage1GateStub({ exitCode: 2, state: "PENDING", triggerTimestamp: "2026-01-01T00:00:00Z" }),
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        writes.push(proposedBody);
+        currentBody = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  return { result, writes };
+}
+
+test("run(): ROUTED with an all-DONE integration-worker plan finalizes to REVIEW (#856)", async () => {
+  const { result, writes } = await runRouted({ plan: routedPlan() });
+  assert.equal(result.state, "FINALIZED");
+  assert.equal(writes.length, 1);
+});
+
+test("run(): ROUTED with a legitimate unit-owned PR breakpoint (owner not yet DONE, siblings DONE) finalizes; mismatched --unit does not (#856)", async () => {
+  const plan = routedPlan({ route: "unit-owned: 447-B", states: { "447-B": "IN_PROGRESS" } });
+  const ok = await runRouted({ plan, unit: "447-B" });
+  assert.equal(ok.result.state, "FINALIZED");
+  const wrongOwner = await runRouted({ plan, unit: "447-A" });
+  assert.equal(wrongOwner.result.state, "PR_BREAKPOINT_UNVERIFIED");
+  assert.ok(wrongOwner.result.reason.includes("does not own the PR breakpoint"));
+  assert.equal(wrongOwner.writes.length, 0);
+});
+
+test("run(): ROUTED with an incomplete sibling fails closed without writing (#856)", async () => {
+  const integration = await runRouted({ plan: routedPlan({ states: { "447-A": "IN_PROGRESS" } }) });
+  assert.equal(integration.result.state, "PR_BREAKPOINT_UNVERIFIED");
+  assert.ok(integration.result.reason.includes("447-A"));
+  assert.equal(integration.writes.length, 0);
+  const owned = await runRouted({ plan: routedPlan({ route: "unit-owned: 447-B", states: { "447-A": "PLANNED", "447-B": "IN_PROGRESS" } }) });
+  assert.equal(owned.result.state, "PR_BREAKPOINT_UNVERIFIED");
+  assert.equal(owned.writes.length, 0);
+});
+
+test("run(): ROUTED with a missing, unreadable, no-pr, or invalid-route plan fails closed without writing (#856)", async () => {
+  const cases = [
+    { parsed: { exitCode: 2, ok: false, errors: ["no plan"] } },
+    { parsed: { exitCode: 1, message: "gh failed" } },
+    { plan: routedPlan({ route: "no-pr: nothing to review" }) },
+    { plan: routedPlan({ route: "none" }) },
+    { plan: { planIndex: { integrationRoute: "integration worker" }, units: {} } },
+  ];
+  for (const c of cases) {
+    const { result, writes } = await runRouted(c);
+    assert.equal(result.state, "PR_BREAKPOINT_UNVERIFIED", JSON.stringify(c).slice(0, 80));
+    assert.equal(writes.length, 0);
+  }
+});
+
+test("run(): a non-ROUTED lifecycle never consults the plan (READY direct route unaffected) (#856)", async () => {
+  let currentBody = READY_BODY;
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 448, executionIssue: 447, pr: 453, head: "579188a" },
+    {
+      parseExecutionPlanImpl: async () => {
+        throw new Error("must not be called");
+      },
+      ghIssueViewImpl: async () => currentBody,
+      ghPrViewImpl: makePrViewStub(LINKED_PR_VIEW_447),
+      stage1GateRunImpl: makeStage1GateStub({ exitCode: 2, state: "PENDING", triggerTimestamp: "2026-01-01T00:00:00Z" }),
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        currentBody = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.state, "FINALIZED");
+});

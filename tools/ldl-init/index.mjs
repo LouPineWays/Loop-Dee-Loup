@@ -680,6 +680,15 @@ export const HARD_MODULE_DEPENDENCIES = [
   // Issue #856: parse-execution-plan.mjs (planLevelRouteFailure) and the new
   // correct-plan-index-route.mjs hard-import these managed modules.
   { dest: "tools/orchestration/parse-execution-plan.mjs", dependsOnDest: "tools/orchestration/dependency-grammar.mjs" },
+  // Issue #856 Stage 1 correction (P2): the three direct importers of parse-execution-plan.mjs's
+  // new classifyIntegrationRoute/planLevelRouteFailure/unitOwnedRouteErrors exports. A preserved
+  // unmanaged parse-execution-plan.mjs lacking those exports would fail at import time.
+  { dest: "tools/orchestration/ready-dispatch-gate.mjs", dependsOnDest: "tools/orchestration/parse-execution-plan.mjs" },
+  { dest: "tools/orchestration/prepare-dispatch-manifest.mjs", dependsOnDest: "tools/orchestration/parse-execution-plan.mjs" },
+  { dest: "tools/orchestration/format-execution-plan.mjs", dependsOnDest: "tools/orchestration/parse-execution-plan.mjs" },
+  // finalize-pr-breakpoint.mjs hard-imports runParseExecutionPlan/classifyIntegrationRoute/planLevelRouteFailure
+  // for its ROUTED live-plan proof.
+  { dest: "tools/orchestration/finalize-pr-breakpoint.mjs", dependsOnDest: "tools/orchestration/parse-execution-plan.mjs" },
   { dest: "tools/orchestration/correct-plan-index-route.mjs", dependsOnDest: "tools/orchestration/parse-execution-plan.mjs" },
   { dest: "tools/orchestration/correct-plan-index-route.mjs", dependsOnDest: "tools/orchestration/correct-unit-dependency.mjs" },
   { dest: "tools/orchestration/correct-plan-index-route.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
