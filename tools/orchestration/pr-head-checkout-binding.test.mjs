@@ -35,6 +35,7 @@ import {
   verifyBinding,
   releaseBinding,
   reserveFromGate,
+  findDuplicateJsonKey,
   reserveAndPersistHandoff,
   parseBindingLockReason,
   formatBindingLockReason,
@@ -830,4 +831,32 @@ test("#1031 reserveAndPersistHandoff persists the terminal missing-grant verdict
   assert.equal(cr.exitCode, 0);
   const other = await reserveFromGate({ state: "NO_ACTION_YET" }, { repo: "o/r", cwd: fx.primary }, { readIssueImpl: never });
   assert.equal(other.exitCode, 0);
+});
+
+// Issue #1031 Stage 1 correction (PR #1033 findings P2 x2): ambiguity and alias fail-closed cases.
+test("#1031 duplicate sensitive keys inside one object fail closed; separate blocks and nested repeats stay distinct", async (t) => {
+  const dupIntent = `${FENCE}json\n{"plannedMutationPaths": ["tools/orchestration/action-envelope.mjs"], "plannedMutationPaths": ["x.test.mjs"]}\n${FENCE}`;
+  const dupGrants = `${issueBody({ planned: P1029 })}\n\n${FENCE}json\n{"executorSubstrate": [], "executorSubstrate": [${JSON.stringify(G_AUTH)}]}\n${FENCE}`;
+  for (const body of [dupIntent, dupGrants]) {
+    const r = await scoped(t, body);
+    assert.equal(r.out.exitCode, 2);
+    assert.equal(r.out.output.verdict, "PLANNED_SCOPE_MALFORMED");
+    assert.match(r.out.output.reason, /duplicate JSON key/);
+    assert.equal(r.after(), r.before, "no worktree reserved");
+  }
+  // Same key in nested/sibling objects is not a duplicate; legitimate separate grant blocks still work.
+  assert.equal(findDuplicateJsonKey('{"a":{"x":1},"b":{"x":2},"c":[{"x":1},{"x":2}]}'), null);
+  const ok = await scoped(t, issueBody({ planned: P1029, grants: [G_REVIEW] }) + `\n\n${issueBody({ grants: [G_AUTH] })}`, GATE1031, "tok1031g");
+  assert.equal(ok.out.exitCode, 0);
+});
+
+test("#1031 noncanonical dot-segment aliases are rejected before classification", async (t) => {
+  for (const alias of ["././tools/orchestration/action-envelope.mjs", "tools/./orchestration/action-envelope.mjs", "tools//orchestration/action-envelope.mjs", "tools/orchestration/../orchestration/action-envelope.mjs", "tools\\orchestration\\action-envelope.mjs"]) {
+    const r = await scoped(t, issueBody({ planned: [alias] }));
+    assert.equal(r.out.exitCode, 2, alias);
+    assert.equal(r.out.output.verdict, "PLANNED_SCOPE_MALFORMED", alias);
+    assert.equal(r.after(), r.before);
+  }
+  const single = await scoped(t, issueBody({ planned: ["./tools/orchestration/action-envelope.mjs"], grants: [G_AUTH] }), GATE1031, "tok1031h");
+  assert.equal(single.out.exitCode, 0, "single leading ./ remains classified by the shared classifier");
 });

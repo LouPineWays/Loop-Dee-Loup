@@ -864,9 +864,50 @@ function jsonFenceBlocks(body) {
   return blocks;
 }
 
+// Issue #1031 Stage 1 correction (P2): `JSON.parse` silently keeps the last of two same-object
+// duplicate keys, so a repeated `plannedMutationPaths`/`executorSubstrate` could hide an earlier
+// substrate path. Scans already-syntactically-valid JSON text and returns the first key repeated
+// within ONE object (nested objects and sibling blocks are tracked separately), else null.
+export function findDuplicateJsonKey(text) {
+  const stack = [];
+  const src = String(text);
+  for (let i = 0; i < src.length; i += 1) {
+    const c = src[i];
+    if (c === "{") stack.push({ object: true, keys: new Set(), expectKey: true });
+    else if (c === "[") stack.push({ object: false });
+    else if (c === "}" || c === "]") stack.pop();
+    else if (c === ",") {
+      const top = stack[stack.length - 1];
+      if (top?.object) top.expectKey = true;
+    } else if (c === '"') {
+      let j = i + 1;
+      while (j < src.length && src[j] !== '"') j += src[j] === "\\" ? 2 : 1;
+      const top = stack[stack.length - 1];
+      if (top?.object && top.expectKey) {
+        const key = JSON.parse(src.slice(i, j + 1));
+        if (top.keys.has(key)) return key;
+        top.keys.add(key);
+        top.expectKey = false;
+      }
+      i = j;
+    }
+  }
+  return null;
+}
+
+// Noncanonical spellings (residual `.`/empty segments, backslashes, padding) are rejected rather
+// than canonicalized: the shared classifier strips only one leading `./`, so an alias such as
+// `././tools/...` would otherwise classify as ordinary work product (Stage 1 review, P2).
+function isCanonicalPlannedPath(path) {
+  if (typeof path !== "string" || path === "" || path !== path.trim() || path.includes("\\") || path.startsWith("/")) return false;
+  const rest = path.startsWith("./") ? path.slice(2) : path;
+  return rest.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
+}
+
 // Returns { intent: null } (absent), { intent, authority } (valid), or { error } (fail closed).
 export function parsePreparedMutationIntent(body) {
   let intent = null;
+  let grantAmbiguity = null;
   const grants = [];
   for (const raw of jsonFenceBlocks(body)) {
     let parsed;
@@ -877,6 +918,12 @@ export function parsePreparedMutationIntent(body) {
       continue;
     }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const dup = raw.includes("plannedMutationPaths") || raw.includes("executorSubstrate") ? findDuplicateJsonKey(raw) : null;
+    if (dup !== null) {
+      const msg = `duplicate JSON key ${JSON.stringify(dup)} in one object is ambiguous`;
+      if (Object.prototype.hasOwnProperty.call(parsed, "plannedMutationPaths")) return { error: msg };
+      grantAmbiguity ??= msg;
+    }
     if (Array.isArray(parsed.executorSubstrate)) grants.push(...parsed.executorSubstrate);
     else if (parsed.executorSubstrate !== undefined) return { error: "executorSubstrate must be an array of component grants" };
     if (Object.prototype.hasOwnProperty.call(parsed, "plannedMutationPaths")) {
@@ -885,9 +932,13 @@ export function parsePreparedMutationIntent(body) {
     }
   }
   if (!intent) return { intent: null };
+  if (grantAmbiguity) return { error: grantAmbiguity };
   const paths = intent.plannedMutationPaths;
   if (!Array.isArray(paths) || paths.length === 0 || paths.some((x) => typeof x !== "string" || x.trim() === "")) {
     return { error: "plannedMutationPaths must be a non-empty array of path strings" };
+  }
+  if (!paths.every(isCanonicalPlannedPath)) {
+    return { error: "plannedMutationPaths must be canonical repository-relative paths (no '.', '..', empty segments, or backslashes)" };
   }
   return { intent, authority: { executorSubstrate: grants } };
 }
