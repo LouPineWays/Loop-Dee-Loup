@@ -4495,6 +4495,29 @@ test("#1023 resolvePreMergeVerdict: UNKNOWN -> NO_ACTION_YET, operational error 
   assert.match(shortHead.reason, /40-character reviewed head/);
 });
 
+test("#1023 correction: findings-bearing + matching `exempt at <head>` + CONFLICTING never gains the ordinary-satisfied recovery route (EXEMPT semantics unchanged)", () => {
+  const v = resolvePreMergeVerdict(
+    {
+      stage1: stage1("RESPONSE_RECEIVED", FINDINGS_RESPONSE_1023),
+      mergeReady: mergeReady("MERGE_READY"),
+      stage1Disposition: `exempt at ${ISSUE_1023_HEAD}`,
+      mergeConflict: { exitCode: 0, mergeable: "CONFLICTING" },
+    },
+    { head: ISSUE_1023_HEAD },
+  );
+  assert.notEqual(v.state, "STAGE1_SATISFIED_MERGE_CONFLICT");
+  assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+});
+
+test("#1023 correction: a fetched probe without a positive MERGEABLE (missing, null, misspelled, novel) is AMBIGUOUS, never merge/Stage 2", () => {
+  const base = { stage1: stage1("RESPONSE_RECEIVED"), mergeReady: mergeReady("MERGE_READY") };
+  for (const probe of [{ exitCode: 0 }, { exitCode: 0, mergeable: null }, { exitCode: 0, mergeable: "MERGABLE" }, { exitCode: 0, mergeable: "DIRTY" }]) {
+    const v = resolvePreMergeVerdict({ ...base, mergeConflict: probe }, { head: ISSUE_1023_HEAD });
+    assert.equal(v.state, "AMBIGUOUS");
+    assert.match(v.reason, /unrecognized mergeable value/);
+  }
+});
+
 test("#1023 runNextReviewTransitionGate: exact #963/#964/PR #1021 shape (Stage 1 satisfied at the reviewed head, GitHub CONFLICTING) -> bounded STAGE1_SATISFIED_MERGE_CONFLICT, no merge/Stage 2/founder interrupt, no correction pair", async () => {
   const { result, calls } = await runOrdinarySatisfied1023({ mergeability: { exitCode: 0, mergeable: "CONFLICTING" } });
   assert.deepEqual(calls.args, { repo: "o/r", number: 1021 });

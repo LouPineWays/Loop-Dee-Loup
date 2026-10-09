@@ -463,6 +463,13 @@ export function stage1DispositionMatchesHead(disposition, head) {
   return head.toLowerCase().startsWith(disposition.sha);
 }
 
+// Issue #1023 Stage 1 correction: ordinary-satisfied conflict recovery is authorized only by a parsed
+// `satisfied` disposition at the head; a matching `exempt at <head>` must never reach it.
+function stage1SatisfiedMatchesHead(raw, head) {
+  const parsed = parseAffirmativeStage1Disposition(raw);
+  return parsed !== null && parsed.state === "satisfied" && stage1DispositionMatchesHead(parsed, head);
+}
+
 // Codex's other known fixed Stage 1 preamble (observed live on PRs #275/#276), kept as its own
 // unconditional check for backward compatibility with fixtures/history that predate stage1-
 // findings.mjs's shared classifier and never carry a match `endpoint` field at all.
@@ -538,6 +545,17 @@ function ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeRe
       // Never inferred as a conflict and never authorizes merge on unconfirmed evidence: wait and recheck.
       return { state: "NO_ACTION_YET", stopAfter: true, ...context, stage1, mergeReady };
     }
+    if (mergeConflict.mergeable !== "MERGEABLE") {
+      // A fetched probe must positively report MERGEABLE; missing/novel/malformed values never authorize merge.
+      return {
+        state: "AMBIGUOUS",
+        stopAfter: true,
+        ...context,
+        stage1,
+        mergeReady,
+        reason: `mergeability check for an ordinary Stage 1 satisfied merge returned an unrecognized mergeable value ${JSON.stringify(mergeConflict.mergeable)}; failing closed`,
+      };
+    }
   }
   return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
 }
@@ -575,10 +593,7 @@ export function resolvePreMergeVerdict(
     };
   }
 
-  const stage1DispositionSatisfiedAtHead = stage1DispositionMatchesHead(
-    parseAffirmativeStage1Disposition(stage1Disposition),
-    context.head,
-  );
+  const stage1DispositionSatisfiedAtHead = stage1SatisfiedMatchesHead(stage1Disposition, context.head);
   if (stage1.state === "NOT_REQUESTED") {
     // Issue #454, unit 454-C: a correction-satisfied disposition only ever matters once
     // stage1-gate itself reports NOT_REQUESTED at the current head (the reviewed head's own
@@ -1488,7 +1503,7 @@ async function resolvePreMerge(
     mergeReady.exitCode === 0 &&
     isMergeReadyState(mergeReady.state) &&
     (hasFindingsStage1Response(stage1)
-      ? stage1DispositionMatchesHead(parseAffirmativeStage1Disposition(stage1Disposition), head)
+      ? stage1SatisfiedMatchesHead(stage1Disposition, head)
       : isCleanStage1Response(stage1))
   ) {
     try {
