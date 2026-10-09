@@ -774,6 +774,13 @@ export const HARD_MODULE_DEPENDENCIES = [
   // formatter. An unmanaged, preserved copy would fail at ESM load time.
   { dest: "tools/orchestration/action-envelope-hook.mjs", dependsOnDest: "tools/orchestration/verdict-handoff.mjs" },
   { dest: "tools/orchestration/pr-head-checkout-preflight.mjs", dependsOnDest: "tools/orchestration/verdict-handoff.mjs" },
+  // Issue #964: the action-envelope hook hard-imports the pre-push correction validator, which
+  // hard-imports the shared closing-keyword matcher (also now hard-imported by lifecycle-gate.mjs);
+  // it dynamically imports next-review-transition-gate.mjs for verifyCorrectionProvenance.
+  { dest: "tools/orchestration/action-envelope-hook.mjs", dependsOnDest: "tools/orchestration/correction-prepush-validator.mjs" },
+  { dest: "tools/orchestration/correction-prepush-validator.mjs", dependsOnDest: "tools/review-watch/closing-keyword.mjs" },
+  { dest: "tools/orchestration/correction-prepush-validator.mjs", dependsOnDest: "tools/orchestration/next-review-transition-gate.mjs" },
+  { dest: "tools/review-watch/lifecycle-gate.mjs", dependsOnDest: "tools/review-watch/closing-keyword.mjs" },
   { dest: "tools/orchestration/format-dispatch-prompt.mjs", dependsOnDest: "tools/orchestration/verdict-handoff.mjs" },
   // Issue #883: the evidence-only Stage 2 correction evaluator hard-imports the Stage 2 audit
   // parsers/evidence reader from lifecycle-gate.mjs, the open-PR reader from ready-dispatch-gate.mjs,

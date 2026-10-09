@@ -220,6 +220,7 @@ import { fileURLToPath } from "node:url";
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { requiresPreBoundNonIsolatedDispatch } from "./action-envelope.mjs";
+import { classifyGitPushCommand, validateCorrectionRange } from "./correction-prepush-validator.mjs";
 import { clearVerdictHandoff, persistVerdictHandoff, verdictHandoffPath } from "./verdict-handoff.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -712,6 +713,57 @@ export function decidePreToolUse(marker, toolCall = {}) {
   };
 }
 
+// Issue #964 (control #963; live #951 / #950 / PR #962): pre-publication guard for the bound
+// findings-correction worker. Applies ONLY to a Bash call made by the worker whose agent_id equals
+// the marker's `correctionCompletion.workerAgentId` (the authoritative SubagentStart binding) and
+// that would execute `git push`. Before the push is allowed, the complete local
+// reviewedHead..candidate range must satisfy the existing correction-provenance and
+// closing-reference semantics (correction-prepush-validator.mjs); otherwise the push is denied
+// while the bad history is still local, so the worker can amend/reword and retry an ordinary
+// push. Unclassifiable push intent and any inability to prove the range fail closed. Any other
+// tool call, helper agent, unbound session, or non-push command returns { applies: false }.
+export async function decideCorrectionPrePush(
+  marker,
+  toolCall = {},
+  { validateImpl = validateCorrectionRange, classifyImpl = classifyGitPushCommand } = {},
+) {
+  const completion = marker?.correctionCompletion;
+  if (
+    !completion ||
+    typeof completion.workerAgentId !== "string" ||
+    !completion.workerAgentId ||
+    completion.workerAgentId !== toolCall.agentId ||
+    toolCall.toolName !== "Bash"
+  ) {
+    return { applies: false };
+  }
+  const classified = classifyImpl(toolCall.command, { baseCwd: toolCall.cwd });
+  if (!classified.push) return { applies: false };
+  const retry =
+    "Fix the local history (amend/reword the offending commit(s) so each names the execution Issue " +
+    `#${completion.executionIssue} with a non-closing form such as "Address #${completion.executionIssue} ..."), ` +
+    "then retry an ordinary non-forced `git push`. Do not force-push.";
+  const deny = (why) => ({
+    applies: true,
+    permissionDecision: "deny",
+    permissionDecisionReason:
+      `Pre-publication correction guard (issue #964): ${why} Blocked before the push executed. ${retry}`,
+  });
+  if (!classified.classifiable) {
+    return deny(`this command's \`git push\` intent could not be safely classified (${classified.reason}). Run a plain, standalone \`git push [remote] [branch]\` from the PR-head checkout instead.`);
+  }
+  for (const push of classified.pushes) {
+    const result = await validateImpl({
+      executionIssue: completion.executionIssue,
+      reviewedHead: completion.reviewedHead,
+      candidate: push.candidate,
+      cwd: push.cwd,
+    });
+    if (!result.ok) return deny(`the local correction range ${completion.reviewedHead.slice(0, 12)}..${push.candidate} is invalid -- ${result.reason}.`);
+  }
+  return { applies: true, permissionDecision: "allow" };
+}
+
 // Extracts the captured output text from a PostToolUseFailure payload. Claude Code's
 // documented field is `tool_output`; `tool_response.stdout` and `error` are tolerated as
 // defensive fallbacks (see module header) in case the running harness version shapes this
@@ -903,7 +955,7 @@ export function markObservedVerdict(sessionId, command, stdout, { agentId, exist
   if (mode === "none" || mode === "bounded") writeMarker(sessionId, sideChannelVerdict, markOpts);
 }
 
-function main() {
+async function main() {
   try {
     const payload = readStdinJson();
     const sessionId = typeof payload?.session_id === "string" ? payload.session_id : null;
@@ -955,6 +1007,36 @@ function main() {
 
     if (payload?.hook_event_name === "PreToolUse" && sessionId) {
       const marker = readMarker(sessionId);
+      // Issue #964: bound correction worker's `git push` is validated locally before it runs.
+      // Errors here deny (fail closed) rather than falling through to the swallow-and-allow path.
+      let prePush = { applies: false };
+      try {
+        prePush = await decideCorrectionPrePush(marker, {
+          toolName: payload.tool_name,
+          command: payload.tool_input?.command,
+          agentId: typeof payload.agent_id === "string" ? payload.agent_id : undefined,
+          cwd: typeof payload.cwd === "string" ? payload.cwd : undefined,
+        });
+      } catch (err) {
+        prePush = {
+          applies: true,
+          permissionDecision: "deny",
+          permissionDecisionReason: `Pre-publication correction guard (issue #964) failed closed: ${err?.message ?? err}. Retry a plain \`git push\` after confirming the local correction commits name the execution Issue without a closing keyword.`,
+        };
+      }
+      if (prePush.applies && prePush.permissionDecision === "deny") {
+        process.stdout.write(
+          JSON.stringify({
+            hookSpecificOutput: {
+              hookEventName: "PreToolUse",
+              permissionDecision: "deny",
+              permissionDecisionReason: prePush.permissionDecisionReason,
+            },
+          }),
+        );
+        process.exit(0);
+        return;
+      }
       const decision = decidePreToolUse(marker, {
         toolName: payload.tool_name,
         command: payload.tool_input?.command,
@@ -989,5 +1071,5 @@ function main() {
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
-  main();
+  main().catch(() => process.exit(0));
 }
