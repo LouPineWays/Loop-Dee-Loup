@@ -904,6 +904,17 @@ function isCanonicalPlannedPath(path) {
   return rest.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
 }
 
+// Issue #1031 Stage 1 correction (P1): JSON permits Unicode escapes in member names, so a raw
+// substring test misses `"executor\\u0053ubstrate"` in a fence that does not parse. Decode
+// `\\uXXXX` escapes before testing so an escaped key token in a malformed fence still fails closed
+// (over-detection is the safe direction).
+export function mentionsKeyToken(raw, name) {
+  const text = String(raw);
+  if (text.includes(name)) return true;
+  const decoded = text.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+  return decoded.includes(name);
+}
+
 // Returns { intent: null } (absent), { intent, authority } (valid), or { error } (fail closed).
 export function parsePreparedMutationIntent(body) {
   let intent = null;
@@ -914,11 +925,13 @@ export function parsePreparedMutationIntent(body) {
     try {
       parsed = JSON.parse(raw);
     } catch {
-      if (raw.includes("plannedMutationPaths")) return { error: "prepared mutation intent block is not valid JSON" };
+      if (mentionsKeyToken(raw, "plannedMutationPaths")) return { error: "prepared mutation intent block is not valid JSON" };
+      // A malformed durable grant block must never be masked by another valid grant (Audit #1035).
+      if (mentionsKeyToken(raw, "executorSubstrate")) grantAmbiguity ??= "executorSubstrate grant block is not valid JSON";
       continue;
     }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-    const dup = raw.includes("plannedMutationPaths") || raw.includes("executorSubstrate") ? findDuplicateJsonKey(raw) : null;
+    const dup = mentionsKeyToken(raw, "plannedMutationPaths") || mentionsKeyToken(raw, "executorSubstrate") ? findDuplicateJsonKey(raw) : null;
     if (dup !== null) {
       const msg = `duplicate JSON key ${JSON.stringify(dup)} in one object is ambiguous`;
       if (Object.prototype.hasOwnProperty.call(parsed, "plannedMutationPaths")) return { error: msg };
