@@ -45,6 +45,9 @@ import { getActionEnvelope } from "./action-envelope.mjs";
 const PR = 700;
 const BRANCH = "worktree-agent-pr700";
 
+// Issue #1031: the execution-Issue reader is injected; legacy tests see an Issue with no intent.
+const noIntent = async () => ({ body: "ordinary issue body", state: "OPEN" });
+
 function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
@@ -502,7 +505,7 @@ test("release: chdir is never invoked when release already runs from outside the
 test("reserveFromGate: a findings STAGE1_CORRECTION_REQUIRED verdict gains checkoutBinding; other verdicts pass through untouched", async (t) => {
   const fx = makeFixture(t);
   const gate = { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, pr: PR, issue: 689, controlIssue: 514, correctionReason: "findings" };
-  const out = await reserveFromGate(gate, { repo: "o/r", cwd: fx.primary }, { ghPrViewImpl: fx.ghPrViewImpl, tokenImpl: () => "tokgate1" });
+  const out = await reserveFromGate(gate, { repo: "o/r", cwd: fx.primary }, { ghPrViewImpl: fx.ghPrViewImpl, readIssueImpl: noIntent, tokenImpl: () => "tokgate1" });
   assert.equal(out.exitCode, 0);
   assert.equal(out.output.state, "STAGE1_CORRECTION_REQUIRED");
   assert.equal(out.output.checkoutBinding.token, "tokgate1");
@@ -529,7 +532,7 @@ test("reserveFromGate: a failed reservation becomes CHECKOUT_BINDING_UNVERIFIED 
   const out = await reserveFromGate(
     gate,
     { repo: "o/r", cwd: fx.primary },
-    { ghPrViewImpl: async () => ({ headRefName: BRANCH, headRefOid: "e".repeat(40) }), tokenImpl: () => "tokgate2" },
+    { ghPrViewImpl: async () => ({ headRefName: BRANCH, headRefOid: "e".repeat(40) }), readIssueImpl: noIntent, tokenImpl: () => "tokgate2" },
   );
   assert.equal(out.exitCode, 2);
   assert.equal(out.output.state, "CHECKOUT_BINDING_UNVERIFIED");
@@ -612,6 +615,7 @@ test("reserveAndPersistHandoff: persistence failure after a fresh reservation re
     { repo: "o/r", cwd: fx.primary, fromHandoff: true },
     {
       ghPrViewImpl: fx.ghPrViewImpl,
+      readIssueImpl: noIntent,
       tokenImpl: () => "tokfail1",
       persist: (o) => {
         // The reservation genuinely exists (locked worktree on disk) when persistence is attempted.
@@ -639,7 +643,7 @@ test("reserveAndPersistHandoff: successful persistence keeps the reservation; no
   const ok = await reserveAndPersistHandoff(
     gate,
     { repo: "o/r", cwd: fx.primary, fromHandoff: true },
-    { ghPrViewImpl: fx.ghPrViewImpl, tokenImpl: () => "tokokay1", persist: () => (calls++, true) },
+    { ghPrViewImpl: fx.ghPrViewImpl, readIssueImpl: noIntent, tokenImpl: () => "tokokay1", persist: () => (calls++, true) },
   );
   assert.equal(ok.persistFailed, false);
   assert.equal(ok.exitCode, 0);
@@ -648,7 +652,7 @@ test("reserveAndPersistHandoff: successful persistence keeps the reservation; no
   const stdin = await reserveAndPersistHandoff(
     gate,
     { repo: "o/r", cwd: fx.primary },
-    { ghPrViewImpl: fx.ghPrViewImpl, tokenImpl: () => "tokokay2", persist: () => (calls++, false) },
+    { ghPrViewImpl: fx.ghPrViewImpl, readIssueImpl: noIntent, tokenImpl: () => "tokokay2", persist: () => (calls++, false) },
   );
   assert.equal(stdin.persistFailed, false);
   assert.equal(calls, 1);
@@ -687,4 +691,143 @@ test("#1023 reserveFromGate: STAGE1_SATISFIED_MERGE_CONFLICT fails closed when t
   assert.equal(moved.exitCode, 2);
   assert.equal(moved.output.verdict, "STALE_HEAD_MISMATCH");
   assert.equal(moved.output.actionEnvelope.mode, "none");
+});
+
+// -------------------------------------------------------------------------------------------
+// Issue #1031: pre-reservation known-scope executor-substrate authority check
+// -------------------------------------------------------------------------------------------
+
+const FENCE = "```";
+const grant = (component, paths) => ({ component, paths, intendedChange: "x", verification: "y" });
+function issueBody({ planned, grants = [], extra = {} } = {}) {
+  const parts = ["intro"];
+  if (planned !== undefined) parts.push(`${FENCE}json\n${JSON.stringify({ plannedMutationPaths: planned, ...extra })}\n${FENCE}`);
+  if (grants.length) parts.push(`${FENCE}json\n${JSON.stringify({ executorSubstrate: grants })}\n${FENCE}`);
+  return parts.join("\n\n");
+}
+const GATE1031 = { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, pr: PR, issue: 1029, controlIssue: 514, correctionReason: "findings" };
+const P1029 = ["tools/review-watch/trigger.mjs", "tools/orchestration/action-envelope.mjs"];
+const G_REVIEW = grant("review-control", ["tools/review-watch/trigger.mjs"]);
+const G_AUTH = grant("authority-guards", ["tools/orchestration/action-envelope.mjs"]);
+
+async function scoped(t, body, gate = GATE1031, token = "tok1031a", extraDeps = {}) {
+  const fx = makeFixture(t);
+  const before = worktreeCount(fx.primary);
+  const reads = [];
+  const out = await reserveFromGate(
+    gate,
+    { repo: "o/r", cwd: fx.primary },
+    { ghPrViewImpl: fx.ghPrViewImpl, tokenImpl: () => token, readIssueImpl: async (a) => (reads.push(a), { body, state: "OPEN" }), ...extraDeps },
+  );
+  return { fx, out, before, reads, after: () => worktreeCount(fx.primary) };
+}
+
+test("#1031 #1029-shaped scope with only review-control stops before reservation naming authority-guards", async (t) => {
+  const r = await scoped(t, issueBody({ planned: P1029, grants: [G_REVIEW] }));
+  assert.equal(r.out.exitCode, 2);
+  assert.equal(r.out.output.state, "KNOWN_SCOPE_AUTHORITY_MISSING");
+  assert.equal(r.out.output.verdict, "SUBSTRATE_AUTHORITY_MISSING");
+  assert.deepEqual(r.out.output.unauthorizedComponents, ["authority-guards"]);
+  assert.equal(r.out.output.stopAfter, true);
+  assert.equal(r.out.output.actionEnvelope.mode, "none");
+  assert.equal(r.out.output.checkoutBinding, undefined);
+  assert.equal(r.after(), r.before, "no worktree reserved");
+  assert.equal(r.reads[0].number, 1029);
+});
+
+test("#1031 both exact grants: reserves unchanged, and a repeat invocation reuses the reservation", async (t) => {
+  const body = issueBody({ planned: P1029, grants: [G_REVIEW, G_AUTH], extra: { executionIssue: 1029, pr: PR } });
+  const r = await scoped(t, body);
+  assert.equal(r.out.exitCode, 0);
+  assert.equal(r.out.output.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.ok(existsSync(r.out.output.checkoutBinding.path));
+  // Existing idempotency lives in the CLI handoff path (an already-bound handoff is returned
+  // as-is, see main()); the new check adds no state, so a repeated missing-grant stop is
+  // side-effect free and deterministic.
+  const missing = issueBody({ planned: P1029, grants: [G_REVIEW] });
+  const first = await scoped(t, missing, GATE1031, "tok1031e");
+  const second = await reserveFromGate(GATE1031, { repo: "o/r", cwd: first.fx.primary }, { ghPrViewImpl: first.fx.ghPrViewImpl, tokenImpl: () => "tok1031f", readIssueImpl: async () => ({ body: missing }) });
+  assert.deepEqual(second.output, first.out.output);
+  assert.equal(first.after(), first.before);
+});
+
+test("#1031 grant naming the component but excluding the planned path is not adjacent-path permission", async (t) => {
+  const r = await scoped(t, issueBody({ planned: P1029, grants: [G_REVIEW, grant("authority-guards", ["tools/orchestration/other.mjs"])] }));
+  assert.equal(r.out.exitCode, 2);
+  assert.equal(r.out.output.verdict, "SUBSTRATE_AUTHORITY_MISSING");
+  assert.deepEqual(r.out.output.paths, ["tools/orchestration/action-envelope.mjs"]);
+  assert.equal(r.after(), r.before);
+});
+
+test("#1031 test-only planned paths take the ordinary WORK_PRODUCT route; absent intent leaves dispatch unchanged", async (t) => {
+  const a = await scoped(t, issueBody({ planned: ["tools/review-watch/trigger.test.mjs"] }));
+  assert.equal(a.out.exitCode, 0);
+  assert.ok(a.out.output.checkoutBinding);
+  const b = await scoped(t, issueBody({ grants: [G_REVIEW] }), GATE1031, "tok1031c");
+  assert.equal(b.out.exitCode, 0);
+  assert.ok(b.out.output.checkoutBinding);
+});
+
+test("#1031 present-but-malformed or ambiguous intent fails closed without reserving", async (t) => {
+  const dup = `${issueBody({ planned: ["a.test.mjs"] })}\n\n${issueBody({ planned: ["b.test.mjs"] })}`;
+  const cases = [
+    issueBody({ planned: [] }),
+    issueBody({ planned: "tools/review-watch/trigger.mjs" }),
+    issueBody({ planned: ["ok.test.mjs", 5] }),
+    `${FENCE}json\n{"plannedMutationPaths": [oops\n${FENCE}`,
+    dup,
+  ];
+  for (const body of cases) {
+    const r = await scoped(t, body);
+    assert.equal(r.out.exitCode, 2);
+    assert.equal(r.out.output.state, "KNOWN_SCOPE_AUTHORITY_MISSING");
+    assert.equal(r.out.output.verdict, "PLANNED_SCOPE_MALFORMED");
+    assert.equal(r.after(), r.before);
+  }
+});
+
+test("#1031 stale intent identity and unreadable Issue fail closed without reserving", async (t) => {
+  for (const extra of [{ executionIssue: 999 }, { pr: PR + 1 }]) {
+    const r = await scoped(t, issueBody({ planned: ["x.test.mjs"], extra }));
+    assert.equal(r.out.output.verdict, "PLANNED_SCOPE_STALE");
+    assert.equal(r.after(), r.before);
+  }
+  const head = await scoped(t, issueBody({ planned: ["x.test.mjs"], extra: { head: "a".repeat(40) } }), { ...GATE1031, head: "b".repeat(40) });
+  assert.equal(head.out.output.verdict, "PLANNED_SCOPE_STALE");
+  const unread = await scoped(t, "", GATE1031, "tok1031d", {
+    readIssueImpl: async () => {
+      throw new Error("boom");
+    },
+  });
+  assert.equal(unread.out.exitCode, 2);
+  assert.equal(unread.out.output.verdict, "PLANNED_SCOPE_UNVERIFIED");
+  assert.equal(unread.after(), unread.before);
+});
+
+test("#1031 reserveAndPersistHandoff persists the terminal missing-grant verdict and reserves nothing; closing-reference and other verdicts do not read the Issue", async (t) => {
+  const fx = makeFixture(t);
+  const before = worktreeCount(fx.primary);
+  let persisted = null;
+  const out = await reserveAndPersistHandoff(
+    GATE1031,
+    { repo: "o/r", cwd: fx.primary, fromHandoff: true },
+    {
+      ghPrViewImpl: fx.ghPrViewImpl,
+      readIssueImpl: async () => ({ body: issueBody({ planned: P1029, grants: [G_REVIEW] }) }),
+      persist: (o) => {
+        persisted = o;
+        return true;
+      },
+    },
+  );
+  assert.equal(out.exitCode, 2);
+  assert.equal(persisted.state, "KNOWN_SCOPE_AUTHORITY_MISSING");
+  assert.equal(worktreeCount(fx.primary), before);
+  const never = async () => {
+    throw new Error("must not read");
+  };
+  const cr = await reserveFromGate({ ...GATE1031, correctionReason: "closing-reference" }, { repo: "o/r", cwd: fx.primary }, { readIssueImpl: never });
+  assert.equal(cr.exitCode, 0);
+  const other = await reserveFromGate({ state: "NO_ACTION_YET" }, { repo: "o/r", cwd: fx.primary }, { readIssueImpl: never });
+  assert.equal(other.exitCode, 0);
 });
