@@ -386,6 +386,25 @@ export function extractFindingsSection(reportText) {
   return lines.slice(start, end).join("\n");
 }
 
+// Pure. Count top-level findings, including Markdown list items indented by up to three spaces.
+// A child list begins at or beyond its parent's content column, not at any fixed indentation.
+// Audit #1011: cross-check actual entries instead of trusting the severity table alone.
+export function parseFindingEntries(findingsText) {
+  const lines = normalizeEol(findingsText).split("\n").slice(1);
+  const entries = [];
+  let contentIndent = null;
+  for (const line of lines) {
+    const marker = /^( {0,3})(?:\d+[.)]|[-*+])[ \t]+(?=\S)/.exec(line);
+    if (marker && (contentIndent === null || marker[1].length < contentIndent)) {
+      entries.push([line]);
+      contentIndent = marker[0].length;
+    } else if (entries.length > 0) {
+      entries[entries.length - 1].push(line);
+    }
+  }
+  return entries.map((e) => e.join("\n"));
+}
+
 // Re-derives the checklist-baseline proof. Never throws on a read failure: unprovable => not proven.
 async function proveChecklistBaselineCorrection(io, { repo, pr, body, mergeCommit, reportComment }) {
   const no = (reason) => ({ proven: false, reason });
@@ -416,8 +435,14 @@ async function proveChecklistBaselineCorrection(io, { repo, pr, body, mergeCommi
   // Findings section (not merely anywhere, e.g. the checklist walkthrough), so a different unrelated
   // P2/P3 finding cannot ride on a report that happens to mention both SHAs elsewhere.
   const findingsText = extractFindingsSection(reportComment?.body ?? "").toLowerCase();
-  if (!findingsText.includes(staleBase) || !findingsText.includes(firstParent)) {
-    return no("the independent NOT CLEAN report's Findings section does not name both the stale base and the merge's true first parent");
+  // Exactly one actual finding entry, and it is the one naming both SHAs: the separately authored
+  // severity table is cross-checked below, never trusted alone (Audit #1011).
+  const entries = parseFindingEntries(findingsText);
+  if (entries.length !== 1) {
+    return no(`the independent NOT CLEAN report's Findings section contains ${entries.length} finding entries, not exactly one`);
+  }
+  if (!entries[0].includes(staleBase) || !entries[0].includes(firstParent)) {
+    return no("the independent NOT CLEAN report's single finding entry does not name both the stale base and the merge's true first parent");
   }
   const sev = parseSeverityCounts(reportComment?.body ?? "");
   if (!sev || sev.P0 !== 0 || sev.P1 !== 0 || sev.P2 + sev.P3 !== 1) {
