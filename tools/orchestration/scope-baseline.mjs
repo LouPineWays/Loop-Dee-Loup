@@ -19,8 +19,10 @@
 import { execFileSync } from "node:child_process";
 
 const FULL_SHA = /^[0-9a-f]{40}$/i;
-// GitHub's commit endpoint caps `files` at 300; at the cap the list is not provably complete.
-const COMMIT_FILES_CAP = 300;
+// GitHub's commit endpoint paginates `files` (default 30/page) and caps the total at 3000; at the cap the
+// list is not provably complete.
+const COMMIT_FILES_CAP = 3000;
+const COMMIT_FILES_PER_PAGE = 100;
 
 export const ScopeState = Object.freeze({
   OK: "OK",
@@ -38,23 +40,24 @@ export function extractMergeScopeCommands(text, mergeCommit) {
   const out = [];
   if (!FULL_SHA.test(merge)) return out;
   for (const m of String(text ?? "").matchAll(/git\s+diff\b([^\n`]*)/gi)) {
-    const tokens = m[1]
-      .trim()
-      .split(/\s+/)
+    // Pathspecs follow `--`; drop everything from the first bare `--` on before reading revision operands.
+    const raw = m[1].trim().split(/\s+/);
+    const dd = raw.indexOf("--");
+    const tokens = (dd === -1 ? raw : raw.slice(0, dd))
       .map((t) => t.replace(/^[("'`]+|[)"'`.,;:]+$/g, ""))
-      .filter((t) => t !== "" && !t.startsWith("-") && t !== "--");
+      .filter((t) => t !== "" && !t.startsWith("-"));
     let base = null;
     let head = null;
     let form = "two-arg";
-    if (tokens.length >= 2) {
-      base = tokens[0];
-      head = tokens[1];
-    } else if (tokens.length === 1) {
-      const range = /^(.+?)(\.\.\.?)(.+)$/.exec(tokens[0]);
-      if (!range) continue;
+    // A range operand (`a..b` / `a...b`) is parsed first: any later token is then a pathspec, never the head.
+    const range = tokens.length >= 1 ? /^(.+?)(\.\.\.?)(.+)$/.exec(tokens[0]) : null;
+    if (range) {
       base = range[1];
       head = range[3];
       form = range[2] === "..." ? "three-dot" : "two-dot";
+    } else if (tokens.length >= 2) {
+      base = tokens[0];
+      head = tokens[1];
     } else {
       continue;
     }
@@ -126,11 +129,19 @@ export function deriveMergeScope(commit) {
   return { base: String(parents[0]).toLowerCase(), head: String(commit.sha).toLowerCase(), files: commit.files ?? null };
 }
 
-// Pure. Mechanical corrected-checklist text: replaces every occurrence of the proven-stale base SHA
-// with the proven first parent. No other text is touched.
-export function substituteScopeBase(checklist, staleBase, firstParent) {
-  const re = new RegExp(String(staleBase).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-  return String(checklist ?? "").replace(re, String(firstParent).toLowerCase());
+// Pure. Mechanical corrected-checklist text: within each literal `git diff ... <base> <merge>` scope
+// command whose base is the proven-stale SHA, replaces that base operand (its first occurrence in the
+// command) with the proven first parent. Every other occurrence of the SHA elsewhere in the checklist, and
+// all other text, is untouched. `mergeCommit` identifies which commands are scope commands.
+export function substituteScopeBase(checklist, staleBase, firstParent, mergeCommit) {
+  const stale = String(staleBase).toLowerCase();
+  const parent = String(firstParent).toLowerCase();
+  return String(checklist ?? "").replace(/git\s+diff\b[^\n`]*/gi, (match) => {
+    const hit = extractMergeScopeCommands(match, mergeCommit).some((c) => String(c.base).toLowerCase() === stale);
+    if (!hit) return match;
+    const at = match.toLowerCase().indexOf(stale);
+    return match.slice(0, at) + parent + match.slice(at + stale.length);
+  });
 }
 
 // Pure. One-line human reason for a failed check.
@@ -141,13 +152,25 @@ export function describeScopeFailure(result) {
 }
 
 export function defaultReadCommit({ repo, sha }) {
-  const raw = execFileSync("gh", ["api", `repos/${repo}/commits/${sha}`], { encoding: "utf8", maxBuffer: 50 * 1024 * 1024 });
-  const payload = JSON.parse(raw);
+  const files = [];
+  let payload = null;
+  const maxPages = COMMIT_FILES_CAP / COMMIT_FILES_PER_PAGE;
+  for (let page = 1; page <= maxPages; page++) {
+    const raw = execFileSync("gh", ["api", `repos/${repo}/commits/${sha}?per_page=${COMMIT_FILES_PER_PAGE}&page=${page}`], {
+      encoding: "utf8",
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    const p = JSON.parse(raw);
+    payload ??= p;
+    const batch = (p.files ?? []).map((f) => f.filename);
+    files.push(...batch);
+    if (batch.length < COMMIT_FILES_PER_PAGE) break;
+  }
   return {
     sha: payload.sha,
     parents: (payload.parents ?? []).map((p) => p.sha),
-    files: (payload.files ?? []).map((f) => f.filename),
-    filesComplete: (payload.files ?? []).length < COMMIT_FILES_CAP,
+    files,
+    filesComplete: files.length < COMMIT_FILES_CAP,
   };
 }
 

@@ -231,7 +231,7 @@ export function composeReplacementAuditBody(predecessorBody, { predecessor, work
       `own independent verdict. #${predecessor} and its report are preserved unchanged as historical evidence.`;
     const corrected = replaceChecklistField(
       predecessorBody,
-      substituteScopeBase(parseVerificationChecklistRef(predecessorBody) ?? "", checklistCorrection.staleBase, checklistCorrection.firstParent),
+      substituteScopeBase(parseVerificationChecklistRef(predecessorBody) ?? "", checklistCorrection.staleBase, checklistCorrection.firstParent, mergeCommit),
     );
     if (corrected === null) return null;
     const withNote = appendToFormBlock(corrected, "Stage 1 inline review disposition", note);
@@ -367,6 +367,25 @@ export function replaceChecklistField(body, replacement) {
   return body.slice(0, at) + replacement + body.slice(at + block.length);
 }
 
+// Pure. The text of the report's Findings section (heading to the next heading of equal or higher level),
+// or "" when there is none.
+export function extractFindingsSection(reportText) {
+  const lines = normalizeEol(reportText).split("\n");
+  const head = /^(#{1,6})\s*\*{0,2}\s*findings?\b/i;
+  const start = lines.findIndex((l) => head.test(l));
+  if (start === -1) return "";
+  const level = head.exec(lines[start])[1].length;
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    const m = /^(#{1,6})\s/.exec(lines[i]);
+    if (m && m[1].length <= level) {
+      end = i;
+      break;
+    }
+  }
+  return lines.slice(start, end).join("\n");
+}
+
 // Re-derives the checklist-baseline proof. Never throws on a read failure: unprovable => not proven.
 async function proveChecklistBaselineCorrection(io, { repo, pr, body, mergeCommit, reportComment }) {
   const no = (reason) => ({ proven: false, reason });
@@ -393,15 +412,18 @@ async function proveChecklistBaselineCorrection(io, { repo, pr, body, mergeCommi
   if (!files || !prSorted || files.length === 0 || files.length !== prSorted.length || files.some((f, i) => f !== prSorted[i])) {
     return no("the merge's first-parent change list is incomplete or does not equal the merged PR's file list");
   }
-  const reportText = normalizeEol(reportComment?.body ?? "").toLowerCase();
-  if (!reportText.includes(staleBase) || !reportText.includes(firstParent)) {
-    return no("the independent NOT CLEAN report does not name both the stale base and the merge's true first parent");
+  // The baseline defect must be the report's own finding: both SHAs must appear inside the report's
+  // Findings section (not merely anywhere, e.g. the checklist walkthrough), so a different unrelated
+  // P2/P3 finding cannot ride on a report that happens to mention both SHAs elsewhere.
+  const findingsText = extractFindingsSection(reportComment?.body ?? "").toLowerCase();
+  if (!findingsText.includes(staleBase) || !findingsText.includes(firstParent)) {
+    return no("the independent NOT CLEAN report's Findings section does not name both the stale base and the merge's true first parent");
   }
   const sev = parseSeverityCounts(reportComment?.body ?? "");
   if (!sev || sev.P0 !== 0 || sev.P1 !== 0 || sev.P2 + sev.P3 !== 1) {
     return no("the NOT CLEAN report's severity table is not exactly one P2/P3 finding with no P0/P1");
   }
-  const corrected = substituteScopeBase(checklist, staleBase, firstParent);
+  const corrected = substituteScopeBase(checklist, staleBase, firstParent, mergeCommit);
   const after = checkScopeBaseline({ checklist: corrected, mergeCommit, commit });
   if (after.state !== ScopeState.OK) return no("the mechanically corrected checklist still fails the scope baseline");
   return { proven: true, staleBase, firstParent, correctedChecklist: corrected, files };

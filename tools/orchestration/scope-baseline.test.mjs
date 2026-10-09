@@ -71,9 +71,9 @@ test("a truncated file list is never reported as the merge's file set", () => {
 test("deriveMergeScope uses the first parent, substituteScopeBase touches only the stale SHA", () => {
   assert.deepEqual(deriveMergeScope(commit({ parents: [PARENT, "f".repeat(40)] })), { base: PARENT, head: MERGE, files: FILES });
   assert.equal(deriveMergeScope(commit({ parents: [] })), null);
-  const out = substituteScopeBase(item(STALE), STALE, PARENT);
+  const out = substituteScopeBase(item(STALE), STALE, PARENT, MERGE);
   assert.equal(out, item(PARENT));
-  assert.equal(substituteScopeBase("keep other text", STALE, PARENT), "keep other text");
+  assert.equal(substituteScopeBase("keep other text", STALE, PARENT, MERGE), "keep other text");
 });
 
 test("verifyAuditScopeBaseline: no read when no scope command; read failure fails closed", async () => {
@@ -87,4 +87,19 @@ test("verifyAuditScopeBaseline: no read when no scope command; read failure fail
   const r = await verifyAuditScopeBaseline({ repo: "o/r", checklist: item(PARENT), mergeCommit: MERGE }, { readCommitImpl });
   assert.equal(r.state, ScopeState.MERGE_PARENT_UNPROVEN);
   assert.equal(reads, 1);
+});
+
+test("range operand followed by a pathspec is still a scope command (Stage 1 P2)", () => {
+  for (const text of [`git diff ${STALE}..${MERGE} -- tools/`, `git diff ${STALE}...${MERGE} tools/`]) {
+    assert.equal(extractMergeScopeCommands(text, MERGE).length, 1, text);
+    assert.equal(checkScopeBaseline({ checklist: text, mergeCommit: MERGE, commit: commit() }).state, ScopeState.STALE_SCOPE_BASELINE, text);
+  }
+});
+
+test("substituteScopeBase rewrites only the scope command's base, not the SHA elsewhere (Stage 1 P2)", () => {
+  const text = `3. Verify CI passed on ${STALE}.
+` + item(STALE);
+  const out = substituteScopeBase(text, STALE, PARENT, MERGE);
+  assert.ok(out.startsWith(`3. Verify CI passed on ${STALE}.`));
+  assert.ok(out.includes(`git diff ${PARENT} ${MERGE}`));
 });

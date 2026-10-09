@@ -53,7 +53,7 @@ function report({ counts = { P0: 0, P1: 0, P2: 1, P3: 0 }, mentions = [STALE, PA
     "# Stage 2 Audit Report", "", `Exact merge commit: \`${MERGE}\``, "",
     "| Severity | Count |", "| --- | ---: |",
     ...Object.entries(counts).map(([k, v]) => `| ${k} | ${v} |`), "",
-    `Finding: baseline ${mentions.join(" and ")}.`, "",
+    "### Findings", "", `Finding: baseline ${mentions.join(" and ")}.`, "",
     "### Verification checklist", "",
     "1. Confirm A — CONFIRMED",
     "2. Confirm the diff — NOT CONFIRMED: stale baseline", "",
@@ -214,6 +214,8 @@ test("negative: report that does not independently name both SHAs, or has extra/
     report({ counts: { P0: 0, P1: 1, P2: 0, P3: 0 } }),
     report({ counts: { P0: 0, P1: 0, P2: 2, P3: 0 } }),
     report({ counts: { P0: 0, P1: 0, P2: 0, P3: 0 } }),
+    // Unrelated finding; both SHAs only appear in the checklist walkthrough (P1 Stage 1 finding).
+    report({ mentions: ["an unrelated defect"] }).replace("2. Confirm the diff", `2. Confirm ${STALE} and ${PARENT}`),
   ]) {
     const world = makeWorld();
     world.comments[AUDIT][1].body = rep;

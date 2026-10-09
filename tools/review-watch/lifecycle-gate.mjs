@@ -320,6 +320,7 @@ import {
   hasVerificationEvidence,
 } from "./stage2-report.mjs";
 import { isGenuineResponse } from "./genuine-response.mjs";
+import { verifyAuditScopeBaseline, defaultReadCommit, describeScopeFailure } from "../orchestration/scope-baseline.mjs";
 
 export const DEFAULT_BOT = "chatgpt-codex-connector[bot]";
 
@@ -1033,6 +1034,7 @@ function parseThinControlStage2Ref(body) {
 async function verifyAuditCanonicalForTrigger(
   { repo, auditIssue, auditIssueData, mergeCommit, workIssueRef },
   ghIssueListImpl,
+  readCommitImpl = defaultReadCommit,
 ) {
   if (auditIssueData.state !== "OPEN") {
     return { ok: false, reason: `audit issue ${repo}#${auditIssue} is not OPEN (state: ${auditIssueData.state})` };
@@ -1071,6 +1073,17 @@ async function verifyAuditCanonicalForTrigger(
     };
   }
 
+  // Issue #1005 Stage 1 correction: re-prove the change-scope baseline at this delayed-trigger boundary
+  // too, so an edit made after control projection cannot consume the one permitted review against a
+  // stale scope command.
+  const scopeCheck = await verifyAuditScopeBaseline(
+    { repo, checklist: parseVerificationChecklistRef(auditIssueData.body ?? "") ?? "", mergeCommit },
+    { readCommitImpl },
+  );
+  if (!scopeCheck.ok) {
+    return { ok: false, reason: `checklist change-scope baseline rejected before any reviewer trigger - ${describeScopeFailure(scopeCheck)}` };
+  }
+
   return { ok: true };
 }
 
@@ -1083,6 +1096,7 @@ export async function checkPostAudit(
     ghApiImpl = defaultGhApi,
     ghIssueListImpl = defaultGhIssueList,
     ghEditedAtImpl = defaultGhIssueLastEditedAt,
+    readCommitImpl = defaultReadCommit,
     bot = DEFAULT_BOT,
   } = {},
 ) {
@@ -1260,6 +1274,7 @@ export async function checkPostAudit(
         const canonicalCheck = await verifyAuditCanonicalForTrigger(
           { repo, auditIssue: Number(auditIssue), auditIssueData, mergeCommit, workIssueRef },
           ghIssueListImpl,
+          readCommitImpl,
         );
         if (!canonicalCheck.ok) {
           return {
@@ -1470,6 +1485,7 @@ export async function checkPostAudit(
       const canonicalCheck = await verifyAuditCanonicalForTrigger(
         { repo, auditIssue: Number(auditIssue), auditIssueData, mergeCommit, workIssueRef },
         ghIssueListImpl,
+        readCommitImpl,
       );
       if (!canonicalCheck.ok) {
         return {
