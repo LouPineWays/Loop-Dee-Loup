@@ -19,13 +19,22 @@
 //          merge commit and the given work issue, and is the sole matching OPEN canonical Audit
 //          Issue. Prints `AUDIT_READY #<n>` (exit 0) or `AUDIT_PREPARATION_FAILED <reason>`
 //          (exit 2). Never posts a reviewer trigger and never writes anything.
+//   node tools/orchestration/verify-audit-ready.mjs --pr <N> --scope
+//       -> prints `MERGE_SCOPE <first-parent-sha> <merge-sha> <changed-file-count>` (issue #1005):
+//          the truthful exact-merge change-scope range, derived from the merged commit's actual
+//          first parent -- never from the PR's saved base SHA, which goes stale when the default
+//          branch advances before merge. The checklist's change-scope `git diff` MUST use exactly
+//          this range. The full check also fails closed (before any reviewer trigger) when the
+//          Audit Issue's checklist carries a `git diff <base> <merge>` whose base is not that
+//          first parent (scope-baseline.mjs).
 //
 // Reuses finalize-audit-breakpoint.mjs's verifyPrMerged/verifyAuditIssueMatches/
 // verifyAuditIssueStillUnique so there is exactly one definition of "matches this merge".
 import { execFileSync } from "node:child_process";
 import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 import { verifyPrMerged, verifyAuditIssueMatches } from "./finalize-audit-breakpoint.mjs";
-import { defaultGhIssueList, findMatchingOpenAuditIssues, parseFormField } from "../review-watch/lifecycle-gate.mjs";
+import { defaultGhIssueList, findMatchingOpenAuditIssues, parseFormField, parseVerificationChecklistRef } from "../review-watch/lifecycle-gate.mjs";
+import { verifyAuditScopeBaseline, defaultReadCommit, deriveMergeScope, describeScopeFailure } from "./scope-baseline.mjs";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
 
 function isPositiveInteger(value) {
@@ -63,8 +72,13 @@ function failed(reason) {
 }
 
 export async function run(
-  { repo, pr, executionIssue, auditIssue },
-  { ghPrViewImpl = defaultGhPrView, ghAuditIssueViewImpl = defaultGhAuditIssueView, ghIssueListImpl = defaultGhIssueList } = {},
+  { repo, pr, executionIssue, auditIssue, scope = false },
+  {
+    ghPrViewImpl = defaultGhPrView,
+    ghAuditIssueViewImpl = defaultGhAuditIssueView,
+    ghIssueListImpl = defaultGhIssueList,
+    readCommitImpl = defaultReadCommit,
+  } = {},
 ) {
   if (!isPositiveInteger(pr)) {
     return { exitCode: 1, message: "Missing/invalid required arg: --pr must be a positive integer." };
@@ -87,6 +101,27 @@ export async function run(
   }
   const merged = verifyPrMerged(prView);
   if (!merged.ok) return failed(merged.reason);
+  if (resolveOnly && scope) {
+    let commit = null;
+    try {
+      commit = await readCommitImpl({ repo, sha: merged.mergeCommitOid });
+    } catch (err) {
+      return failed(`could not read merge commit ${merged.mergeCommitOid}: ${err.message}`);
+    }
+    const derived = deriveMergeScope(commit);
+    if (!derived || String(commit.sha).toLowerCase() !== merged.mergeCommitOid.toLowerCase()) {
+      return failed(`merge commit ${merged.mergeCommitOid} has no provable first parent; cannot derive an exact-merge scope`);
+    }
+    const count = commit.filesComplete === false ? "unknown" : String((derived.files ?? []).length);
+    return {
+      exitCode: 0,
+      state: "MERGE_SCOPE",
+      base: derived.base,
+      head: derived.head,
+      files: derived.files,
+      message: `MERGE_SCOPE ${derived.base} ${derived.head} ${count}`,
+    };
+  }
   if (resolveOnly) {
     return { exitCode: 0, state: "MERGE_COMMIT", mergeCommitOid: merged.mergeCommitOid, message: `MERGE_COMMIT ${merged.mergeCommitOid}` };
   }
@@ -103,6 +138,13 @@ export async function run(
   if (!prIdentity.ok) return failed(prIdentity.reason);
   const match = verifyAuditIssueMatches(auditView, { mergeCommitOid: merged.mergeCommitOid, executionIssue });
   if (!match.ok) return failed(match.reason);
+
+  // Issue #1005: the mandatory change-scope command must truthfully isolate the audited merge.
+  const scopeCheck = await verifyAuditScopeBaseline(
+    { repo, checklist: parseVerificationChecklistRef(auditView?.body ?? "") ?? "", mergeCommit: merged.mergeCommitOid },
+    { readCommitImpl },
+  );
+  if (!scopeCheck.ok) return failed(`checklist change-scope baseline rejected before any reviewer trigger - ${describeScopeFailure(scopeCheck)}`);
 
   let candidates;
   try {
@@ -125,7 +167,7 @@ export async function run(
     );
   }
 
-  return { exitCode: 0, state: "AUDIT_READY", auditIssue, message: `AUDIT_READY #${auditIssue}` };
+  return { exitCode: 0, state: "AUDIT_READY", auditIssue, scopeBaseline: scopeCheck.state, message: `AUDIT_READY #${auditIssue}` };
 }
 
 function parseArgs(argv) {
@@ -153,6 +195,7 @@ async function main() {
     pr: args.pr != null ? Number(args.pr) : null,
     executionIssue: ei === "none" ? "none" : ei != null ? Number(ei) : null,
     auditIssue: args["audit-issue"] != null ? Number(args["audit-issue"]) : null,
+    scope: process.argv.includes("--scope"),
   });
   if (result.exitCode === 1) console.error(result.message);
   else console.log(result.message);

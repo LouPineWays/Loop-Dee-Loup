@@ -137,3 +137,47 @@ test("premature CLEAN Verdict is equally rejected; canonical PENDING still succe
   assert.equal((await run(args, deps(auditBody({ verdict: "CLEAN" })))).exitCode, 2);
   assert.equal((await run(args, deps(auditBody({ verdict: "PENDING" })))).message, "AUDIT_READY #739");
 });
+
+// -- issue #1005: exact-merge change-scope baseline (live Audit #1004 / PR #958) ------------------
+const PARENT = "182c4d9c621bdb7feb547bf6626566f9d4edbcf9";
+const STALE_BASE = "c2f3676e251ec6b3192c854634d0339d4daa841b";
+const scopeBody = (base) => auditBody({ checklistHead: CI_HEAD }).replace(
+  `1. Control-plane CI passed at pre-merge head ${CI_HEAD}.`,
+  `1. Control-plane CI passed at pre-merge head ${CI_HEAD}.\n2. Confirm \`git diff ${base} ${MERGE}\` touches only the intended files.`,
+);
+const commitOf = (parents = [PARENT]) => ({ sha: MERGE, parents, files: ["a.md", "b.mjs"], filesComplete: true });
+const scopeDeps = (body, commit) => ({ ...deps(body), readCommitImpl: async () => commit });
+
+test("#1005 --scope resolve mode prints the first-parent range and file count", async () => {
+  const r = await run({ repo: "o/r", pr: 738, scope: true }, { ...deps(""), readCommitImpl: async () => commitOf() });
+  assert.equal(r.exitCode, 0);
+  assert.equal(r.message, `MERGE_SCOPE ${PARENT} ${MERGE} 2`);
+});
+
+test("#1005 --scope fails closed without a provable first parent", async () => {
+  const r = await run({ repo: "o/r", pr: 738, scope: true }, { ...deps(""), readCommitImpl: async () => commitOf([]) });
+  assert.equal(r.exitCode, 2);
+  assert.match(r.message, /^AUDIT_PREPARATION_FAILED /);
+});
+
+test("#1005 good fixture: checklist scope base is the merge's first parent -> AUDIT_READY", async () => {
+  const r = await run(args, scopeDeps(scopeBody(PARENT), commitOf()));
+  assert.equal(r.message, "AUDIT_READY #739");
+  assert.equal(r.scopeBaseline, "OK");
+});
+
+test("#1005 bad fixture: stale PR-base in the mandatory change-scope check -> AUDIT_PREPARATION_FAILED before any trigger", async () => {
+  const r = await run(args, scopeDeps(scopeBody(STALE_BASE), commitOf()));
+  assert.equal(r.exitCode, 2);
+  assert.match(r.message, /^AUDIT_PREPARATION_FAILED checklist change-scope baseline rejected.*STALE_SCOPE_BASELINE/);
+});
+
+test("#1005 unprovable merge parent or unreadable commit with a scope command fails closed", async () => {
+  for (const commit of [commitOf([]), null]) {
+    const r = await run(args, scopeDeps(scopeBody(PARENT), commit));
+    assert.equal(r.exitCode, 2);
+    assert.match(r.message, /MERGE_PARENT_UNPROVEN/);
+  }
+  const throwing = { ...deps(scopeBody(PARENT)), readCommitImpl: async () => { throw new Error("x"); } };
+  assert.match((await run(args, throwing)).message, /MERGE_PARENT_UNPROVEN/);
+});

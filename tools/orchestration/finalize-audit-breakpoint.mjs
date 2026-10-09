@@ -114,7 +114,9 @@ import {
   checkPreAuditPendingState,
   findMatchingOpenAuditIssues,
   defaultGhIssueList,
+  parseVerificationChecklistRef,
 } from "../review-watch/lifecycle-gate.mjs";
+import { verifyAuditScopeBaseline, defaultReadCommit, describeScopeFailure } from "./scope-baseline.mjs";
 
 // Lifecycle values this script is authorized to transition *from*. `REVIEW` is the normal
 // pre-audit state a `STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2`/
@@ -432,6 +434,7 @@ export async function run(
     ghAuditIssueViewImpl = defaultGhAuditIssueView,
     ghIssueListImpl = defaultGhIssueList,
     writeControlSnapshotImpl = checkWriteControlSnapshot,
+    readCommitImpl = defaultReadCommit,
   } = {},
 ) {
   if (!isPositiveInteger(controlIssue) || !isPositiveInteger(pr) || !isPositiveInteger(auditIssue)) {
@@ -526,6 +529,18 @@ export async function run(
   );
   if (!auditMatchCheck.ok) {
     return unverified({ controlIssue, executionIssue, pr, auditIssue, reason: auditMatchCheck.reason });
+  }
+  // Issue #1005: pre-trigger boundary -- the mandatory change-scope command must truthfully isolate
+  // the audited merge. Not applied to an idempotent rerun of an already-finalized (possibly already
+  // triggered) audit.
+  if (!alreadyFinalized) {
+    const scopeCheck = await verifyAuditScopeBaseline(
+      { repo, checklist: parseVerificationChecklistRef(auditView?.body ?? "") ?? "", mergeCommit: mergedCheck.mergeCommitOid },
+      { readCommitImpl },
+    );
+    if (!scopeCheck.ok) {
+      return unverified({ controlIssue, executionIssue, pr, auditIssue, reason: `checklist change-scope baseline rejected before any reviewer trigger - ${describeScopeFailure(scopeCheck)}` });
+    }
   }
 
   // Stage 1 review finding P2 on PR #730 (issue #729's TOCTOU gap): when this finalize call was
@@ -629,7 +644,7 @@ export async function run(
 // flow (`tools/orchestration/action-envelope.mjs`'s `verify-direct-reference-audit` action).
 export async function runDirectReferenceVerification(
   { repo, executionIssue, pr, auditIssue, revalidateUniqueness = false },
-  { ghPrViewImpl = defaultGhPrView, ghAuditIssueViewImpl = defaultGhAuditIssueView, ghIssueListImpl = defaultGhIssueList } = {},
+  { ghPrViewImpl = defaultGhPrView, ghAuditIssueViewImpl = defaultGhAuditIssueView, ghIssueListImpl = defaultGhIssueList, readCommitImpl = defaultReadCommit } = {},
 ) {
   if (!isPositiveInteger(pr) || !isPositiveInteger(auditIssue)) {
     return {
@@ -670,6 +685,16 @@ export async function runDirectReferenceVerification(
   const auditMatchCheck = verifyAuditIssueMatches(auditView, { mergeCommitOid: mergedCheck.mergeCommitOid, executionIssue });
   if (!auditMatchCheck.ok) {
     return unverified({ controlIssue: null, executionIssue, pr, auditIssue, reason: auditMatchCheck.reason });
+  }
+  // Issue #1005: same pre-trigger change-scope baseline boundary as `run`.
+  {
+    const scopeCheck = await verifyAuditScopeBaseline(
+      { repo, checklist: parseVerificationChecklistRef(auditView?.body ?? "") ?? "", mergeCommit: mergedCheck.mergeCommitOid },
+      { readCommitImpl },
+    );
+    if (!scopeCheck.ok) {
+      return unverified({ controlIssue: null, executionIssue, pr, auditIssue, reason: `checklist change-scope baseline rejected before any reviewer trigger - ${describeScopeFailure(scopeCheck)}` });
+    }
   }
 
   // Issue #883 Stage 1 correction: honor the same opt-in uniqueness revalidation `run` performs,
