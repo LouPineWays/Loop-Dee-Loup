@@ -659,12 +659,17 @@ export const CONFLICT_RECOVERY_PROTECTED_CLAUSE =
 // Issue #980 (control #967): a successor cherry-pick conflict in a protected operating-contract file
 // is resolved only by the controller-side delta helper (sibling of the preflight), never by a
 // worker edit; its exit 2 stops. Other conflicts stay worker-owned.
-export function renderConflictRecoverySuccessorClause({ preflightPath, controlIssue, issue, pr, correctedHead, token = null }) {
+// Issue #1023 (control #1022): `ordinarySatisfied` renders the same route for a clean ordinary Stage 1
+// satisfied predecessor. `correctedHead` is then the satisfied (reviewed) head used only as the
+// predecessor-head expectation; no correction-satisfied pair exists, so the correction-only protected
+// delta helper (which proves that pair) is never offered and a protected-file conflict fails closed.
+export function renderConflictRecoverySuccessorClause({ preflightPath, controlIssue, issue, pr, correctedHead, token = null, ordinarySatisfied = false }) {
   const deltaPath = preflightPath.replace(/successor-integration-preflight.mjs$/, "resolve-successor-protected-delta.mjs");
-  const protectedDelta =
-    `AGENTS.md/CLAUDE.md cherry-pick conflict => never hand-edit; run node "${deltaPath}" --control-issue ${controlIssue} --execution-issue ${issue} --predecessor-pr ${pr} --reviewed-head <control Stage 1 reviewed head> --corrected-head ${correctedHead} --apply (exit 2 => stop; other conflicts are yours)`;
+  const protectedDelta = ordinarySatisfied
+    ? "AGENTS.md/CLAUDE.md cherry-pick conflict => never hand-edit; stop with a proposal (no correction-satisfied pair exists for the protected-delta helper; other conflicts are yours)"
+    : `AGENTS.md/CLAUDE.md cherry-pick conflict => never hand-edit; run node "${deltaPath}" --control-issue ${controlIssue} --execution-issue ${issue} --predecessor-pr ${pr} --reviewed-head <control Stage 1 reviewed head> --corrected-head ${correctedHead} --apply (exit 2 => stop; other conflicts are yours)`;
   return (
-    `Successor-first (gate confirmed CONFLICTING): never merge the target into #${pr}, run resolve-protected-conflict.mjs, rebase, force-push, rewrite or re-review it; it stays historical. ` +
+    `Successor-first (gate confirmed CONFLICTING${ordinarySatisfied ? "; ordinary Stage 1 satisfied predecessor, its satisfaction is not review authority for the successor" : ""}): never merge the target into #${pr}, run resolve-protected-conflict.mjs, rebase, force-push, rewrite or re-review it; it stays historical. ` +
     `founder/product/security/authority ambiguity => founder interrupt; ordinary technical integration of the settled outcome => ` +
     `one successor PR: node "${preflightPath}" --execution-issue ${issue} --predecessor-pr ${pr} --expect-predecessor-head ${correctedHead}. ` +
     `SUCCESSOR_EXISTS => never create/push another or replay NO_SUCCESSOR steps; verify its head, body ("Addresses #${issue}" + "Supersedes #${pr}") and Stage 1 state, run trigger.mjs for that exact live head only if not already requested (idempotent, never a second trigger), run finalize-pr-breakpoint.mjs if the control PR pointer is not already it, release the predecessor binding${token ? ` (--release-binding ${token})` : ""} and stop; mismatched/ambiguous state => stop, never overwrite the pointer. LOCAL_SUCCESSOR_LIVE_OWNED => stop (a worker already owns it). LOCAL_SUCCESSOR_RESUMABLE => resume its returned path/branch, never a new branch or binding. LOCAL_SUCCESSOR_STALE_RECLAIMABLE => rerun with --reclaim true, then treat as NO_SUCCESSOR. FAIL_CLOSED => stop. NO_SUCCESSOR => save returned target.sha+branch+target.ref, ` +
@@ -743,9 +748,42 @@ export function formatConflictRecoveryWorkerDispatchPrompt({
   reviewedHead = null,
   correctedHead = null,
   checkoutBinding = null,
+  ordinarySatisfied = false,
 }) {
   if (!isPositiveInteger(pr)) {
     throw new Error("formatConflictRecoveryWorkerDispatchPrompt requires pr to be a positive integer");
+  }
+  if (ordinarySatisfied) {
+    // Issue #1023: successor-first only; the satisfied head is the predecessor expectation and no
+    // corrected head may be supplied (a correction-satisfied pair is never fabricated).
+    if (
+      !isPositiveInteger(controlIssue) ||
+      !isPositiveInteger(issue) ||
+      typeof reviewedHead !== "string" ||
+      !/^[0-9a-f]{40}$/i.test(reviewedHead) ||
+      (correctedHead !== null && correctedHead !== undefined)
+    ) {
+      throw new Error(
+        "formatConflictRecoveryWorkerDispatchPrompt (ordinary satisfied) requires positive controlIssue and issue, a 40-character reviewedHead, and no correctedHead",
+      );
+    }
+    assertCheckoutBinding(checkoutBinding, "formatConflictRecoveryWorkerDispatchPrompt", "a conflict-recovery dispatch");
+    const { path, token, scriptPath } = checkoutBinding;
+    return (
+      `Conflict-recovery worker dispatch. Execution Issue: #${issue}. PR: #${pr}. Controlling Issue: #${controlIssue}.
+
+` +
+      renderSuccessorPredecessorCheckoutClause({ path, token, scriptPath, pr }) +
+      renderConflictRecoverySuccessorClause({
+        preflightPath: siblingAuthoritativeScript(scriptPath, "successor-integration-preflight.mjs"),
+        controlIssue,
+        issue,
+        pr,
+        correctedHead: reviewedHead,
+        token,
+        ordinarySatisfied: true,
+      })
+    );
   }
   const hasExecutionIssue = issue !== "none";
   if (hasExecutionIssue && !isPositiveInteger(issue)) {
@@ -903,6 +941,12 @@ const TEMPLATES_BY_STATE = {
   STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT: {
     formatter: formatConflictRecoveryWorkerDispatchPrompt,
     fields: ["controlIssue", "issue", "pr", "reviewedHead", "correctedHead", "checkoutBinding"],
+  },
+  // Issue #1023: ordinary Stage 1 satisfied + confirmed CONFLICTING; same formatter, flagged.
+  STAGE1_SATISFIED_MERGE_CONFLICT: {
+    formatter: formatConflictRecoveryWorkerDispatchPrompt,
+    fields: ["controlIssue", "issue", "pr", "reviewedHead", "correctedHead", "checkoutBinding"],
+    constants: { ordinarySatisfied: true },
   },
 };
 
@@ -1073,7 +1117,7 @@ function main() {
           `(or "READY_TO_DISPATCH_PLANNING"/"READY_TO_DISPATCH_INTEGRATION"/"REPLAN_REQUIRED"/` +
           `"STAGE1_CORRECTION_REQUIRED"/"STAGE2_CORRECTION_REQUIRED"/"STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2"/` +
           `"STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2"/"STAGE2_PREPARATION_REQUIRED"/` +
-          `"STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT") — refusing to format a dispatch prompt for a non-ready or ` +
+          `"STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT"/"STAGE1_SATISFIED_MERGE_CONFLICT") — refusing to format a dispatch prompt for a non-ready or ` +
           "malformed gate result\n",
       );
       process.exit(2);
@@ -1081,6 +1125,7 @@ function main() {
     }
     formatter = entry.formatter;
     fields = Object.fromEntries(entry.fields.map((f) => [f, readField(f, parsed, { isCli: false })]));
+    if (entry.constants) Object.assign(fields, entry.constants);
   }
 
   // Issue #703: a pre-bound checkout path is machine-generated data, not restated prose, and its
@@ -1108,8 +1153,9 @@ function main() {
           controlIssue: fields.controlIssue,
           issue: fields.issue,
           pr: fields.pr,
-          correctedHead: fields.correctedHead,
+          correctedHead: fields.ordinarySatisfied ? fields.reviewedHead : fields.correctedHead,
           token: fields.checkoutBinding.token,
+          ordinarySatisfied: fields.ordinarySatisfied === true,
         }).length
       : 0;
   const templateAllowance =

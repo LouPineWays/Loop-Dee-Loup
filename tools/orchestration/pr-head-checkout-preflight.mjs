@@ -860,12 +860,19 @@ export async function releaseBinding(
 // authorized recovery.
 export async function reserveFromGate(gate, { repo, cwd } = {}, deps = {}) {
   const isFindingsCorrection = gate?.state === "STAGE1_CORRECTION_REQUIRED" && gate.correctionReason !== "closing-reference";
-  const isConflictRecovery = gate?.state === "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT";
+  // Issue #1023: the ordinary-satisfied conflict verdict reserves the same way, pinned to its
+  // `reviewedHead` (the exact head Stage 1 was satisfied at) since no corrected head exists.
+  const isOrdinaryConflict = gate?.state === "STAGE1_SATISFIED_MERGE_CONFLICT";
+  const isConflictRecovery = gate?.state === "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT" || isOrdinaryConflict;
   if (!gate || (!isFindingsCorrection && !isConflictRecovery)) {
     return { exitCode: 0, output: gate };
   }
-  const expectedHead = isConflictRecovery ? gate.correctedHead : null;
-  const result = await reserve({ repo, pr: gate.pr, cwd, expectedHead }, deps);
+  const expectedHead = isOrdinaryConflict ? gate.reviewedHead : isConflictRecovery ? gate.correctedHead : null;
+  // An ordinary-satisfied conflict verdict without a provable reviewed head must never reserve unpinned.
+  const result =
+    isOrdinaryConflict && !/^[0-9a-f]{40}$/i.test(String(gate.reviewedHead ?? ""))
+      ? { exitCode: 2, verdict: "STALE_HEAD_MISMATCH", reason: "STAGE1_SATISFIED_MERGE_CONFLICT verdict carries no 40-character reviewedHead to pin the reservation to" }
+      : await reserve({ repo, pr: gate.pr, cwd, expectedHead }, deps);
   if (result.exitCode !== 0) {
     // Issue #703 Stage 1 correction (P2 finding on PR #710): a failed reservation must reach a
     // terminal, no-dispatch outcome that is itself representable as compliant -- the original

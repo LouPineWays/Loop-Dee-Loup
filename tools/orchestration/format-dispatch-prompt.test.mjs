@@ -1487,3 +1487,65 @@ test("conflict-recovery prompt without a control/execution pair keeps exit 2 as 
   assert.match(prompt, /work only there/);
   assert.doesNotMatch(prompt, /separate successor worktree/);
 });
+
+// -- Issue #1023: ordinary Stage 1 satisfied + CONFLICTING (successor-first, no correction pair) ------
+
+const ORDINARY_HEAD = "5dd2da1c128155c44973cf4f9c38ff2ce759eec4";
+
+test("#1023 formatConflictRecoveryWorkerDispatchPrompt (ordinarySatisfied): successor-first with the satisfied head as the predecessor expectation, no correction-satisfied helper or finalizer", () => {
+  const prompt = formatConflictRecoveryWorkerDispatchPrompt({
+    controlIssue: 963,
+    issue: 964,
+    pr: 1021,
+    reviewedHead: ORDINARY_HEAD,
+    checkoutBinding: BINDING,
+    ordinarySatisfied: true,
+  });
+  assert.match(prompt, /^Conflict-recovery worker dispatch\. Execution Issue: #964\. PR: #1021\. Controlling Issue: #963\./);
+  assert.match(prompt, new RegExp(`--expect-predecessor-head ${ORDINARY_HEAD}`));
+  assert.match(prompt, /Supersedes #1021/);
+  assert.match(prompt, /request fresh Stage 1 on its live head/);
+  assert.match(prompt, /ordinary Stage 1 satisfied predecessor, its satisfaction is not review authority/);
+  assert.doesNotMatch(prompt, /resolve-successor-protected-delta\.mjs/);
+  assert.doesNotMatch(prompt, /--corrected-head/);
+  assert.match(prompt, /never merge the target into #1021/);
+});
+
+test("#1023 formatConflictRecoveryWorkerDispatchPrompt (ordinarySatisfied) fails closed on a missing/short reviewed head, a supplied corrected head, a missing binding, or no control/execution pair", () => {
+  const ok = { controlIssue: 963, issue: 964, pr: 1021, reviewedHead: ORDINARY_HEAD, checkoutBinding: BINDING, ordinarySatisfied: true };
+  assert.doesNotThrow(() => formatConflictRecoveryWorkerDispatchPrompt(ok));
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ ...ok, reviewedHead: "abc123" }));
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ ...ok, reviewedHead: null }));
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ ...ok, correctedHead: CORRECTED_HEAD }), /no correctedHead/);
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ ...ok, checkoutBinding: null }), /checkoutBinding/);
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ ...ok, controlIssue: null }));
+  assert.throws(() => formatConflictRecoveryWorkerDispatchPrompt({ ...ok, issue: "none" }));
+});
+
+test("#1023 CLI: piped STAGE1_SATISFIED_MERGE_CONFLICT selects the ordinary successor-first template and fails closed on a corrected head or missing binding", async () => {
+  const result = await runCli({
+    state: "STAGE1_SATISFIED_MERGE_CONFLICT",
+    controlIssue: 963,
+    issue: 964,
+    pr: 1021,
+    reviewedHead: ORDINARY_HEAD,
+    checkoutBinding: BINDING,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^Conflict-recovery worker dispatch\./);
+  assert.match(result.stdout, new RegExp(`--expect-predecessor-head ${ORDINARY_HEAD}`));
+  assert.doesNotMatch(result.stdout, /resolve-successor-protected-delta/);
+  const withCorrected = await runCli({
+    state: "STAGE1_SATISFIED_MERGE_CONFLICT",
+    controlIssue: 963,
+    issue: 964,
+    pr: 1021,
+    reviewedHead: ORDINARY_HEAD,
+    correctedHead: CORRECTED_HEAD,
+    checkoutBinding: BINDING,
+  });
+  assert.equal(withCorrected.status, 1);
+  const noBinding = await runCli({ state: "STAGE1_SATISFIED_MERGE_CONFLICT", controlIssue: 963, issue: 964, pr: 1021, reviewedHead: ORDINARY_HEAD });
+  assert.equal(noBinding.status, 1);
+  assert.equal(noBinding.stdout, "");
+});

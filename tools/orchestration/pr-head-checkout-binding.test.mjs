@@ -653,3 +653,38 @@ test("reserveAndPersistHandoff: successful persistence keeps the reservation; no
   assert.equal(stdin.persistFailed, false);
   assert.equal(calls, 1);
 });
+
+// Issue #1023: the ordinary-satisfied conflict verdict reserves the predecessor checkout pinned to
+// its `reviewedHead` (no corrected head exists), failing closed on a moved head or a missing pin.
+test("#1023 reserveFromGate: STAGE1_SATISFIED_MERGE_CONFLICT gains checkoutBinding pinned to the gated reviewedHead", async (t) => {
+  const fx = makeFixture(t);
+  const gate = { state: "STAGE1_SATISFIED_MERGE_CONFLICT", stopAfter: true, pr: PR, issue: 964, controlIssue: 963, reviewedHead: fx.prHead.sha };
+  const out = await reserveFromGate(gate, { repo: "o/r", cwd: fx.primary }, { ghPrViewImpl: fx.ghPrViewImpl, tokenImpl: () => "tokord01" });
+  assert.equal(out.exitCode, 0);
+  assert.equal(out.output.state, "STAGE1_SATISFIED_MERGE_CONFLICT");
+  assert.equal(out.output.checkoutBinding.sha, fx.prHead.sha);
+  assert.ok(existsSync(out.output.checkoutBinding.path));
+  assert.equal(out.output.reviewedHead, gate.reviewedHead);
+});
+
+test("#1023 reserveFromGate: STAGE1_SATISFIED_MERGE_CONFLICT fails closed when the PR head moved after the verdict, or when no 40-char reviewedHead pins it", async (t) => {
+  const fx = makeFixture(t);
+  const gated = fx.prHead.sha;
+  const noPin = await reserveFromGate(
+    { state: "STAGE1_SATISFIED_MERGE_CONFLICT", stopAfter: true, pr: PR, issue: 964, controlIssue: 963 },
+    { repo: "o/r", cwd: fx.primary },
+    { ghPrViewImpl: fx.ghPrViewImpl, tokenImpl: () => "tokord02" },
+  );
+  assert.equal(noPin.exitCode, 2);
+  assert.equal(noPin.output.state, "CHECKOUT_BINDING_UNVERIFIED");
+  fx.prHead.sha = commitFile(fx.implementer, "feature.txt", "moved after the conflict verdict\n");
+  git(fx.implementer, "push", "-q", "origin", BRANCH);
+  const moved = await reserveFromGate(
+    { state: "STAGE1_SATISFIED_MERGE_CONFLICT", stopAfter: true, pr: PR, issue: 964, controlIssue: 963, reviewedHead: gated },
+    { repo: "o/r", cwd: fx.primary },
+    { ghPrViewImpl: fx.ghPrViewImpl, tokenImpl: () => "tokord03" },
+  );
+  assert.equal(moved.exitCode, 2);
+  assert.equal(moved.output.verdict, "STALE_HEAD_MISMATCH");
+  assert.equal(moved.output.actionEnvelope.mode, "none");
+});

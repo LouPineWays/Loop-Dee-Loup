@@ -280,6 +280,15 @@ const ENVELOPES = {
     mode: ENVELOPE_MODES.BOUNDED,
     authorizedActions: ["reserve-correction-checkout", "dispatch-conflict-recovery-worker"],
   },
+  // Issue #1023 (control #1022; live #963/#964/PR #1021): the ORDINARY Stage 1 satisfied analog of
+  // the row above -- a clean-satisfied PR GitHub positively reports CONFLICTING. Identical bounded
+  // shape (reserve the exclusive predecessor checkout, dispatch the one successor-first recovery
+  // worker); never merge-pr, finalize-stage1-satisfied, or any Stage 2 action, and never a second
+  // Stage 1 trigger on the predecessor.
+  STAGE1_SATISFIED_MERGE_CONFLICT: {
+    mode: ENVELOPE_MODES.BOUNDED,
+    authorizedActions: ["reserve-correction-checkout", "dispatch-conflict-recovery-worker"],
+  },
   // Issue #703: a findings-bearing Stage 1 correction settles the worker's exact PR-head checkout
   // BEFORE spawn (`pr-head-checkout-preflight.mjs --reserve-from-gate`, the pipeline stage between
   // this gate and `format-dispatch-prompt.mjs`), so `reserve-correction-checkout` is authorized
@@ -763,7 +772,7 @@ export function contextSensitiveEnvelopeStates() {
 // the closing-reference repair needs no checkout, so its continuation is the formatter alone.
 export function getCorrectionContinuation(state, verdict = {}) {
   const isStage1Correction = state === "STAGE1_CORRECTION_REQUIRED";
-  const isConflict = state === "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT";
+  const isConflict = state === "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT" || state === "STAGE1_SATISFIED_MERGE_CONFLICT";
   if (!isStage1Correction && !isConflict) return null;
   const needsReservation = isConflict || verdict.correctionReason !== "closing-reference";
   // Issue #858 Stage 2 correction: only an actual positive integer number qualifies; never

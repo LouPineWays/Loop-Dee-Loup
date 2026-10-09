@@ -6,6 +6,7 @@ import {
   knownEnvelopeStates,
   contextSensitiveEnvelopeStates,
   requiresPreBoundNonIsolatedDispatch,
+  getCorrectionContinuation,
   ENVELOPE_MODES,
 } from "./action-envelope.mjs";
 
@@ -32,6 +33,7 @@ test("getActionEnvelope: every ready-dispatch-gate.mjs and next-review-transitio
     "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
     "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
     "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT",
+    "STAGE1_SATISFIED_MERGE_CONFLICT",
     "STAGE1_CORRECTION_REQUIRED",
     "STAGE1_CORRECTION_FINALIZATION_REQUIRED",
     "CHECKOUT_BINDING_UNVERIFIED",
@@ -1134,4 +1136,23 @@ test("#883 STAGE2_EVIDENCE_REAUDIT_READY: finalize/project then trigger in contr
     classifyEnvelopeCompliance("STAGE2_EVIDENCE_REAUDIT_READY", ["dispatch-correction-worker"], verdict).status,
     "violation",
   );
+});
+
+// Issue #1023: the ordinary Stage 1 satisfied conflict verdict mirrors the correction-satisfied one --
+// reserve the predecessor checkout, dispatch one successor-first recovery worker, never merge or Stage 2.
+test("STAGE1_SATISFIED_MERGE_CONFLICT: bounded reserve -> dispatch-conflict-recovery-worker; merge, Stage 2, and a second gate run are violations", () => {
+  assert.deepEqual(getActionEnvelope("STAGE1_SATISFIED_MERGE_CONFLICT"), {
+    mode: "bounded",
+    authorizedActions: ["reserve-correction-checkout", "dispatch-conflict-recovery-worker"],
+  });
+  const good = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_CONFLICT", ["reserve-correction-checkout", "dispatch-conflict-recovery-worker"]);
+  assert.equal(good.status, "compliant");
+  for (const bad of ["merge-pr", "finalize-stage1-satisfied", "dispatch-stage2-preparation-worker", "rerun-gate"]) {
+    const r = classifyEnvelopeCompliance("STAGE1_SATISFIED_MERGE_CONFLICT", ["reserve-correction-checkout", "dispatch-conflict-recovery-worker", bad]);
+    assert.equal(r.status, "violation", bad);
+  }
+  assert.equal(requiresPreBoundNonIsolatedDispatch(getActionEnvelope("STAGE1_SATISFIED_MERGE_CONFLICT").authorizedActions), true);
+  const c = getCorrectionContinuation("STAGE1_SATISFIED_MERGE_CONFLICT", { controlIssue: 963 });
+  assert.equal(c.steps.length, 2);
+  assert.match(c.steps[0], /pr-head-checkout-preflight\.mjs --reserve-from-gate/);
 });

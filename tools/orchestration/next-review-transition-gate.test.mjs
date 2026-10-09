@@ -1236,6 +1236,7 @@ test("runNextReviewTransitionGate: control-Issue mode with a settled PR (no Stag
         assert.equal(args.head, "livehead123");
         return stage1("RESPONSE_RECEIVED");
       },
+      checkMergeConflictImpl: async () => ({ exitCode: 0, mergeable: "MERGEABLE" }),
       checkMergeReadyImpl: async (args) => {
         assert.equal(args.pr, 376);
         assert.equal(args.issue, 375);
@@ -1335,6 +1336,7 @@ test("runNextReviewTransitionGate: the same #428-shaped body with a clean/no-fin
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_428_SHAPE, state: "OPEN" }),
       ghPrStateImpl: async () => ({ headRefOid: "67fa0c28fde901e721afe30a91451130668f0bb0", state: "OPEN" }),
       stage1RunImpl: async () => stage1("RESPONSE_RECEIVED"),
+      checkMergeConflictImpl: async () => ({ exitCode: 0, mergeable: "MERGEABLE" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
     },
   );
@@ -1992,6 +1994,7 @@ test("runNextReviewTransitionGate: control-Issue mode never invokes checkCorrect
       ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE_CORRECTION_SATISFIED, state: "OPEN" }),
       ghPrStateImpl: async () => ({ headRefOid: "0009c54b18", state: "OPEN" }),
       stage1RunImpl: async () => stage1("RESPONSE_RECEIVED"),
+      checkMergeConflictImpl: async () => ({ exitCode: 0, mergeable: "MERGEABLE" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
       checkCorrectionDeltaImpl: async () => {
         correctionDeltaCalls++;
@@ -2018,6 +2021,7 @@ test("runNextReviewTransitionGate: control-Issue mode honors an explicit --head,
         assert.equal(args.head, "explicit-sha");
         return stage1("RESPONSE_RECEIVED");
       },
+      checkMergeConflictImpl: async () => ({ exitCode: 0, mergeable: "MERGEABLE" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
     },
   );
@@ -2597,6 +2601,7 @@ test("runNextReviewTransitionGate: a settled PR with no settled Stage 2 referenc
         assert.equal(args.head, "livehead123");
         return stage1("RESPONSE_RECEIVED");
       },
+      checkMergeConflictImpl: async () => ({ exitCode: 0, mergeable: "MERGEABLE" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
     },
   );
@@ -3712,6 +3717,7 @@ test("runNextReviewTransitionGate: control-Issue mode accepts the live 'Executio
       ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
       ghPrStateImpl: async () => ({ headRefOid: "livehead123", state: "OPEN" }),
       stage1RunImpl: async () => stage1("RESPONSE_RECEIVED"),
+      checkMergeConflictImpl: async () => ({ exitCode: 0, mergeable: "MERGEABLE" }),
       checkMergeReadyImpl: async () => mergeReady("MERGE_READY"),
     },
   );
@@ -4393,4 +4399,188 @@ test("runNextReviewTransitionGate: #924 -- findings-bearing correction commit om
   assert.match(r.reason, /do not request a second ordinary review/);
   assert.equal(r.reviewedHead, ISSUE_611_REVIEWED_HEAD);
   assert.equal(r.correctedHead, ISSUE_611_CORRECTED_HEAD);
+});
+
+// -- Issue #1023 (control #1022; live #963/#964/PR #1021): ordinary Stage 1 satisfied + CONFLICTING ----
+
+const ISSUE_1023_HEAD = "5dd2da1c128155c44973cf4f9c38ff2ce759eec4";
+const CONTROL_BODY_ORDINARY_SATISFIED_1023 = `## Current state
+
+- **Lifecycle:** REVIEW
+- **Execution:** #964
+- **Route:** implementation worker
+- **PR:** #1021
+- **Stage 1:** satisfied at ${ISSUE_1023_HEAD}
+- **Stage 2:** none
+- **Blocker:** none
+- **Founder decision:** none
+`;
+
+function runOrdinarySatisfied1023(overrides = {}) {
+  const calls = { mergeability: 0, correctionDelta: 0 };
+  const run = runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "963" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_ORDINARY_SATISFIED_1023, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: ISSUE_1023_HEAD, state: "OPEN" }),
+      stage1RunImpl: async () => stage1("RESPONSE_RECEIVED"),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkCorrectionDeltaImpl: async () => {
+        calls.correctionDelta++;
+        throw new Error("an ordinary satisfied PR must never fabricate a correction-satisfied pair");
+      },
+      checkMergeConflictImpl: async (args) => {
+        calls.mergeability++;
+        calls.args = args;
+        return overrides.mergeability ?? { exitCode: 0, mergeable: "MERGEABLE" };
+      },
+    },
+  );
+  return run.then((result) => ({ result, calls }));
+}
+
+const FINDINGS_RESPONSE_1023 = {
+  matches: [{ body_excerpt: "### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request." }],
+  unboundGenuineMatches: [],
+};
+
+test("#1023 resolvePreMergeVerdict: clean RESPONSE_RECEIVED + MERGE_READY + CONFLICTING -> STAGE1_SATISFIED_MERGE_CONFLICT carrying reviewedHead only, never the merge verdict or a corrected head", () => {
+  const v = resolvePreMergeVerdict(
+    { stage1: stage1("RESPONSE_RECEIVED"), mergeReady: mergeReady("MERGE_READY"), mergeConflict: { exitCode: 0, mergeable: "CONFLICTING" } },
+    { head: ISSUE_1023_HEAD, pr: 1021, issue: 964, controlIssue: 963 },
+  );
+  assert.equal(v.state, "STAGE1_SATISFIED_MERGE_CONFLICT");
+  assert.equal(v.stopAfter, true);
+  assert.equal(v.reviewedHead, ISSUE_1023_HEAD);
+  assert.ok(!("correctedHead" in v));
+});
+
+test("#1023 resolvePreMergeVerdict: findings-bearing RESPONSE_RECEIVED with a head-scoped satisfied disposition + CONFLICTING also routes to the conflict verdict", () => {
+  const v = resolvePreMergeVerdict(
+    {
+      stage1: stage1("RESPONSE_RECEIVED", FINDINGS_RESPONSE_1023),
+      mergeReady: mergeReady("MERGE_READY"),
+      stage1Disposition: `satisfied at ${ISSUE_1023_HEAD}`,
+      mergeConflict: { exitCode: 0, mergeable: "CONFLICTING" },
+    },
+    { head: ISSUE_1023_HEAD },
+  );
+  assert.equal(v.state, "STAGE1_SATISFIED_MERGE_CONFLICT");
+});
+
+test("#1023 resolvePreMergeVerdict: MERGEABLE, absent (null) mergeability, and EXEMPT even with CONFLICTING keep the unchanged merge verdict", () => {
+  for (const mergeConflict of [{ exitCode: 0, mergeable: "MERGEABLE" }, null]) {
+    const v = resolvePreMergeVerdict(
+      { stage1: stage1("RESPONSE_RECEIVED"), mergeReady: mergeReady("MERGE_READY"), mergeConflict },
+      { head: ISSUE_1023_HEAD },
+    );
+    assert.equal(v.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+  }
+  const exempt = resolvePreMergeVerdict(
+    { stage1: stage1("EXEMPT"), mergeReady: mergeReady("MERGE_READY"), mergeConflict: { exitCode: 0, mergeable: "CONFLICTING" } },
+    { head: ISSUE_1023_HEAD },
+  );
+  assert.equal(exempt.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("#1023 resolvePreMergeVerdict: UNKNOWN -> NO_ACTION_YET, operational error -> AMBIGUOUS, CONFLICTING with an unprovable head -> AMBIGUOUS (never a recovery, never a merge)", () => {
+  const base = { stage1: stage1("RESPONSE_RECEIVED"), mergeReady: mergeReady("MERGE_READY") };
+  const unknown = resolvePreMergeVerdict({ ...base, mergeConflict: { exitCode: 0, mergeable: "UNKNOWN" } }, { head: ISSUE_1023_HEAD });
+  assert.equal(unknown.state, "NO_ACTION_YET");
+  const failed = resolvePreMergeVerdict({ ...base, mergeConflict: { exitCode: 1, message: "boom" } }, { head: ISSUE_1023_HEAD });
+  assert.equal(failed.state, "AMBIGUOUS");
+  assert.match(failed.reason, /boom/);
+  const shortHead = resolvePreMergeVerdict({ ...base, mergeConflict: { exitCode: 0, mergeable: "CONFLICTING" } }, { head: "1234abc" });
+  assert.equal(shortHead.state, "AMBIGUOUS");
+  assert.match(shortHead.reason, /40-character reviewed head/);
+});
+
+test("#1023 correction: findings-bearing + matching `exempt at <head>` + CONFLICTING never gains the ordinary-satisfied recovery route (EXEMPT semantics unchanged)", () => {
+  const v = resolvePreMergeVerdict(
+    {
+      stage1: stage1("RESPONSE_RECEIVED", FINDINGS_RESPONSE_1023),
+      mergeReady: mergeReady("MERGE_READY"),
+      stage1Disposition: `exempt at ${ISSUE_1023_HEAD}`,
+      mergeConflict: { exitCode: 0, mergeable: "CONFLICTING" },
+    },
+    { head: ISSUE_1023_HEAD },
+  );
+  assert.notEqual(v.state, "STAGE1_SATISFIED_MERGE_CONFLICT");
+  assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED");
+});
+
+test("#1023 correction: a fetched probe without a positive MERGEABLE (missing, null, misspelled, novel) is AMBIGUOUS, never merge/Stage 2", () => {
+  const base = { stage1: stage1("RESPONSE_RECEIVED"), mergeReady: mergeReady("MERGE_READY") };
+  for (const probe of [{ exitCode: 0 }, { exitCode: 0, mergeable: null }, { exitCode: 0, mergeable: "MERGABLE" }, { exitCode: 0, mergeable: "DIRTY" }]) {
+    const v = resolvePreMergeVerdict({ ...base, mergeConflict: probe }, { head: ISSUE_1023_HEAD });
+    assert.equal(v.state, "AMBIGUOUS");
+    assert.match(v.reason, /unrecognized mergeable value/);
+  }
+});
+
+test("#1023 runNextReviewTransitionGate: exact #963/#964/PR #1021 shape (Stage 1 satisfied at the reviewed head, GitHub CONFLICTING) -> bounded STAGE1_SATISFIED_MERGE_CONFLICT, no merge/Stage 2/founder interrupt, no correction pair", async () => {
+  const { result, calls } = await runOrdinarySatisfied1023({ mergeability: { exitCode: 0, mergeable: "CONFLICTING" } });
+  assert.deepEqual(calls.args, { repo: "o/r", number: 1021 });
+  assert.equal(calls.correctionDelta, 0);
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.state, "STAGE1_SATISFIED_MERGE_CONFLICT");
+  assert.equal(result.reviewedHead, ISSUE_1023_HEAD);
+  assert.equal(result.pr, 1021);
+  assert.equal(result.issue, 964);
+  assert.equal(result.controlIssue, 963);
+  assert.ok(!("correctedHead" in result));
+  assert.deepEqual(result.actionEnvelope, {
+    mode: "bounded",
+    authorizedActions: ["reserve-correction-checkout", "dispatch-conflict-recovery-worker"],
+  });
+  // Re-entry after a refused merge converges on the same verdict (deterministic, no duplicate attempt state).
+  const again = await runOrdinarySatisfied1023({ mergeability: { exitCode: 0, mergeable: "CONFLICTING" } });
+  assert.equal(again.result.state, "STAGE1_SATISFIED_MERGE_CONFLICT");
+  assert.equal(again.result.reviewedHead, result.reviewedHead);
+});
+
+test("#1023 runNextReviewTransitionGate: same evidence with MERGEABLE -> the unchanged ordinary merge verdict; UNKNOWN -> NO_ACTION_YET; operational error -> AMBIGUOUS", async () => {
+  const mergeable = await runOrdinarySatisfied1023({ mergeability: { exitCode: 0, mergeable: "MERGEABLE" } });
+  assert.equal(mergeable.result.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+  assert.equal(mergeable.result.exitCode, 0);
+  const unknown = await runOrdinarySatisfied1023({ mergeability: { exitCode: 0, mergeable: "UNKNOWN" } });
+  assert.equal(unknown.result.state, "NO_ACTION_YET");
+  const errored = await runOrdinarySatisfied1023({ mergeability: { exitCode: 1, message: "gh failed" } });
+  assert.equal(errored.result.state, "AMBIGUOUS");
+});
+
+test("#1023 runNextReviewTransitionGate: a stale PR head (control disposition names an older head, findings-bearing response) never reaches the conflict verdict or spends a mergeability check", async () => {
+  let mergeabilityCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "963" },
+    {
+      ghIssueViewImpl: async () => ({ body: CONTROL_BODY_ORDINARY_SATISFIED_1023, state: "OPEN" }),
+      ghPrStateImpl: async () => ({ headRefOid: "f".repeat(40), state: "OPEN" }),
+      stage1RunImpl: async () => stage1("RESPONSE_RECEIVED", FINDINGS_RESPONSE_1023),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkMergeConflictImpl: async () => {
+        mergeabilityCalls++;
+        return { exitCode: 0, mergeable: "CONFLICTING" };
+      },
+    },
+  );
+  assert.equal(mergeabilityCalls, 0);
+  assert.equal(result.state, "STAGE1_CORRECTION_REQUIRED");
+});
+
+test("#1023 runNextReviewTransitionGate: direct-reference mode (no control/execution pair, hence no successor route) never spends a mergeability check for the ordinary path", async () => {
+  let mergeabilityCalls = 0;
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", pr: 1021, head: ISSUE_1023_HEAD, issue: 964 },
+    {
+      stage1RunImpl: async () => stage1("RESPONSE_RECEIVED"),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+      checkMergeConflictImpl: async () => {
+        mergeabilityCalls++;
+        return { exitCode: 0, mergeable: "CONFLICTING" };
+      },
+    },
+  );
+  assert.equal(mergeabilityCalls, 0);
+  assert.equal(result.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
 });
