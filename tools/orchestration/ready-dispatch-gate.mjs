@@ -1767,7 +1767,18 @@ export async function verifyRoutedDispatchManifest(
   const alreadyDoneUnitIds = dispatchReadyManifestUnitIds.filter((unitId) =>
     /^done\b/i.test(String(parsed.plan.units?.[unitId]?.state ?? "").trim()),
   );
-  const dispatchReadyUnitIds = dispatchReadyManifestUnitIds.filter((unitId) => !alreadyDoneUnitIds.includes(unitId));
+  // Issue #1047 (the #1037-A reproduction): the same authority rule applies to a live BLOCKED
+  // Worker Unit State. A stale `dispatch_ready=true` manifest entry never outranks it; the unit
+  // is reported separately (not dropped, not marked DONE) so the caller fails closed visibly.
+  // Recovery is a changed live State (no longer BLOCKED) read fresh on the next invocation.
+  const blockedUnitIds = dispatchReadyManifestUnitIds.filter(
+    (unitId) =>
+      !alreadyDoneUnitIds.includes(unitId) &&
+      /^blocked\b/i.test(String(parsed.plan.units?.[unitId]?.state ?? "").trim()),
+  );
+  const dispatchReadyUnitIds = dispatchReadyManifestUnitIds.filter(
+    (unitId) => !alreadyDoneUnitIds.includes(unitId) && !blockedUnitIds.includes(unitId),
+  );
 
   // Issue #856: every Plan Index unit's own live Worker Unit Contract State is DONE -- the
   // post-unit boundary (Integration/PR or unit-owned PR breakpoint) is what comes next, not
@@ -1784,6 +1795,7 @@ export async function verifyRoutedDispatchManifest(
     manifestUrl,
     dispatchReadyUnitIds,
     alreadyDoneUnitIds,
+    blockedUnitIds,
     allUnitsDone,
     integrationRoute: parsed.plan.planIndex.integrationRoute,
     routeFailure: planLevelRouteFailure(parsed.plan),
@@ -2410,6 +2422,25 @@ async function checkReadyDispatchCore(
         };
       }
     }
+    if (manifestCheck.dispatchReadyUnitIds.length === 0 && manifestCheck.blockedUnitIds.length > 0) {
+      // Issue #1047: nothing dispatchable and at least one manifest-ready unit is live BLOCKED.
+      // Fail closed with the existing BLOCKED stop (envelope mode none; no reconcile step since
+      // this is not a control-Issue Blocker field). Interrupt evidence stays on the unit.
+      return {
+        exitCode: 4,
+        state: "BLOCKED",
+        controlIssue: Number(controlIssue),
+        repo: resolvedRepo,
+        executionIssue: result.executionIssue,
+        blockedUnitIds: manifestCheck.blockedUnitIds,
+        reasons: [
+          `unit(s) ${manifestCheck.blockedUnitIds.join(", ")} record "State: BLOCKED" on their own Worker Unit Contract; ` +
+            `a Dispatch Manifest dispatch_ready=true is dependency-readiness only and does not authorize redispatch. ` +
+            `Do not dispatch; an authorized change must restore an executable State on the unit (then re-prepare the manifest) before it can run`,
+        ],
+        blockerReconciliationEligible: false,
+      };
+    }
     if (manifestCheck.dispatchReadyUnitIds.length === 0 && manifestCheck.alreadyDoneUnitIds.length > 0) {
       return {
         exitCode: 3,
@@ -2435,6 +2466,7 @@ async function checkReadyDispatchCore(
       manifestUrl: manifestCheck.manifestUrl,
       dispatchReadyUnitIds: manifestCheck.dispatchReadyUnitIds,
       ...(manifestCheck.alreadyDoneUnitIds.length > 0 ? { alreadyDoneUnitIds: manifestCheck.alreadyDoneUnitIds } : {}),
+      ...(manifestCheck.blockedUnitIds.length > 0 ? { blockedUnitIds: manifestCheck.blockedUnitIds } : {}),
     };
   }
   if (result.status in EXIT_CODES_BY_STATUS) {

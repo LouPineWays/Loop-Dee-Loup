@@ -1209,3 +1209,43 @@ test("runPrepareDispatchManifest accepts explicit integration worker / no-pr rou
     assert.equal(result.exitCode, 0, String(integrationRoute));
   }
 });
+
+// --- Issue #1047: a live BLOCKED unit is never dispatch-ready ----------------------------
+
+test("computeDispatchReady: dependency-free BLOCKED unit (with note) is not ready, flagged blocked (#1047 / #1037-A)", () => {
+  const u = unit({ unitId: "1037-A", state: "BLOCKED -- capability-boundary: provider denied the mutation", prerequisitesDependencies: "none." });
+  const result = computeDispatchReady(u, { "1037-A": u });
+  assert.equal(result.ready, false);
+  assert.equal(result.blocked, true);
+});
+
+test("computeDispatchReady: DONE still wins and PLANNED dependency-free is still ready (#1047 controls)", () => {
+  const done = unit({ state: "DONE -- implemented" });
+  assert.equal(computeDispatchReady(done, { "294-X": done }).ready, true);
+  const planned = unit({ prerequisitesDependencies: "none." });
+  assert.equal(computeDispatchReady(planned, { "294-X": planned }).ready, true);
+});
+
+test("computeDispatchReady: a unit depending on a BLOCKED unit is not ready (#1047)", () => {
+  const a = unit({ unitId: "1037-A", state: "BLOCKED -- x", prerequisitesDependencies: "none." });
+  const b = unit({ unitId: "1037-B", prerequisitesDependencies: "Depends on 1037-A." });
+  const result = computeDispatchReady(b, { "1037-A": a, "1037-B": b });
+  assert.equal(result.ready, false);
+  assert.deepEqual(result.notDone, ["1037-A"]);
+});
+
+test("isBlockedState: matches the leading BLOCKED word only (#1047)", async () => {
+  const { isBlockedState } = await import("./prepare-dispatch-manifest.mjs");
+  assert.equal(isBlockedState("BLOCKED"), true);
+  assert.equal(isBlockedState("  blocked -- note"), true);
+  assert.equal(isBlockedState("BLOCKEDISH"), false);
+  assert.equal(isBlockedState("PLANNED -- was BLOCKED"), false);
+  assert.equal(isBlockedState(undefined), false);
+});
+
+test("buildManifestEntries: BLOCKED unit emits dispatch_ready=false with a BLOCKED note (#1047)", () => {
+  const a = unit({ unitId: "1037-A", state: "BLOCKED -- x", prerequisitesDependencies: "none." });
+  const entries = buildManifestEntries({ units: { "1037-A": a } }, { fileExists: () => true });
+  assert.equal(entries[0].dispatchReady, false);
+  assert.match(entries[0].note, /^BLOCKED:/);
+});

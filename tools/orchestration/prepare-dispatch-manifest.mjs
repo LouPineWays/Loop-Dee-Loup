@@ -327,6 +327,14 @@ export function isDoneState(state) {
   return typeof state === "string" && /^DONE\b/.test(state.trim());
 }
 
+// Pure. A unit's own "State" field is BLOCKED when it starts with the literal word "BLOCKED"
+// (issue #1047: real interrupted units append a capability-boundary / blocker note after the
+// state word, exactly as DONE units append a completion note). A BLOCKED unit is interrupted
+// with a retained reason -- never dispatch-ready, never conflated with DONE.
+export function isBlockedState(state) {
+  return typeof state === "string" && /^BLOCKED\b/i.test(state.trim());
+}
+
 // Pure. Computes whether `unit` is currently dispatch-ready: always true (trivially) once
 // the unit's own State is DONE; otherwise true only when every unit ID its own
 // "Prerequisites/dependencies" field names after "depends on" is itself in state DONE in
@@ -338,6 +346,11 @@ export function isDoneState(state) {
 export function computeDispatchReady(unit, unitsById) {
   if (isDoneState(unit.state)) {
     return { ready: true, dependencies: [], notDone: [] };
+  }
+  // Issue #1047: dependency satisfaction alone is not current authorization to execute. A live
+  // BLOCKED Worker Unit State outranks it (manifest readiness is derived, state is authority).
+  if (isBlockedState(unit.state)) {
+    return { ready: false, dependencies: [], notDone: [], blocked: true };
   }
   const dependencies = extractDependencyUnitIds(unit.prerequisitesDependencies);
   if (dependencies.length === 0) {
@@ -355,6 +368,9 @@ export function computeDispatchReady(unit, unitsById) {
 export function buildNote({ unit, routeResult, readiness }) {
   if (routeResult.isReplanRequired) return routeResult.reason;
   if (isDoneState(unit.state)) return "DONE";
+  if (readiness.blocked) {
+    return "BLOCKED: live Worker Unit State is BLOCKED -- not dispatchable until an authorized change restores an executable State and the manifest is re-prepared";
+  }
   if (readiness.unrecognized) {
     return `unrecognized prerequisites wording: ${JSON.stringify(unit.prerequisitesDependencies ?? "")} -- needs a recognized "depends on" clause or replan`;
   }
