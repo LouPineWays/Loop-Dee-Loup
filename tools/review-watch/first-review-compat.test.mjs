@@ -194,3 +194,21 @@ test("trigger: Stage 2 (--kind issue) never runs the first-review check", async 
   assert.equal(result.exitCode, 0);
   assert.equal(compatCalls, 0);
 });
+
+test("trigger: a non-trigger comment merely quoting a head marker is not a prior round -- the first real trigger is still compat-gated", async () => {
+  let compatCalls = 0;
+  let posts = 0;
+  const result = await run(
+    { repo: "o/r", kind: "pr", number: 1, head: HEAD },
+    {
+      ghApiImpl: thread([
+        { body: `discussion quoting the marker <!-- ldl-trigger-head:${"a".repeat(40)} -->`, created_at: "2026-10-09T00:00:00Z" },
+      ]),
+      ghPostImpl: async () => (posts++, { created_at: "x" }),
+      compatImpl: async () => (compatCalls++, { verdict: "CONFLICT", target: { ref: "main", sha: TARGET } }),
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(compatCalls, 1);
+  assert.equal(posts, 0);
+});

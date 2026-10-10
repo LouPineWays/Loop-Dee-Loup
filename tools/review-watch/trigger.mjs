@@ -384,7 +384,7 @@ export async function run(
   // on current-target compatibility. A positively confirmed CONFLICTING head never consumes the
   // one reviewer trigger; later rounds (corrections at a new head) are governed by the existing
   // cross-head block and the post-review conflict gate (#1022), not this check.
-  if (kind === "pr" && head && findTriggerRounds(comments ?? []).length === 0) {
+  if (kind === "pr" && head && findTriggerRounds((comments ?? []).filter((c) => (c.body ?? "").includes(TRIGGER_TEXT))).length === 0) {
     const compat = await compatImpl({ repo, number, head });
     if (compat.verdict === COMPAT_CONFLICT) {
       return {
