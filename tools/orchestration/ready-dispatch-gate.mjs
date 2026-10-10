@@ -1775,7 +1775,24 @@ export async function verifyRoutedDispatchManifest(
   const blockedUnitIds = planUnitIds.filter((unitId) =>
     /^blocked\b/i.test(String(parsed.plan.units?.[unitId]?.state ?? "").trim()),
   );
-  const dispatchReadyUnitIds = dispatchReadyManifestUnitIds.filter(
+  // Audit #1049 correction: a freshly prepared manifest records a then-BLOCKED unit as
+  // dispatch_ready=false with a "BLOCKED:" note. Once an authorized change restores an
+  // executable live State, that stale false entry must not remain readiness authority --
+  // current dispatchability is re-derived from the live State and prerequisites (the same
+  // computeDispatchReady the producer uses); the manifest contributes only its validated route.
+  const { computeDispatchReady } = await import("./prepare-dispatch-manifest.mjs");
+  const recoveredUnitIds = [...manifestEntries.entries()]
+    .filter(
+      ([unitId, entry]) =>
+        !entry.dispatchReady &&
+        /^BLOCKED:/i.test(entry.note) &&
+        !/^REPLAN_REQUIRED$/i.test(entry.route.trim()) &&
+        !blockedUnitIds.includes(unitId) &&
+        !/^done/i.test(String(parsed.plan.units?.[unitId]?.state ?? "").trim()) &&
+        computeDispatchReady(parsed.plan.units[unitId], parsed.plan.units).ready,
+    )
+    .map(([unitId]) => unitId);
+  const dispatchReadyUnitIds = [...dispatchReadyManifestUnitIds, ...recoveredUnitIds].filter(
     (unitId) => !alreadyDoneUnitIds.includes(unitId) && !blockedUnitIds.includes(unitId),
   );
 

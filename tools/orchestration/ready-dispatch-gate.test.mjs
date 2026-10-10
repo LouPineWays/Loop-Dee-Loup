@@ -3348,6 +3348,27 @@ test("checkReadyDispatch: recovery -- the same unit with State restored to PLANN
   assert.deepEqual(await run(), first);
 });
 
+test("checkReadyDispatch: recovery from a freshly prepared dispatch_ready=false BLOCKED manifest dispatches once State is PLANNED, manifest unchanged (Audit #1049)", async () => {
+  const run = async (state) => {
+    const { repo, impls } = await runBlockedFixture({
+      unitStates: { "1037-A": state },
+      manifestUnitLines: [
+        "1037-A: route=stronger/general worker dispatch_ready=false note=BLOCKED: live Worker Unit State is BLOCKED -- not dispatchable until an authorized change restores an executable State and the manifest is re-prepared",
+      ],
+    });
+    return checkReadyDispatch(
+      { repo, controlIssue: 390 },
+      { ghIssueViewImpl: async () => ({ body: ROUTED_389_BODY, state: "OPEN" }), ghPrListImpl: async () => [], ...impls },
+    );
+  };
+  const blocked = await run(BLOCKED_STATE_1037A);
+  assert.equal(blocked.state, "BLOCKED");
+  const first = await run("PLANNED");
+  assert.equal(first.state, "READY_TO_DISPATCH_UNITS");
+  assert.deepEqual(first.dispatchReadyUnitIds, ["1037-A"]);
+  assert.deepEqual(await run("PLANNED"), first);
+});
+
 test("checkReadyDispatch: manifest dispatch_ready=false for BLOCKED is still reported as blocked, while DONE stays excluded (#1047 controls)", async () => {
   const done = await runBlockedFixture({
     unitStates: { "1-A": "DONE -- finished", "1-B": BLOCKED_STATE_1037A },
