@@ -1558,7 +1558,94 @@ export async function reconcileStage2CorrectionPr({ repo, workIssue }, { ghPrLis
   const openCandidateCount = (Array.isArray(prList) ? prList : []).filter(
     (p) => referencesExecutionIssue(p ?? {}, workIssue) && String(p?.state ?? "").toUpperCase() === "OPEN",
   ).length;
-  return { crossed: true, pr, openCandidateCount };
+  const candidates = (Array.isArray(prList) ? prList : []).filter(
+    (p) => referencesExecutionIssue(p ?? {}, workIssue) && String(p?.state ?? "").toUpperCase() === "OPEN",
+  );
+  return { crossed: true, pr, openCandidateCount, candidates };
+}
+
+// Pure. Issue #1060 (control #539; the #1028/#1029/#1030/#1058/#1059 recurrence): an OPEN,
+// execution-linked PR is not automatically a *current correction PR for this audit* -- an older
+// predecessor can stay OPEN after a merged successor expressly superseded it. Positive witness
+// only: the control Issue's current PR pointer names a MERGED PR whose own body states
+// "Supersedes #<candidate>". Returns the set of superseded candidate numbers (possibly empty).
+export function findSupersededCandidates(candidates, supersedingPrBody) {
+  const out = new Set();
+  if (typeof supersedingPrBody !== "string") return out;
+  // A positive witness is a standalone top-level declaration, not incidental prose.
+  const affirmed = new Set();
+  let fence = null;
+  for (const line of supersedingPrBody.split(/\r?\n/)) {
+    const boundary = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    if (fence) {
+      if (boundary && boundary[1][0] === fence.char && boundary[1].length >= fence.length) fence = null;
+      continue;
+    }
+    if (boundary) {
+      fence = { char: boundary[1][0], length: boundary[1].length };
+      continue;
+    }
+    const marker = line.match(/^\s{0,3}Supersedes\s+#([1-9]\d*)\.?\s*$/i);
+    if (marker) affirmed.add(Number(marker[1]));
+  }
+  for (const c of Array.isArray(candidates) ? candidates : []) {
+    const n = Number(c?.number);
+    if (Number.isInteger(n) && affirmed.has(n)) out.add(n);
+  }
+  return out;
+}
+
+// Issue #1060: see findSupersededCandidates. Returns { reconciliation } (downgraded to
+// crossed:false when every open candidate is demonstrably superseded) or { failed } (AMBIGUOUS,
+// no mutation) on a read error, contradictory identity, or multiple surviving candidates.
+async function filterSupersededCandidates({ repo, context, postAudit, workIssue, reconciliation }, { ghPrStateImpl, ghIssueViewImpl }) {
+  const fail = (reason) => ({ failed: { state: "AMBIGUOUS", stopAfter: true, ...context, postAudit, reason } });
+  let controlBody;
+  try {
+    controlBody = (await ghIssueViewImpl({ repo, number: context.controlIssue }))?.body ?? "";
+  } catch (err) {
+    return fail(`could not read control Issue #${context.controlIssue} to bind correction-PR candidates to the audited PR: ${err.message}`);
+  }
+  const prRef = parseOptionalIssueRefGuarded(controlBody, "PR");
+  if (prRef.kind === "invalid" || prRef.kind === "ambiguous") {
+    return fail(`refreshed control Issue #${context.controlIssue} has ${prRef.kind} PR identity: ${prRef.reason}`);
+  }
+  if (prRef.kind !== "issue") return { reconciliation };
+  const candidates = Array.isArray(reconciliation.candidates) && reconciliation.candidates.length > 0 ? reconciliation.candidates : [reconciliation.pr];
+  if (candidates.length === 1 && Number(candidates[0].number) === prRef.issue) return { reconciliation };
+  let current;
+  try {
+    current = await ghPrStateImpl({ repo, number: prRef.issue, fields: ["state", "body"] });
+  } catch (err) {
+    return fail(`could not read control Issue #${context.controlIssue}'s current PR #${prRef.issue} to rule out superseded correction-PR candidates: ${err.message}`);
+  }
+  if (current?.state !== "MERGED") return { reconciliation };
+  const superseded = findSupersededCandidates(candidates, current.body);
+  if (superseded.size === 0) return { reconciliation };
+  const executionRef = resolveExecutionPointerOrNone(readExecutionBulletField(controlBody));
+  if (!executionRef.ok || executionRef.issue !== workIssue) {
+    return fail(
+      `control Issue #${context.controlIssue}'s Execution pointer does not match audited work Issue #${workIssue}; refusing to rule out ` +
+        `superseded candidate(s) ${[...superseded].map((n) => `#${n}`).join(", ")} on contradictory identity`,
+    );
+  }
+  const remaining = candidates.filter((c) => !superseded.has(Number(c.number)));
+  if (remaining.length === 0) return { reconciliation: { crossed: false, supersededCandidates: [...superseded] } };
+  if (remaining.length > 1) {
+    return fail(
+      `multiple competing open execution-linked correction PR candidates remain for ${repo}#${workIssue} after excluding superseded ` +
+        `${[...superseded].map((n) => `#${n}`).join(", ")}: ${remaining.map((c) => `#${c.number}`).join(", ")}; refusing to choose one`,
+    );
+  }
+  return {
+    reconciliation: {
+      crossed: true,
+      pr: remaining[0],
+      openCandidateCount: remaining.length,
+      candidates: remaining,
+      supersededCandidates: [...superseded],
+    },
+  };
 }
 
 // Pure. Composes the exact real (non-dry-run) command a controller must run to finalize a
@@ -1697,6 +1784,15 @@ async function resolvePostMerge(
         reason: `Stage 2 correction-PR reconciliation failed operationally, refusing to authorize a correction-worker dispatch without it: ${reconciliation.reason}`,
       };
       return { exitCode: exitCodeFor(failedVerdict.state), ...failedVerdict };
+    }
+    if (reconciliation.crossed && !unusableCorrection && typeof context.controlIssue === "number") {
+      // Issue #1060: bind open candidates to the audit's merged PR / current control identity.
+      const filtered = await filterSupersededCandidates(
+        { repo, context, postAudit, workIssue: verdict.workIssue, reconciliation },
+        { ghPrStateImpl, ghIssueViewImpl },
+      );
+      if (filtered.failed) return { exitCode: exitCodeFor(filtered.failed.state), ...filtered.failed };
+      reconciliation = filtered.reconciliation;
     }
     if (reconciliation.crossed) {
       const pr = reconciliation.pr;
@@ -2686,8 +2782,8 @@ function defaultGhPrMergeable({ repo, number }) {
 // match against an already-prepared Audit Issue's own "Exact merge commit" field. Absent (a test
 // double that doesn't supply it) reads as `undefined`, which that reconciliation treats as "skip
 // reconciliation, fall through to STAGE2_PREPARATION_REQUIRED unchanged" -- never a crash.
-function defaultGhPrState({ repo, number }) {
-  return readGithubPr({ repo, number, fields: ["headRefOid", "state", "mergeCommit"] });
+function defaultGhPrState({ repo, number, fields }) {
+  return readGithubPr({ repo, number, fields: fields ?? ["headRefOid", "state", "mergeCommit"] });
 }
 
 // Issue #729 (control #398, the #723/#727 liveness seam): a prior Stage 2 preparation worker may
