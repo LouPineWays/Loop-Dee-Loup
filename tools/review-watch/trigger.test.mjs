@@ -492,7 +492,10 @@ test("run: --kind pr (with --head) and --kind issue both check the issues/commen
     return [];
   };
   const ghPostImpl = async () => ({ created_at: "2026-08-23T14:05:00Z" });
-  await run({ repo: "owner/repo", kind: "pr", number: 50, head: "abc123" }, { ghApiImpl, ghPostImpl });
+  await run(
+    { repo: "owner/repo", kind: "pr", number: 50, head: "abc123" },
+    { ghApiImpl, ghPostImpl, compatImpl: async () => ({ verdict: "COMPATIBLE" }) },
+  );
   await run({ repo: "owner/repo", kind: "issue", number: 53 }, { ghApiImpl, ghPostImpl });
   assert.ok(seenPaths.includes("repos/owner/repo/issues/50/comments"));
   assert.ok(seenPaths.includes("repos/owner/repo/issues/53/comments"));

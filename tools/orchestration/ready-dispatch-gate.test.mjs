@@ -3162,7 +3162,7 @@ test("checkReadyDispatch: all units DONE but an open execution-linked PR already
   assert.equal(result.stopAfter, true);
   assert.equal(result.pr, 391);
   assert.equal(result.nextCommand, "node tools/review-watch/trigger.mjs --repo LouPineWays/Loop-Dee-Loup --kind pr --number 391 --head abc123def456abc123def456abc123def456abcd && node tools/orchestration/finalize-pr-breakpoint.mjs --control-issue 390 --execution-issue 389 --pr 391 --head abc123def456abc123def456abc123def456abcd");
-  assert.deepEqual(result.actionEnvelope, { mode: "bounded", authorizedActions: ["run-review-watch-trigger", "run-finalize-pr-breakpoint"] });
+  assert.deepEqual(result.actionEnvelope, { mode: "bounded", authorizedActions: ["run-review-watch-trigger", "run-finalize-pr-breakpoint", "run-successor-integration-preflight", "dispatch-successor-integration-worker"] });
 });
 
 test("checkReadyDispatch: all units DONE with a linked PR that is not open fails closed to the repair stop, never NOT_READY fallthrough (#856)", async () => {
