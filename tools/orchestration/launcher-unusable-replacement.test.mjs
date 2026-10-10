@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildDeps } from "./launcher-run.mjs";
+import { buildDeps, validateUnusableReplacementCommand } from "./launcher-run.mjs";
 import { runLauncherStep, Outcome, TRANSITIONS, OPEN_PATH_STATES } from "./launcher-step.mjs";
 import { knownEnvelopeStates, getActionEnvelope, ENVELOPE_MODES } from "./action-envelope.mjs";
 
@@ -163,6 +163,17 @@ test("an actually unknown state still fails closed with no mutation (negative co
   assert.equal(w.mutations().length, 0);
 });
 
+test("launcher repository cannot be supplied by the verdict or omitted", () => {
+  for (const verdict of [prepVerdict(), readyVerdict()]) {
+    for (const repo of [null, "", " "]) {
+      assert.throws(
+        () => validateUnusableReplacementCommand(verdict.state, verdict, { controlIssue: 379, repo }),
+        /launcher names no repository/,
+      );
+    }
+  }
+});
+
 test("wrong target / malformed payload / missing authority fail closed before any mutation", async () => {
   const cases = [
     ["prepare names a different audit", prepVerdict({ nextCommand: `node ${RECOVERY} prepare --repo o/r --audit-issue 999` })],
@@ -170,6 +181,7 @@ test("wrong target / malformed payload / missing authority fail closed before an
     ["prepare flag order differs", prepVerdict({ nextCommand: `node ${RECOVERY} prepare --audit-issue 381 --repo o/r` })],
     ["prepare is a different script", prepVerdict({ nextCommand: `node ${FINALIZE} --audit-issue 381` })],
     ["prepare repo differs", prepVerdict({ nextCommand: `node ${RECOVERY} prepare --repo x/y --audit-issue 381` })],
+    ["prepare verdict and command both redirect repository", prepVerdict({ repo: "evil/foreign", nextCommand: `node ${RECOVERY} prepare --repo evil/foreign --audit-issue 381` })],
     ["prepare names no nextCommand", prepVerdict({ nextCommand: undefined })],
     ["prepare names no predecessor", prepVerdict({ predecessorAuditIssue: undefined })],
     ["different execution issue", prepVerdict({ workIssue: 99 })],
@@ -193,6 +205,7 @@ test("wrong target / malformed payload / missing authority fail closed before an
     ["finalize reorders canonical flags", readyVerdict({ nextCommand: readyVerdict().nextCommand.replace("--control-issue 379 --execution-issue 73", "--execution-issue 73 --control-issue 379") })],
     ["trigger injects extra flag", readyVerdict({ nextCommand: readyVerdict().nextCommand.replace("--kind issue", "--dry-run true --kind issue") })],
     ["trigger reorders canonical flags", readyVerdict({ nextCommand: readyVerdict().nextCommand.replace("--repo o/r --kind issue", "--kind issue --repo o/r") })],
+    ["ready verdict and trigger both redirect repository", readyVerdict({ repo: "evil/foreign", nextCommand: readyVerdict().nextCommand.replace("--repo o/r --kind issue", "--repo evil/foreign --kind issue") })],
     ["replacement equals predecessor", readyVerdict({ replacementAuditIssue: 381 })],
   ];
   for (const [label, verdict] of readyCases) {
