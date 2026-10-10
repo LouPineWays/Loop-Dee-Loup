@@ -2811,13 +2811,14 @@ test("verifyRoutedDispatchManifest: a state merely starting with 'done' as a dif
   const { repo, executionIssue, ...impls } = fixture;
   const result = await verifyRoutedDispatchManifest({ repo, executionIssue }, impls);
   assert.equal(result.ok, true);
-  assert.deepEqual(result.dispatchReadyUnitIds, ["537-A"]);
+  // Audit #1051: a malformed/unknown live State is not DONE, but it is also never dispatchable.
+  assert.deepEqual(result.dispatchReadyUnitIds, []);
   assert.deepEqual(result.alreadyDoneUnitIds, []);
 });
 
-test("verifyRoutedDispatchManifest: a genuinely non-DONE, dependency-ready unit stays in dispatchReadyUnitIds (#456 Verification scenario 3, manifest negative control)", async () => {
+test("verifyRoutedDispatchManifest: a genuinely non-DONE PLANNED, dependency-ready unit stays in dispatchReadyUnitIds (#456 Verification scenario 3, manifest negative control)", async () => {
   const fixture = manifestFixtureWithUnitStates({
-    unitStates: { "498-A": "IN_PROGRESS" },
+    unitStates: { "498-A": "PLANNED" },
     manifestUnitLines: ["498-A: route=stronger/general worker dispatch_ready=true note=none"],
   });
   const { repo, executionIssue, ...impls } = fixture;
@@ -2825,6 +2826,26 @@ test("verifyRoutedDispatchManifest: a genuinely non-DONE, dependency-ready unit 
   assert.equal(result.ok, true);
   assert.deepEqual(result.dispatchReadyUnitIds, ["498-A"]);
   assert.deepEqual(result.alreadyDoneUnitIds, []);
+});
+
+test("verifyRoutedDispatchManifest: a stale dispatch_ready=true entry never dispatches a live IN_PROGRESS, REPLAN_REQUIRED or unknown/malformed State, nor a REPLAN_REQUIRED route (Audit #1051)", async () => {
+  for (const state of ["IN_PROGRESS", "IN_PROGRESS -- worker running", "REPLAN_REQUIRED", "WEIRD", ""]) {
+    const fixture = manifestFixtureWithUnitStates({
+      unitStates: { "498-A": state },
+      manifestUnitLines: ["498-A: route=stronger/general worker dispatch_ready=true note=none"],
+    });
+    const { repo, executionIssue, ...impls } = fixture;
+    const result = await verifyRoutedDispatchManifest({ repo, executionIssue }, impls);
+    assert.equal(result.ok, true, state);
+    assert.deepEqual(result.dispatchReadyUnitIds, [], `state ${JSON.stringify(state)}`);
+  }
+  const fixture = manifestFixtureWithUnitStates({
+    unitStates: { "498-A": "PLANNED" },
+    manifestUnitLines: ["498-A: route=REPLAN_REQUIRED dispatch_ready=true note=none"],
+  });
+  const { repo, executionIssue, ...impls } = fixture;
+  const result = await verifyRoutedDispatchManifest({ repo, executionIssue }, impls);
+  assert.deepEqual(result.dispatchReadyUnitIds, []);
 });
 
 test("verifyRoutedDispatchManifest: a mixed wave excludes only the already-DONE unit, keeping the genuinely pending one dispatchable", async () => {

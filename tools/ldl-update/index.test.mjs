@@ -466,6 +466,61 @@ test("run: refuses the whole update, as a conflict, when updating would install 
   assert.equal(after.ldlSourceRevision, "rev-1", "the manifest must not advance when the update is refused");
 });
 
+function addDispatchManifestFixtureFiles(root, revisionTag) {
+  mkdirSync(join(root, "tools", "orchestration"), { recursive: true });
+  writeFileSync(
+    join(root, "tools", "orchestration", "prepare-dispatch-manifest.mjs"),
+    `export function computeDispatchReady() { return { ready: true }; } // ${revisionTag}\n`,
+  );
+  writeFileSync(
+    join(root, "tools", "orchestration", "ready-dispatch-gate.mjs"),
+    `import { computeDispatchReady } from "./prepare-dispatch-manifest.mjs"; // ${revisionTag}\n`,
+  );
+}
+
+test("run: refuses the whole update, as a conflict, when updating would install ready-dispatch-gate.mjs unable to load an unmanaged, preserved prepare-dispatch-manifest.mjs (Audit #1051, #1047)", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, rootV1, "rev-1");
+  const before = readFileSync(join(dest, ".ldl", "manifest.json"), "utf8");
+
+  const consumerContent = "// consumer-owned file, exports nothing LDL needs\n";
+  writeFileSync(join(dest, "tools", "orchestration", "prepare-dispatch-manifest.mjs"), consumerContent);
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  addDispatchManifestFixtureFiles(rootV2, "rev-2");
+
+  const result = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /prepare-dispatch-manifest\.mjs/);
+  assert.match(result.message, /ready-dispatch-gate\.mjs/);
+  assert.equal(readFileSync(join(dest, "tools", "orchestration", "prepare-dispatch-manifest.mjs"), "utf8"), consumerContent);
+  assert.ok(
+    !existsSync(join(dest, "tools", "orchestration", "ready-dispatch-gate.mjs")),
+    "the hard importer must not be written either -- the whole update is refused atomically",
+  );
+  assert.equal(readFileSync(join(dest, ".ldl", "manifest.json"), "utf8"), before, "the manifest must not change when refused");
+  assert.equal(readManifest(dest).ldlSourceRevision, "rev-1");
+});
+
+test("run: still updates normally when the consumer has no pre-existing prepare-dispatch-manifest.mjs collision (Audit #1051, #1047)", async (t) => {
+  const rootV1 = makeFixtureRoot(t, "rev-1");
+  const dest = tempDir(t);
+  await bootstrap(dest, rootV1, "rev-1");
+
+  const rootV2 = makeFixtureRoot(t, "rev-2");
+  addDispatchManifestFixtureFiles(rootV2, "rev-2");
+
+  const result = await run({ dest, root: rootV2 }, { resolveRevisionImpl: () => "rev-2" });
+
+  assert.equal(result.exitCode, 0);
+  const after = readManifest(dest);
+  assert.equal(after.ldlSourceRevision, "rev-2");
+  assert.ok(after.files.some((f) => f.dest === "tools/orchestration/ready-dispatch-gate.mjs"));
+  assert.ok(after.files.some((f) => f.dest === "tools/orchestration/prepare-dispatch-manifest.mjs"));
+});
+
 test("run: rewritten manifest reflects the new revision and lists both updated and already-matching managed files", async (t) => {
   const rootV1 = makeFixtureRoot(t, "rev-1");
   const dest = tempDir(t);

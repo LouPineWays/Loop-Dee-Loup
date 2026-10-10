@@ -1786,19 +1786,23 @@ export async function verifyRoutedDispatchManifest(
   // and unknown/malformed/unreadable States never recover into dispatch.
   const isDispatchEligibleState = (unitId) =>
     /^(?:PLANNED|ROUTED)\b/i.test(String(parsed.plan.units?.[unitId]?.state ?? "").trim());
-  const recoveredUnitIds = [...manifestEntries.entries()]
+  // Audit #1051 correction: the same live eligibility applies to EVERY candidate, including a
+  // persisted dispatch_ready=true entry -- a stale-true manifest must not authorize a live
+  // IN_PROGRESS, REPLAN_REQUIRED, unknown/malformed State, an unmet dependency, or a
+  // REPLAN_REQUIRED manifest route. DONE and BLOCKED keep their separate bookkeeping above.
+  const isLiveDispatchable = (unitId, entry) =>
+    !/^REPLAN_REQUIRED$/i.test(entry.route.trim()) &&
+    isDispatchEligibleState(unitId) &&
+    computeDispatchReady(parsed.plan.units[unitId], parsed.plan.units).ready;
+  const dispatchReadyUnitIds = [...manifestEntries.entries()]
     .filter(
       ([unitId, entry]) =>
-        !entry.dispatchReady &&
-        /^BLOCKED:/i.test(entry.note) &&
-        !/^REPLAN_REQUIRED$/i.test(entry.route.trim()) &&
-        isDispatchEligibleState(unitId) &&
-        computeDispatchReady(parsed.plan.units[unitId], parsed.plan.units).ready,
+        (entry.dispatchReady || /^BLOCKED:/i.test(entry.note)) &&
+        !alreadyDoneUnitIds.includes(unitId) &&
+        !blockedUnitIds.includes(unitId) &&
+        isLiveDispatchable(unitId, entry),
     )
     .map(([unitId]) => unitId);
-  const dispatchReadyUnitIds = [...dispatchReadyManifestUnitIds, ...recoveredUnitIds].filter(
-    (unitId) => !alreadyDoneUnitIds.includes(unitId) && !blockedUnitIds.includes(unitId),
-  );
 
   // Issue #856: every Plan Index unit's own live Worker Unit Contract State is DONE -- the
   // post-unit boundary (Integration/PR or unit-owned PR breakpoint) is what comes next, not
