@@ -3348,7 +3348,7 @@ test("checkReadyDispatch: recovery -- the same unit with State restored to PLANN
   assert.deepEqual(await run(), first);
 });
 
-test("checkReadyDispatch: manifest dispatch_ready=false for a BLOCKED unit is never reported as blocked-ready, and DONE stays excluded (#1047 controls)", async () => {
+test("checkReadyDispatch: manifest dispatch_ready=false for BLOCKED is still reported as blocked, while DONE stays excluded (#1047 controls)", async () => {
   const done = await runBlockedFixture({
     unitStates: { "1-A": "DONE -- finished", "1-B": BLOCKED_STATE_1037A },
     manifestUnitLines: [
@@ -3358,6 +3358,47 @@ test("checkReadyDispatch: manifest dispatch_ready=false for a BLOCKED unit is ne
   });
   const r = await verifyRoutedDispatchManifest({ repo: done.repo, executionIssue: done.executionIssue }, done.impls);
   assert.deepEqual(r.alreadyDoneUnitIds, ["1-A"]);
-  assert.deepEqual(r.blockedUnitIds, []);
+  assert.deepEqual(r.blockedUnitIds, ["1-B"]);
   assert.deepEqual(r.dispatchReadyUnitIds, []);
+});
+
+
+test("checkReadyDispatch: a freshly regenerated false-ready BLOCKED unit stops cleanly across fresh replay (#1047 / Stage 1)", async () => {
+  const run = async () => {
+    const { repo, impls } = await runBlockedFixture({
+      unitStates: { "1037-A": BLOCKED_STATE_1037A, "1037-B": "PLANNED" },
+      manifestUnitLines: [
+        "1037-A: route=stronger/general worker dispatch_ready=false note=BLOCKED",
+        "1037-B: route=stronger/general worker dispatch_ready=false note=blocked on: 1037-A (not yet DONE)",
+      ],
+    });
+    return checkReadyDispatch(
+      { repo, controlIssue: 390 },
+      { ghIssueViewImpl: async () => ({ body: ROUTED_389_BODY, state: "OPEN" }), ghPrListImpl: async () => [], ...impls },
+    );
+  };
+  const first = await run();
+  assert.equal(first.state, "BLOCKED");
+  assert.equal(first.exitCode, 4);
+  assert.deepEqual(first.blockedUnitIds, ["1037-A"]);
+  assert.equal(first.dispatchReadyUnitIds, undefined);
+  assert.equal(first.actionEnvelope.mode, "none");
+  assert.deepEqual(await run(), first);
+});
+
+test("checkReadyDispatch: a regenerated false-ready BLOCKED unit does not suppress an independent ready sibling (#1047 / Stage 1)", async () => {
+  const { repo, impls } = await runBlockedFixture({
+    unitStates: { "1-A": BLOCKED_STATE_1037A, "1-B": "PLANNED" },
+    manifestUnitLines: [
+      "1-A: route=stronger/general worker dispatch_ready=false note=BLOCKED",
+      "1-B: route=stronger/general worker dispatch_ready=true note=no prerequisites",
+    ],
+  });
+  const result = await checkReadyDispatch(
+    { repo, controlIssue: 390 },
+    { ghIssueViewImpl: async () => ({ body: ROUTED_389_BODY, state: "OPEN" }), ghPrListImpl: async () => [], ...impls },
+  );
+  assert.equal(result.state, "READY_TO_DISPATCH_UNITS");
+  assert.deepEqual(result.dispatchReadyUnitIds, ["1-B"]);
+  assert.deepEqual(result.blockedUnitIds, ["1-A"]);
 });
