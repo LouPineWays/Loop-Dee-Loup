@@ -756,6 +756,9 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/review-watch/consumer-sync-gate.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/review-watch/lifecycle-gate.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/review-watch/stage1-gate.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  // Issue #1029: trigger.mjs hard-imports first-review-compat.mjs and github-read.mjs for the pre-first-trigger gate.
+  { dest: "tools/review-watch/trigger.mjs", dependsOnDest: "tools/review-watch/first-review-compat.mjs" },
+  { dest: "tools/review-watch/trigger.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/review-watch/stage2-control-plane-ci-head.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   // Issue #776 Stage 1 review finding (P2, on PR #777): stage1-gate.mjs hard-imports
   // findQualifyingCleanReaction/hasExplicitFindingsSignal from stage1-clean-reaction.mjs. Without

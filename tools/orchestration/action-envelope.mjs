@@ -146,7 +146,7 @@ const ENVELOPES = {
   // authorizes nothing (the normal blocked/founder-interrupt chat contract).
   PR_BREAKPOINT_NEEDS_FINALIZATION: {
     mode: ENVELOPE_MODES.BOUNDED,
-    authorizedActions: ["run-review-watch-trigger", "run-finalize-pr-breakpoint"],
+    authorizedActions: ["run-review-watch-trigger", "run-finalize-pr-breakpoint", "run-successor-integration-preflight"],
   },
   READY_TO_PROJECT_NO_PR_COMPLETION: {
     mode: ENVELOPE_MODES.BOUNDED,
@@ -389,7 +389,7 @@ const ENVELOPES = {
   // from `state` alone.
   STAGE2_CORRECTION_PR_NEEDS_FINALIZATION: {
     mode: ENVELOPE_MODES.BOUNDED,
-    authorizedActions: ["run-review-watch-trigger", "run-finalize-pr-breakpoint"],
+    authorizedActions: ["run-review-watch-trigger", "run-finalize-pr-breakpoint", "run-successor-integration-preflight"],
   },
 };
 
@@ -557,6 +557,11 @@ export function getActionEnvelope(state, context = {}) {
     const authorizedActions = [];
     if (hasTrigger) authorizedActions.push("run-review-watch-trigger");
     if (hasFinalize) authorizedActions.push("run-finalize-pr-breakpoint");
+    // Issue #1029 (Stage 1 correction): `trigger.mjs` exits 3 when the first Stage 1 trigger finds the
+    // PR positively CONFLICTING with its target. That result is consumed here, not left unhandled:
+    // the one contingent follow-up is `successor-integration-preflight.mjs`, authorized only
+    // alongside a trigger segment (so it can never be an independent action).
+    if (hasTrigger) authorizedActions.push("run-successor-integration-preflight");
     return { mode: entry.mode, authorizedActions };
   }
 
@@ -593,6 +598,11 @@ export function getActionEnvelope(state, context = {}) {
 // fallthrough — a fallthrough verdict's own controller is already mid-session and does not
 // re-kick off itself), so it belongs in the unconditional deny-list rather than being left to
 // each envelope's own "not in authorizedActions" check alone.
+// Issue #1029 (Stage 1 correction): authorized only as the contingent branch of an already-required
+// action (the first Stage 1 trigger exiting 3 on a CONFLICTING head), so the required-action check
+// below does not demand it when the trigger succeeds. Still subject to the order/uniqueness checks.
+const CONTINGENT_ACTIONS = new Set(["run-successor-integration-preflight"]);
+
 const NEVER_AUTHORIZED = new Set([
   "rerun-gate",
   "wait-for-completion",
@@ -701,7 +711,13 @@ export function classifyEnvelopeCompliance(state, actionsTaken = [], context = {
   // now actually have been attempted (whether or not that attempt was itself accepted above) —
   // BOUNDED and CHAIN both authorize the complete named sequence, not a permitted-superset menu.
   if (envelope.mode === ENVELOPE_MODES.BOUNDED || envelope.mode === ENVELOPE_MODES.CHAIN) {
-    const missing = envelope.authorizedActions.filter((action) => !attemptedActions.has(action));
+    const missing = envelope.authorizedActions.filter(
+      (action) =>
+        !attemptedActions.has(action) &&
+        !CONTINGENT_ACTIONS.has(action) &&
+        // trigger.mjs exit 3 diverts to the successor preflight; finalize never runs on that branch.
+        !(action === "run-finalize-pr-breakpoint" && attemptedActions.has("run-successor-integration-preflight")),
+    );
     if (missing.length > 0) {
       reasons.push(
         `required action(s) not observed for "${state}": ${missing.join(", ")} (authorized: ${envelope.authorizedActions.join(", ")})`,
