@@ -4695,7 +4695,7 @@ test("#1060: read error on the current control PR at the candidate-binding step 
 
 test("#1060 Stage 1: only standalone affirmative supersession declarations qualify", () => {
   const candidate = [{ number: 1030 }];
-  const positive = ["Supersedes #1030.", "Supersedes #1030", "Intro\\n\\nSupersedes #1030.\\n\\nMore text"];
+  const positive = ["Supersedes #1030.", "Supersedes #1030", "Intro\n\nSupersedes #1030.\n\nMore text"];
   for (const body of positive) assert.deepEqual([...findSupersededCandidates(candidate, body)], [1030]);
   const notAffirmative = [
     "- [ ] Supersedes #1030.",
@@ -4703,7 +4703,7 @@ test("#1060 Stage 1: only standalone affirmative supersession declarations quali
     "~~Supersedes #1030.~~",
     "It is false that this supersedes #1030.",
     "Quotation: Supersedes #1030.",
-    "```\\nSupersedes #1030.\\n```",
+    "```\nSupersedes #1030.\n```",
     "    Supersedes #1030.",
   ];
   for (const body of notAffirmative) assert.deepEqual([...findSupersededCandidates(candidate, body)], [], body);
@@ -4717,7 +4717,7 @@ test("#1060 Stage 1: malformed freshly reread PR pointer fails closed", async ()
 });
 
 test("#1060 Stage 1: ambiguous freshly reread PR pointer fails closed", async () => {
-  const refreshed = CONTROL_BODY_1028.replace("- **PR:** #1058", "- **PR:** #1058\\n- **PR (current):** #1061");
+  const refreshed = CONTROL_BODY_1028.replace("- **PR:** #1058", "- **PR:** #1058\n- **PR (current):** #1061");
   const result = await run1060({ candidates: [open1030], refreshedControlBody: refreshed });
   assert.equal(result.state, "AMBIGUOUS");
   assert.match(result.reason, /refreshed control Issue.*ambiguous PR identity/);
