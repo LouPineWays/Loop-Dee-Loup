@@ -701,6 +701,21 @@ export function classifyEnvelopeCompliance(state, actionsTaken = [], context = {
       );
       continue;
     }
+    // Audit #1059 (issue #1028): the successor branch is a contingent alternative to the normal
+    // finalize branch (trigger.mjs exit 3 diverts to the preflight; finalize never runs there). The
+    // worker dispatch requires an already-accepted preceding preflight, and neither successor action
+    // may follow a finalize that already ran.
+    if (
+      (action === "dispatch-successor-integration-worker" && !seenAuthorized.has("run-successor-integration-preflight")) ||
+      (action === "run-successor-integration-preflight" && seenAuthorized.has("run-finalize-pr-breakpoint")) ||
+      (action === "dispatch-successor-integration-worker" && seenAuthorized.has("run-finalize-pr-breakpoint"))
+    ) {
+      reasons.push(
+        `action "${action}" is contingent on the successor-integration preflight conflict branch and is not authorized ` +
+          `without a preceding "run-successor-integration-preflight" or after "run-finalize-pr-breakpoint"`,
+      );
+      continue;
+    }
     seenAuthorized.add(action);
     lastAuthorizedIndex = authorizedIndex;
   }

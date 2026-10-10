@@ -1179,5 +1179,10 @@ test("Issue #1029: first-trigger CONFLICTING result (exit 3) is consumed -- succ
     assert.equal(early.status, "violation");
     const none = classifyEnvelopeCompliance(state, ["run-successor-integration-preflight"], { nextCommand: "node tools/orchestration/finalize-pr-breakpoint.mjs --control-issue 1 --execution-issue 2 --pr 9 --head h" });
     assert.equal(none.status, "violation");
+    const fin = ["run-review-watch-trigger", "run-finalize-pr-breakpoint"];
+    assert.equal(classifyEnvelopeCompliance(state, [...fin, "dispatch-successor-integration-worker"], ctx).status, "violation");
+    assert.equal(classifyEnvelopeCompliance(state, ["run-review-watch-trigger", "dispatch-successor-integration-worker"], ctx).status, "violation");
+    assert.equal(classifyEnvelopeCompliance(state, [...fin, "run-successor-integration-preflight"], ctx).status, "violation");
+    assert.equal(classifyEnvelopeCompliance(state, [...fin, "run-successor-integration-preflight", "dispatch-successor-integration-worker"], ctx).status, "violation");
   }
 });
