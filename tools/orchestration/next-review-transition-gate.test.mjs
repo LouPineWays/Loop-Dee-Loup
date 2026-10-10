@@ -4600,11 +4600,12 @@ const CONTROL_BODY_1028 = `## Current state
 - **Founder decision:** none
 `;
 const open1030 = { number: 1030, headRefOid: "9e3f7935215f7a7321de32bf4dfc21ef29366f3b", state: "OPEN" };
-function run1060({ candidates, prBodies = { 1058: "Supersedes #1030" }, prStates = { 1058: "MERGED" }, controlBody = CONTROL_BODY_1028, throwOn = null, throwNth = 0, calls = [] }) {
+function run1060({ candidates, prBodies = { 1058: "Supersedes #1030" }, prStates = { 1058: "MERGED" }, controlBody = CONTROL_BODY_1028, refreshedControlBody = null, throwOn = null, throwNth = 0, calls = [] }) {
+  let controlReads = 0;
   return runNextReviewTransitionGate(
     { repo: "o/r", controlIssue: "1028" },
     {
-      ghIssueViewImpl: async () => ({ body: controlBody, state: "OPEN" }),
+      ghIssueViewImpl: async () => ({ body: controlReads++ > 0 && refreshedControlBody !== null ? refreshedControlBody : controlBody, state: "OPEN" }),
       checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 1029 }),
       reconcileStage2CorrectionPrImpl: async () => ({
         crossed: true,
@@ -4619,6 +4620,8 @@ function run1060({ candidates, prBodies = { 1058: "Supersedes #1030" }, prStates
         if (c) return { headRefOid: c.headRefOid, state: "OPEN" };
         return { headRefOid: "x", state: prStates[number], body: prBodies[number] };
       },
+      stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
+      checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
       evaluateEvidenceCorrectionImpl: async () => ({ status: "NOT_ELIGIBLE", reason: "fixture" }),
     },
   );
@@ -4658,7 +4661,7 @@ test("#1060: unverifiable supersession (no Supersedes statement) keeps existing 
 test("#1060: stale control PR pointer (current PR not merged) grants no exclusion", async () => {
   // An OPEN current control PR never reaches post-merge routing at all; no exclusion is granted.
   const result = await run1060({ candidates: [open1030], prStates: { 1058: "OPEN" } });
-  assert.notEqual(result.pr, 1030);
+  assert.equal(result.state, "NO_ACTION_YET");
 });
 
 test("#1060: incorrect work Issue on control fails closed", async () => {
@@ -4688,4 +4691,34 @@ test("#1060: read error on the current control PR at the candidate-binding step 
   const result = await run1060({ candidates: [open1030], throwOn: 1058, throwNth: 2 });
   assert.equal(result.state, "AMBIGUOUS");
   assert.match(result.reason, /could not read/);
+});
+
+test("#1060 Stage 1: only standalone affirmative supersession declarations qualify", () => {
+  const candidate = [{ number: 1030 }];
+  const positive = ["Supersedes #1030.", "Supersedes #1030", "Intro\\n\\nSupersedes #1030.\\n\\nMore text"];
+  for (const body of positive) assert.deepEqual([...findSupersededCandidates(candidate, body)], [1030]);
+  const notAffirmative = [
+    "- [ ] Supersedes #1030.",
+    "> Supersedes #1030.",
+    "~~Supersedes #1030.~~",
+    "It is false that this supersedes #1030.",
+    "Quotation: Supersedes #1030.",
+    "```\\nSupersedes #1030.\\n```",
+    "    Supersedes #1030.",
+  ];
+  for (const body of notAffirmative) assert.deepEqual([...findSupersededCandidates(candidate, body)], [], body);
+});
+
+test("#1060 Stage 1: malformed freshly reread PR pointer fails closed", async () => {
+  const refreshed = CONTROL_BODY_1028.replace("- **PR:** #1058", "- **PR:** #1058 and #1061");
+  const result = await run1060({ candidates: [open1030], refreshedControlBody: refreshed });
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /refreshed control Issue.*invalid PR identity/);
+});
+
+test("#1060 Stage 1: ambiguous freshly reread PR pointer fails closed", async () => {
+  const refreshed = CONTROL_BODY_1028.replace("- **PR:** #1058", "- **PR:** #1058\\n- **PR (current):** #1061");
+  const result = await run1060({ candidates: [open1030], refreshedControlBody: refreshed });
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /refreshed control Issue.*ambiguous PR identity/);
 });

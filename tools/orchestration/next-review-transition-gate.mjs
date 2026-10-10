@@ -1572,9 +1572,25 @@ export async function reconcileStage2CorrectionPr({ repo, workIssue }, { ghPrLis
 export function findSupersededCandidates(candidates, supersedingPrBody) {
   const out = new Set();
   if (typeof supersedingPrBody !== "string") return out;
+  // A positive witness is a standalone top-level declaration, not incidental prose.
+  const affirmed = new Set();
+  let fence = null;
+  for (const line of supersedingPrBody.split(/\r?\n/)) {
+    const boundary = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    if (fence) {
+      if (boundary && boundary[1][0] === fence.char && boundary[1].length >= fence.length) fence = null;
+      continue;
+    }
+    if (boundary) {
+      fence = { char: boundary[1][0], length: boundary[1].length };
+      continue;
+    }
+    const marker = line.match(/^\s{0,3}Supersedes\s+#([1-9]\d*)\.?\s*$/i);
+    if (marker) affirmed.add(Number(marker[1]));
+  }
   for (const c of Array.isArray(candidates) ? candidates : []) {
     const n = Number(c?.number);
-    if (Number.isInteger(n) && new RegExp(`\\bSupersedes\\s*:?\\s*#${n}(?!\\d)`, "i").test(supersedingPrBody)) out.add(n);
+    if (Number.isInteger(n) && affirmed.has(n)) out.add(n);
   }
   return out;
 }
@@ -1591,6 +1607,9 @@ async function filterSupersededCandidates({ repo, context, postAudit, workIssue,
     return fail(`could not read control Issue #${context.controlIssue} to bind correction-PR candidates to the audited PR: ${err.message}`);
   }
   const prRef = parseOptionalIssueRefGuarded(controlBody, "PR");
+  if (prRef.kind === "invalid" || prRef.kind === "ambiguous") {
+    return fail(`refreshed control Issue #${context.controlIssue} has ${prRef.kind} PR identity: ${prRef.reason}`);
+  }
   if (prRef.kind !== "issue") return { reconciliation };
   const candidates = Array.isArray(reconciliation.candidates) && reconciliation.candidates.length > 0 ? reconciliation.candidates : [reconciliation.pr];
   if (candidates.length === 1 && Number(candidates[0].number) === prRef.issue) return { reconciliation };
