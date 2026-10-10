@@ -4623,6 +4623,10 @@ function run1060({ candidates, prBodies = { 1058: "Supersedes #1030" }, prStates
       stage1RunImpl: async () => ({ exitCode: 2, state: "NOT_REQUESTED" }),
       checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
       evaluateEvidenceCorrectionImpl: async () => ({ status: "NOT_ELIGIBLE", reason: "fixture" }),
+      listStage1TriggerHeadsImpl: async () => [],
+      readCorrectionCommitsImpl: async () => [],
+      readTargetCommitsImpl: async () => [],
+      checkMergeConflictImpl: async () => ({ exitCode: 0, mergeable: "MERGEABLE" }),
     },
   );
 }
