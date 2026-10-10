@@ -179,12 +179,15 @@ const sameArgs = (actual, expected) => JSON.stringify(actual) === JSON.stringify
 export function validateUnusableReplacementCommand(state, verdict, { controlIssue, repo = null } = {}) {
   const segs = parseNextCommand(verdict?.nextCommand);
   const predecessor = String(verdict?.predecessorAuditIssue ?? "");
-  const wantRepo = verdict?.repo ?? repo;
+  const wantRepo = repo;
   const bail = (why) => {
     throw new Error(`${state} nextCommand is not the canonical continuation for this verdict: ${why}`);
   };
   if (!/^[1-9]\d*$/.test(predecessor)) bail("verdict names no predecessor audit issue");
-  if (typeof wantRepo !== "string" || !wantRepo) bail("verdict names no repository");
+  if (typeof wantRepo !== "string" || !wantRepo.trim()) bail("launcher names no repository");
+  if (verdict?.repo != null && verdict.repo !== "" && verdict.repo !== wantRepo) {
+    bail("verdict belongs to a different repository");
+  }
   if (state === UNUSABLE_PREPARE) {
     const [s] = segs;
     const expected = ["prepare", "--repo", wantRepo, "--audit-issue", predecessor];
