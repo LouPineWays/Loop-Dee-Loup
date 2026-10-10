@@ -755,6 +755,52 @@ test("run: refuses atomically, writing nothing, when installing a hard importer 
   );
 });
 
+test("run: refuses atomically, writing nothing, when installing ready-dispatch-gate.mjs would leave it unable to load an unmanaged, preserved prepare-dispatch-manifest.mjs (Audit #1051, #1047)", async (t) => {
+  const root = makeFixtureRoot(t);
+  mkdirSync(join(root, "tools", "orchestration"), { recursive: true });
+  writeFileSync(
+    join(root, "tools", "orchestration", "prepare-dispatch-manifest.mjs"),
+    "export function computeDispatchReady() { return { ready: true }; }\n",
+  );
+  writeFileSync(
+    join(root, "tools", "orchestration", "ready-dispatch-gate.mjs"),
+    'import { computeDispatchReady } from "./prepare-dispatch-manifest.mjs";\n',
+  );
+  const dest = tempDir(t);
+  mkdirSync(join(dest, "tools", "orchestration"), { recursive: true });
+  const consumerContent = "// consumer-owned file, exports nothing LDL needs\n";
+  writeFileSync(join(dest, "tools", "orchestration", "prepare-dispatch-manifest.mjs"), consumerContent);
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /prepare-dispatch-manifest\.mjs/);
+  assert.match(result.message, /ready-dispatch-gate\.mjs/);
+  assert.ok(!existsSync(join(dest, ".ldl", "manifest.json")), "no manifest must be written when the operation is refused");
+  assert.equal(readFileSync(join(dest, "tools", "orchestration", "prepare-dispatch-manifest.mjs"), "utf8"), consumerContent);
+  assert.ok(
+    !existsSync(join(dest, "tools", "orchestration", "ready-dispatch-gate.mjs")),
+    "the hard importer must not be written either -- the whole operation is refused atomically",
+  );
+});
+
+test("run: installs ready-dispatch-gate.mjs and prepare-dispatch-manifest.mjs normally when the consumer has no colliding file (Audit #1051, #1047)", async (t) => {
+  const root = makeFixtureRoot(t);
+  mkdirSync(join(root, "tools", "orchestration"), { recursive: true });
+  writeFileSync(join(root, "tools", "orchestration", "prepare-dispatch-manifest.mjs"), "export const x = 1;\n");
+  writeFileSync(
+    join(root, "tools", "orchestration", "ready-dispatch-gate.mjs"),
+    'import { x } from "./prepare-dispatch-manifest.mjs";\n',
+  );
+  const dest = tempDir(t);
+
+  const result = await run({ dest, root }, { resolveRevisionImpl: () => "fake-sha-1" });
+
+  assert.equal(result.exitCode, 0);
+  assert.ok(existsSync(join(dest, "tools", "orchestration", "ready-dispatch-gate.mjs")));
+  assert.ok(existsSync(join(dest, "tools", "orchestration", "prepare-dispatch-manifest.mjs")));
+});
+
 test("run: a repeat run refusing a hard-dependency collision must not first delete a superseded bridge template (Stage 2 audit #531 P2 finding)", async (t) => {
   // Deliberately built WITHOUT the hard-dependency fixture files yet, so the first run below
   // has nothing to collide on and can succeed normally.
