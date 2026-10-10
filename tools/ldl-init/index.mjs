@@ -809,6 +809,9 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/session-entry-gate.mjs", dependsOnDest: "tools/orchestration/control-plane-continuation.mjs" },
   { dest: "tools/orchestration/action-envelope.mjs", dependsOnDest: "tools/orchestration/control-plane-continuation.mjs" },
   { dest: "tools/orchestration/launcher-run.mjs", dependsOnDest: "tools/orchestration/control-plane-continuation.mjs" },
+  // Issue #1047 Stage 1 finding (P2): ready-dispatch-gate.mjs dynamically imports
+  // computeDispatchReady from prepare-dispatch-manifest.mjs for BLOCKED-unit recovery.
+  { dest: "tools/orchestration/ready-dispatch-gate.mjs", dependsOnDest: "tools/orchestration/prepare-dispatch-manifest.mjs" },
 ];
 
 // Pure. Given one install/update run's final toInstall/toSkip classification, returns one
