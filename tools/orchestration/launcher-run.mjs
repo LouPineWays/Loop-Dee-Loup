@@ -175,10 +175,7 @@ const NEXT_COMMAND_STATES = new Set([
 // malformed payload fails closed before any mutation. Returns the validated segments.
 const UNUSABLE_PREPARE = "STAGE2_UNUSABLE_REPLACEMENT_PREPARATION_REQUIRED";
 const UNUSABLE_READY = "STAGE2_UNUSABLE_REPLACEMENT_READY";
-const flagValue = (args, flag) => {
-  const hits = args.reduce((acc, a, i) => (a === flag ? [...acc, args[i + 1]] : acc), []);
-  return hits.length === 1 ? hits[0] : undefined;
-};
+const sameArgs = (actual, expected) => JSON.stringify(actual) === JSON.stringify(expected);
 export function validateUnusableReplacementCommand(state, verdict, { controlIssue, repo = null } = {}) {
   const segs = parseNextCommand(verdict?.nextCommand);
   const predecessor = String(verdict?.predecessorAuditIssue ?? "");
@@ -186,27 +183,38 @@ export function validateUnusableReplacementCommand(state, verdict, { controlIssu
   const bail = (why) => {
     throw new Error(`${state} nextCommand is not the canonical continuation for this verdict: ${why}`);
   };
-  if (!/^\d+$/.test(predecessor)) bail("verdict names no predecessor audit issue");
+  if (!/^[1-9]\\d*$/.test(predecessor)) bail("verdict names no predecessor audit issue");
+  if (typeof wantRepo !== "string" || !wantRepo) bail("verdict names no repository");
   if (state === UNUSABLE_PREPARE) {
     const [s] = segs;
-    if (segs.length !== 1 || s.canonical !== "tools/orchestration/unusable-audit-recovery.mjs") bail("not the single recovery prepare segment");
-    const a = s.canonicalArgs;
-    if (a.length !== 5 || a[0] !== "prepare" || flagValue(a, "--audit-issue") !== predecessor) bail("audit issue differs from the verdict predecessor");
-    if (wantRepo != null && flagValue(a, "--repo") !== String(wantRepo)) bail("repo differs from the verdict");
+    const expected = ["prepare", "--repo", wantRepo, "--audit-issue", predecessor];
+    if (segs.length !== 1 || s.canonical !== "tools/orchestration/unusable-audit-recovery.mjs" || !sameArgs(s.canonicalArgs, expected)) {
+      bail("not the exact canonical recovery prepare command");
+    }
     return segs;
   }
+  if (state !== UNUSABLE_READY) bail("unrecognized replacement state");
   const replacement = String(verdict?.replacementAuditIssue ?? "");
-  if (!/^\d+$/.test(replacement) || replacement === predecessor) bail("verdict names no distinct replacement audit issue");
-  if (segs.length !== 2 || segs[0].canonical !== "tools/orchestration/finalize-audit-breakpoint.mjs" || segs[1].canonical !== "tools/review-watch/trigger.mjs") {
-    bail("not the finalize-then-trigger pair");
+  if (!/^[1-9]\\d*$/.test(replacement) || replacement === predecessor) bail("verdict names no distinct replacement audit issue");
+  if (![controlIssue, verdict?.pr, verdict?.workIssue].every((v) => /^[1-9]\\d*$/.test(String(v ?? "")))) {
+    bail("verdict/launcher names no valid control, PR, or execution issue");
   }
-  const f = segs[0].canonicalArgs;
-  const t = segs[1].canonicalArgs;
-  if (flagValue(f, "--audit-issue") !== replacement || flagValue(f, "--stale-audit-issue") !== predecessor) bail("finalize names a different audit pair");
-  if (flagValue(f, "--pr") !== String(verdict?.pr) || flagValue(f, "--execution-issue") !== String(verdict?.workIssue)) bail("finalize names a different PR or work issue");
-  if (verdict?.controlIssue != null && flagValue(f, "--control-issue") !== String(controlIssue)) bail("finalize names a different control issue");
-  if (flagValue(t, "--kind") !== "issue" || flagValue(t, "--number") !== replacement) bail("trigger names a different audit");
-  if (wantRepo != null && flagValue(t, "--repo") !== String(wantRepo)) bail("trigger repo differs from the verdict");
+  const expectedFinalize = [
+    "--control-issue", String(controlIssue),
+    "--execution-issue", String(verdict.workIssue),
+    "--pr", String(verdict.pr),
+    "--audit-issue", replacement,
+    "--stale-audit-issue", predecessor,
+    "--revalidate-uniqueness", "true",
+  ];
+  const expectedTrigger = ["--repo", wantRepo, "--kind", "issue", "--number", replacement];
+  if (
+    segs.length !== 2 ||
+    segs[0].canonical !== "tools/orchestration/finalize-audit-breakpoint.mjs" ||
+    segs[1].canonical !== "tools/review-watch/trigger.mjs" ||
+    !sameArgs(segs[0].canonicalArgs, expectedFinalize) ||
+    !sameArgs(segs[1].canonicalArgs, expectedTrigger)
+  ) bail("not the exact canonical finalize-then-trigger command");
   return segs;
 }
 
