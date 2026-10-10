@@ -13,6 +13,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  findSupersededCandidates,
   parseOptionalIssueRef,
   parseOptionalIssueRefGuarded,
   resolvePreMergeVerdict,
@@ -4583,4 +4584,108 @@ test("#1023 runNextReviewTransitionGate: direct-reference mode (no control/execu
   );
   assert.equal(mergeabilityCalls, 0);
   assert.equal(result.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+// Issue #1060 (control #539): the #1028/#1029/#1030/#1058/#1059 recurrence. An OPEN execution-linked
+// predecessor PR that a MERGED current control PR expressly supersedes is not a correction PR.
+const CONTROL_BODY_1028 = `## Current state
+
+- **Lifecycle:** AUDIT
+- **Execution:** #1029
+- **Route:** implementation worker
+- **PR:** #1058
+- **Stage 1:** satisfied
+- **Stage 2:** #1059
+- **Blocker:** none
+- **Founder decision:** none
+`;
+const open1030 = { number: 1030, headRefOid: "9e3f7935215f7a7321de32bf4dfc21ef29366f3b", state: "OPEN" };
+function run1060({ candidates, prBodies = { 1058: "Supersedes #1030" }, prStates = { 1058: "MERGED" }, controlBody = CONTROL_BODY_1028, throwOn = null, throwNth = 0, calls = [] }) {
+  return runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "1028" },
+    {
+      ghIssueViewImpl: async () => ({ body: controlBody, state: "OPEN" }),
+      checkPostAuditImpl: async () => ({ exitCode: 0, state: "OK", rawVerdict: "NOT CLEAN", verdict: "NOT CLEAN", workIssue: 1029 }),
+      reconcileStage2CorrectionPrImpl: async () => ({
+        crossed: true,
+        pr: candidates.reduce((a, b) => (b.number > a.number ? b : a)),
+        openCandidateCount: candidates.length,
+        candidates,
+      }),
+      ghPrStateImpl: async ({ number }) => {
+        calls.push(number);
+        if (number === throwOn && (throwNth === 0 || calls.filter((n) => n === number).length === throwNth)) throw new Error("boom");
+        const c = candidates.find((x) => x.number === number);
+        if (c) return { headRefOid: c.headRefOid, state: "OPEN" };
+        return { headRefOid: "x", state: prStates[number], body: prBodies[number] };
+      },
+      evaluateEvidenceCorrectionImpl: async () => ({ status: "NOT_ELIGIBLE", reason: "fixture" }),
+    },
+  );
+}
+
+test("#1060: superseded OPEN predecessor is never routed to Stage 1 trigger/finalize", async () => {
+  const calls = [];
+  const result = await run1060({ candidates: [open1030], calls });
+  assert.notEqual(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.equal(result.state, "STAGE2_CORRECTION_REQUIRED");
+  assert.doesNotMatch(JSON.stringify(result), /1030 --head/);
+  assert.ok(!calls.includes(1030));
+});
+
+test("#1060: a genuine new open correction PR beside the superseded predecessor remains eligible", async () => {
+  const fresh = { number: 1061, headRefOid: "newhead", state: "OPEN" };
+  const result = await run1060({ candidates: [open1030, fresh] });
+  assert.equal(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.equal(result.pr, 1061);
+  assert.match(result.nextCommand, /--number 1061 --head newhead/);
+});
+
+test("#1060: multiple surviving candidates fail closed", async () => {
+  const a = { number: 1061, headRefOid: "a", state: "OPEN" };
+  const b = { number: 1062, headRefOid: "b", state: "OPEN" };
+  const result = await run1060({ candidates: [open1030, a, b] });
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /multiple competing/);
+});
+
+test("#1060: unverifiable supersession (no Supersedes statement) keeps existing routing", async () => {
+  const result = await run1060({ candidates: [open1030], prBodies: { 1058: "unrelated" } });
+  assert.equal(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.equal(result.pr, 1030);
+});
+
+test("#1060: stale control PR pointer (current PR not merged) grants no exclusion", async () => {
+  // An OPEN current control PR never reaches post-merge routing at all; no exclusion is granted.
+  const result = await run1060({ candidates: [open1030], prStates: { 1058: "OPEN" } });
+  assert.notEqual(result.pr, 1030);
+});
+
+test("#1060: incorrect work Issue on control fails closed", async () => {
+  const result = await run1060({ candidates: [open1030], controlBody: CONTROL_BODY_1028.replace("#1029", "#999") });
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /Execution pointer does not match/);
+});
+
+test("#1060: read error on the current control PR fails closed", async () => {
+  const result = await run1060({ candidates: [open1030], throwOn: 1058 });
+  assert.notEqual(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.notEqual(result.exitCode, 3);
+});
+
+test("#1060: repeated evaluation is idempotent", async () => {
+  const a = await run1060({ candidates: [open1030] });
+  const b = await run1060({ candidates: [open1030] });
+  assert.deepEqual(a, b);
+});
+
+test("#1060: findSupersededCandidates matches exact numbers only", () => {
+  const s = findSupersededCandidates([{ number: 103 }, { number: 1030 }], "Supersedes #1030.");
+  assert.deepEqual([...s], [1030]);
+});
+
+test("#1060: read error on the current control PR at the candidate-binding step fails closed with a precise reason", async () => {
+  const result = await run1060({ candidates: [open1030], throwOn: 1058, throwNth: 2 });
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /could not read/);
 });
