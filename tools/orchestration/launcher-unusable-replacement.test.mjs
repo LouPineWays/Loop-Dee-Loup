@@ -105,6 +105,10 @@ test("replacement-ready: created but unprojected/untriggered -> finalize/project
   assert.equal(r.outcome, Outcome.ADVANCED);
   const order = w.mutations().map((c) => c[0]);
   assert.deepEqual(order, [FINALIZE, TRIGGER]);
+  assert.deepEqual(w.calls.find((c) => c[0] === FINALIZE), [
+    FINALIZE, "--control-issue", "379", "--execution-issue", "73", "--pr", "824",
+    "--audit-issue", "390", "--stale-audit-issue", "381", "--revalidate-uniqueness", "true",
+  ]);
   assert.equal(w.count(RECOVERY), 0);
 });
 
@@ -163,6 +167,7 @@ test("wrong target / malformed payload / missing authority fail closed before an
   const cases = [
     ["prepare names a different audit", prepVerdict({ nextCommand: `node ${RECOVERY} prepare --repo o/r --audit-issue 999` })],
     ["prepare carries extra args", prepVerdict({ nextCommand: `node ${RECOVERY} prepare --repo o/r --audit-issue 381 --force true` })],
+    ["prepare flag order differs", prepVerdict({ nextCommand: `node ${RECOVERY} prepare --audit-issue 381 --repo o/r` })],
     ["prepare is a different script", prepVerdict({ nextCommand: `node ${FINALIZE} --audit-issue 381` })],
     ["prepare repo differs", prepVerdict({ nextCommand: `node ${RECOVERY} prepare --repo x/y --audit-issue 381` })],
     ["prepare names no nextCommand", prepVerdict({ nextCommand: undefined })],
@@ -182,6 +187,12 @@ test("wrong target / malformed payload / missing authority fail closed before an
     ["finalize names a different replacement", readyVerdict({ nextCommand: readyVerdict().nextCommand.replace("--audit-issue 390", "--audit-issue 391") })],
     ["finalize names a different PR", readyVerdict({ nextCommand: readyVerdict().nextCommand.replace("--pr 824", "--pr 825") })],
     ["only the trigger", readyVerdict({ nextCommand: `node ${TRIGGER} --repo o/r --kind issue --number 390` })],
+    ["finalize injects another repo", readyVerdict({ nextCommand: readyVerdict().nextCommand.replace("--control-issue 379", "--repo other/repo --control-issue 379") })],
+    ["finalize omits uniqueness revalidation", readyVerdict({ nextCommand: readyVerdict().nextCommand.replace(" --revalidate-uniqueness true", "") })],
+    ["finalize disables uniqueness revalidation", readyVerdict({ nextCommand: readyVerdict().nextCommand.replace("--revalidate-uniqueness true", "--revalidate-uniqueness false") })],
+    ["finalize reorders canonical flags", readyVerdict({ nextCommand: readyVerdict().nextCommand.replace("--control-issue 379 --execution-issue 73", "--execution-issue 73 --control-issue 379") })],
+    ["trigger injects extra flag", readyVerdict({ nextCommand: readyVerdict().nextCommand.replace("--kind issue", "--dry-run true --kind issue") })],
+    ["trigger reorders canonical flags", readyVerdict({ nextCommand: readyVerdict().nextCommand.replace("--repo o/r --kind issue", "--kind issue --repo o/r") })],
     ["replacement equals predecessor", readyVerdict({ replacementAuditIssue: 381 })],
   ];
   for (const [label, verdict] of readyCases) {
@@ -190,6 +201,13 @@ test("wrong target / malformed payload / missing authority fail closed before an
     assert.equal(r.outcome, Outcome.FAIL_CLOSED, label);
     assert.equal(w.mutations().length, 0, label);
   }
+  // Reconciliation must validate the complete command before running its finalize-only segment.
+  const stale = readyVerdict({
+    nextCommand: readyVerdict().nextCommand.replace(" --revalidate-uniqueness true", ""),
+  });
+  const projectedLater = world({ gate: [stale], replacement: true, triggered: true });
+  assert.equal((await projectedLater.step()).outcome, Outcome.FAIL_CLOSED);
+  assert.equal(projectedLater.mutations().length, 0);
   // Launch request names a different execution issue than the verdict: refused, nothing run.
   const w = world({ gate: [prepVerdict()] });
   assert.equal((await w.step(555)).outcome, Outcome.FAIL_CLOSED);
