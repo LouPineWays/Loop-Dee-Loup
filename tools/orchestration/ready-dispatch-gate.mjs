@@ -1804,6 +1804,28 @@ export async function verifyRoutedDispatchManifest(
     )
     .map(([unitId]) => unitId);
 
+  // Stage 1 correction (#1047): classify every manifest entry that is neither DONE, BLOCKED nor
+  // dispatchable so the caller can map an EMPTY eligible wave to a non-dispatch continuation instead
+  // of an impossible READY_TO_DISPATCH_UNITS. Causes: "replan" (live State or manifest route
+  // REPLAN_REQUIRED), "in-progress", "unmet-dependency" (live PLANNED/ROUTED, prerequisites not done),
+  // "unknown-state" (anything else, fail closed).
+  const excludedUnits = [...manifestEntries.entries()]
+    .filter(
+      ([unitId]) =>
+        !alreadyDoneUnitIds.includes(unitId) &&
+        !blockedUnitIds.includes(unitId) &&
+        !/^done\b/i.test(String(parsed.plan.units?.[unitId]?.state ?? "").trim()) &&
+        !dispatchReadyUnitIds.includes(unitId),
+    )
+    .map(([unitId, entry]) => {
+      const state = String(parsed.plan.units?.[unitId]?.state ?? "").trim();
+      let cause = "unknown-state";
+      if (/^REPLAN_REQUIRED$/i.test(entry.route.trim()) || /^REPLAN_REQUIRED\b/i.test(state)) cause = "replan";
+      else if (/^IN_PROGRESS\b/i.test(state)) cause = "in-progress";
+      else if (isDispatchEligibleState(unitId)) cause = "unmet-dependency";
+      return { unitId, cause };
+    });
+
   // Issue #856: every Plan Index unit's own live Worker Unit Contract State is DONE -- the
   // post-unit boundary (Integration/PR or unit-owned PR breakpoint) is what comes next, not
   // another unit wave. Same leading-token match as alreadyDoneUnitIds above.
@@ -1820,6 +1842,7 @@ export async function verifyRoutedDispatchManifest(
     dispatchReadyUnitIds,
     alreadyDoneUnitIds,
     blockedUnitIds,
+    excludedUnits,
     allUnitsDone,
     integrationRoute: parsed.plan.planIndex.integrationRoute,
     routeFailure: planLevelRouteFailure(parsed.plan),
@@ -2476,6 +2499,45 @@ async function checkReadyDispatchCore(
             `already record "State: DONE" on their own Worker Unit Contract -- the PR/Stage 1 breakpoint for this wave has already been ` +
             `crossed even though Lifecycle is still "ROUTED"; do not redispatch, reconcile toward post-PR handling instead`,
         ],
+      };
+    }
+    if (manifestCheck.dispatchReadyUnitIds.length === 0) {
+      // Stage 1 correction (#1047): READY_TO_DISPATCH_UNITS must always name at least one presently
+      // eligible unit. A genuine REPLAN_REQUIRED state/route routes to canonical replanning; every
+      // other empty-wave cause (IN_PROGRESS, unmet dependency, unknown/malformed State, no candidate)
+      // fails closed with the existing BLOCKED stop (envelope mode none), never a dispatch.
+      const excluded = manifestCheck.excludedUnits ?? [];
+      const replanIds = excluded.filter((u) => u.cause === "replan").map((u) => u.unitId);
+      if (replanIds.length > 0) {
+        return {
+          exitCode: EXIT_CODES_BY_STATUS.REPLAN_REQUIRED,
+          state: "REPLAN_REQUIRED",
+          stopAfter: true,
+          controlIssue: Number(controlIssue),
+          repo: resolvedRepo,
+          executionIssue: result.executionIssue,
+          planIndexUrl: manifestCheck.planIndexUrl,
+          replanRequiredUnitIds: replanIds,
+          reason:
+            `no unit is presently dispatchable and unit(s) ${replanIds.join(", ")} are REPLAN_REQUIRED by live State or manifest route; ` +
+            `dispatch a planning-correction worker, not a unit wave`,
+          route: "planning worker",
+        };
+      }
+      const detail = excluded.length
+        ? excluded.map((u) => `${u.unitId} (${u.cause})`).join(", ")
+        : "no manifest entry is a dispatch candidate";
+      return {
+        exitCode: 4,
+        state: "BLOCKED",
+        controlIssue: Number(controlIssue),
+        repo: resolvedRepo,
+        executionIssue: result.executionIssue,
+        reasons: [
+          `no Worker Unit is presently eligible for dispatch under current live state: ${detail}. ` +
+            `A Dispatch Manifest's dispatch_ready flag is not authorization; do not dispatch, redispatch, or replan on this evidence alone`,
+        ],
+        blockerReconciliationEligible: false,
       };
     }
     return {

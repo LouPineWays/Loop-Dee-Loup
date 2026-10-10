@@ -1336,6 +1336,7 @@ test("checkReadyDispatch: ROUTED reports exit 7 only when the manifest pointer a
             url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100",
             dispatchManifest: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
           },
+          units: { "407-A": { state: "PLANNED" } },
         },
       }),
       ghCommentViewImpl: async () => ({
@@ -1343,7 +1344,8 @@ test("checkReadyDispatch: ROUTED reports exit 7 only when the manifest pointer a
         html_url: "https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-200",
         issue_url: "https://api.github.com/repos/LouPineWays/Loop-Dee-Loup/issues/407",
         body:
-          "## Dispatch Manifest (v1)\n\n- **Plan index:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100\n",
+          "## Dispatch Manifest (v1)\n\n- **Plan index:** https://github.com/LouPineWays/Loop-Dee-Loup/issues/407#issuecomment-100\n" +
+          "- 407-A: route=stronger/general worker dispatch_ready=true note=none\n",
       }),
     },
   );
@@ -3487,4 +3489,78 @@ test("checkReadyDispatch: a regenerated false-ready BLOCKED unit does not suppre
   assert.equal(result.state, "READY_TO_DISPATCH_UNITS");
   assert.deepEqual(result.dispatchReadyUnitIds, ["1-B"]);
   assert.deepEqual(result.blockedUnitIds, ["1-A"]);
+});
+
+// --- Stage 1 correction (#1047, PR #1052): an empty eligible wave never yields READY_TO_DISPATCH_UNITS ----
+
+async function runRoutedCaller({ unitStates, manifestUnitLines, unitExtras }) {
+  const fixture = manifestFixtureWithUnitStates({ executionIssue: 389, unitStates, manifestUnitLines, unitExtras });
+  const { repo, executionIssue, ...impls } = fixture;
+  return checkReadyDispatch(
+    { repo, controlIssue: 390 },
+    { ghIssueViewImpl: async () => ({ body: ROUTED_389_BODY, state: "OPEN" }), ghPrListImpl: async () => [], ...impls },
+  );
+}
+
+test("checkReadyDispatch: stale dispatch_ready=true on IN_PROGRESS/unknown/empty State fails closed (BLOCKED, exit 4, envelope none), never an empty READY_TO_DISPATCH_UNITS (Stage 1 #1047)", async () => {
+  for (const state of ["IN_PROGRESS", "IN_PROGRESS -- worker running", "WEIRD", ""]) {
+    const r = await runRoutedCaller({
+      unitStates: { "1-A": state },
+      manifestUnitLines: ["1-A: route=stronger/general worker dispatch_ready=true note=none"],
+    });
+    assert.equal(r.state, "BLOCKED", JSON.stringify(state));
+    assert.equal(r.exitCode, 4);
+    assert.equal(r.dispatchReadyUnitIds, undefined);
+    assert.equal(r.blockerReconciliationEligible, false);
+    assert.equal(r.actionEnvelope.mode, "none");
+    assert.match(r.reasons[0], /1-A/);
+  }
+});
+
+test("checkReadyDispatch: stale dispatch_ready=true with an unmet dependency fails closed, never an empty wave (Stage 1 #1047)", async () => {
+  const r = await runRoutedCaller({
+    unitStates: { "1-A": "IN_PROGRESS", "1-B": "PLANNED" },
+    unitExtras: { "1-B": { prerequisitesDependencies: "1-A" } },
+    manifestUnitLines: [
+      "1-A: route=stronger/general worker dispatch_ready=false note=none",
+      "1-B: route=stronger/general worker dispatch_ready=true note=none",
+    ],
+  });
+  assert.equal(r.state, "BLOCKED");
+  assert.match(r.reasons[0], /1-B \(unmet-dependency\)/);
+  assert.match(r.reasons[0], /1-A \(in-progress\)/);
+  assert.equal(r.actionEnvelope.mode, "none");
+});
+
+test("checkReadyDispatch: live REPLAN_REQUIRED State or REPLAN_REQUIRED route routes to REPLAN_REQUIRED (exit 12, planning worker), not a unit wave (Stage 1 #1047)", async () => {
+  for (const [state, line] of [
+    ["REPLAN_REQUIRED", "1-A: route=stronger/general worker dispatch_ready=true note=none"],
+    ["PLANNED", "1-A: route=REPLAN_REQUIRED dispatch_ready=true note=none"],
+  ]) {
+    const r = await runRoutedCaller({ unitStates: { "1-A": state }, manifestUnitLines: [line] });
+    assert.equal(r.state, "REPLAN_REQUIRED", state);
+    assert.equal(r.exitCode, 12);
+    assert.deepEqual(r.replanRequiredUnitIds, ["1-A"]);
+    assert.equal(r.route, "planning worker");
+    assert.equal(r.dispatchReadyUnitIds, undefined);
+    assert.equal(r.actionEnvelope.authorizedActions[0], "dispatch-planning-correction-worker");
+  }
+});
+
+test("checkReadyDispatch: mixed wave with excluded and eligible candidates emits only the eligible ID; positive control still dispatches (Stage 1 #1047)", async () => {
+  const r = await runRoutedCaller({
+    unitStates: { "1-A": "IN_PROGRESS", "1-B": "ROUTED", "1-C": "REPLAN_REQUIRED" },
+    manifestUnitLines: [
+      "1-A: route=stronger/general worker dispatch_ready=true note=none",
+      "1-B: route=stronger/general worker dispatch_ready=true note=none",
+      "1-C: route=stronger/general worker dispatch_ready=true note=none",
+    ],
+  });
+  assert.equal(r.state, "READY_TO_DISPATCH_UNITS");
+  assert.deepEqual(r.dispatchReadyUnitIds, ["1-B"]);
+  const solo = await runRoutedCaller({
+    unitStates: { "1-A": "PLANNED" },
+    manifestUnitLines: ["1-A: route=stronger/general worker dispatch_ready=true note=none"],
+  });
+  assert.deepEqual(solo.dispatchReadyUnitIds, ["1-A"]);
 });
