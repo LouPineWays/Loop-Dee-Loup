@@ -146,7 +146,7 @@ const ENVELOPES = {
   // authorizes nothing (the normal blocked/founder-interrupt chat contract).
   PR_BREAKPOINT_NEEDS_FINALIZATION: {
     mode: ENVELOPE_MODES.BOUNDED,
-    authorizedActions: ["run-review-watch-trigger", "run-finalize-pr-breakpoint", "run-successor-integration-preflight"],
+    authorizedActions: ["run-review-watch-trigger", "run-finalize-pr-breakpoint", "run-successor-integration-preflight", "dispatch-successor-integration-worker"],
   },
   READY_TO_PROJECT_NO_PR_COMPLETION: {
     mode: ENVELOPE_MODES.BOUNDED,
@@ -389,7 +389,7 @@ const ENVELOPES = {
   // from `state` alone.
   STAGE2_CORRECTION_PR_NEEDS_FINALIZATION: {
     mode: ENVELOPE_MODES.BOUNDED,
-    authorizedActions: ["run-review-watch-trigger", "run-finalize-pr-breakpoint", "run-successor-integration-preflight"],
+    authorizedActions: ["run-review-watch-trigger", "run-finalize-pr-breakpoint", "run-successor-integration-preflight", "dispatch-successor-integration-worker"],
   },
 };
 
@@ -562,6 +562,10 @@ export function getActionEnvelope(state, context = {}) {
     // the one contingent follow-up is `successor-integration-preflight.mjs`, authorized only
     // alongside a trigger segment (so it can never be an independent action).
     if (hasTrigger) authorizedActions.push("run-successor-integration-preflight");
+    // Stage 1 correction (#1029, PR #1058 P1): a preflight that returns a successor route ends in a
+    // dead end unless the one successor-integration worker (fresh PR + its own Stage 1) is
+    // authorized too. Contingent on the preflight, so it is never an independent action.
+    if (hasTrigger) authorizedActions.push("dispatch-successor-integration-worker");
     return { mode: entry.mode, authorizedActions };
   }
 
@@ -601,7 +605,7 @@ export function getActionEnvelope(state, context = {}) {
 // Issue #1029 (Stage 1 correction): authorized only as the contingent branch of an already-required
 // action (the first Stage 1 trigger exiting 3 on a CONFLICTING head), so the required-action check
 // below does not demand it when the trigger succeeds. Still subject to the order/uniqueness checks.
-const CONTINGENT_ACTIONS = new Set(["run-successor-integration-preflight"]);
+const CONTINGENT_ACTIONS = new Set(["run-successor-integration-preflight", "dispatch-successor-integration-worker"]);
 
 const NEVER_AUTHORIZED = new Set([
   "rerun-gate",

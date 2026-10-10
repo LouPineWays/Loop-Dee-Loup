@@ -1031,7 +1031,7 @@ const CORRECTION_PR_FINALIZE_DIRECT_REFERENCE_MODE = {
 
 test("STAGE2_CORRECTION_PR_NEEDS_FINALIZATION (control-Issue mode): performing trigger then finalize, in order, is compliant", () => {
   const envelope = getActionEnvelope("STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", CORRECTION_PR_FINALIZE_CONTROL_ISSUE_MODE);
-  assert.deepEqual(envelope.authorizedActions, ["run-review-watch-trigger", "run-finalize-pr-breakpoint", "run-successor-integration-preflight"]);
+  assert.deepEqual(envelope.authorizedActions, ["run-review-watch-trigger", "run-finalize-pr-breakpoint", "run-successor-integration-preflight", "dispatch-successor-integration-worker"]);
   const result = classifyEnvelopeCompliance(
     "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
     ["run-review-watch-trigger", "run-finalize-pr-breakpoint"],
@@ -1042,7 +1042,7 @@ test("STAGE2_CORRECTION_PR_NEEDS_FINALIZATION (control-Issue mode): performing t
 
 test("STAGE2_CORRECTION_PR_NEEDS_FINALIZATION (direct-reference mode, no thin control): run-finalize-pr-breakpoint is not authorized -- there is no control Issue to project onto", () => {
   const envelope = getActionEnvelope("STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", CORRECTION_PR_FINALIZE_DIRECT_REFERENCE_MODE);
-  assert.deepEqual(envelope.authorizedActions, ["run-review-watch-trigger", "run-successor-integration-preflight"]);
+  assert.deepEqual(envelope.authorizedActions, ["run-review-watch-trigger", "run-successor-integration-preflight", "dispatch-successor-integration-worker"]);
   const result = classifyEnvelopeCompliance(
     "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
     ["run-review-watch-trigger", "run-finalize-pr-breakpoint"],
@@ -1173,6 +1173,10 @@ test("Issue #1029: first-trigger CONFLICTING result (exit 3) is consumed -- succ
     assert.equal(ok.status, "compliant");
     const ok2 = classifyEnvelopeCompliance(state, ["run-review-watch-trigger", "run-finalize-pr-breakpoint"], ctx);
     assert.equal(ok2.status, "compliant");
+    const ok3 = classifyEnvelopeCompliance(state, ["run-review-watch-trigger", "run-successor-integration-preflight", "dispatch-successor-integration-worker"], ctx);
+    assert.equal(ok3.status, "compliant");
+    const early = classifyEnvelopeCompliance(state, ["dispatch-successor-integration-worker", "run-successor-integration-preflight"], ctx);
+    assert.equal(early.status, "violation");
     const none = classifyEnvelopeCompliance(state, ["run-successor-integration-preflight"], { nextCommand: "node tools/orchestration/finalize-pr-breakpoint.mjs --control-issue 1 --execution-issue 2 --pr 9 --head h" });
     assert.equal(none.status, "violation");
   }

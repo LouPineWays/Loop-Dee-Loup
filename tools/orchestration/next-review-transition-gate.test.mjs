@@ -4124,7 +4124,7 @@ test("runNextReviewTransitionGate: the exact #487/#643/#644 shape -- an already-
   assert.equal(result.actionEnvelope.mode, "bounded");
   assert.deepEqual(
     result.actionEnvelope.authorizedActions.slice().sort(),
-    ["run-finalize-pr-breakpoint", "run-review-watch-trigger", "run-successor-integration-preflight"].sort(),
+    ["run-finalize-pr-breakpoint", "run-review-watch-trigger", "run-successor-integration-preflight", "dispatch-successor-integration-worker"].sort(),
   );
 });
 
