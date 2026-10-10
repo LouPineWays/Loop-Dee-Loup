@@ -1775,7 +1775,28 @@ export async function verifyRoutedDispatchManifest(
   const blockedUnitIds = planUnitIds.filter((unitId) =>
     /^blocked\b/i.test(String(parsed.plan.units?.[unitId]?.state ?? "").trim()),
   );
-  const dispatchReadyUnitIds = dispatchReadyManifestUnitIds.filter(
+  // Audit #1049 correction: a freshly prepared manifest records a then-BLOCKED unit as
+  // dispatch_ready=false with a "BLOCKED:" note. Once an authorized change restores an
+  // executable live State, that stale false entry must not remain readiness authority --
+  // current dispatchability is re-derived from the live State and prerequisites (the same
+  // computeDispatchReady the producer uses); the manifest contributes only its validated route.
+  const { computeDispatchReady } = await import("./prepare-dispatch-manifest.mjs");
+  // Stage 1 correction (#1047): a formerly-BLOCKED stale-false entry is re-authorized only by a live
+  // undispatched State (leading token PLANNED or ROUTED); BLOCKED, DONE, IN_PROGRESS, REPLAN_REQUIRED
+  // and unknown/malformed/unreadable States never recover into dispatch.
+  const isDispatchEligibleState = (unitId) =>
+    /^(?:PLANNED|ROUTED)\b/i.test(String(parsed.plan.units?.[unitId]?.state ?? "").trim());
+  const recoveredUnitIds = [...manifestEntries.entries()]
+    .filter(
+      ([unitId, entry]) =>
+        !entry.dispatchReady &&
+        /^BLOCKED:/i.test(entry.note) &&
+        !/^REPLAN_REQUIRED$/i.test(entry.route.trim()) &&
+        isDispatchEligibleState(unitId) &&
+        computeDispatchReady(parsed.plan.units[unitId], parsed.plan.units).ready,
+    )
+    .map(([unitId]) => unitId);
+  const dispatchReadyUnitIds = [...dispatchReadyManifestUnitIds, ...recoveredUnitIds].filter(
     (unitId) => !alreadyDoneUnitIds.includes(unitId) && !blockedUnitIds.includes(unitId),
   );
 

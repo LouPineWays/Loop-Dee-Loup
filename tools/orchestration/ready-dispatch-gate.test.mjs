@@ -3348,6 +3348,71 @@ test("checkReadyDispatch: recovery -- the same unit with State restored to PLANN
   assert.deepEqual(await run(), first);
 });
 
+test("checkReadyDispatch: recovery from a freshly prepared dispatch_ready=false BLOCKED manifest dispatches once State is PLANNED, manifest unchanged (Audit #1049)", async () => {
+  const run = async (state) => {
+    const { repo, impls } = await runBlockedFixture({
+      unitStates: { "1037-A": state },
+      manifestUnitLines: [
+        "1037-A: route=stronger/general worker dispatch_ready=false note=BLOCKED: live Worker Unit State is BLOCKED -- not dispatchable until an authorized change restores an executable State and the manifest is re-prepared",
+      ],
+    });
+    return checkReadyDispatch(
+      { repo, controlIssue: 390 },
+      { ghIssueViewImpl: async () => ({ body: ROUTED_389_BODY, state: "OPEN" }), ghPrListImpl: async () => [], ...impls },
+    );
+  };
+  const blocked = await run(BLOCKED_STATE_1037A);
+  assert.equal(blocked.state, "BLOCKED");
+  const first = await run("PLANNED");
+  assert.equal(first.state, "READY_TO_DISPATCH_UNITS");
+  assert.deepEqual(first.dispatchReadyUnitIds, ["1037-A"]);
+  assert.deepEqual(await run("PLANNED"), first);
+});
+
+const STALE_BLOCKED_FALSE =
+  "dispatch_ready=false note=BLOCKED: live Worker Unit State is BLOCKED -- not dispatchable until an authorized change restores an executable State and the manifest is re-prepared";
+
+async function runRecoveredWave(states, manifestFlagsByUnit = {}) {
+  const unitIds = Object.keys(states);
+  const { repo, impls } = await runBlockedFixture({
+    unitStates: states,
+    manifestUnitLines: unitIds.map(
+      (u) => `${u}: route=stronger/general worker ${manifestFlagsByUnit[u] ?? STALE_BLOCKED_FALSE}`,
+    ),
+  });
+  return verifyRoutedDispatchManifest({ repo, executionIssue: 389 }, impls);
+}
+
+test("verifyRoutedDispatchManifest: formerly-BLOCKED stale-false entry dispatches exactly once for PLANNED and ROUTED (Stage 1 #1047)", async () => {
+  for (const state of ["PLANNED", "ROUTED"]) {
+    const result = await runRecoveredWave({ "1-A": state });
+    assert.deepEqual(result.dispatchReadyUnitIds, ["1-A"], state);
+  }
+});
+
+test("verifyRoutedDispatchManifest: DONE/IN_PROGRESS/REPLAN_REQUIRED/unknown never recover into dispatch from a formerly-BLOCKED stale-false entry (Stage 1 #1047)", async () => {
+  const sibling = { "1-B": "PLANNED" };
+  for (const state of ["DONE -- finished", "IN_PROGRESS", "IN_PROGRESS -- worker running", "REPLAN_REQUIRED", "WEIRD", ""]) {
+    const stale = await runRecoveredWave({ "1-A": state, ...sibling }, { "1-B": "dispatch_ready=true note=none" });
+    assert.deepEqual(stale.dispatchReadyUnitIds, ["1-B"], JSON.stringify(state));
+  }
+});
+
+test("verifyRoutedDispatchManifest: recovered unit with an unmet dependency is not dispatched (Stage 1 #1047)", async () => {
+  const fixture = manifestFixtureWithUnitStates({
+    executionIssue: 389,
+    unitStates: { "1-A": "PLANNED", "1-B": "PLANNED" },
+    unitExtras: { "1-B": { prerequisitesDependencies: "Depends on 1-A" } },
+    manifestUnitLines: [
+      "1-A: route=stronger/general worker dispatch_ready=true note=none",
+      `1-B: route=stronger/general worker ${STALE_BLOCKED_FALSE}`,
+    ],
+  });
+  const { repo, executionIssue, ...impls } = fixture;
+  const result = await verifyRoutedDispatchManifest({ repo, executionIssue }, impls);
+  assert.deepEqual(result.dispatchReadyUnitIds, ["1-A"]);
+});
+
 test("checkReadyDispatch: manifest dispatch_ready=false for BLOCKED is still reported as blocked, while DONE stays excluded (#1047 controls)", async () => {
   const done = await runBlockedFixture({
     unitStates: { "1-A": "DONE -- finished", "1-B": BLOCKED_STATE_1037A },
