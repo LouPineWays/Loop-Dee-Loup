@@ -169,6 +169,55 @@ const NEXT_COMMAND_STATES = new Set([
   "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION",
 ]);
 
+// Issue #888: the #985 unusable-response replacement verdicts carry a gate-composed `nextCommand`.
+// Before the launcher runs any segment of it, every identity the command names must equal the
+// verdict's own (predecessor, replacement, PR, work issue, control issue) -- a wrong-target or
+// malformed payload fails closed before any mutation. Returns the validated segments.
+const UNUSABLE_PREPARE = "STAGE2_UNUSABLE_REPLACEMENT_PREPARATION_REQUIRED";
+const UNUSABLE_READY = "STAGE2_UNUSABLE_REPLACEMENT_READY";
+const sameArgs = (actual, expected) => JSON.stringify(actual) === JSON.stringify(expected);
+export function validateUnusableReplacementCommand(state, verdict, { controlIssue, repo = null } = {}) {
+  const segs = parseNextCommand(verdict?.nextCommand);
+  const predecessor = String(verdict?.predecessorAuditIssue ?? "");
+  const wantRepo = verdict?.repo ?? repo;
+  const bail = (why) => {
+    throw new Error(`${state} nextCommand is not the canonical continuation for this verdict: ${why}`);
+  };
+  if (!/^[1-9]\d*$/.test(predecessor)) bail("verdict names no predecessor audit issue");
+  if (typeof wantRepo !== "string" || !wantRepo) bail("verdict names no repository");
+  if (state === UNUSABLE_PREPARE) {
+    const [s] = segs;
+    const expected = ["prepare", "--repo", wantRepo, "--audit-issue", predecessor];
+    if (segs.length !== 1 || s.canonical !== "tools/orchestration/unusable-audit-recovery.mjs" || !sameArgs(s.canonicalArgs, expected)) {
+      bail("not the exact canonical recovery prepare command");
+    }
+    return segs;
+  }
+  if (state !== UNUSABLE_READY) bail("unrecognized replacement state");
+  const replacement = String(verdict?.replacementAuditIssue ?? "");
+  if (!/^[1-9]\d*$/.test(replacement) || replacement === predecessor) bail("verdict names no distinct replacement audit issue");
+  if (![controlIssue, verdict?.pr, verdict?.workIssue].every((v) => /^[1-9]\d*$/.test(String(v ?? "")))) {
+    bail("verdict/launcher names no valid control, PR, or execution issue");
+  }
+  const expectedFinalize = [
+    "--control-issue", String(controlIssue),
+    "--execution-issue", String(verdict.workIssue),
+    "--pr", String(verdict.pr),
+    "--audit-issue", replacement,
+    "--stale-audit-issue", predecessor,
+    "--revalidate-uniqueness", "true",
+  ];
+  const expectedTrigger = ["--repo", wantRepo, "--kind", "issue", "--number", replacement];
+  if (
+    segs.length !== 2 ||
+    segs[0].canonical !== "tools/orchestration/finalize-audit-breakpoint.mjs" ||
+    segs[1].canonical !== "tools/review-watch/trigger.mjs" ||
+    !sameArgs(segs[0].canonicalArgs, expectedFinalize) ||
+    !sameArgs(segs[1].canonicalArgs, expectedTrigger)
+  ) bail("not the exact canonical finalize-then-trigger command");
+  return segs;
+}
+
 // io: { node(file, args, input?) -> stdout, gh(args, input?) -> stdout } (injectable for tests).
 // readPr({ repo, number }) -> { state, headRefOid } and readIssue({ repo, number }) -> { body, state }
 // are REST-backed by default and injectable for tests.
@@ -181,6 +230,8 @@ export function buildDeps({
   readPr = ({ repo: r, number }) => readGithubPr({ repo: r, number, fields: ["state", "headRefOid"] }),
   readIssue = ({ repo: r, number }) => readGithubIssue({ repo: r, number, fields: ["body", "state"] }),
   verifyManifest,
+  readEvidenceCorrection,
+  readUnusableRecovery,
 }) {
   const gate = async () => {
     const out = io.node("tools/orchestration/control-plane-bootstrap.mjs", ["session-entry-gate", "--control-issue", String(controlIssue)]);
@@ -202,7 +253,7 @@ export function buildDeps({
   const writeControlBody = (body) =>
     io.node("tools/orchestration/write-control-snapshot.mjs", ["--control-issue", String(controlIssue), "--body-file", "-"], body);
 
-  const { readEffect } = buildReadEffect({ repo, controlIssue, executionIssue, readIssue, readComments, readPr, verifyManifest });
+  const { readEffect } = buildReadEffect({ repo, controlIssue, executionIssue, readIssue, readComments, readPr, verifyManifest, readEvidenceCorrection, readUnusableRecovery });
 
   // Project Lifecycle: ROUTED for the manifest transition from the gate's OWN verdict: only after
   // the gate re-verifies the manifest does it return READY_TO_PROJECT_ROUTED + proposedBody. Any
@@ -230,6 +281,8 @@ export function buildDeps({
         // two leaves manifest-present/unprojected, which the next read-back reconciles (finalize).
         io.node("tools/orchestration/prepare-dispatch-manifest.mjs", ["--execution-issue", String(verdict.executionIssue ?? executionIssue), "--create"]);
         await projectRoutedFromFreshGate();
+      } else if (state === UNUSABLE_PREPARE || state === UNUSABLE_READY) {
+        for (const c of validateUnusableReplacementCommand(state, verdict, { controlIssue, repo })) io.node(c.file, c.args);
       } else if (NEXT_COMMAND_STATES.has(state)) {
         for (const c of parseNextCommand(verdict.nextCommand)) io.node(c.file, c.args);
       } else if (state === "STAGE1_CORRECTION_FINALIZATION_REQUIRED") {
@@ -270,9 +323,9 @@ export function buildDeps({
         if (control.length !== 1) throw new Error("close verdict has no single control-terminalization segment to finalize");
         return io.node(control[0].file, control[0].args);
       }
-      if (state === "STAGE2_AUDIT_ALREADY_PREPARED" || state === "STAGE2_EVIDENCE_REAUDIT_READY" || state === "STAGE2_UNUSABLE_REPLACEMENT_READY") {
+      if (state === "STAGE2_AUDIT_ALREADY_PREPARED" || state === "STAGE2_EVIDENCE_REAUDIT_READY" || state === UNUSABLE_READY) {
         // The trigger already exists (read-back); only the control projection is missing.
-        const fin = parseNextCommand(verdict.nextCommand).filter((c) => c.canonical === "tools/orchestration/finalize-audit-breakpoint.mjs");
+        const fin = (state === UNUSABLE_READY ? validateUnusableReplacementCommand(state, verdict, { controlIssue, repo }) : parseNextCommand(verdict.nextCommand)).filter((c) => c.canonical === "tools/orchestration/finalize-audit-breakpoint.mjs");
         if (fin.length !== 1) throw new Error("prepared-audit verdict has no single finalize-audit-breakpoint segment");
         return io.node(fin[0].file, fin[0].args);
       }
