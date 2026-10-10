@@ -183,7 +183,7 @@ export function validateUnusableReplacementCommand(state, verdict, { controlIssu
   const bail = (why) => {
     throw new Error(`${state} nextCommand is not the canonical continuation for this verdict: ${why}`);
   };
-  if (!/^[1-9]\\d*$/.test(predecessor)) bail("verdict names no predecessor audit issue");
+  if (!/^[1-9]\d*$/.test(predecessor)) bail("verdict names no predecessor audit issue");
   if (typeof wantRepo !== "string" || !wantRepo) bail("verdict names no repository");
   if (state === UNUSABLE_PREPARE) {
     const [s] = segs;
@@ -195,8 +195,8 @@ export function validateUnusableReplacementCommand(state, verdict, { controlIssu
   }
   if (state !== UNUSABLE_READY) bail("unrecognized replacement state");
   const replacement = String(verdict?.replacementAuditIssue ?? "");
-  if (!/^[1-9]\\d*$/.test(replacement) || replacement === predecessor) bail("verdict names no distinct replacement audit issue");
-  if (![controlIssue, verdict?.pr, verdict?.workIssue].every((v) => /^[1-9]\\d*$/.test(String(v ?? "")))) {
+  if (!/^[1-9]\d*$/.test(replacement) || replacement === predecessor) bail("verdict names no distinct replacement audit issue");
+  if (![controlIssue, verdict?.pr, verdict?.workIssue].every((v) => /^[1-9]\d*$/.test(String(v ?? "")))) {
     bail("verdict/launcher names no valid control, PR, or execution issue");
   }
   const expectedFinalize = [
