@@ -189,7 +189,9 @@ const baseName = (t) => t.split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "
 // `baseCwd` is the hook's working directory; `cd`/`pushd` in earlier segments are honored only for
 // simple literal paths, otherwise a following push is unclassifiable.
 export function classifyGitPushCommand(command, { baseCwd } = {}) {
-  if (typeof command !== "string" || !/\bpush\b/.test(command)) return { push: false };
+  if (typeof command !== "string") return { push: false };
+  // A literal `push` is not required: a shell variable can supply the subcommand (`S=push; git "$S" ...`).
+  if (!/\bpush\b/.test(command) && !(/\bgit\b/.test(command) && command.includes("$"))) return { push: false };
   const segments = splitShellSegments(command);
   const pushes = [];
   let cwd = baseCwd;
@@ -237,6 +239,10 @@ export function classifyGitPushCommand(command, { baseCwd } = {}) {
           return { push: true, classifiable: false, reason: `git global option \`${t}\` changes which repository the push operates on` };
         } else if (GIT_GLOBAL_WITH_ARG.has(t)) i += 2;
         else i += 1;
+      }
+      // A subcommand that depends on shell expansion cannot be proven not to be `push` (Audit #1027).
+      if (typeof tokens[i] === "string" && tokens[i].includes("$")) {
+        return { push: true, classifiable: false, reason: "the git subcommand depends on shell expansion and could not be proven not to be `push`" };
       }
       if (tokens[i] !== "push") continue;
       const args = tokens.slice(i + 1);

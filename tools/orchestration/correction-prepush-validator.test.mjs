@@ -131,6 +131,21 @@ test("classifyGitPushCommand: plain, chained, wrapped, and non-push commands", (
   }
 });
 
+test("classifyGitPushCommand: shell-expanded git subcommand is unclassifiable push intent (Audit #1027)", () => {
+  for (const c of [
+    'S=push; git "$S" origin HEAD:branch',
+    "S=push; git $S origin HEAD:branch",
+    'P=pu; git "${P}sh" origin HEAD:branch',
+    'S=push && git -C /repo "$S" origin HEAD:b',
+  ]) {
+    const out = classifyGitPushCommand(c, { baseCwd: "/x" });
+    assert.equal(out.push, true, c);
+    assert.equal(out.classifiable, false, c);
+  }
+  assert.equal(classifyGitPushCommand('git commit -m "$MSG"', { baseCwd: "/x" }).push, false);
+  assert.equal(classifyGitPushCommand('git -C "$D" status', { baseCwd: "/x" }).push, false);
+});
+
 test("classifyGitPushCommand: continuations and subshell scope", () => {
   const cont = classifyGitPushCommand("git \\\n push origin HEAD:b", { baseCwd: "/x" });
   assert.equal(cont.classifiable, true);
