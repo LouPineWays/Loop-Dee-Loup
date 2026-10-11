@@ -197,6 +197,9 @@ test("#1070: negative markers never count as a successor declaration and cannot 
     "~~Supersedes #1021.~~",
     "```\nSupersedes #1021.\n```",
     "    Supersedes #1021.",
+    "\tSupersedes #1021.",
+    ["```", "```not-a-close", "Supersedes #1021.", "```"].join("\n"),
+    ["~~~", "~~~not-a-close", "Supersedes #1021.", "~~~"].join("\n"),
     "Supersedes #10210.",
     "Supersedes #1022.",
   ];
