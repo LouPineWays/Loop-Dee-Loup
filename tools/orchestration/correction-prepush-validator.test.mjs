@@ -137,6 +137,11 @@ test("classifyGitPushCommand: shell-expanded git subcommand is unclassifiable pu
     "S=push; git $S origin HEAD:branch",
     'P=pu; git "${P}sh" origin HEAD:branch',
     'S=push && git -C /repo "$S" origin HEAD:b',
+    'git $(printf %s pu sh) origin HEAD:branch',
+    'git -C /repo $(printf %s pu sh) origin HEAD:b',
+    'git "$(printf %s pu sh)" origin HEAD:b',
+    'git p$(printf %s ush) origin HEAD:b',
+    'git `printf %s pu sh` origin HEAD:b',
   ]) {
     const out = classifyGitPushCommand(c, { baseCwd: "/x" });
     assert.equal(out.push, true, c);
@@ -144,6 +149,8 @@ test("classifyGitPushCommand: shell-expanded git subcommand is unclassifiable pu
   }
   assert.equal(classifyGitPushCommand('git commit -m "$MSG"', { baseCwd: "/x" }).push, false);
   assert.equal(classifyGitPushCommand('git -C "$D" status', { baseCwd: "/x" }).push, false);
+  assert.equal(classifyGitPushCommand('git status "$(date)"', { baseCwd: "/x" }).push, false);
+  assert.equal(classifyGitPushCommand("git status `date`", { baseCwd: "/x" }).push, false);
 });
 
 test("classifyGitPushCommand: continuations and subshell scope", () => {
@@ -190,6 +197,8 @@ test("hook guard: compound/unclassifiable push denied; valid push allowed; denia
   assert.equal(wrapped.permissionDecision, "deny");
   assert.match(wrapped.permissionDecisionReason, /Do not force-push/);
   assert.match(wrapped.permissionDecisionReason, /Address #950/);
+  const substitution = await decideCorrectionPrePush(marker, { ...base, command: "git $(printf %s pu sh) origin HEAD:b" }, { validateImpl: ok });
+  assert.equal(substitution.permissionDecision, "deny");
 });
 
 test("hook guard end-to-end on a real repo: #962 message denied, reworded allowed", async () => {
