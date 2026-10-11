@@ -199,6 +199,11 @@ const XARGS_BYPASSES = [
   "printf 'push\norigin\nHEAD:b\n' | ionice xargs git",
   "printf 'push\norigin\nHEAD:b\n' | taskset 1 xargs git",
   "printf push | chrt -f 1 xargs git",
+  "G=git; printf 'push\\norigin\\nHEAD:b\\n' | ionice xargs \"$G\"",
+  "printf push | ionice xargs sh -c 'git \"$0\" origin HEAD:b'",
+  "printf push | taskset 1 xargs \"$G\"",
+  "rg -e never --pre xargs git",
+  "man --pager 'xargs git' git",
   "printf 'push\\norigin\\nHEAD:b\\n' | timeout 5 $(printf xargs) git",
   "printf push | timeout 5 `printf xargs` git",
   "printf push | $(printf xargs) git",
@@ -208,6 +213,12 @@ const XARGS_BYPASSES = [
   "printf push | xargs --max-l git",
   "printf push | xargs --eo git git",
 ];
+
+test("xargs negative controls stay non-push", () => {
+  for (const c of ["echo xargs git", "git ls-files | xargs git add", "xargs git status", "ls | xargs wc -l", "git status", "ionice ls"]) {
+    assert.equal(classifyGitPushCommand(c, {}).push, false, c);
+  }
+});
 
 test("xargs option analysis stays linear for repeated optional-argument options", () => {
   const start = Date.now();
