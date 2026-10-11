@@ -178,7 +178,7 @@ export function splitShellSegments(command) {
 
 const WRAPPERS = new Set([
   "bash", "sh", "zsh", "dash", "ksh", "fish", "eval", "env", "xargs", "command", "exec", "time",
-  "nohup", "sudo", "powershell", "pwsh", "cmd", "cmd.exe", "node", "python", "python3", "source", ".", "watch", "timeout", "nice", "setsid",
+  "nohup", "sudo", "powershell", "pwsh", "cmd", "cmd.exe", "node", "python", "python3", "source", ".", "watch", "timeout", "nice", "setsid", "stdbuf",
 ]);
 const GIT_GLOBAL_WITH_ARG = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env"]);
 const PUSH_FLAGS_OK = new Set([
@@ -198,7 +198,10 @@ const baseName = (t) => t.split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "
 const LAUNCHERS = new Set(["command", "env", "nice", "nohup", "exec", "time", "setsid", "sudo"]);
 const XARGS_SHORT_WITH_ARG = new Set(["E", "I", "L", "n", "P", "s", "a", "d", "J", "R", "S"]);
 const XARGS_SHORT_OPT_ARG = new Set(["e", "i", "l"]);
-const XARGS_LONG_WITH_ARG = new Set(["--max-args", "--max-procs", "--max-chars", "--max-lines", "--delimiter", "--arg-file", "--process-slot-var"]);
+const XARGS_LONG_WITH_ARG = new Set(["--max-args", "--max-procs", "--max-chars", "--delimiter", "--arg-file", "--process-slot-var"]);
+// Long options whose argument is optional (GNU requires `=`, other implementations may take the next
+// token): both interpretations are analyzed and either one being a possible push fails closed.
+const XARGS_LONG_OPT_ARG = new Set(["--replace", "--eof", "--logical-eof", "--max-lines"]);
 const XARGS_REASON = "`xargs git` may receive its subcommand from standard input or a replacement string and could not be proven not to be `push`";
 const isDynamicTok = (t, repl) => /[$`]/.test(t) || (repl !== null && t.includes(repl));
 
@@ -225,46 +228,21 @@ function skipLaunchers(tokens, start) {
   return i;
 }
 
-// Returns a fail-closed reason when this segment is an `xargs` that may run `git`'s `push`, else null.
-function analyzeXargs(tokens) {
-  const li = skipLaunchers(tokens, 0);
-  if (li === -1) return tokens.some((t) => baseName(t) === "xargs") ? XARGS_REASON : null;
-  if (baseName(tokens[li] ?? "") !== "xargs") {
-    // a shell wrapper's inline payload may itself run xargs
-    if (WRAPPERS.has(baseName(tokens[li] ?? ""))) {
-      for (const t of tokens.slice(li + 1)) {
-        if (/\bxargs\b/.test(t) && /\s/.test(t) && classifyGitPushCommand(t, {}).push) return XARGS_REASON;
-      }
-    }
-    return null;
-  }
-  let repl = null;
-  let j = li + 1;
-  while (j < tokens.length) {
-    const t = tokens[j];
-    if (t === "--") { j += 1; break; }
-    if (!t.startsWith("-") || t === "-") break;
-    if (t.startsWith("--")) {
-      const eq = t.indexOf("=");
-      const name = eq === -1 ? t : t.slice(0, eq);
-      const val = eq === -1 ? undefined : t.slice(eq + 1);
-      if (name === "--replace") repl = val ? val : "{}";
-      j += XARGS_LONG_WITH_ARG.has(name) && val === undefined ? 2 : 1;
-      continue;
-    }
-    let consumed = 1;
-    for (let k = 1; k < t.length; k += 1) {
-      const c = t[k];
-      if (!XARGS_SHORT_WITH_ARG.has(c) && !XARGS_SHORT_OPT_ARG.has(c)) continue;
-      const rest = t.slice(k + 1);
-      const needsArg = XARGS_SHORT_WITH_ARG.has(c);
-      if (rest === "" && needsArg) consumed = 2;
-      if (c === "I") repl = rest !== "" ? rest : (tokens[j + 1] ?? "{}");
-      else if (c === "i") repl = rest !== "" ? rest : "{}";
-      break;
-    }
-    j += consumed;
-  }
+// GNU getopt_long accepts any unambiguous prefix of a long option, so `--repl=@` is `--replace=@`.
+const XARGS_LONG_ALL = [
+  "--arg-file", "--delimiter", "--eof", "--exit", "--help", "--interactive", "--max-args", "--max-chars",
+  "--max-lines", "--max-procs", "--no-run-if-empty", "--null", "--open-tty", "--process-slot-var", "--replace",
+  "--show-limits", "--verbose", "--version", "--logical-eof",
+];
+// Returns the canonical long option names a (possibly abbreviated) option may denote. An exact match is
+// unique; otherwise every option sharing the prefix is returned so the caller can fail closed on any of them.
+function resolveXargsLong(name) {
+  if (XARGS_LONG_ALL.includes(name)) return [name];
+  return XARGS_LONG_ALL.filter((c) => c.startsWith(name));
+}
+
+// Analyzes the command portion of an xargs invocation starting at token index `j` with replacement string `repl`.
+function analyzeXargsCommand(tokens, j, repl) {
   if (j >= tokens.length) return null; // no command: xargs runs `echo`
   const e = skipLaunchers(tokens, j);
   if (e === -1) return XARGS_REASON;
@@ -283,6 +261,82 @@ function analyzeXargs(tokens) {
   }
   const sub = tokens[g];
   if (sub === undefined || sub === "push" || isDynamicTok(sub, repl)) return XARGS_REASON;
+  return null;
+}
+
+// Returns a fail-closed reason when this segment is an `xargs` that may run git's push subcommand, else null.
+// `anyXargs` is true when the whole command mentions xargs, so a dynamically expanded command position in
+// this segment could itself be `xargs`.
+function analyzeXargs(tokens, anyXargs = false) {
+  const li = skipLaunchers(tokens, 0);
+  if (li === -1) return tokens.some((t) => baseName(t) === "xargs") ? XARGS_REASON : null;
+  if (anyXargs && li < tokens.length && /[$`]/.test(tokens[li])) return XARGS_REASON;
+  if (baseName(tokens[li] ?? "") !== "xargs") {
+    // a shell wrapper's inline payload may itself run xargs
+    if (WRAPPERS.has(baseName(tokens[li] ?? ""))) {
+      // an unresolved wrapper (timeout, stdbuf, nested chains) in front of xargs cannot be unwrapped, and a
+      // shell-expanded token after a wrapper may itself be the `xargs` command it runs
+      if (tokens.slice(li + 1).some((t) => baseName(t) === "xargs" || (anyXargs && /[$`]/.test(t)))) return XARGS_REASON;
+      for (const t of tokens.slice(li + 1)) {
+        if (/\bxargs\b/.test(t) && /\s/.test(t) && classifyGitPushCommand(t, {}).push) return XARGS_REASON;
+      }
+    }
+    return null;
+  }
+  // Explore every plausible option parse as a set of (position, replacement) states, each visited once, so
+  // repeated optional-argument options cannot cause exponential re-analysis.
+  const seen = new Set();
+  const stack = [[li + 1, null]];
+  while (stack.length) {
+    const [start, startRepl] = stack.pop();
+    const key = `${start}\u0000${startRepl}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    let j = start;
+    let repl = startRepl;
+    while (j < tokens.length) {
+      const t = tokens[j];
+      if (t === "--") { j += 1; break; }
+      if (!t.startsWith("-") || t === "-") break;
+      if (t.startsWith("--")) {
+        const eq = t.indexOf("=");
+        const raw = eq === -1 ? t : t.slice(0, eq);
+        const val = eq === -1 ? undefined : t.slice(eq + 1);
+        const names = resolveXargsLong(raw);
+        // an ambiguous or unknown abbreviation is analyzed as each candidate (or as a plain option)
+        const candidates = names.length ? names : [raw];
+        for (const name of candidates.slice(1)) {
+          const consumes = XARGS_LONG_WITH_ARG.has(name) && val === undefined;
+          stack.push([j + (consumes ? 2 : 1), name === "--replace" ? (val ? val : "{}") : repl]);
+          if (XARGS_LONG_OPT_ARG.has(name) && val === undefined && j + 1 < tokens.length) {
+            stack.push([j + 2, name === "--replace" ? tokens[j + 1] : repl]);
+          }
+        }
+        const name = candidates[0];
+        if (XARGS_LONG_OPT_ARG.has(name) && val === undefined && j + 1 < tokens.length) {
+          // GNU requires `=`; other implementations may take the next token: the consumed interpretation
+          // is explored as its own state, the unconsumed one continues here.
+          stack.push([j + 2, name === "--replace" ? tokens[j + 1] : repl]);
+        }
+        if (name === "--replace") repl = val ? val : "{}";
+        j += XARGS_LONG_WITH_ARG.has(name) && val === undefined ? 2 : 1;
+        continue;
+      }
+      let consumed = 1;
+      for (let k = 1; k < t.length; k += 1) {
+        const c = t[k];
+        if (!XARGS_SHORT_WITH_ARG.has(c) && !XARGS_SHORT_OPT_ARG.has(c)) continue;
+        const rest = t.slice(k + 1);
+        const needsArg = XARGS_SHORT_WITH_ARG.has(c);
+        if (rest === "" && needsArg) consumed = 2;
+        if (c === "I") repl = rest !== "" ? rest : (tokens[j + 1] ?? "{}");
+        else if (c === "i") repl = rest !== "" ? rest : "{}";
+        break;
+      }
+      j += consumed;
+    }
+    if (analyzeXargsCommand(tokens, j, repl)) return XARGS_REASON;
+  }
   return null;
 }
 
@@ -368,7 +422,7 @@ export function classifyGitPushCommand(command, { baseCwd } = {}) {
       return { push: true, classifiable: false, reason: SHELL_EXPANSION_REASON };
     }
     // `xargs` can run `git push` with the subcommand/executable supplied at run time (Audit #1077).
-    const xr = analyzeXargs(tokens);
+    const xr = analyzeXargs(tokens, /\bxargs\b/.test(command));
     if (xr) return { push: true, classifiable: false, reason: xr };
     // A shell interpreter with no inline program reads it from stdin (`echo 'git "$S" ...' | S=push bash`),
     // so the payload is invisible to this segment; refuse when the command could carry a git push.

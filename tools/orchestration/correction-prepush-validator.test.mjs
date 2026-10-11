@@ -190,7 +190,29 @@ const XARGS_BYPASSES = [
   'printf push | G=git xargs "$G"',
   "printf push | xargs --replace=@ git @ origin HEAD:b",
   "printf push | xargs -i git {} origin HEAD:b",
+  "printf push | xargs --replace @ git @ origin HEAD:b",
+  "printf push | xargs --eof git git",
+  "printf push | xargs --logical-eof git git",
+  "printf push | timeout 5 xargs git",
+  "printf push | stdbuf -o0 xargs git",
+  "printf push | nohup timeout 5 xargs git",
+  "printf 'push\\norigin\\nHEAD:b\\n' | timeout 5 $(printf xargs) git",
+  "printf push | timeout 5 `printf xargs` git",
+  "printf push | $(printf xargs) git",
+  "printf push | xargs --repl=@ git @ origin HEAD:b",
+  "printf push | xargs --replace @ git @ origin HEAD:b",
+  "printf push | xargs --max-lines git",
+  "printf push | xargs --max-l git",
+  "printf push | xargs --eo git git",
 ];
+
+test("xargs option analysis stays linear for repeated optional-argument options", () => {
+  const start = Date.now();
+  const tail = Array(40).fill("--eof").join(" ");
+  assert.equal(classifyGitPushCommand(`xargs ${tail} echo`, {}).push, false);
+  assert.equal(classifyGitPushCommand(`printf push | xargs ${tail} git`, {}).push, true);
+  assert.ok(Date.now() - start < 1000, "classification must not branch exponentially");
+});
 
 test("classifyGitPushCommand: continuations and subshell scope", () => {
   const cont = classifyGitPushCommand("git \\\n push origin HEAD:b", { baseCwd: "/x" });
