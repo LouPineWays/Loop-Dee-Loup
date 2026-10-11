@@ -203,6 +203,8 @@ const XARGS_LONG_WITH_ARG = new Set(["--max-args", "--max-procs", "--max-chars",
 // token): both interpretations are analyzed and either one being a possible push fails closed.
 const XARGS_LONG_OPT_ARG = new Set(["--replace", "--eof", "--logical-eof", "--max-lines"]);
 const XARGS_REASON = "`xargs git` may receive its subcommand from standard input or a replacement string and could not be proven not to be `push`";
+// Commands that only print or search their arguments and never exec them.
+const INERT_LEADERS = new Set(["echo", "printf", "cat", "grep", "rg", "man", "which", "type"]);
 const isDynamicTok = (t, repl) => /[$`]/.test(t) || (repl !== null && t.includes(repl));
 
 // Index of the first token that is not a launcher (command/env/nice/...) or its options; -1 when the
@@ -280,6 +282,11 @@ function analyzeXargs(tokens, anyXargs = false) {
       for (const t of tokens.slice(li + 1)) {
         if (/\bxargs\b/.test(t) && /\s/.test(t) && classifyGitPushCommand(t, {}).push) return XARGS_REASON;
       }
+    } else if (!INERT_LEADERS.has(baseName(tokens[li] ?? ""))) {
+      // an unrecognized leading command (ionice, taskset, chrt, ...) may exec its arguments, so a later literal
+      // `xargs` followed by `git` cannot be proven benign (Audit #1081)
+      const xi = tokens.findIndex((t, k) => k > li && baseName(t) === "xargs");
+      if (xi !== -1 && tokens.slice(xi + 1).some((t) => baseName(t) === "git")) return XARGS_REASON;
     }
     return null;
   }
