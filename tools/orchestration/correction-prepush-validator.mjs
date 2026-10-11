@@ -149,6 +149,9 @@ export function splitShellSegments(command) {
     } else if (ch === "(" || ch === ")" || ch === "`") {
       // Subshell / command-substitution scope boundary: emit a marker so directory changes
       // inside the scope are not carried past it.
+      // Preserve an opening backtick as a dynamic token before entering its scope.
+      // Otherwise `git `command`` looks like an inert `git` with no subcommand.
+      if (ch === "`" && !backtickOpen) { cur += "`"; has = true; }
       pushSeg();
       if (ch === "`") {
         segments.push([backtickOpen ? SCOPE_CLOSE : SCOPE_OPEN]);
@@ -157,6 +160,10 @@ export function splitShellSegments(command) {
     } else if (ch === "\n" || ch === ";" || ch === "&" || ch === "|" || ch === "{" || ch === "}") {
       pushSeg();
     } else if (ch === "$" && command[i + 1] === "(") {
+      // Keep the substitution marker in the outer token. Its contents have a
+      // separate scope, but the outer git subcommand is still shell-expanded.
+      cur += "$(";
+      has = true;
       pushSeg();
       segments.push([SCOPE_OPEN]);
       i += 1;
