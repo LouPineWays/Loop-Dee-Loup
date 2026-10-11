@@ -6,7 +6,7 @@
 //
 //   Supersedes #<predecessor>.
 //
-// (trailing period optional, case-insensitive, up to three leading spaces). Producers
+// (trailing period optional, case-insensitive, up to three leading literal spaces; no tabs). Producers
 // (`successor-integration-preflight.mjs`) accept only this form as "canonical"; the downstream Stage 2
 // correction-PR gate (`next-review-transition-gate.mjs` `findSupersededCandidates`) and the
 // finalizer cross-phase guard recognize exactly the same form via `canonicalSupersededNumbers`. Quoted,
@@ -22,16 +22,16 @@ export function canonicalSupersededNumbers(body) {
   if (typeof body !== "string") return affirmed;
   let fence = null;
   for (const line of body.split(/\r?\n/)) {
-    const boundary = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    const boundary = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (fence) {
-      if (boundary && boundary[1][0] === fence.char && boundary[1].length >= fence.length) fence = null;
+      if (boundary && boundary[1][0] === fence.char && boundary[1].length >= fence.length && /^[ \t]*$/.test(boundary[2])) fence = null;
       continue;
     }
     if (boundary) {
       fence = { char: boundary[1][0], length: boundary[1].length };
       continue;
     }
-    const marker = line.match(/^\s{0,3}Supersedes\s+#([1-9]\d*)\.?\s*$/i);
+    const marker = line.match(/^ {0,3}Supersedes[ \t]+#([1-9]\d*)\.?[ \t]*$/i);
     if (marker) affirmed.add(Number(marker[1]));
   }
   return affirmed;
