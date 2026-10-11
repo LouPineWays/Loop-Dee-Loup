@@ -187,6 +187,7 @@ const PUSH_FLAGS_OK = new Set([
 ]);
 const PUSH_FLAGS_FORCE = new Set(["-f", "--force", "--force-if-includes"]);
 
+const SHELL_EXPANSION_REASON = "the git subcommand depends on shell expansion and could not be proven not to be `push`";
 const baseName = (t) => t.split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "");
 
 // Classifies a Bash command. Returns:
@@ -249,7 +250,7 @@ export function classifyGitPushCommand(command, { baseCwd } = {}) {
       }
       // A subcommand that depends on shell expansion cannot be proven not to be `push` (Audit #1027).
       if (typeof tokens[i] === "string" && (tokens[i].includes("$") || tokens[i].includes("`"))) {
-        return { push: true, classifiable: false, reason: "the git subcommand depends on shell expansion and could not be proven not to be `push`" };
+        return { push: true, classifiable: false, reason: SHELL_EXPANSION_REASON };
       }
       if (tokens[i] !== "push") continue;
       const args = tokens.slice(i + 1);
@@ -261,6 +262,11 @@ export function classifyGitPushCommand(command, { baseCwd } = {}) {
     }
     if (WRAPPERS.has(first) && /\bgit\b[\s\S]*\bpush\b/.test(tokens.join(" "))) {
       return { push: true, classifiable: false, reason: `\`git push\` is nested inside a \`${first}\` wrapper` };
+    }
+    // A wrapper whose payload names git and carries shell expansion can supply the subcommand at
+    // run time (`bash -c 'git "$S" ...'`, `eval 'git "$S" ...'`; Audit #1073).
+    if (WRAPPERS.has(first) && /\bgit\b[\s\S]*[$`]/.test(tokens.join(" "))) {
+      return { push: true, classifiable: false, reason: SHELL_EXPANSION_REASON };
     }
   }
   if (pushes.length === 0) {
