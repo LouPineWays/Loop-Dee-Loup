@@ -735,8 +735,8 @@ const AUDIT_BODY_963 = `## Current state
 const PR_1021 = { headRefName: "issue-964-guard", headRefOid: "1021head", body: "Addresses #964.", state: "OPEN" };
 const PR_1080 = { headRefName: "issue-964-correction", headRefOid: "1080head", body: "Addresses #964.", state: "OPEN" };
 
-async function runCrossPhase({ pr, head, callerView, mergedBody }) {
-  let currentBody = AUDIT_BODY_963;
+async function runCrossPhase({ pr, head, callerView, mergedBody, controlBody = AUDIT_BODY_963 }) {
+  let currentBody = controlBody;
   const writes = [];
   const result = await run(
     { repo: "owner/repo", controlIssue: 963, executionIssue: 964, pr, head },
@@ -807,4 +807,35 @@ test("#1070: unreadable current control PR fails closed with no write", async ()
   );
   assert.equal(result.state, "PR_BREAKPOINT_UNVERIFIED");
   assert.equal(writes, 0);
+});
+
+// PR #1074 Stage 1: supported full URL field values must not bypass cross-phase protection.
+test("#1070: URL-form Stage 2 and PR pointers deny stale historical finalization without writes", async () => {
+  const bodies = [
+    AUDIT_BODY_963.replace("- **Stage 2:** #1073", "- **Stage 2:** https://github.com/owner/repo/issues/1073"),
+    AUDIT_BODY_963.replace("- **PR:** #1069", "- **PR:** https://github.com/owner/repo/pull/1069"),
+    AUDIT_BODY_963.replace("- **Stage 2:** #1073", "- **Stage 2:** https://github.com/owner/repo/issues/1073")
+      .replace("- **PR:** #1069", "- **PR:** https://github.com/owner/repo/pull/1069"),
+  ];
+  for (const controlBody of bodies) {
+    const r = await runCrossPhase({
+      pr: 1021, head: "1021head", callerView: PR_1021,
+      mergedBody: "Addresses #964\n\nSupersedes #1021.", controlBody,
+    });
+    assert.equal(r.result.state, "PR_BREAKPOINT_UNVERIFIED", controlBody);
+    assert.equal(r.writes.length, 0, controlBody);
+    assert.equal(r.body(), controlBody);
+  }
+});
+
+test("#1070: URL-form pointers still allow a genuine new post-audit correction PR", async () => {
+  const controlBody = AUDIT_BODY_963
+    .replace("- **Stage 2:** #1073", "- **Stage 2:** https://github.com/owner/repo/issues/1073")
+    .replace("- **PR:** #1069", "- **PR:** https://github.com/owner/repo/pull/1069");
+  const r = await runCrossPhase({
+    pr: 1080, head: "1080head", callerView: PR_1080,
+    mergedBody: "Addresses #964\n\nSupersedes #1021.", controlBody,
+  });
+  assert.equal(r.result.state, "FINALIZED");
+  assert.equal(r.writes.length, 1);
 });
