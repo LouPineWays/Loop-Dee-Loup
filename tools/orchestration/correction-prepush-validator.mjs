@@ -248,7 +248,7 @@ export function classifyGitPushCommand(command, { baseCwd } = {}) {
         else i += 1;
       }
       // A subcommand that depends on shell expansion cannot be proven not to be `push` (Audit #1027).
-      if (typeof tokens[i] === "string" && tokens[i].includes("$")) {
+      if (typeof tokens[i] === "string" && (tokens[i].includes("$") || tokens[i].includes("`"))) {
         return { push: true, classifiable: false, reason: "the git subcommand depends on shell expansion and could not be proven not to be `push`" };
       }
       if (tokens[i] !== "push") continue;
