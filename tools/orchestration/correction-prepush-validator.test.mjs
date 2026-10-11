@@ -142,11 +142,23 @@ test("classifyGitPushCommand: shell-expanded git subcommand is unclassifiable pu
     'git "$(printf %s pu sh)" origin HEAD:b',
     'git p$(printf %s ush) origin HEAD:b',
     'git `printf %s pu sh` origin HEAD:b',
+    `S=push bash -c 'git "$S" origin HEAD:branch'`,
+    `S=push sh -c 'git "$S" origin HEAD:branch'`,
+    `S=push; eval 'git "$S" origin HEAD:branch'`,
+    `S=push cmd /c 'git %S% origin HEAD:b'`,
+    `S=push cmd /c 'git !S! origin HEAD:b'`,
   ]) {
     const out = classifyGitPushCommand(c, { baseCwd: "/x" });
     assert.equal(out.push, true, c);
     assert.equal(out.classifiable, false, c);
+    assert.match(out.reason, /git subcommand depends on shell expansion and could not be proven not to be `push`/, c);
   }
+  for (const c of [`echo 'git "$S" origin HEAD:b' | S=push bash`, `echo 'git push origin HEAD:b' | bash`, `printf 'git "$S" origin b' | S=push sh -s`]) {
+    const out = classifyGitPushCommand(c, { baseCwd: "/x" });
+    assert.equal(out.push, true, c);
+    assert.equal(out.classifiable, false, c);
+  }
+  assert.equal(classifyGitPushCommand('echo hi | bash', { baseCwd: "/x" }).push, false);
   assert.equal(classifyGitPushCommand('git commit -m "$MSG"', { baseCwd: "/x" }).push, false);
   assert.equal(classifyGitPushCommand('git -C "$D" status', { baseCwd: "/x" }).push, false);
   assert.equal(classifyGitPushCommand('git status "$(date)"', { baseCwd: "/x" }).push, false);
@@ -199,6 +211,12 @@ test("hook guard: compound/unclassifiable push denied; valid push allowed; denia
   assert.match(wrapped.permissionDecisionReason, /Address #950/);
   const substitution = await decideCorrectionPrePush(marker, { ...base, command: "git $(printf %s pu sh) origin HEAD:b" }, { validateImpl: ok });
   assert.equal(substitution.permissionDecision, "deny");
+  assert.match(substitution.permissionDecisionReason, /depends on shell expansion/);
+  for (const command of [`S=push bash -c 'git "$S" origin HEAD:b'`, `S=push sh -c 'git "$S" origin HEAD:b'`, `S=push; eval 'git "$S" origin HEAD:b'`]) {
+    const out = await decideCorrectionPrePush(marker, { ...base, command }, { validateImpl: ok });
+    assert.equal(out.permissionDecision, "deny", command);
+    assert.match(out.permissionDecisionReason, /depends on shell expansion/, command);
+  }
 });
 
 test("hook guard end-to-end on a real repo: #962 message denied, reworded allowed", async () => {
