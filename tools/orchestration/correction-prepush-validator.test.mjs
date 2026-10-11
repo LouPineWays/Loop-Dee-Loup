@@ -165,12 +165,32 @@ test("classifyGitPushCommand: shell-expanded git subcommand is unclassifiable pu
     assert.match(out.reason, /xargs git/, c);
   }
   assert.equal(classifyGitPushCommand('git ls-files | xargs git add', { baseCwd: "/x" }).push, false);
+  for (const c of XARGS_BYPASSES) {
+    const out = classifyGitPushCommand(c, { baseCwd: "/x" });
+    assert.equal(out.push, true, c);
+    assert.equal(out.classifiable, false, c);
+    assert.match(out.reason, /xargs git/, c);
+  }
+  for (const c of ["git ls-files | xargs -0 -n1 git add", "git ls-files | xargs -I{} git add {}", "ls | xargs -E git echo", "ls | xargs -P4 -- git status", "ls | xargs rm", "ls | command xargs git add", "ls | xargs", "ls | xargs -I@ git add @"]) {
+    assert.equal(classifyGitPushCommand(c, { baseCwd: "/x" }).push, false, c);
+  }
   assert.equal(classifyGitPushCommand('echo hi | bash', { baseCwd: "/x" }).push, false);
   assert.equal(classifyGitPushCommand('git commit -m "$MSG"', { baseCwd: "/x" }).push, false);
   assert.equal(classifyGitPushCommand('git -C "$D" status', { baseCwd: "/x" }).push, false);
   assert.equal(classifyGitPushCommand('git status "$(date)"', { baseCwd: "/x" }).push, false);
   assert.equal(classifyGitPushCommand("git status `date`", { baseCwd: "/x" }).push, false);
 });
+
+const XARGS_BYPASSES = [
+  "cat /tmp/git-args | xargs git",
+  "printf push | xargs -I@ git @ origin HEAD:b",
+  "printf 'push\\norigin\\nHEAD:b\\n' | xargs -E git git",
+  "printf 'push\\norigin\\nHEAD:b\\n' | command xargs git",
+  "printf 'push\\norigin\\nHEAD:b\\n' | env X=1 nice -n 5 xargs git",
+  'printf push | G=git xargs "$G"',
+  "printf push | xargs --replace=@ git @ origin HEAD:b",
+  "printf push | xargs -i git {} origin HEAD:b",
+];
 
 test("classifyGitPushCommand: continuations and subshell scope", () => {
   const cont = classifyGitPushCommand("git \\\n push origin HEAD:b", { baseCwd: "/x" });
@@ -224,7 +244,7 @@ test("hook guard: compound/unclassifiable push denied; valid push allowed; denia
     assert.equal(out.permissionDecision, "deny", command);
     assert.match(out.permissionDecisionReason, /depends on shell expansion/, command);
   }
-  for (const command of ["printf '%s\n' push origin HEAD:b | xargs git", "echo push origin HEAD:b | xargs git"]) {
+  for (const command of ["printf '%s\n' push origin HEAD:b | xargs git", "echo push origin HEAD:b | xargs git", ...XARGS_BYPASSES]) {
     const out = await decideCorrectionPrePush(marker, { ...base, command }, { validateImpl: ok });
     assert.equal(out.permissionDecision, "deny", command);
     assert.match(out.permissionDecisionReason, /xargs git/, command);
