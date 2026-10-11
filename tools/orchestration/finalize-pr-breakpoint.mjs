@@ -117,6 +117,7 @@ import {
   upsertControlBullet,
   readExecutionBulletField,
   parseExecutionPointer,
+  isNoneSentinel,
   referencesExecutionIssue,
   isLegacyStage2NotStartedSentinel,
 } from "./ready-dispatch-gate.mjs";
@@ -375,10 +376,13 @@ export function verifyRoutedPostUnitBreakpoint(plan, { unit } = {}) {
 // write; fails closed with the control body untouched. Absent a real audit or a different merged
 // current PR, behavior is unchanged (including the AUDIT -> REVIEW finalization of a new correction PR).
 function singleRef(raw) {
-  if (typeof raw !== "string") return { kind: "none" };
-  const refs = [...new Set([...raw.matchAll(/#([1-9]\d*)/g)].map((m) => Number(m[1])))];
-  if (refs.length === 0) return { kind: "none" };
-  return refs.length === 1 ? { kind: "ref", number: refs[0] } : { kind: "ambiguous", raw };
+  if (raw === null || raw === undefined || isNoneSentinel(raw) || isLegacyStage2NotStartedSentinel(raw)) {
+    return { kind: "none" };
+  }
+  // Reuse the control-plane's supported #N / GitHub URL pointer semantics.
+  // Malformed or multi-valued pointers are not evidence that an audit is absent.
+  const parsed = parseExecutionPointer(raw);
+  return parsed.ok ? { kind: "ref", number: parsed.issue } : { kind: "ambiguous", raw };
 }
 
 export async function checkCrossPhaseGuard({ repo, body, pr, callerView, ghPrViewImpl }) {
