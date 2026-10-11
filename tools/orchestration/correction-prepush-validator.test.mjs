@@ -190,6 +190,12 @@ const XARGS_BYPASSES = [
   'printf push | G=git xargs "$G"',
   "printf push | xargs --replace=@ git @ origin HEAD:b",
   "printf push | xargs -i git {} origin HEAD:b",
+  "printf push | xargs --replace @ git @ origin HEAD:b",
+  "printf push | xargs --eof git git",
+  "printf push | xargs --logical-eof git git",
+  "printf push | timeout 5 xargs git",
+  "printf push | stdbuf -o0 xargs git",
+  "printf push | nohup timeout 5 xargs git",
 ];
 
 test("classifyGitPushCommand: continuations and subshell scope", () => {

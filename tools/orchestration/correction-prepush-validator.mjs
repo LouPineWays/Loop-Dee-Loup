@@ -178,7 +178,7 @@ export function splitShellSegments(command) {
 
 const WRAPPERS = new Set([
   "bash", "sh", "zsh", "dash", "ksh", "fish", "eval", "env", "xargs", "command", "exec", "time",
-  "nohup", "sudo", "powershell", "pwsh", "cmd", "cmd.exe", "node", "python", "python3", "source", ".", "watch", "timeout", "nice", "setsid",
+  "nohup", "sudo", "powershell", "pwsh", "cmd", "cmd.exe", "node", "python", "python3", "source", ".", "watch", "timeout", "nice", "setsid", "stdbuf",
 ]);
 const GIT_GLOBAL_WITH_ARG = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env"]);
 const PUSH_FLAGS_OK = new Set([
@@ -199,6 +199,9 @@ const LAUNCHERS = new Set(["command", "env", "nice", "nohup", "exec", "time", "s
 const XARGS_SHORT_WITH_ARG = new Set(["E", "I", "L", "n", "P", "s", "a", "d", "J", "R", "S"]);
 const XARGS_SHORT_OPT_ARG = new Set(["e", "i", "l"]);
 const XARGS_LONG_WITH_ARG = new Set(["--max-args", "--max-procs", "--max-chars", "--max-lines", "--delimiter", "--arg-file", "--process-slot-var"]);
+// Long options whose argument is optional (GNU requires `=`, other implementations may take the next
+// token): both interpretations are analyzed and either one being a possible push fails closed.
+const XARGS_LONG_OPT_ARG = new Set(["--replace", "--eof", "--logical-eof", "--max-lines"]);
 const XARGS_REASON = "`xargs git` may receive its subcommand from standard input or a replacement string and could not be proven not to be `push`";
 const isDynamicTok = (t, repl) => /[$`]/.test(t) || (repl !== null && t.includes(repl));
 
@@ -232,6 +235,8 @@ function analyzeXargs(tokens) {
   if (baseName(tokens[li] ?? "") !== "xargs") {
     // a shell wrapper's inline payload may itself run xargs
     if (WRAPPERS.has(baseName(tokens[li] ?? ""))) {
+      // an unresolved wrapper (timeout, stdbuf, nested chains) in front of xargs cannot be unwrapped
+      if (tokens.slice(li + 1).some((t) => baseName(t) === "xargs")) return XARGS_REASON;
       for (const t of tokens.slice(li + 1)) {
         if (/\bxargs\b/.test(t) && /\s/.test(t) && classifyGitPushCommand(t, {}).push) return XARGS_REASON;
       }
@@ -248,6 +253,10 @@ function analyzeXargs(tokens) {
       const eq = t.indexOf("=");
       const name = eq === -1 ? t : t.slice(0, eq);
       const val = eq === -1 ? undefined : t.slice(eq + 1);
+      if (XARGS_LONG_OPT_ARG.has(name) && val === undefined && j + 1 < tokens.length) {
+        const consumed = tokens.slice(0, j).concat([`${name}=${tokens[j + 1]}`], tokens.slice(j + 2));
+        if (analyzeXargs(consumed)) return XARGS_REASON;
+      }
       if (name === "--replace") repl = val ? val : "{}";
       j += XARGS_LONG_WITH_ARG.has(name) && val === undefined ? 2 : 1;
       continue;
