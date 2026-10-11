@@ -198,7 +198,7 @@ const baseName = (t) => t.split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "
 export function classifyGitPushCommand(command, { baseCwd } = {}) {
   if (typeof command !== "string") return { push: false };
   // A literal `push` is not required: a shell variable can supply the subcommand (`S=push; git "$S" ...`).
-  if (!/\bpush\b/.test(command) && !(/\bgit\b/.test(command) && command.includes("$"))) return { push: false };
+  if (!/\bpush\b/.test(command) && !(/\bgit\b/.test(command) && (command.includes("$") || command.includes(String.fromCharCode(96))))) return { push: false };
   const segments = splitShellSegments(command);
   const pushes = [];
   let cwd = baseCwd;
