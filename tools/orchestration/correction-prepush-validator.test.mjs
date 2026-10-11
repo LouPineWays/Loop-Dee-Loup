@@ -158,6 +158,13 @@ test("classifyGitPushCommand: shell-expanded git subcommand is unclassifiable pu
     assert.equal(out.push, true, c);
     assert.equal(out.classifiable, false, c);
   }
+  for (const c of ["printf 'push\\norigin\\nHEAD:b\\n' | xargs git", "printf '%s\\n' push origin HEAD:b | xargs git", "echo push origin HEAD:b | xargs git", "echo push origin HEAD:b | xargs -n3 git"]) {
+    const out = classifyGitPushCommand(c, { baseCwd: "/x" });
+    assert.equal(out.push, true, c);
+    assert.equal(out.classifiable, false, c);
+    assert.match(out.reason, /xargs git/, c);
+  }
+  assert.equal(classifyGitPushCommand('git ls-files | xargs git add', { baseCwd: "/x" }).push, false);
   assert.equal(classifyGitPushCommand('echo hi | bash', { baseCwd: "/x" }).push, false);
   assert.equal(classifyGitPushCommand('git commit -m "$MSG"', { baseCwd: "/x" }).push, false);
   assert.equal(classifyGitPushCommand('git -C "$D" status', { baseCwd: "/x" }).push, false);
@@ -216,6 +223,11 @@ test("hook guard: compound/unclassifiable push denied; valid push allowed; denia
     const out = await decideCorrectionPrePush(marker, { ...base, command }, { validateImpl: ok });
     assert.equal(out.permissionDecision, "deny", command);
     assert.match(out.permissionDecisionReason, /depends on shell expansion/, command);
+  }
+  for (const command of ["printf '%s\n' push origin HEAD:b | xargs git", "echo push origin HEAD:b | xargs git"]) {
+    const out = await decideCorrectionPrePush(marker, { ...base, command }, { validateImpl: ok });
+    assert.equal(out.permissionDecision, "deny", command);
+    assert.match(out.permissionDecisionReason, /xargs git/, command);
   }
 });
 

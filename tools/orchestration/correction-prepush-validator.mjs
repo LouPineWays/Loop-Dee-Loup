@@ -274,6 +274,20 @@ export function classifyGitPushCommand(command, { baseCwd } = {}) {
     if (WRAPPERS.has(first) && /\bgit\b/.test(joined) && (cmdLike ? hasAnyExpansion(joined) : hasPosixExpansion(joined))) {
       return { push: true, classifiable: false, reason: SHELL_EXPANSION_REASON };
     }
+    // `xargs git` takes its arguments from stdin, so the subcommand (`push`) can be supplied by an
+    // upstream pipeline stage (Audit #1077). Unless a literal non-push subcommand follows `git`,
+    // it cannot be proven not to be `push`.
+    if (first === "xargs") {
+      const gi = tokens.findIndex((t, idx) => idx > 0 && baseName(t) === "git");
+      if (gi > 0) {
+        let j = gi + 1;
+        while (j < tokens.length && tokens[j].startsWith("-")) j += GIT_GLOBAL_WITH_ARG.has(tokens[j]) ? 2 : 1;
+        const sub = tokens[j];
+        if (sub === undefined || sub === "push" || /[$`]/.test(sub)) {
+          return { push: true, classifiable: false, reason: "`xargs git` may receive `push` from standard input and could not be proven not to be `push`" };
+        }
+      }
+    }
     // A shell interpreter with no inline program reads it from stdin (`echo 'git "$S" ...' | S=push bash`),
     // so the payload is invisible to this segment; refuse when the command could carry a git push.
     if (STDIN_SHELLS.has(first) && !tokens.slice(1).some((t) => /^-[A-Za-z]*c$/i.test(t) || /^\/[ck]$/i.test(t) || /^-(command|encodedcommand)$/i.test(t) || (!t.startsWith("-") && !t.startsWith("/"))) &&
