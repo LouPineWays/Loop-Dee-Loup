@@ -188,6 +188,10 @@ const PUSH_FLAGS_OK = new Set([
 const PUSH_FLAGS_FORCE = new Set(["-f", "--force", "--force-if-includes"]);
 
 const SHELL_EXPANSION_REASON = "the git subcommand depends on shell expansion and could not be proven not to be `push`";
+const STDIN_SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh", "fish", "cmd", "cmd.exe", "powershell", "pwsh"]);
+// Expansion forms: POSIX `$`/backtick, cmd `%VAR%` and delayed `!VAR!`.
+const hasPosixExpansion = (t) => /[$`]/.test(t);
+const hasAnyExpansion = (t) => /[$`%!]/.test(t);
 const baseName = (t) => t.split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "");
 
 // Classifies a Bash command. Returns:
@@ -199,7 +203,7 @@ const baseName = (t) => t.split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "
 export function classifyGitPushCommand(command, { baseCwd } = {}) {
   if (typeof command !== "string") return { push: false };
   // A literal `push` is not required: a shell variable can supply the subcommand (`S=push; git "$S" ...`).
-  if (!/\bpush\b/.test(command) && !(/\bgit\b/.test(command) && (command.includes("$") || command.includes(String.fromCharCode(96))))) return { push: false };
+  if (!/\bpush\b/.test(command) && !(/\bgit\b/.test(command) && hasAnyExpansion(command))) return { push: false };
   const segments = splitShellSegments(command);
   const pushes = [];
   let cwd = baseCwd;
@@ -264,9 +268,17 @@ export function classifyGitPushCommand(command, { baseCwd } = {}) {
       return { push: true, classifiable: false, reason: `\`git push\` is nested inside a \`${first}\` wrapper` };
     }
     // A wrapper whose payload names git and carries shell expansion can supply the subcommand at
-    // run time (`bash -c 'git "$S" ...'`, `eval 'git "$S" ...'`; Audit #1073).
-    if (WRAPPERS.has(first) && /\bgit\b[\s\S]*[$`]/.test(tokens.join(" "))) {
+    // run time (`bash -c 'git "$S" ...'`, `eval 'git "$S" ...'`, `cmd /c 'git %S% ...'`; Audit #1073).
+    const joined = tokens.join(" ");
+    const cmdLike = first === "cmd" || first === "cmd.exe";
+    if (WRAPPERS.has(first) && /\bgit\b/.test(joined) && (cmdLike ? hasAnyExpansion(joined) : hasPosixExpansion(joined))) {
       return { push: true, classifiable: false, reason: SHELL_EXPANSION_REASON };
+    }
+    // A shell interpreter with no inline program reads it from stdin (`echo 'git "$S" ...' | S=push bash`),
+    // so the payload is invisible to this segment; refuse when the command could carry a git push.
+    if (STDIN_SHELLS.has(first) && !tokens.slice(1).some((t) => /^-[A-Za-z]*c$/i.test(t) || /^\/[ck]$/i.test(t) || /^-(command|encodedcommand)$/i.test(t) || (!t.startsWith("-") && !t.startsWith("/"))) &&
+        segments.length > 1 && /\bgit\b/.test(command) && (hasAnyExpansion(command) || /\bpush\b/.test(command))) {
+      return { push: true, classifiable: false, reason: `a \`${first}\` reads its program from a pipeline, so a nested \`git push\` could not be ruled out` };
     }
   }
   if (pushes.length === 0) {

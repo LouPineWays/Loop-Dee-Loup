@@ -145,12 +145,20 @@ test("classifyGitPushCommand: shell-expanded git subcommand is unclassifiable pu
     `S=push bash -c 'git "$S" origin HEAD:branch'`,
     `S=push sh -c 'git "$S" origin HEAD:branch'`,
     `S=push; eval 'git "$S" origin HEAD:branch'`,
+    `S=push cmd /c 'git %S% origin HEAD:b'`,
+    `S=push cmd /c 'git !S! origin HEAD:b'`,
   ]) {
     const out = classifyGitPushCommand(c, { baseCwd: "/x" });
     assert.equal(out.push, true, c);
     assert.equal(out.classifiable, false, c);
     assert.match(out.reason, /git subcommand depends on shell expansion and could not be proven not to be `push`/, c);
   }
+  for (const c of [`echo 'git "$S" origin HEAD:b' | S=push bash`, `echo 'git push origin HEAD:b' | bash`, `printf 'git "$S" origin b' | S=push sh -s`]) {
+    const out = classifyGitPushCommand(c, { baseCwd: "/x" });
+    assert.equal(out.push, true, c);
+    assert.equal(out.classifiable, false, c);
+  }
+  assert.equal(classifyGitPushCommand('echo hi | bash', { baseCwd: "/x" }).push, false);
   assert.equal(classifyGitPushCommand('git commit -m "$MSG"', { baseCwd: "/x" }).push, false);
   assert.equal(classifyGitPushCommand('git -C "$D" status', { baseCwd: "/x" }).push, false);
   assert.equal(classifyGitPushCommand('git status "$(date)"', { baseCwd: "/x" }).push, false);
