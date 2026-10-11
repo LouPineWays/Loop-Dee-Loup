@@ -149,6 +149,9 @@ export function splitShellSegments(command) {
     } else if (ch === "(" || ch === ")" || ch === "`") {
       // Subshell / command-substitution scope boundary: emit a marker so directory changes
       // inside the scope are not carried past it.
+      // Preserve an opening backtick as a dynamic token before entering its scope.
+      // Otherwise `git `command`` looks like an inert `git` with no subcommand.
+      if (ch === "`" && !backtickOpen) { cur += "`"; has = true; }
       pushSeg();
       if (ch === "`") {
         segments.push([backtickOpen ? SCOPE_CLOSE : SCOPE_OPEN]);
@@ -157,6 +160,10 @@ export function splitShellSegments(command) {
     } else if (ch === "\n" || ch === ";" || ch === "&" || ch === "|" || ch === "{" || ch === "}") {
       pushSeg();
     } else if (ch === "$" && command[i + 1] === "(") {
+      // Keep the substitution marker in the outer token. Its contents have a
+      // separate scope, but the outer git subcommand is still shell-expanded.
+      cur += "$(";
+      has = true;
       pushSeg();
       segments.push([SCOPE_OPEN]);
       i += 1;
@@ -189,7 +196,9 @@ const baseName = (t) => t.split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "
 // `baseCwd` is the hook's working directory; `cd`/`pushd` in earlier segments are honored only for
 // simple literal paths, otherwise a following push is unclassifiable.
 export function classifyGitPushCommand(command, { baseCwd } = {}) {
-  if (typeof command !== "string" || !/\bpush\b/.test(command)) return { push: false };
+  if (typeof command !== "string") return { push: false };
+  // A literal `push` is not required: a shell variable can supply the subcommand (`S=push; git "$S" ...`).
+  if (!/\bpush\b/.test(command) && !(/\bgit\b/.test(command) && (command.includes("$") || command.includes(String.fromCharCode(96))))) return { push: false };
   const segments = splitShellSegments(command);
   const pushes = [];
   let cwd = baseCwd;
@@ -237,6 +246,10 @@ export function classifyGitPushCommand(command, { baseCwd } = {}) {
           return { push: true, classifiable: false, reason: `git global option \`${t}\` changes which repository the push operates on` };
         } else if (GIT_GLOBAL_WITH_ARG.has(t)) i += 2;
         else i += 1;
+      }
+      // A subcommand that depends on shell expansion cannot be proven not to be `push` (Audit #1027).
+      if (typeof tokens[i] === "string" && (tokens[i].includes("$") || tokens[i].includes("`"))) {
+        return { push: true, classifiable: false, reason: "the git subcommand depends on shell expansion and could not be proven not to be `push`" };
       }
       if (tokens[i] !== "push") continue;
       const args = tokens.slice(i + 1);
