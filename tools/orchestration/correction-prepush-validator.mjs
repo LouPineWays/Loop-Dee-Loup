@@ -194,6 +194,98 @@ const hasPosixExpansion = (t) => /[$`]/.test(t);
 const hasAnyExpansion = (t) => /[$`%!]/.test(t);
 const baseName = (t) => t.split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "");
 
+// ---- xargs analysis (Audit #1077 and Stage 1 findings on PR #1078) ----
+const LAUNCHERS = new Set(["command", "env", "nice", "nohup", "exec", "time", "setsid", "sudo"]);
+const XARGS_SHORT_WITH_ARG = new Set(["E", "I", "L", "n", "P", "s", "a", "d", "J", "R", "S"]);
+const XARGS_SHORT_OPT_ARG = new Set(["e", "i", "l"]);
+const XARGS_LONG_WITH_ARG = new Set(["--max-args", "--max-procs", "--max-chars", "--max-lines", "--delimiter", "--arg-file", "--process-slot-var"]);
+const XARGS_REASON = "`xargs git` may receive its subcommand from standard input or a replacement string and could not be proven not to be `push`";
+const isDynamicTok = (t, repl) => /[$`]/.test(t) || (repl !== null && t.includes(repl));
+
+// Index of the first token that is not a launcher (command/env/nice/...) or its options; -1 when the
+// launcher's semantics cannot be established.
+function skipLaunchers(tokens, start) {
+  let i = start;
+  while (i < tokens.length) {
+    const name = baseName(tokens[i]);
+    if (!LAUNCHERS.has(name)) return i;
+    i += 1;
+    while (i < tokens.length) {
+      const t = tokens[i];
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) i += 1;
+      else if (name === "env" && t === "-S") return -1;
+      else if (name === "env" && /^-[uCP]$/.test(t)) i += 2;
+      else if (name === "nice" && t === "-n") i += 2;
+      else if (name === "sudo" && /^-[ugCDhprRTU]$/.test(t)) i += 2;
+      else if (t === "--") { i += 1; break; }
+      else if (t.startsWith("-") && t.length > 1) i += 1;
+      else break;
+    }
+  }
+  return i;
+}
+
+// Returns a fail-closed reason when this segment is an `xargs` that may run `git`'s `push`, else null.
+function analyzeXargs(tokens) {
+  const li = skipLaunchers(tokens, 0);
+  if (li === -1) return tokens.some((t) => baseName(t) === "xargs") ? XARGS_REASON : null;
+  if (baseName(tokens[li] ?? "") !== "xargs") {
+    // a shell wrapper's inline payload may itself run xargs
+    if (WRAPPERS.has(baseName(tokens[li] ?? ""))) {
+      for (const t of tokens.slice(li + 1)) {
+        if (/\bxargs\b/.test(t) && /\s/.test(t) && classifyGitPushCommand(t, {}).push) return XARGS_REASON;
+      }
+    }
+    return null;
+  }
+  let repl = null;
+  let j = li + 1;
+  while (j < tokens.length) {
+    const t = tokens[j];
+    if (t === "--") { j += 1; break; }
+    if (!t.startsWith("-") || t === "-") break;
+    if (t.startsWith("--")) {
+      const eq = t.indexOf("=");
+      const name = eq === -1 ? t : t.slice(0, eq);
+      const val = eq === -1 ? undefined : t.slice(eq + 1);
+      if (name === "--replace") repl = val ? val : "{}";
+      j += XARGS_LONG_WITH_ARG.has(name) && val === undefined ? 2 : 1;
+      continue;
+    }
+    let consumed = 1;
+    for (let k = 1; k < t.length; k += 1) {
+      const c = t[k];
+      if (!XARGS_SHORT_WITH_ARG.has(c) && !XARGS_SHORT_OPT_ARG.has(c)) continue;
+      const rest = t.slice(k + 1);
+      const needsArg = XARGS_SHORT_WITH_ARG.has(c);
+      if (rest === "" && needsArg) consumed = 2;
+      if (c === "I") repl = rest !== "" ? rest : (tokens[j + 1] ?? "{}");
+      else if (c === "i") repl = rest !== "" ? rest : "{}";
+      break;
+    }
+    j += consumed;
+  }
+  if (j >= tokens.length) return null; // no command: xargs runs `echo`
+  const e = skipLaunchers(tokens, j);
+  if (e === -1) return XARGS_REASON;
+  if (e >= tokens.length) return null;
+  const exe = tokens[e];
+  if (isDynamicTok(exe, repl)) return XARGS_REASON;
+  const name = baseName(exe);
+  if (name !== "git") {
+    // an interpreter handed a bare git token cannot be proven benign
+    return WRAPPERS.has(name) && tokens.slice(e + 1).some((t) => baseName(t) === "git") ? XARGS_REASON : null;
+  }
+  let g = e + 1;
+  while (g < tokens.length && tokens[g].startsWith("-")) {
+    if (isDynamicTok(tokens[g], repl)) return XARGS_REASON;
+    g += GIT_GLOBAL_WITH_ARG.has(tokens[g]) ? 2 : 1;
+  }
+  const sub = tokens[g];
+  if (sub === undefined || sub === "push" || isDynamicTok(sub, repl)) return XARGS_REASON;
+  return null;
+}
+
 // Classifies a Bash command. Returns:
 //   { push: false }                                    -- no `git push` intent
 //   { push: true, classifiable: true, pushes: [{ cwd, candidate }] }
@@ -203,7 +295,8 @@ const baseName = (t) => t.split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "
 export function classifyGitPushCommand(command, { baseCwd } = {}) {
   if (typeof command !== "string") return { push: false };
   // A literal `push` is not required: a shell variable can supply the subcommand (`S=push; git "$S" ...`).
-  if (!/\bpush\b/.test(command) && !(/\bgit\b/.test(command) && hasAnyExpansion(command))) return { push: false };
+  // `xargs` is analyzed even without a literal `push`: stdin or a replacement string can supply it.
+  if (!/\bpush\b/.test(command) && !/\bxargs\b/.test(command) && !(/\bgit\b/.test(command) && hasAnyExpansion(command))) return { push: false };
   const segments = splitShellSegments(command);
   const pushes = [];
   let cwd = baseCwd;
@@ -274,6 +367,9 @@ export function classifyGitPushCommand(command, { baseCwd } = {}) {
     if (WRAPPERS.has(first) && /\bgit\b/.test(joined) && (cmdLike ? hasAnyExpansion(joined) : hasPosixExpansion(joined))) {
       return { push: true, classifiable: false, reason: SHELL_EXPANSION_REASON };
     }
+    // `xargs` can run `git push` with the subcommand/executable supplied at run time (Audit #1077).
+    const xr = analyzeXargs(tokens);
+    if (xr) return { push: true, classifiable: false, reason: xr };
     // A shell interpreter with no inline program reads it from stdin (`echo 'git "$S" ...' | S=push bash`),
     // so the payload is invisible to this segment; refuse when the command could carry a git push.
     if (STDIN_SHELLS.has(first) && !tokens.slice(1).some((t) => /^-[A-Za-z]*c$/i.test(t) || /^\/[ck]$/i.test(t) || /^-(command|encodedcommand)$/i.test(t) || (!t.startsWith("-") && !t.startsWith("/"))) &&
