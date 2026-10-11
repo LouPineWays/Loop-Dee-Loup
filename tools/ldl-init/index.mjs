@@ -737,6 +737,10 @@ export const HARD_MODULE_DEPENDENCIES = [
   // Issue #950: successor-integration-preflight.mjs hard-imports github-read.mjs and ready-dispatch-gate.mjs.
   { dest: "tools/orchestration/successor-integration-preflight.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
   { dest: "tools/orchestration/successor-integration-preflight.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
+  // Issue #1070: the shared canonical supersession contract is hard-imported by three consumers.
+  { dest: "tools/orchestration/successor-integration-preflight.mjs", dependsOnDest: "tools/orchestration/supersession-marker.mjs" },
+  { dest: "tools/orchestration/next-review-transition-gate.mjs", dependsOnDest: "tools/orchestration/supersession-marker.mjs" },
+  { dest: "tools/orchestration/finalize-pr-breakpoint.mjs", dependsOnDest: "tools/orchestration/supersession-marker.mjs" },
   // Issue #968: successor-integration-preflight.mjs hard-imports successor-local-state.mjs, which hard-imports
   // classify-primary-path-lock.mjs and pr-head-checkout-preflight.mjs.
   { dest: "tools/orchestration/successor-integration-preflight.mjs", dependsOnDest: "tools/orchestration/successor-local-state.mjs" },

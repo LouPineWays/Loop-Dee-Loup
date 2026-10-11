@@ -718,3 +718,124 @@ test("run(): a non-ROUTED lifecycle never consults the plan (READY direct route 
   );
   assert.equal(result.state, "FINALIZED");
 });
+
+// -- Issue #1070 (control #539): cross-phase finalizer guard ---------------------------------
+// #963 shape: execution #964, merged current PR #1069, NOT CLEAN Audit #1073, historical OPEN PR #1021.
+const AUDIT_BODY_963 = `## Current state
+
+- **Lifecycle:** AUDIT
+- **Execution:** #964
+- **Route:** implementation worker
+- **PR:** #1069
+- **Stage 1:** satisfied
+- **Stage 2:** #1073
+- **Blocker:** none
+- **Founder decision:** none
+`;
+const PR_1021 = { headRefName: "issue-964-guard", headRefOid: "1021head", body: "Addresses #964.", state: "OPEN" };
+const PR_1080 = { headRefName: "issue-964-correction", headRefOid: "1080head", body: "Addresses #964.", state: "OPEN" };
+
+async function runCrossPhase({ pr, head, callerView, mergedBody, controlBody = AUDIT_BODY_963 }) {
+  let currentBody = controlBody;
+  const writes = [];
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 963, executionIssue: 964, pr, head },
+    {
+      ghIssueViewImpl: async () => currentBody,
+      ghPrViewImpl: async ({ pr: n }) => (n === 1069 ? { state: "MERGED", body: mergedBody, headRefName: "issue-964-x", headRefOid: "m" } : callerView),
+      stage1GateRunImpl: async () => ({ exitCode: 2, state: "PENDING", triggerTimestamp: "2026-01-01T00:00:00Z" }),
+      writeControlSnapshotImpl: async ({ proposedBody }) => {
+        writes.push(proposedBody);
+        currentBody = proposedBody;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  return { result, writes, body: () => currentBody };
+}
+
+test("#1070: finalizer denies historical PR #1021 superseded by merged #1069 (canonical line) with no write, and repeats are inert", async () => {
+  const mergedBody = "Addresses #964\n\nSupersedes #1021.";
+  const first = await runCrossPhase({ pr: 1021, head: "1021head", callerView: PR_1021, mergedBody });
+  assert.equal(first.result.state, "PR_BREAKPOINT_UNVERIFIED");
+  assert.match(first.result.reason, /historical\/superseded/);
+  assert.equal(first.writes.length, 0);
+  assert.equal(first.body(), AUDIT_BODY_963);
+  const second = await runCrossPhase({ pr: 1021, head: "1021head", callerView: PR_1021, mergedBody });
+  assert.equal(second.result.state, "PR_BREAKPOINT_UNVERIFIED");
+  assert.equal(second.body(), AUDIT_BODY_963);
+});
+
+test("#1070: finalizer also denies when the merged PR mentions the candidate only inline (legacy, fail closed)", async () => {
+  const r = await runCrossPhase({ pr: 1021, head: "1021head", callerView: PR_1021, mergedBody: "Addresses #964 (control #963). Supersedes #1021." });
+  assert.equal(r.result.state, "PR_BREAKPOINT_UNVERIFIED");
+  assert.equal(r.writes.length, 0);
+});
+
+test("#1070: finalizer denies a non-OPEN caller PR while a merged current PR and live audit exist", async () => {
+  const r = await runCrossPhase({ pr: 1021, head: "1021head", callerView: { ...PR_1021, state: "CLOSED" }, mergedBody: "unrelated" });
+  assert.equal(r.result.state, "PR_BREAKPOINT_UNVERIFIED");
+  assert.match(r.result.reason, /not an open correction PR/);
+  assert.equal(r.writes.length, 0);
+});
+
+test("#1070: genuine AUDIT -> REVIEW finalization of a new post-audit correction PR still works", async () => {
+  const r = await runCrossPhase({ pr: 1080, head: "1080head", callerView: PR_1080, mergedBody: "Addresses #964\n\nSupersedes #1021." });
+  assert.equal(r.result.state, "FINALIZED");
+  assert.equal(r.writes.length, 1);
+  assert.match(r.body(), /- \*\*PR:\*\* #1080/);
+  assert.match(r.body(), /- \*\*Stage 2:\*\* #1073/);
+  assert.match(r.body(), /- \*\*Lifecycle:\*\* REVIEW/);
+});
+
+test("#1070: unreadable current control PR fails closed with no write", async () => {
+  let writes = 0;
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 963, executionIssue: 964, pr: 1080, head: "1080head" },
+    {
+      ghIssueViewImpl: async () => AUDIT_BODY_963,
+      ghPrViewImpl: async ({ pr }) => {
+        if (pr === 1069) throw new Error("boom");
+        return PR_1080;
+      },
+      stage1GateRunImpl: async () => ({ exitCode: 2, state: "PENDING", triggerTimestamp: "2026-01-01T00:00:00Z" }),
+      writeControlSnapshotImpl: async () => {
+        writes++;
+        return { exitCode: 0, state: "WRITTEN" };
+      },
+    },
+  );
+  assert.equal(result.state, "PR_BREAKPOINT_UNVERIFIED");
+  assert.equal(writes, 0);
+});
+
+// PR #1074 Stage 1: supported full URL field values must not bypass cross-phase protection.
+test("#1070: URL-form Stage 2 and PR pointers deny stale historical finalization without writes", async () => {
+  const bodies = [
+    AUDIT_BODY_963.replace("- **Stage 2:** #1073", "- **Stage 2:** https://github.com/owner/repo/issues/1073"),
+    AUDIT_BODY_963.replace("- **PR:** #1069", "- **PR:** https://github.com/owner/repo/pull/1069"),
+    AUDIT_BODY_963.replace("- **Stage 2:** #1073", "- **Stage 2:** https://github.com/owner/repo/issues/1073")
+      .replace("- **PR:** #1069", "- **PR:** https://github.com/owner/repo/pull/1069"),
+  ];
+  for (const controlBody of bodies) {
+    const r = await runCrossPhase({
+      pr: 1021, head: "1021head", callerView: PR_1021,
+      mergedBody: "Addresses #964\n\nSupersedes #1021.", controlBody,
+    });
+    assert.equal(r.result.state, "PR_BREAKPOINT_UNVERIFIED", controlBody);
+    assert.equal(r.writes.length, 0, controlBody);
+    assert.equal(r.body(), controlBody);
+  }
+});
+
+test("#1070: URL-form pointers still allow a genuine new post-audit correction PR", async () => {
+  const controlBody = AUDIT_BODY_963
+    .replace("- **Stage 2:** #1073", "- **Stage 2:** https://github.com/owner/repo/issues/1073")
+    .replace("- **PR:** #1069", "- **PR:** https://github.com/owner/repo/pull/1069");
+  const r = await runCrossPhase({
+    pr: 1080, head: "1080head", callerView: PR_1080,
+    mergedBody: "Addresses #964\n\nSupersedes #1021.", controlBody,
+  });
+  assert.equal(r.result.state, "FINALIZED");
+  assert.equal(r.writes.length, 1);
+});

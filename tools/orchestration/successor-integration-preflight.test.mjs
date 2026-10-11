@@ -115,7 +115,8 @@ test("target moved during preparation -> fail closed", () => {
 test("invalid identifiers fail closed; marker parser is exact", () => {
   assert.equal(run({ ...base, predecessorPr: 0 }, harness()).state, "FAIL_CLOSED");
   assert.equal(referencesSupersede("Supersedes #8690", 869), false);
-  assert.equal(referencesSupersede("supersedes: #869", 869), true);
+  assert.equal(referencesSupersede("supersedes: #869", 869), false); // #1070: colon/inline is noncanonical
+  assert.equal(referencesSupersede("supersedes #869.", 869), true);
 });
 
 // Issue #968: local-only successor state.
@@ -158,4 +159,60 @@ test("the expected attempt (after closed successors) is passed to local inspecti
 test("remote successor PR takes precedence; local state is not consulted (#950 unchanged)", () => {
   const r = run(base, harness({ linked: [PRED, succ(900)], inspectLocal: () => { throw new Error("must not be called"); } }));
   assert.equal(r.state, "SUCCESSOR_EXISTS");
+});
+
+// Issue #1070 (control #539): one producer/consumer supersession contract.
+const ORIGINAL_1026_BODY = "Addresses #964 (control #963). Supersedes #1021.";
+const PRED_1021 = { number: 1021, state: "OPEN", headRefName: "issue-964-guard", headRefOid: PRED_HEAD, baseRefName: "main", body: "Addresses #964" };
+const base1021 = { repo: "o/r", executionIssue: 964, predecessorPr: 1021, expectedPredecessorHead: PRED_HEAD };
+const succ1021 = (number, body, state = "OPEN") => ({ number, state, headRefName: "issue-964-successor-of-1021-attempt-1", body });
+
+test("#1070: the original #1026 inline first line is not canonical supersession metadata", () => {
+  assert.equal(referencesSupersede(ORIGINAL_1026_BODY, 1021), false);
+  assert.equal(referencesSupersede("Addresses #964\nSupersedes #1021.", 1021), true);
+});
+
+test("#1070: canonical standalone marker passes producer checks (reuse) beside the original-shaped body", () => {
+  const r = run(base1021, harness({ pred: PRED_1021, linked: [PRED_1021, succ1021(1026, "Addresses #964\n\nSupersedes #1021.")] }));
+  assert.equal(r.state, "SUCCESSOR_EXISTS");
+  assert.equal(r.successor, 1026);
+  assert.equal(r.predecessor, 1021);
+});
+
+test("#1070: legacy inline-only OPEN or MERGED successor fails closed with a normalization reason, never NO_SUCCESSOR", () => {
+  for (const state of ["OPEN", "MERGED"]) {
+    const r = run(base1021, harness({ pred: PRED_1021, linked: [PRED_1021, succ1021(1026, ORIGINAL_1026_BODY, state)] }));
+    assert.equal(r.state, "FAIL_CLOSED", state);
+    assert.equal(r.exitCode, 2);
+    assert.match(r.reason, /NONCANONICAL_SUPERSESSION/);
+    assert.match(r.reason, /#1026/);
+    assert.equal(r.branch, undefined);
+  }
+});
+
+test("#1070: negative markers never count as a successor declaration and cannot masquerade as lineage absence", () => {
+  const negatives = [
+    "> Supersedes #1021.",
+    "- [ ] Supersedes #1021.",
+    "~~Supersedes #1021.~~",
+    "```\nSupersedes #1021.\n```",
+    "    Supersedes #1021.",
+    "\tSupersedes #1021.",
+    ["```", "```not-a-close", "Supersedes #1021.", "```"].join("\n"),
+    ["~~~", "~~~not-a-close", "Supersedes #1021.", "~~~"].join("\n"),
+    "Supersedes #10210.",
+    "Supersedes #1022.",
+  ];
+  for (const text of negatives) {
+    const r = run(base1021, harness({ pred: PRED_1021, linked: [PRED_1021, succ1021(1026, "Addresses #964\n" + text)] }));
+    assert.equal(r.state, "FAIL_CLOSED", text);
+    assert.notEqual(r.state, "NO_SUCCESSOR");
+    assert.notEqual(r.state, "SUCCESSOR_EXISTS");
+  }
+});
+
+test("#1070: multiple canonical linked successors remain ambiguous", () => {
+  const r = run(base1021, harness({ pred: PRED_1021, linked: [PRED_1021, succ1021(1026, "Addresses #964\nSupersedes #1021."), succ1021(1027, "Addresses #964\nSupersedes #1021.")] }));
+  assert.equal(r.state, "FAIL_CLOSED");
+  assert.match(r.reason, /multiple open successors/);
 });
