@@ -120,6 +120,7 @@ import {
   referencesExecutionIssue,
   isLegacyStage2NotStartedSentinel,
 } from "./ready-dispatch-gate.mjs";
+import { canonicalSupersededNumbers, referencesLegacySupersede } from "./supersession-marker.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 import { runParseExecutionPlan, classifyIntegrationRoute, planLevelRouteFailure } from "./parse-execution-plan.mjs";
 import { run as stage1GateRun } from "../review-watch/stage1-gate.mjs";
@@ -365,6 +366,47 @@ export function verifyRoutedPostUnitBreakpoint(plan, { unit } = {}) {
   return { ok: true, route: "unit-owned", owner: route.unitId };
 }
 
+// Issue #1070 (control #539; the #963 recurrence): cross-phase guard. When the control Issue already
+// records a real Stage 2 audit AND its current PR pointer names a different, MERGED PR, this call is
+// (re)finalizing a PR after the audited merge. It may only proceed for a genuine new correction PR:
+// OPEN, and not declared superseded by the merged current PR (the one shared #1060 contract in
+// supersession-marker.mjs; a legacy inline mention also denies, since fail-closed is the safe side).
+// Anything else is a historical/superseded PR and must not roll the phase back onto it. Runs before any
+// write; fails closed with the control body untouched. Absent a real audit or a different merged
+// current PR, behavior is unchanged (including the AUDIT -> REVIEW finalization of a new correction PR).
+function singleRef(raw) {
+  if (typeof raw !== "string") return { kind: "none" };
+  const refs = [...new Set([...raw.matchAll(/#([1-9]\d*)/g)].map((m) => Number(m[1])))];
+  if (refs.length === 0) return { kind: "none" };
+  return refs.length === 1 ? { kind: "ref", number: refs[0] } : { kind: "ambiguous", raw };
+}
+
+export async function checkCrossPhaseGuard({ repo, body, pr, callerView, ghPrViewImpl }) {
+  const stage2 = singleRef(parseControlBullet(body, "Stage 2"));
+  if (stage2.kind === "none") return { ok: true };
+  const current = singleRef(parseControlBullet(body, "PR"));
+  if (current.kind === "none") return { ok: true };
+  if (stage2.kind === "ambiguous" || current.kind === "ambiguous") {
+    return { ok: false, reason: `control Issue's Stage 2/PR pointers are ambiguous (${stage2.kind === "ambiguous" ? `Stage 2 ${JSON.stringify(stage2.raw)}` : `PR ${JSON.stringify(current.raw)}`}); refusing to finalize PR #${pr} across phases` };
+  }
+  if (current.number === pr) return { ok: true };
+  let currentView;
+  try {
+    currentView = await ghPrViewImpl({ repo, pr: current.number });
+  } catch (err) {
+    return { ok: false, reason: `could not read the control Issue's current PR #${current.number} to rule out a historical/superseded PR #${pr}: ${err.message}` };
+  }
+  if (String(currentView?.state ?? "").toUpperCase() !== "MERGED") return { ok: true };
+  if (String(callerView?.state ?? "").toUpperCase() !== "OPEN") {
+    return { ok: false, reason: `PR #${pr} is ${callerView?.state ?? "unknown"}, not an open correction PR; control Issue's current PR #${current.number} is merged with live Stage 2 audit #${stage2.number}` };
+  }
+  const superseded = canonicalSupersededNumbers(currentView?.body).has(pr) || referencesLegacySupersede(currentView?.body, pr);
+  if (superseded) {
+    return { ok: false, reason: `PR #${pr} is a historical/superseded PR (merged PR #${current.number} declares "Supersedes #${pr}") and is not the current correction for Stage 2 audit #${stage2.number}; refusing to roll the control phase back onto it` };
+  }
+  return { ok: true };
+}
+
 function unverified({ controlIssue, executionIssue, pr, reason }) {
   return {
     exitCode: 2,
@@ -460,6 +502,11 @@ export async function run(
     latestBody = await ghIssueViewImpl({ repo, controlIssue });
   } catch (err) {
     return unverified({ controlIssue, executionIssue, pr, reason: `pre-write control re-read failed: ${err.message}` });
+  }
+
+  const crossPhase = await checkCrossPhaseGuard({ repo, body: latestBody, pr, callerView: prView, ghPrViewImpl });
+  if (!crossPhase.ok) {
+    return unverified({ controlIssue, executionIssue, pr, reason: `refusing cross-phase finalize: ${crossPhase.reason}` });
   }
 
   // Issue #856: `ROUTED` is accepted only with live-plan proof of an authorized post-unit breakpoint.

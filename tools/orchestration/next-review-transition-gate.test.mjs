@@ -4726,3 +4726,37 @@ test("#1060 Stage 1: ambiguous freshly reread PR pointer fails closed", async ()
   assert.equal(result.state, "AMBIGUOUS");
   assert.match(result.reason, /refreshed control Issue.*ambiguous PR identity/);
 });
+
+// Issue #1070 (control #539): the #963/#964/#1021/#1026/#1027 historical shape through the composed gate.
+const CONTROL_BODY_963 = CONTROL_BODY_1028.replace("#1058", "#1026").replace("#1059", "#1027");
+const open1021 = { number: 1021, headRefOid: "1021headsha", state: "OPEN" };
+const run963 = (prBody, extra = {}) => run1060({ candidates: [open1021], prBodies: { 1026: prBody }, prStates: { 1026: "MERGED" }, controlBody: CONTROL_BODY_963, ...extra });
+
+test("#1070: original unnormalized #1026 body fails closed and never trigger/finalizes historical #1021", async () => {
+  const result = await run963("Addresses #964 (control #963). Supersedes #1021.");
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /NONCANONICAL_SUPERSESSION/);
+  assert.notEqual(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION");
+  assert.doesNotMatch(JSON.stringify(result), /1021 --head/);
+});
+
+test("#1070: canonical standalone declaration (with the original first line retained) excludes #1021 and reaches the NOT CLEAN correction path", async () => {
+  const result = await run963("Addresses #964 (control #963). Supersedes #1021.\n\nSupersedes #1021.");
+  assert.equal(result.state, "STAGE2_CORRECTION_REQUIRED");
+  assert.doesNotMatch(JSON.stringify(result), /1021 --head/);
+});
+
+test("#1070: a genuine new correction PR beside canonical-superseded #1021 stays eligible for exactly one finalization", async () => {
+  const fresh = { number: 1070, headRefOid: "newhead", state: "OPEN" };
+  const result = await run1060({ candidates: [open1021, fresh], prBodies: { 1026: "Addresses #964\nSupersedes #1021." }, prStates: { 1026: "MERGED" }, controlBody: CONTROL_BODY_963 });
+  assert.equal(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", result.reason);
+  assert.equal(result.pr, 1070);
+});
+
+test("#1070: wrong-issue and prefix-colliding inline mentions do not fire the legacy fail-closed path", async () => {
+  for (const body of ["Supersedes #10210.", "Supersedes #1022."]) {
+    const result = await run963(body);
+    assert.equal(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", body);
+    assert.equal(result.pr, 1021);
+  }
+});

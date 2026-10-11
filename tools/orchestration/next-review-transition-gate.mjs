@@ -302,6 +302,7 @@
 //
 // Tests: node --test tools/orchestration/next-review-transition-gate.test.mjs
 
+import { canonicalSupersededNumbers, referencesLegacySupersede } from "./supersession-marker.mjs";
 import { enforceControlPlaneFreshness } from "./control-plane-freshness.mjs";
 import { execFileSync } from "node:child_process";
 import { readGithubIssue, readGithubPr } from "./github-read.mjs";
@@ -1572,22 +1573,8 @@ export async function reconcileStage2CorrectionPr({ repo, workIssue }, { ghPrLis
 export function findSupersededCandidates(candidates, supersedingPrBody) {
   const out = new Set();
   if (typeof supersedingPrBody !== "string") return out;
-  // A positive witness is a standalone top-level declaration, not incidental prose.
-  const affirmed = new Set();
-  let fence = null;
-  for (const line of supersedingPrBody.split(/\r?\n/)) {
-    const boundary = line.match(/^\s{0,3}(`{3,}|~{3,})/);
-    if (fence) {
-      if (boundary && boundary[1][0] === fence.char && boundary[1].length >= fence.length) fence = null;
-      continue;
-    }
-    if (boundary) {
-      fence = { char: boundary[1][0], length: boundary[1].length };
-      continue;
-    }
-    const marker = line.match(/^\s{0,3}Supersedes\s+#([1-9]\d*)\.?\s*$/i);
-    if (marker) affirmed.add(Number(marker[1]));
-  }
+  // Issue #1070: the one shared canonical contract (supersession-marker.mjs).
+  const affirmed = canonicalSupersededNumbers(supersedingPrBody);
   for (const c of Array.isArray(candidates) ? candidates : []) {
     const n = Number(c?.number);
     if (Number.isInteger(n) && affirmed.has(n)) out.add(n);
@@ -1621,6 +1608,16 @@ async function filterSupersededCandidates({ repo, context, postAudit, workIssue,
   }
   if (current?.state !== "MERGED") return { reconciliation };
   const superseded = findSupersededCandidates(candidates, current.body);
+  // Issue #1070: a merged current PR that mentions a candidate only in noncanonical inline prose
+  // ("... Supersedes #N.") is real but unprovable lineage -- never a quiet "no supersession" that would
+  // route the historical predecessor to Stage 1 trigger/finalize. Fail closed, no mutation.
+  const legacyOnly = candidates.filter((c) => !superseded.has(Number(c.number)) && referencesLegacySupersede(current.body, Number(c.number)));
+  if (legacyOnly.length > 0) {
+    return fail(
+      `NONCANONICAL_SUPERSESSION: merged current PR #${prRef.issue} mentions "Supersedes ${legacyOnly.map((c) => `#${c.number}`).join(", ")}" only inline; ` +
+        `normalize its body to a standalone "Supersedes #<N>." line (ordinary PR metadata edit with readback) before correction-PR routing -- refusing to trigger or finalize a possibly historical PR`,
+    );
+  }
   if (superseded.size === 0) return { reconciliation };
   const executionRef = resolveExecutionPointerOrNone(readExecutionBulletField(controlBody));
   if (!executionRef.ok || executionRef.issue !== workIssue) {

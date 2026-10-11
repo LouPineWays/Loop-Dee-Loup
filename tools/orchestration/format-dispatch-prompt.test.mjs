@@ -6,6 +6,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import {
   formatDispatchPrompt,
   formatPlanningWorkerDispatchPrompt,
@@ -1548,4 +1549,10 @@ test("#1023 CLI: piped STAGE1_SATISFIED_MERGE_CONFLICT selects the ordinary succ
   const noBinding = await runCli({ state: "STAGE1_SATISFIED_MERGE_CONFLICT", controlIssue: 963, issue: 964, pr: 1021, reviewedHead: ORDINARY_HEAD });
   assert.equal(noBinding.status, 1);
   assert.equal(noBinding.stdout, "");
+});
+
+test("#1070: successor dispatch prompt requires the canonical standalone Supersedes line", () => {
+  const src = fs.readFileSync(new URL("./format-dispatch-prompt.mjs", import.meta.url), "utf8");
+  assert.match(src, /standalone line "Supersedes #\$\{pr\}\."/);
+  assert.match(src, /as its own separate line, "Supersedes #\$\{pr\}\."/);
 });

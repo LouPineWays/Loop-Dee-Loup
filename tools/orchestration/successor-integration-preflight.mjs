@@ -15,7 +15,9 @@
 // Successor identity (all required): an OPEN PR that references the execution Issue via the
 // existing linkage convention (`referencesExecutionIssue`: `issue-<N>-` head branch or an
 // `Addresses/Implements #<N>` body marker), is not the predecessor, targets the predecessor's own
-// base branch, and carries the explicit body marker `Supersedes #<predecessor>`. An open
+// base branch, and carries the canonical standalone body line `Supersedes #<predecessor>.` (supersession-marker.mjs, the same
+// form the Stage 2 correction-PR gate reads; inline-only prose is noncanonical legacy and fails closed as
+// NONCANONICAL_SUPERSESSION, issue #1070). An open
 // execution-linked PR that is not the predecessor and lacks the marker is ambiguous authority and
 // fails closed (never silently reused or duplicated).
 //
@@ -44,10 +46,19 @@ import { execFileSync } from "node:child_process";
 import { readGithubPr } from "./github-read.mjs";
 import { inspectLocalSuccessor, reclaimLocalSuccessor } from "./successor-local-state.mjs";
 import { defaultGhPrList, referencesExecutionIssue, resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
+import { hasCanonicalSupersede, referencesLegacySupersede } from "./supersession-marker.mjs";
 
+// Issue #1070: a successor is recognized only by the canonical standalone `Supersedes #<pr>.` line --
+// the exact form the downstream Stage 2 correction-PR gate (`findSupersededCandidates`) also reads
+// (supersession-marker.mjs is the one shared contract). Inline prose such as
+// "Addresses #964 (control #963). Supersedes #1021." is only LEGACY lineage evidence (`legacyOnly`):
+// it can never authorize creation or reuse, and never reads as absence of lineage.
 export function referencesSupersede(body, predecessorPr) {
-  return typeof body === "string" && new RegExp(String.raw`\bSupersedes\s*:?\s*#${predecessorPr}(?!\d)`, "i").test(body);
+  return hasCanonicalSupersede(body, predecessorPr);
 }
+
+const legacyOnly = (body, predecessorPr) =>
+  !hasCanonicalSupersede(body, predecessorPr) && referencesLegacySupersede(body, predecessorPr);
 
 const failClosed = (reason, extra = {}) => ({ state: "FAIL_CLOSED", exitCode: 2, reason, ...extra });
 
@@ -64,6 +75,14 @@ export function evaluateSuccessor({ executionIssue, predecessor, linkedPrs, pred
     return failClosed(`predecessor PR #${predecessorPr} does not reference execution Issue #${executionIssue}`);
   }
   const others = (linkedPrs ?? []).filter((pr) => pr.number !== predecessorPr);
+  const legacy = others.filter((pr) => (pr.state === "OPEN" || pr.state === "MERGED") && legacyOnly(pr.body, predecessorPr));
+  if (legacy.length > 0) {
+    return failClosed(
+      `NONCANONICAL_SUPERSESSION: ${legacy.map((p) => `#${p.number} (${p.state})`).join(", ")} mention "Supersedes #${predecessorPr}" only inline; ` +
+        `the downstream Stage 2 gate recognizes only a standalone "Supersedes #${predecessorPr}." line. Normalize the PR body metadata ` +
+        `(ordinary PR metadata edit with readback; never commits, merged audits, or reviewer evidence) and rerun -- no successor is created or reused meanwhile`,
+    );
+  }
   const merged = others.filter((pr) => pr.state === "MERGED" && referencesSupersede(pr.body, predecessorPr));
   if (merged.length > 0) return failClosed(`successor PR #${merged[0].number} is already merged; execution attempt is not open for integration`);
   const open = others.filter((pr) => pr.state === "OPEN");
@@ -125,7 +144,7 @@ export function run(
     return failClosed(`TARGET_MOVED: ${predecessor.baseRefName} is ${sha}, expected ${expectTarget}`);
   }
   const priorClosedSuccessors = (linkedPrs ?? []).filter(
-    (pr) => pr.number !== predecessorPr && pr.state === "CLOSED" && referencesSupersede(pr.body, predecessorPr),
+    (pr) => pr.number !== predecessorPr && pr.state === "CLOSED" && referencesLegacySupersede(pr.body, predecessorPr),
   ).length;
   const target = { ref: predecessor.baseRefName, sha };
   const attempt = priorClosedSuccessors + 1;
