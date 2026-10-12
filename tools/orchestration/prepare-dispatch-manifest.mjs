@@ -115,7 +115,7 @@ import { existsSync, readdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runParseExecutionPlan, planLevelRouteFailure, parseBulletBlock } from "./parse-execution-plan.mjs";
+import { runParseExecutionPlan, planLevelRouteFailure, parseBulletBlock, stripKnownAttributionSuffix } from "./parse-execution-plan.mjs";
 import { extractDependencyUnitIds, hasUnrecognizedDependencyWording } from "./dependency-grammar.mjs";
 
 const REPO_ROOT = path.resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -668,7 +668,7 @@ export async function runPrepareDispatchManifest(
           `(${persistedIdentity.commentUrl} != ${manifestIdentity.commentUrl}).`,
       };
     }
-    if ((persistedManifest.body ?? "") !== body) {
+    if (!persistedBodyMatchesGenerated(persistedManifest.body, body)) {
       return {
         exitCode: 1,
         message:
@@ -786,7 +786,7 @@ export async function runPrepareDispatchManifest(
           `expected #${parsed.executionIssue}.`,
       };
     }
-    const manifestPlanIndexRef = parseBulletBlock(freshManifest.body ?? "", "Plan index");
+    const manifestPlanIndexRef = parseBulletBlock(stripKnownAttributionSuffix(freshManifest.body ?? ""), "Plan index");
     const manifestPlanIndexIdentity = parseCommentPermalinkIdentity(manifestPlanIndexRef);
     const canonicalPlanIndexUrl = finalPlanIndexIdentity.commentUrl;
     const canonicalPlanIndexIdentity = parseCommentPermalinkIdentity(canonicalPlanIndexUrl);
@@ -848,6 +848,19 @@ export async function runPrepareDispatchManifest(
   // this dry-run invocation (no `commentId`/`create`, so nothing is persisted) instead of a
   // second, separate execution-plan parse purely to read `planIndex.url`.
   return { exitCode: 0, ok: true, repo: parsed.repo, executionIssue: parsed.executionIssue, plan: parsed.plan, entries, body };
+}
+
+// Issue #1121: the GitHub execution surface may append one known non-authoritative Claude
+// Code attribution block to a persisted comment. The generated canonical body must still be an
+// exact byte prefix of the read-back; only a remainder that is exactly one recognized block
+// (parse-execution-plan.mjs's stripKnownAttributionSuffix) is tolerated. Unknown, repeated,
+// embedded or altered trailing content stays a mismatch (fail closed). Nothing is rewritten.
+export function persistedBodyMatchesGenerated(persisted, generated) {
+  const text = persisted ?? "";
+  if (text === generated) return true;
+  if (!text.startsWith(generated)) return false;
+  const remainder = text.slice(generated.length);
+  return remainder !== "" && stripKnownAttributionSuffix(remainder) === "";
 }
 
 function parseArgs(argv) {
