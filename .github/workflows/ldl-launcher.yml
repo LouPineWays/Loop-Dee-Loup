@@ -19,12 +19,15 @@ name: LDL launcher
 # Security posture:
 #   - Triggers are issue_comment (created) and workflow_dispatch only; no pull_request or
 #     pull_request_target, and PR comments are rejected by the module.
-#   - A manual dispatch selected on a non-default ref is skipped at the job `if`, before any step
-#     (checkout, scripts, credentials) runs; verifyDispatchLaunchRequest re-checks the same ref.
-#     Checkout is therefore always the default branch of THIS repository; no fork, PR-head or
-#     other-branch code is ever checked out or executed by this job. Platform limit: a repository
-#     writer can still run a modified copy of any workflow from their own branch with repository
-#     secrets; that is governed by branch/Actions-environment protection, not by this file.
+#   - A manual dispatch selected on a non-default ref is skipped at the job `if`, and
+#     verifyDispatchLaunchRequest re-checks the same ref. These are hygiene for the UNMODIFIED
+#     workflow only, NOT a trust boundary (Stage 1 review on #1097): GitHub runs the workflow
+#     version at the dispatch-selected ref, so a repository writer can dispatch a branch whose copy
+#     of this file drops the guard. The enforceable boundary is outside this file: the job declares
+#     `environment: ldl-launcher`, and the founder keeps CLAUDE_CODE_OAUTH_TOKEN as an environment
+#     secret of that environment (not a repository secret) with deployment branches restricted to
+#     the default branch, so a non-default-ref run is denied the secret by GitHub itself.
+#     Checkout is the triggering ref of THIS repository; no fork or PR-head code is checked out.
 #   - Event-derived values reach the shell only through env, never interpolated into
 #     script text.
 #   - Permissions: issues write (claim comments, control-body writes), actions read (liveness
@@ -60,12 +63,9 @@ concurrency:
 
 jobs:
   authorize-and-claim:
-    # Trust boundary (Audit #1096): the job does not START, so no checkout, no repository code and
-    # no credential-bearing step runs, unless a manual dispatch was selected on the repository's
-    # default branch (or the event is an issue_comment, which GitHub always runs from the default
-    # branch). A dispatch on any other ref is skipped here, before any step, rather than relying on
-    # an in-script check that would already be executing selected-ref code. The module re-verifies
-    # the same ref and everything else.
+    # Hygiene guard (Audit #1096), not a trust boundary: the unmodified workflow does not START for
+    # a dispatch on a non-default ref. A modified branch copy can omit this `if`, so the secret's
+    # protection is the `ldl-launcher` environment's default-branch deployment policy (see header).
     if: >-
       (github.event_name == 'workflow_dispatch' &&
        github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
@@ -73,6 +73,7 @@ jobs:
        github.event.issue.pull_request == null &&
        startsWith(github.event.comment.body, '/ldl launch '))
     runs-on: ubuntu-latest
+    environment: ldl-launcher
     timeout-minutes: 350
     steps:
       - name: Checkout

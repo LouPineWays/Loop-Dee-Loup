@@ -38,7 +38,7 @@ test("dispatch trust: actor permission, default-branch ref, fork flag come from 
   assert.doesNotMatch(yml, /inputs\.(execution|objective|actor|permission)/i);
 });
 
-test("non-default-ref dispatch cannot start any privileged step (Audit #1096)", () => {
+test("non-default-ref dispatch guard is hygiene; secret is environment-scoped (Audit #1096, #1097 Stage 1)", () => {
   // Exactly one job; its `if` is evaluated before checkout or any step, so a dispatch selected on
   // a non-default ref never runs repository code or touches a credential.
   const jobs = yml.slice(yml.indexOf("\njobs:"));
@@ -55,6 +55,10 @@ test("non-default-ref dispatch cannot start any privileged step (Audit #1096)", 
   assert.match(dispatchClauses[0], /github\.ref ==/);
   // Checkout does not select a ref other than the (default-branch) triggering one.
   assert.doesNotMatch(yml, /uses: actions\/checkout@v4\n\s+with:\n(?:\s+[a-z-]+:[^\n]*\n)*?\s+ref:/);
+  // The guard is hygiene only; the real boundary is the default-branch-restricted environment.
+  assert.match(job, /\n {4}environment: ldl-launcher\n/);
+  assert.match(yml, /not a trust boundary/);
+  assert.doesNotMatch(yml, /Trust boundary \(Audit/);
   // The credential-bearing steps all live inside the guarded job (no step before the guard).
   assert.ok(job.indexOf("steps:") > job.indexOf("if: >-"));
 });
