@@ -19,8 +19,12 @@ name: LDL launcher
 # Security posture:
 #   - Triggers are issue_comment (created) and workflow_dispatch only; no pull_request or
 #     pull_request_target, and PR comments are rejected by the module.
-#   - Checkout is the default-branch/dispatch ref of THIS repository; no fork or PR-head
-#     code is ever checked out or executed.
+#   - A manual dispatch selected on a non-default ref is skipped at the job `if`, before any step
+#     (checkout, scripts, credentials) runs; verifyDispatchLaunchRequest re-checks the same ref.
+#     Checkout is therefore always the default branch of THIS repository; no fork, PR-head or
+#     other-branch code is ever checked out or executed by this job. Platform limit: a repository
+#     writer can still run a modified copy of any workflow from their own branch with repository
+#     secrets; that is governed by branch/Actions-environment protection, not by this file.
 #   - Event-derived values reach the shell only through env, never interpolated into
 #     script text.
 #   - Permissions: issues write (claim comments, control-body writes), actions read (liveness
@@ -56,9 +60,15 @@ concurrency:
 
 jobs:
   authorize-and-claim:
-    # Cheap pre-filter only; the module re-verifies everything.
+    # Trust boundary (Audit #1096): the job does not START, so no checkout, no repository code and
+    # no credential-bearing step runs, unless a manual dispatch was selected on the repository's
+    # default branch (or the event is an issue_comment, which GitHub always runs from the default
+    # branch). A dispatch on any other ref is skipped here, before any step, rather than relying on
+    # an in-script check that would already be executing selected-ref code. The module re-verifies
+    # the same ref and everything else.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request == null &&
        startsWith(github.event.comment.body, '/ldl launch '))

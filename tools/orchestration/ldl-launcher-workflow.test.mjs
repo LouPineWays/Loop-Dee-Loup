@@ -38,6 +38,27 @@ test("dispatch trust: actor permission, default-branch ref, fork flag come from 
   assert.doesNotMatch(yml, /inputs\.(execution|objective|actor|permission)/i);
 });
 
+test("non-default-ref dispatch cannot start any privileged step (Audit #1096)", () => {
+  // Exactly one job; its `if` is evaluated before checkout or any step, so a dispatch selected on
+  // a non-default ref never runs repository code or touches a credential.
+  const jobs = yml.slice(yml.indexOf("\njobs:"));
+  assert.deepEqual([...jobs.matchAll(/^ {2}([\w-]+):\s*$/gm)].map((m) => m[1]), ["authorize-and-claim"]);
+  const job = jobs.slice(jobs.indexOf("authorize-and-claim:"));
+  const guard = /\n {4}if: >-\n([\s\S]*?)\n {4}runs-on:/.exec(job);
+  assert.ok(guard, "job-level if precedes runs-on and steps");
+  assert.ok(job.indexOf("\n    if: >-") < job.indexOf("steps:"));
+  const cond = guard[1].replace(/\s+/g, " ");
+  assert.match(cond, /github\.event_name == 'workflow_dispatch' && github\.ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/);
+  // The dispatch clause is the ref-guarded one only: no bare workflow_dispatch disjunct remains.
+  const dispatchClauses = cond.split("||").filter((c) => c.includes("'workflow_dispatch'"));
+  assert.equal(dispatchClauses.length, 1);
+  assert.match(dispatchClauses[0], /github\.ref ==/);
+  // Checkout does not select a ref other than the (default-branch) triggering one.
+  assert.doesNotMatch(yml, /uses: actions\/checkout@v4\n\s+with:\n(?:\s+[a-z-]+:[^\n]*\n)*?\s+ref:/);
+  // The credential-bearing steps all live inside the guarded job (no step before the guard).
+  assert.ok(job.indexOf("steps:") > job.indexOf("if: >-"));
+});
+
 test("event-derived values reach the script only through env; no secret echoed; least privilege kept", () => {
   const script = yml.slice(yml.indexOf("node --input-type=module"));
   assert.doesNotMatch(script, /\$\{\{/);
