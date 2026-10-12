@@ -1,8 +1,11 @@
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseNextCommand, buildDeps, qualifyClaudeWorker, claudeWorkerArgv, claudeSmokeArgv, SMOKE_MARKER, resolveWorkerLaunch, advancePollBound, withoutMeteredKey, CLAUDE_WORKER_ALLOWED_TOOLS } from "./launcher-run.mjs";
+import { createHash } from "node:crypto";
+import { parseNextCommand, buildDeps, qualifyClaudeWorker, claudeWorkerArgv, claudeSmokeArgv, smokeMarker, newSmokeNonce, resolveWorkerLaunch, advancePollBound, withoutMeteredKey, CLAUDE_WORKER_ALLOWED_TOOLS } from "./launcher-run.mjs";
 import { runLauncherStep, Outcome } from "./launcher-step.mjs";
+const SO = (n) => `${smokeMarker(n)}  -`;
+const N = "n0nce1";
 
 test("parseNextCommand accepts only chained node-tools commands with plain tokens", () => {
   const ok = parseNextCommand("node tools/review-watch/lifecycle-gate.mjs close-work-issue --repo o/r --issue 5 && node tools/review-watch/lifecycle-gate.mjs close-audit --repo o/r --audit-issue 9");
@@ -194,24 +197,24 @@ test("correction finalization verdict: a PR closed without merge still fails clo
 test("worker qualification: read-only smoke argv cannot mutate and carries the credential only in the smoke env", () => {
   const argv = claudeSmokeArgv();
   assert.ok(!argv.includes("--dangerously-skip-permissions"));
-  assert.deepEqual(argv.slice(argv.indexOf("--allowedTools") + 1, argv.indexOf("--disallowedTools")), ["Read", "Bash(printf:*)"]);
+  assert.deepEqual(argv.slice(argv.indexOf("--allowedTools") + 1, argv.indexOf("--disallowedTools")), ["Read", "Bash(printf:*)", "Bash(sha256sum:*)"]);
   assert.equal(argv[argv.indexOf("--permission-mode") + 1], "dontAsk");
   assert.match(argv[argv.indexOf("--disallowedTools") + 1], /Edit.*Write/);
   let seen;
-  const r = qualifyClaudeWorker({ token: "tok", env: { PATH: "x" }, run: (a, o) => { seen = o; return `${SMOKE_MARKER}
+  const r = qualifyClaudeWorker({ nonce: N, token: "tok", env: { PATH: "x" }, run: (a, o) => { seen = o; return `${SO(N)}
 `; } });
   assert.equal(r.qualified, true);
   assert.equal(seen.env.CLAUDE_CODE_OAUTH_TOKEN, "tok");
   // same scrubbed path as the real worker, and the prompt cannot contain the marker verbatim
   assert.equal(seen.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, "1");
   assert.match(seen.input, /printf/);
-  assert.ok(!seen.input.includes(SMOKE_MARKER));
+  assert.ok(!seen.input.includes(smokeMarker(N)));
 });
 
 test("worker qualification fails closed: no credential, wrong response, or a throwing CLI", () => {
-  assert.equal(qualifyClaudeWorker({ run: () => SMOKE_MARKER }).qualified, false);
-  assert.equal(qualifyClaudeWorker({ token: "t", run: () => "nope" }).qualified, false);
-  const r = qualifyClaudeWorker({ token: "t", run: () => { const e = new Error("x"); e.status = 1; throw e; } });
+  assert.equal(qualifyClaudeWorker({ nonce: N, run: () => SO(N) }).qualified, false);
+  assert.equal(qualifyClaudeWorker({ nonce: N, token: "t", run: () => "nope" }).qualified, false);
+  const r = qualifyClaudeWorker({ nonce: N, token: "t", run: () => { const e = new Error("x"); e.status = 1; throw e; } });
   assert.equal(r.qualified, false);
   assert.ok(!JSON.stringify(r).includes("t\""));
 });
@@ -231,13 +234,13 @@ test("worker argv is deny-by-default (dontAsk) with one --allowedTools argv elem
 });
 
 test("OAuth credential reaches only the qualified built-in worker, never a custom command or a failed smoke check", () => {
-  const ok = () => SMOKE_MARKER;
-  const custom = resolveWorkerLaunch({ token: "tok", customCommand: '["legacy"]', run: () => assert.fail("no smoke for custom"), });
+  const ok = () => SO(N);
+  const custom = resolveWorkerLaunch({ nonce: N, token: "tok", customCommand: '["legacy"]', run: () => assert.fail("no smoke for custom"), });
   assert.deepEqual(custom.workerEnv, {});
   assert.equal(custom.command, undefined);
-  assert.equal(resolveWorkerLaunch({ token: "tok", run: () => "nope" }).workerEnv.CLAUDE_CODE_OAUTH_TOKEN, undefined);
-  assert.equal(resolveWorkerLaunch({ run: ok }).command, undefined);
-  const built = resolveWorkerLaunch({ token: "tok", run: ok });
+  assert.equal(resolveWorkerLaunch({ nonce: N, token: "tok", run: () => "nope" }).workerEnv.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  assert.equal(resolveWorkerLaunch({ nonce: N, run: ok }).command, undefined);
+  const built = resolveWorkerLaunch({ nonce: N, token: "tok", run: ok });
   assert.equal(built.workerEnv.CLAUDE_CODE_OAUTH_TOKEN, "tok");
   assert.deepEqual(JSON.parse(built.command), claudeWorkerArgv());
   assert.ok(!JSON.stringify(built.note ?? "").includes("tok\""));
@@ -257,18 +260,18 @@ test("advancePollBound moves past every matched reviewer item (acknowledgement b
 });
 
 test("qualification requires the exact marker (prefix, suffix, multiline rejected)", () => {
-  for (const out of [`not exact: ${SMOKE_MARKER} trailing`, `${SMOKE_MARKER} trailing`, `pre ${SMOKE_MARKER}`, `${SMOKE_MARKER}
+  for (const out of [`not exact: ${SO(N)} trailing`, `${SO(N)} trailing`, `pre ${SO(N)}`, `${SO(N)}
 extra`, `x
-${SMOKE_MARKER}`]) {
-    assert.equal(qualifyClaudeWorker({ token: "t", run: () => out }).qualified, false, out);
+${SO(N)}`]) {
+    assert.equal(qualifyClaudeWorker({ nonce: N, token: "t", run: () => out }).qualified, false, out);
   }
-  assert.equal(qualifyClaudeWorker({ token: "t", run: () => `  ${SMOKE_MARKER}
+  assert.equal(qualifyClaudeWorker({ nonce: N, token: "t", run: () => `  ${SO(N)}
 ` }).qualified, true);
 });
 
 test("metered ANTHROPIC_API_KEY is never forwarded to the smoke subprocess", () => {
   let seen;
-  qualifyClaudeWorker({ token: "t", env: { ANTHROPIC_API_KEY: "metered", PATH: "x" }, run: (a, o) => { seen = o.env; return SMOKE_MARKER; } });
+  qualifyClaudeWorker({ nonce: N, token: "t", env: { ANTHROPIC_API_KEY: "metered", PATH: "x" }, run: (a, o) => { seen = o.env; return SO(N); } });
   assert.equal(seen.ANTHROPIC_API_KEY, undefined);
   assert.equal(seen.CLAUDE_CODE_OAUTH_TOKEN, "t");
   assert.deepEqual(withoutMeteredKey({ ANTHROPIC_API_KEY: "m", A: "1" }), { A: "1" });
@@ -278,4 +281,21 @@ test("launcher main block scrubs the worker credential before the first child (r
   const src = readFileSync(new URL("./launcher-run.mjs", import.meta.url), "utf8");
   const main = src.slice(src.indexOf("const controlIssue = Number(arg("));
   assert.ok(main.indexOf("delete process.env[WORKER_TOKEN_ENV]") < main.indexOf("resolveRepoIdentity()"));
+});
+
+test("smoke nonce is per-run unpredictable and the prompt cannot carry the expected output", () => {
+  const a = newSmokeNonce(), b = newSmokeNonce();
+  assert.match(a, /^[0-9a-f]{16}$/);
+  assert.notEqual(a, b);
+  let seen;
+  assert.equal(qualifyClaudeWorker({ token: "t", run: (x, o) => { seen = o.input; return "LDL_SMOKE_OK"; } }).qualified, false);
+  // the nonce itself, or the old derivable LDL_<nonce>_OK shape, is not accepted
+  assert.equal(qualifyClaudeWorker({ nonce: N, token: "t", run: () => `LDL_${N}_OK` }).qualified, false);
+  assert.equal(qualifyClaudeWorker({ nonce: N, token: "t", run: () => N }).qualified, false);
+  assert.equal(smokeMarker(N), createHash("sha256").update(N).digest("hex"));
+  const m = /printf '%s' ([0-9a-f]{16}) | sha256sum/.exec(seen);
+  assert.ok(m, "prompt carries the runtime-derived printf command");
+  assert.ok(!seen.includes(smokeMarker(m[1])));
+  // a response guessed from a different nonce is rejected
+  assert.equal(qualifyClaudeWorker({ nonce: N, token: "t", run: () => smokeMarker("other") }).qualified, false);
 });
