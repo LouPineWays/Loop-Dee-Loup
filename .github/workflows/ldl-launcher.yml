@@ -19,8 +19,15 @@ name: LDL launcher
 # Security posture:
 #   - Triggers are issue_comment (created) and workflow_dispatch only; no pull_request or
 #     pull_request_target, and PR comments are rejected by the module.
-#   - Checkout is the default-branch/dispatch ref of THIS repository; no fork or PR-head
-#     code is ever checked out or executed.
+#   - A manual dispatch selected on a non-default ref is skipped at the job `if`, and
+#     verifyDispatchLaunchRequest re-checks the same ref. These are hygiene for the UNMODIFIED
+#     workflow only, NOT a trust boundary (Stage 1 review on #1097): GitHub runs the workflow
+#     version at the dispatch-selected ref, so a repository writer can dispatch a branch whose copy
+#     of this file drops the guard. The enforceable boundary is outside this file: the job declares
+#     `environment: ldl-launcher`, and the founder keeps CLAUDE_CODE_OAUTH_TOKEN as an environment
+#     secret of that environment (not a repository secret) with deployment branches restricted to
+#     the default branch, so a non-default-ref run is denied the secret by GitHub itself.
+#     Checkout is the triggering ref of THIS repository; no fork or PR-head code is checked out.
 #   - Event-derived values reach the shell only through env, never interpolated into
 #     script text.
 #   - Permissions: issues write (claim comments, control-body writes), actions read (liveness
@@ -56,13 +63,17 @@ concurrency:
 
 jobs:
   authorize-and-claim:
-    # Cheap pre-filter only; the module re-verifies everything.
+    # Hygiene guard (Audit #1096), not a trust boundary: the unmodified workflow does not START for
+    # a dispatch on a non-default ref. A modified branch copy can omit this `if`, so the secret's
+    # protection is the `ldl-launcher` environment's default-branch deployment policy (see header).
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request == null &&
        startsWith(github.event.comment.body, '/ldl launch '))
     runs-on: ubuntu-latest
+    environment: ldl-launcher
     timeout-minutes: 350
     steps:
       - name: Checkout
