@@ -1,10 +1,9 @@
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { parseNextCommand, buildDeps, qualifyClaudeWorker, claudeWorkerArgv, claudeSmokeArgv, smokeMarker, newSmokeNonce, resolveWorkerLaunch, advancePollBound, withoutMeteredKey, CLAUDE_WORKER_ALLOWED_TOOLS } from "./launcher-run.mjs";
+import { parseNextCommand, buildDeps, qualifyClaudeWorker, claudeWorkerArgv, claudeSmokeArgv, smokeMarker, newSmokeNonce, smokeBashCommand, SMOKE_NONCE_ENV, resolveWorkerLaunch, advancePollBound, withoutMeteredKey, CLAUDE_WORKER_ALLOWED_TOOLS } from "./launcher-run.mjs";
 import { runLauncherStep, Outcome } from "./launcher-step.mjs";
-const SO = (n) => `${smokeMarker(n)}  -`;
+const SO = (n) => smokeMarker(n);
 const N = "n0nce1";
 
 test("parseNextCommand accepts only chained node-tools commands with plain tokens", () => {
@@ -197,7 +196,7 @@ test("correction finalization verdict: a PR closed without merge still fails clo
 test("worker qualification: read-only smoke argv cannot mutate and carries the credential only in the smoke env", () => {
   const argv = claudeSmokeArgv();
   assert.ok(!argv.includes("--dangerously-skip-permissions"));
-  assert.deepEqual(argv.slice(argv.indexOf("--allowedTools") + 1, argv.indexOf("--disallowedTools")), ["Read", "Bash(printf:*)", "Bash(sha256sum:*)"]);
+  assert.deepEqual(argv.slice(argv.indexOf("--allowedTools") + 1, argv.indexOf("--disallowedTools")), ["Read", "Bash(printf:*)"]);
   assert.equal(argv[argv.indexOf("--permission-mode") + 1], "dontAsk");
   assert.match(argv[argv.indexOf("--disallowedTools") + 1], /Edit.*Write/);
   let seen;
@@ -208,6 +207,8 @@ test("worker qualification: read-only smoke argv cannot mutate and carries the c
   // same scrubbed path as the real worker, and the prompt cannot contain the marker verbatim
   assert.equal(seen.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, "1");
   assert.match(seen.input, /printf/);
+  assert.equal(seen.env[SMOKE_NONCE_ENV], N);
+  assert.ok(!seen.input.includes(N));
   assert.ok(!seen.input.includes(smokeMarker(N)));
 });
 
@@ -288,14 +289,17 @@ test("smoke nonce is per-run unpredictable and the prompt cannot carry the expec
   assert.match(a, /^[0-9a-f]{16}$/);
   assert.notEqual(a, b);
   let seen;
-  assert.equal(qualifyClaudeWorker({ token: "t", run: (x, o) => { seen = o.input; return "LDL_SMOKE_OK"; } }).qualified, false);
-  // the nonce itself, or the old derivable LDL_<nonce>_OK shape, is not accepted
-  assert.equal(qualifyClaudeWorker({ nonce: N, token: "t", run: () => `LDL_${N}_OK` }).qualified, false);
+  // the default (random) nonce never matches a fixed guessed marker; the bare nonce is not accepted
+  assert.equal(qualifyClaudeWorker({ token: "t", run: () => "LDL_SMOKE_OK" }).qualified, false);
   assert.equal(qualifyClaudeWorker({ nonce: N, token: "t", run: () => N }).qualified, false);
-  assert.equal(smokeMarker(N), createHash("sha256").update(N).digest("hex"));
-  const m = /printf '%s' ([0-9a-f]{16}) | sha256sum/.exec(seen);
-  assert.ok(m, "prompt carries the runtime-derived printf command");
-  assert.ok(!seen.includes(smokeMarker(m[1])));
+  assert.equal(smokeMarker(N), `LDL_${N}_OK`);
+  assert.equal(smokeBashCommand(), `printf 'LDL_%s_OK' "$${SMOKE_NONCE_ENV}"`);
+  const argv = claudeSmokeArgv();
+  assert.ok(!argv.some((t) => /sha256sum/.test(t)), "only Bash(printf:*) is allowed");
+  qualifyClaudeWorker({ nonce: N, token: "t", run: (x, o) => { seen = o; return smokeMarker(N); } });
+  assert.equal(seen.env[SMOKE_NONCE_ENV], N);
+  assert.ok(!seen.input.includes(N) && !seen.input.includes(smokeMarker(N)), "prompt carries neither nonce nor expected output");
+  assert.ok(seen.input.includes(smokeBashCommand()));
   // a response guessed from a different nonce is rejected
   assert.equal(qualifyClaudeWorker({ nonce: N, token: "t", run: () => smokeMarker("other") }).qualified, false);
 });
