@@ -389,7 +389,11 @@ export function claudeWorkerArgv() {
 export function advancePollBound(prevMs, stdout) {
   let bound = prevMs;
   const parsed = JSON.parse(String(stdout ?? ""));
-  for (const m of parsed?.matches ?? []) {
+  // Fail closed: a success claim without consumable match evidence is unusable poll output.
+  if (parsed?.matched !== true || !Array.isArray(parsed.matches) || parsed.matches.length === 0) {
+    throw new Error("poll output carried no usable reviewer match evidence");
+  }
+  for (const m of parsed.matches) {
     const t = new Date(m.created_at).getTime();
     if (Number.isNaN(t)) throw new Error("poll match carried no usable timestamp");
     bound = Math.max(bound, t + 1);
@@ -397,6 +401,12 @@ export function advancePollBound(prevMs, stdout) {
   return bound;
 }
 export const SMOKE_MARKER = "LDL_SMOKE_OK";
+// A metered ANTHROPIC_API_KEY must never reach the Claude CLI subprocesses (smoke or worker).
+export function withoutMeteredKey(env = {}) {
+  const out = { ...env };
+  delete out.ANTHROPIC_API_KEY;
+  return out;
+}
 // Read-only authenticated smoke check: no mutating tool is allowed or even available, one turn.
 export function claudeSmokeArgv() {
   return ["claude", "-p", "--permission-mode", "plan", "--allowedTools", "Read", "--disallowedTools", "Bash Edit Write MultiEdit NotebookEdit", "--max-turns", "1"];
@@ -406,8 +416,8 @@ export function qualifyClaudeWorker({ token, run, env = {} }) {
   if (!token) return { qualified: false, reason: "no worker credential supplied" };
   try {
     const argv = claudeSmokeArgv();
-    const out = String(run(argv, { input: `Reply with exactly ${SMOKE_MARKER} and nothing else.`, env: { ...env, CLAUDE_CODE_OAUTH_TOKEN: token } }) ?? "");
-    return out.includes(SMOKE_MARKER) ? { qualified: true } : { qualified: false, reason: "smoke check response did not carry the expected marker" };
+    const out = String(run(argv, { input: `Reply with exactly ${SMOKE_MARKER} and nothing else.`, env: { ...withoutMeteredKey(env), CLAUDE_CODE_OAUTH_TOKEN: token } }) ?? "");
+    return out.trim() === SMOKE_MARKER ? { qualified: true } : { qualified: false, reason: "smoke check response did not carry the expected marker" };
   } catch (e) {
     return { qualified: false, reason: `smoke check failed (${e?.status ?? "error"})` };
   }
@@ -501,7 +511,7 @@ export async function dispatchFreshWorker({ dispatch, io, controlIssue, executio
   const run =
     runWorker ??
     ((prompt, { cwd } = {}) =>
-      execFileSync(argv[0], argv.slice(1), { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["pipe", "ignore", "inherit"], input: prompt, cwd, env: { ...env, ...workerEnv, LDL_WORKER_ROUTE: String(freshDispatch.route) } }));
+      execFileSync(argv[0], argv.slice(1), { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["pipe", "ignore", "inherit"], input: prompt, cwd, env: { ...withoutMeteredKey(env), ...workerEnv, LDL_WORKER_ROUTE: String(freshDispatch.route) } }));
   try {
     for (const p of prompts) run(p, { cwd: workerCwd });
   } finally {
@@ -636,15 +646,16 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     console.error("usage: launcher-run.mjs --control-issue <N> --execution-issue <M>");
     process.exit(2);
   }
+  // Capture then scrub the worker credential before ANY child process (including the git child
+  // behind resolveRepoIdentity) is spawned.
+  const workerToken = process.env[WORKER_TOKEN_ENV];
+  delete process.env[WORKER_TOKEN_ENV];
   const id = resolveRepoIdentity();
   if (!id.ok) {
     console.error(`repository identity unresolved: ${id.reason}`);
     process.exit(1);
   }
   const stepDeps = buildDeps({ controlIssue, executionIssue, io: realIo, repo: id.repo });
-  // Capture then scrub the worker credential before any child process is spawned.
-  const workerToken = process.env[WORKER_TOKEN_ENV];
-  delete process.env[WORKER_TOKEN_ENV];
   const sel = resolveWorkerLaunch({
     token: workerToken,
     customCommand: process.env.LDL_WORKER_COMMAND,

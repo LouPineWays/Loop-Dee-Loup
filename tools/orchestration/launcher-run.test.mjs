@@ -1,6 +1,7 @@
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseNextCommand, buildDeps, qualifyClaudeWorker, claudeWorkerArgv, claudeSmokeArgv, SMOKE_MARKER, resolveWorkerLaunch, advancePollBound, CLAUDE_WORKER_ALLOWED_TOOLS } from "./launcher-run.mjs";
+import { parseNextCommand, buildDeps, qualifyClaudeWorker, claudeWorkerArgv, claudeSmokeArgv, SMOKE_MARKER, resolveWorkerLaunch, advancePollBound, withoutMeteredKey, CLAUDE_WORKER_ALLOWED_TOOLS } from "./launcher-run.mjs";
 import { runLauncherStep, Outcome } from "./launcher-step.mjs";
 
 test("parseNextCommand accepts only chained node-tools commands with plain tokens", () => {
@@ -243,7 +244,33 @@ test("advancePollBound moves past every matched reviewer item (acknowledgement b
   assert.equal(b1, Date.parse("2026-10-01T00:01:00Z") + 1);
   const both = JSON.stringify({ matched: true, matches: [{ created_at: "2026-10-01T00:01:00Z" }, { created_at: "2026-10-01T00:09:00Z" }] });
   assert.equal(advancePollBound(b1, both), Date.parse("2026-10-01T00:09:00Z") + 1);
-  assert.equal(advancePollBound(b1, JSON.stringify({ matched: true, matches: [] })), b1);
+  for (const bad of [{ matched: true, matches: [] }, { matched: true }, { matched: false, matches: [{ created_at: "2026-10-01T00:01:00Z" }] }, { matched: true, matches: "x" }]) {
+    assert.throws(() => advancePollBound(b1, JSON.stringify(bad)), /usable reviewer match/);
+  }
   assert.throws(() => advancePollBound(0, "not json"));
   assert.throws(() => advancePollBound(0, JSON.stringify({ matches: [{ created_at: "x" }] })));
+});
+
+test("qualification requires the exact marker (prefix, suffix, multiline rejected)", () => {
+  for (const out of [`not exact: ${SMOKE_MARKER} trailing`, `${SMOKE_MARKER} trailing`, `pre ${SMOKE_MARKER}`, `${SMOKE_MARKER}
+extra`, `x
+${SMOKE_MARKER}`]) {
+    assert.equal(qualifyClaudeWorker({ token: "t", run: () => out }).qualified, false, out);
+  }
+  assert.equal(qualifyClaudeWorker({ token: "t", run: () => `  ${SMOKE_MARKER}
+` }).qualified, true);
+});
+
+test("metered ANTHROPIC_API_KEY is never forwarded to the smoke subprocess", () => {
+  let seen;
+  qualifyClaudeWorker({ token: "t", env: { ANTHROPIC_API_KEY: "metered", PATH: "x" }, run: (a, o) => { seen = o.env; return SMOKE_MARKER; } });
+  assert.equal(seen.ANTHROPIC_API_KEY, undefined);
+  assert.equal(seen.CLAUDE_CODE_OAUTH_TOKEN, "t");
+  assert.deepEqual(withoutMeteredKey({ ANTHROPIC_API_KEY: "m", A: "1" }), { A: "1" });
+});
+
+test("launcher main block scrubs the worker credential before the first child (repo identity git call)", () => {
+  const src = readFileSync(new URL("./launcher-run.mjs", import.meta.url), "utf8");
+  const main = src.slice(src.indexOf("const controlIssue = Number(arg("));
+  assert.ok(main.indexOf("delete process.env[WORKER_TOKEN_ENV]") < main.indexOf("resolveRepoIdentity()"));
 });
