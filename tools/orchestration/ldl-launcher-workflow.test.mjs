@@ -87,3 +87,35 @@ test("embedded script is syntactically valid", () => {
   writeFileSync(f, dedented);
   execFileSync(process.execPath, ["--check", f]);
 });
+
+// Issue #1102: GitHub's string IS_FORK must reach verifyDispatchLaunchRequest as Boolean false only
+// for the exact value "false" (live run 38279182565 was refused as a fork because the mapping was inverted).
+const forkExpr = (src) => {
+  const m = /isFork:\s*(env\.IS_FORK[^,]*),/.exec(src);
+  assert.ok(m, "isFork mapping present");
+  return m[1];
+};
+const trustedFor = async (src, isForkEnv) => {
+  const { verifyDispatchLaunchRequest } = await import("./launch-authorization.mjs");
+  const env = isForkEnv === undefined ? {} : { IS_FORK: isForkEnv };
+  const isFork = new Function("env", `return (${forkExpr(src)});`)(env);
+  return verifyDispatchLaunchRequest({
+    name: "workflow_dispatch", action: "dispatch", actor: "someone", actorPermission: "admin", isFork,
+    ref: "refs/heads/main", defaultBranch: "main", inputs: { control_issue: "395" },
+  }).trusted;
+};
+
+test("fork flag normalization: only exact \"false\" is trusted; everything else fails closed", async () => {
+  assert.equal(await trustedFor(yml, "false"), true);
+  for (const bad of ["true", "", undefined, "False", "0", "no", " false", "garbage"]) {
+    assert.equal(await trustedFor(yml, bad), false, `IS_FORK=${JSON.stringify(bad)}`);
+  }
+});
+
+test("fork flag normalization regression: the old inversion and a trust-by-default mapping are caught", async () => {
+  const inverted = yml.replace('env.IS_FORK !== "false"', 'env.IS_FORK === "false"');
+  assert.notEqual(inverted, yml);
+  assert.equal(await trustedFor(inverted, "false"), false);
+  const permissive = yml.replace('env.IS_FORK !== "false"', 'env.IS_FORK === "true"');
+  assert.equal(await trustedFor(permissive, "garbage"), true); // would be wrongly trusted: the suite above rejects it
+});

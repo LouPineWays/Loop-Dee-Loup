@@ -155,7 +155,7 @@ jobs:
             const initiator = env.TRIGGERING_ACTOR || env.ACTOR;
             const requestFor = (who) => verifyDispatchLaunchRequest({
               name: env.EVENT_NAME, action: "dispatch", actor: who, actorPermission: permission(who),
-              isFork: env.IS_FORK === "false", ref: env.EVENT_REF, defaultBranch: env.DEFAULT_BRANCH,
+              isFork: env.IS_FORK !== "false", ref: env.EVENT_REF, defaultBranch: env.DEFAULT_BRANCH,
               inputs: { control_issue: env.INPUT_CONTROL_ISSUE },
             });
             const request = requestFor(initiator);
