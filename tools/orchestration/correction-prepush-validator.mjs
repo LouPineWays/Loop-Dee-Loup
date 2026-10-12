@@ -113,15 +113,24 @@ export function splitShellSegments(command) {
   let cur = "";
   let has = false;
   let quote = null;
+  // Per-token expansion provenance (Stage 1 #1084): 0 = no live expansion (single-quoted or escaped `$`),
+  // 1 = expansion inside double quotes (one word), 2 = unquoted expansion (word-splittable).
+  tokens.dyn = [];
+  let curDyn = 0;
   const pushTok = () => {
-    if (has) tokens.push(cur);
+    if (has) {
+      tokens.push(cur);
+      tokens.dyn.push(curDyn);
+    }
     cur = "";
     has = false;
+    curDyn = 0;
   };
   const pushSeg = () => {
     pushTok();
     if (tokens.length) segments.push(tokens);
     tokens = [];
+    tokens.dyn = [];
   };
   let backtickOpen = false;
   for (let i = 0; i < command.length; i += 1) {
@@ -134,7 +143,10 @@ export function splitShellSegments(command) {
       if (ch === quote) quote = null;
       else if (ch === "\\" && quote === '"' && i + 1 < command.length) {
         cur += command[(i += 1)];
-      } else cur += ch;
+      } else {
+        cur += ch;
+        if (quote === '"' && (ch === "$" || ch === "`")) curDyn = Math.max(curDyn, 1);
+      }
       has = true;
       continue;
     }
@@ -151,7 +163,7 @@ export function splitShellSegments(command) {
       // inside the scope are not carried past it.
       // Preserve an opening backtick as a dynamic token before entering its scope.
       // Otherwise `git `command`` looks like an inert `git` with no subcommand.
-      if (ch === "`" && !backtickOpen) { cur += "`"; has = true; }
+      if (ch === "`" && !backtickOpen) { cur += "`"; has = true; curDyn = 2; }
       pushSeg();
       if (ch === "`") {
         segments.push([backtickOpen ? SCOPE_CLOSE : SCOPE_OPEN]);
@@ -164,12 +176,14 @@ export function splitShellSegments(command) {
       // separate scope, but the outer git subcommand is still shell-expanded.
       cur += "$(";
       has = true;
+      curDyn = 2;
       pushSeg();
       segments.push([SCOPE_OPEN]);
       i += 1;
     } else {
       cur += ch;
       has = true;
+      if (ch === "$") curDyn = 2;
     }
   }
   pushSeg();
@@ -206,7 +220,10 @@ const XARGS_REASON = "`xargs git` may receive its subcommand from standard input
 // Commands that only print or search their arguments and never exec them.
 // `rg` (--pre) and `man` (pager/preprocessor options) can spawn subprocesses, so they are not listed.
 const INERT_LEADERS = new Set(["echo", "printf", "cat", "grep", "which", "type"]);
-const isDynamicTok = (t, repl) => /[$`]/.test(t) || (repl !== null && t.includes(repl));
+// Expansion level of token k: 0 none (single-quoted/escaped), 1 double-quoted, 2 unquoted/word-splittable.
+// Tokens without recorded provenance fall back to the raw-text test (conservative).
+const dynLevel = (tokens, k) => (tokens.dyn ? (tokens.dyn[k] ?? 0) : /[$`]/.test(tokens[k] ?? "") ? 2 : 0);
+const isDynamicTok = (tokens, k, repl) => dynLevel(tokens, k) > 0 || (repl !== null && tokens[k].includes(repl));
 
 // Index of the first token that is not a launcher (command/env/nice/...) or its options; -1 when the
 // launcher's semantics cannot be established.
@@ -251,7 +268,7 @@ function analyzeXargsCommand(tokens, j, repl) {
   if (e === -1) return XARGS_REASON;
   if (e >= tokens.length) return null;
   const exe = tokens[e];
-  if (isDynamicTok(exe, repl)) return XARGS_REASON;
+  if (isDynamicTok(tokens, e, repl)) return XARGS_REASON;
   const name = baseName(exe);
   if (name !== "git") {
     // an interpreter handed a bare git token cannot be proven benign
@@ -259,11 +276,11 @@ function analyzeXargsCommand(tokens, j, repl) {
   }
   let g = e + 1;
   while (g < tokens.length && tokens[g].startsWith("-")) {
-    if (isDynamicTok(tokens[g], repl)) return XARGS_REASON;
+    if (isDynamicTok(tokens, g, repl)) return XARGS_REASON;
     g += GIT_GLOBAL_WITH_ARG.has(tokens[g]) ? 2 : 1;
   }
   const sub = tokens[g];
-  if (sub === undefined || sub === "push" || isDynamicTok(sub, repl)) return XARGS_REASON;
+  if (sub === undefined || sub === "push" || isDynamicTok(tokens, g, repl)) return XARGS_REASON;
   return null;
 }
 
@@ -273,17 +290,27 @@ function analyzeXargsCommand(tokens, j, repl) {
 function analyzeXargs(tokens, anyXargs = false) {
   const li = skipLaunchers(tokens, 0);
   if (li === -1) return tokens.some((t) => baseName(t) === "xargs") ? XARGS_REASON : null;
-  if (anyXargs && li < tokens.length && /[$`]/.test(tokens[li])) return XARGS_REASON;
+  const dyn = (k) => dynLevel(tokens, k) > 0;
+  const rawDyn = (t) => /[$`]/.test(t);
+  const tail = (from) => tokens.slice(from);
+  if (anyXargs && li < tokens.length && dyn(li)) return XARGS_REASON;
+  // an unquoted expansion in executable position is word-split and may itself supply every executable word
+  // (`X='xargs git'; ... | $X`), so no following literal `git` is required to be a possible push
+  if (li < tokens.length && dynLevel(tokens, li) === 2) return XARGS_REASON;
   // a shell-expanded command position may itself be `xargs` supplied by the environment (Audit #1083), so
   // it followed by `git` (or another expansion/wrapper) cannot be proven benign even without a literal xargs
-  if (li < tokens.length && /[$`]/.test(tokens[li]) && tokens.slice(li + 1).some((t) => baseName(t) === "git" || /[$`]/.test(t) || WRAPPERS.has(baseName(t)))) return XARGS_REASON;
+  if (li < tokens.length && dyn(li) && tail(li + 1).some((t, k) => baseName(t) === "git" || dyn(li + 1 + k) || WRAPPERS.has(baseName(t)))) return XARGS_REASON;
   if (baseName(tokens[li] ?? "") !== "xargs") {
     // a shell wrapper's inline payload may itself run xargs
     if (WRAPPERS.has(baseName(tokens[li] ?? ""))) {
       // an unresolved wrapper (timeout, stdbuf, nested chains) in front of xargs cannot be unwrapped, and a
-      // shell-expanded token after a wrapper may itself be the `xargs` command it runs
-      if (tokens.slice(li + 1).some((t) => baseName(t) === "xargs" || (anyXargs && /[$`]/.test(t)))) return XARGS_REASON;
-      for (const t of tokens.slice(li + 1)) {
+      // shell-expanded token after a wrapper may itself be the `xargs` command it runs. A wrapper may also
+      // re-parse single-quoted text, so raw `$` counts here.
+      if (tail(li + 1).some((t) => baseName(t) === "xargs" || (anyXargs && rawDyn(t)))) return XARGS_REASON;
+      // two executable words supplied by expansion (`timeout 5 "$X" "$G"`) or an expansion followed by git
+      const wi = tokens.findIndex((t, k) => k > li && dyn(k));
+      if (wi !== -1 && tail(wi + 1).some((t, k) => baseName(t) === "git" || dyn(wi + 1 + k) || WRAPPERS.has(baseName(t)))) return XARGS_REASON;
+      for (const t of tail(li + 1)) {
         if (/\bxargs\b/.test(t) && /\s/.test(t) && classifyGitPushCommand(t, {}).push) return XARGS_REASON;
       }
     } else if (!INERT_LEADERS.has(baseName(tokens[li] ?? ""))) {
@@ -291,11 +318,11 @@ function analyzeXargs(tokens, anyXargs = false) {
       // `xargs` followed by `git` cannot be proven benign (Audit #1081)
       // A dynamic executable, an interpreter, or a nested wrapper after xargs is equally unprovable.
       const xi = tokens.findIndex((t, k) => k > li && /\bxargs\b/.test(t));
-      if (xi !== -1 && tokens.slice(xi + 1).some((t) => baseName(t) === "git" || /[$`]/.test(t) || WRAPPERS.has(baseName(t)))) return XARGS_REASON;
-      if (anyXargs && tokens.slice(li).some((t) => /[$`]/.test(t))) return XARGS_REASON;
+      if (xi !== -1 && tail(xi + 1).some((t, k) => baseName(t) === "git" || dyn(xi + 1 + k) || WRAPPERS.has(baseName(t)))) return XARGS_REASON;
+      if (anyXargs && tokens.some((t, k) => k >= li && dyn(k))) return XARGS_REASON;
       // a shell-expanded token (inherited `X=xargs`) followed by git/another expansion/wrapper, with no literal xargs (Audit #1083)
-      const di = tokens.findIndex((t, k) => k > li && /[$`]/.test(t));
-      if (di !== -1 && tokens.slice(di + 1).some((t) => baseName(t) === "git" || /[$`]/.test(t) || WRAPPERS.has(baseName(t)))) return XARGS_REASON;
+      const di = tokens.findIndex((t, k) => k > li && dyn(k));
+      if (di !== -1 && tail(di + 1).some((t, k) => baseName(t) === "git" || dyn(di + 1 + k) || WRAPPERS.has(baseName(t)))) return XARGS_REASON;
     }
     return null;
   }
@@ -389,7 +416,9 @@ export function classifyGitPushCommand(command, { baseCwd } = {}) {
       if (/^GIT_(DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|OBJECT_DIRECTORY|CONFIG\w*)=/.test(tokens[0]) && tokens.slice(1).some((t) => t === "git")) {
         return { push: true, classifiable: false, reason: `\`${tokens[0].split("=")[0]}\` changes which repository Git operates on` };
       }
+      const dynRest = tokens.dyn?.slice(1);
       tokens = tokens.slice(1);
+      if (dynRest) tokens.dyn = dynRest;
     }
     if (!tokens.length) continue;
     const first = baseName(tokens[0]);
@@ -416,7 +445,7 @@ export function classifyGitPushCommand(command, { baseCwd } = {}) {
         else i += 1;
       }
       // A subcommand that depends on shell expansion cannot be proven not to be `push` (Audit #1027).
-      if (typeof tokens[i] === "string" && (tokens[i].includes("$") || tokens[i].includes("`"))) {
+      if (typeof tokens[i] === "string" && dynLevel(tokens, i) > 0) {
         return { push: true, classifiable: false, reason: SHELL_EXPANSION_REASON };
       }
       if (tokens[i] !== "push") continue;
