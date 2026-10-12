@@ -194,13 +194,18 @@ test("correction finalization verdict: a PR closed without merge still fails clo
 test("worker qualification: read-only smoke argv cannot mutate and carries the credential only in the smoke env", () => {
   const argv = claudeSmokeArgv();
   assert.ok(!argv.includes("--dangerously-skip-permissions"));
-  assert.equal(argv[argv.indexOf("--allowedTools") + 1], "Read");
-  assert.match(argv[argv.indexOf("--disallowedTools") + 1], /Bash.*Edit.*Write/);
+  assert.deepEqual(argv.slice(argv.indexOf("--allowedTools") + 1, argv.indexOf("--disallowedTools")), ["Read", "Bash(printf:*)"]);
+  assert.equal(argv[argv.indexOf("--permission-mode") + 1], "dontAsk");
+  assert.match(argv[argv.indexOf("--disallowedTools") + 1], /Edit.*Write/);
   let seen;
   const r = qualifyClaudeWorker({ token: "tok", env: { PATH: "x" }, run: (a, o) => { seen = o; return `${SMOKE_MARKER}
 `; } });
   assert.equal(r.qualified, true);
   assert.equal(seen.env.CLAUDE_CODE_OAUTH_TOKEN, "tok");
+  // same scrubbed path as the real worker, and the prompt cannot contain the marker verbatim
+  assert.equal(seen.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, "1");
+  assert.match(seen.input, /printf/);
+  assert.ok(!seen.input.includes(SMOKE_MARKER));
 });
 
 test("worker qualification fails closed: no credential, wrong response, or a throwing CLI", () => {

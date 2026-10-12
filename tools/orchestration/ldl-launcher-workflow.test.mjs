@@ -119,3 +119,76 @@ test("fork flag normalization regression: the old inversion and a trust-by-defau
   const permissive = yml.replace('env.IS_FORK !== "false"', 'env.IS_FORK === "true"');
   assert.equal(await trustedFor(permissive, "garbage"), true); // would be wrongly trusted: the suite above rejects it
 });
+
+// Issue #1108: runner isolation preflight (bubblewrap/socat + functional probe) before the worker.
+const iso = (src) => {
+  const a = src.indexOf("// Runner isolation preflight");
+  const b = src.indexOf("if (!requestMode) execFileSync(\"gh\", [\"auth\", \"setup-git\"]");
+  assert.ok(a > 0 && b > a, "preflight block present");
+  return src.slice(a, b);
+};
+
+test("isolation preflight: ordered after claim and CLI install, before the worker launch", () => {
+  const i = (s) => yml.indexOf(s);
+  assert.ok(i("const body = renderClaimBody") < i("Runner isolation preflight"));
+  assert.ok(i("@anthropic-ai/claude-code@2.1.285") < i("Runner isolation preflight"));
+  assert.ok(i("Runner isolation preflight") < i("\"tools/orchestration/launcher-run.mjs\""));
+  assert.ok(i("RUNNER ISOLATION PREFLIGHT FAILED") < i("\"tools/orchestration/launcher-run.mjs\""));
+});
+
+test("isolation preflight: installs bubblewrap+socat, then a functional unprivileged bwrap probe", () => {
+  const b = iso(yml);
+  assert.match(b, /"apt-get", "install", "-y", "-qq", "bubblewrap", "socat"/);
+  assert.match(b, /iso\("bwrap", \["--version"\]/);
+  assert.match(b, /iso\("socat", \["-V"\]/);
+  const probe = /iso\("bwrap", \["--unshare-all"[^\n]*\n/.exec(b);
+  assert.ok(probe, "functional bwrap probe");
+  assert.doesNotMatch(probe[0], /sudo/);
+  assert.ok(b.indexOf("apt-get\", \"install") < b.indexOf("--unshare-all"));
+});
+
+test("isolation preflight: credential-free env, timeouts, fail closed by dropping the credential", () => {
+  const b = iso(yml);
+  assert.match(b, /delete isoEnv\.LDL_WORKER_CLAUDE_OAUTH_TOKEN/);
+  assert.match(b, /timeout/);
+  assert.match(b, /RUNNER ISOLATION PREFLIGHT FAILED[\s\S]*launchToken = undefined;/);
+  assert.doesNotMatch(b, /console\.log\([^)]*(workerToken|launchToken)/);
+});
+
+test("isolation preflight: never weakens isolation (no scrub disable, sysctl, AppArmor change)", () => {
+  assert.doesNotMatch(yml, /SUBPROCESS_ENV_SCRUB\s*[=:]\s*["']?0/);
+  const b = iso(yml).replace(/^\s*\/\/.*$/gm, "");
+  assert.doesNotMatch(b, /sysctl|aa-complain|aa-disable|apparmor_parser|unconfined|userns_clone=1|restrict_unprivileged_userns=0/i);
+  assert.doesNotMatch(b, /writeFileSync|"tee"/);
+  // The only AppArmor reference is a read-only diagnostic.
+  assert.match(b, /readFileSync\("\/proc\/sys\/kernel\/apparmor_restrict_unprivileged_userns"/);
+});
+
+// Mutation cases: exercise the extracted block with a mocked execFileSync.
+const runPreflight = (failAt) => {
+  const b = iso(yml);
+  const calls = [];
+  const logs = [];
+  const execFileSync = (cmd, args) => {
+    calls.push([cmd, ...args].join(" "));
+    if (failAt && calls.at(-1).includes(failAt)) throw new Error(`boom ${failAt}\nmore`);
+    return "";
+  };
+  const readFileSync = () => "1";
+  const process = { env: { PATH: "x", LDL_WORKER_CLAUDE_OAUTH_TOKEN: "secret" } };
+  const fn = new Function("execFileSync", "readFileSync", "process", "console", "let launchToken = 'tok'; if (true) { if (launchToken) {\n" + b + "\nreturn launchToken;");
+  const result = fn(execFileSync, readFileSync, process, { log: (m) => logs.push(m) });
+  return { result, calls, logs };
+};
+
+test("isolation preflight mocks: success keeps the credential; any step failure drops it with a specific diagnosis", () => {
+  const ok = runPreflight();
+  assert.equal(ok.result, "tok");
+  assert.match(ok.logs.join("\n"), /PREFLIGHT PASSED/);
+  for (const failAt of ["apt-get install", "bwrap --version", "socat -V", "--unshare-all"]) {
+    const r = runPreflight(failAt);
+    assert.equal(r.result, undefined, failAt);
+    assert.match(r.logs.join("\n"), /RUNNER ISOLATION PREFLIGHT FAILED: boom/);
+    assert.doesNotMatch(r.logs.join("\n"), /secret|tok\b/);
+  }
+});

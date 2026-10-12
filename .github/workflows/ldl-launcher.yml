@@ -111,6 +111,7 @@ jobs:
         run: |
           node --input-type=module <<'JS'
           import { execFileSync } from "node:child_process";
+          import { readFileSync } from "node:fs";
           import { parseLaunchAuthorization, verifyTrustedTrigger, verifyDispatchLaunchRequest, resolveDispatchExecution, buildDispatchAuthorization, renderDispatchLaunchRecord } from "./tools/orchestration/launch-authorization.mjs";
           import { TRANSITIONS, OPEN_PATH_STATES } from "./tools/orchestration/launcher-step.mjs";
           import { parseAttemptClaims, planClaim, renderClaimBody, formatAttemptId, parseAttemptId } from "./tools/orchestration/attempt-claim.mjs";
@@ -241,6 +242,32 @@ jobs:
             } catch {
               console.log("CLAUDE CLI INSTALL FAILED: continuing without the OAuth worker (WAITING fallback)");
               launchToken = undefined;
+            }
+            if (launchToken) {
+              // Runner isolation preflight (issue #1108): the actual worker runs with
+              // CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1, which needs bubblewrap (and socat) plus a working
+              // unprivileged user namespace. Install and functional probe run here, AFTER the
+              // trusted/claimed checks and BEFORE the worker, in a credential-free child env (the
+              // token lives only in launchToken, never in process.env). No sysctl, AppArmor, or
+              // scrub change is ever made: on failure the credential is dropped (WAITING fallback)
+              // and the worker is never started unisolated.
+              const isoEnv = { ...process.env };
+              delete isoEnv.LDL_WORKER_CLAUDE_OAUTH_TOKEN;
+              const iso = (cmd, args, timeout) => execFileSync(cmd, args, { encoding: "utf8", env: isoEnv, stdio: ["ignore", "ignore", "inherit"], timeout });
+              try {
+                iso("sudo", ["apt-get", "update", "-qq"], 180000);
+                iso("sudo", ["apt-get", "install", "-y", "-qq", "bubblewrap", "socat"], 300000);
+                iso("bwrap", ["--version"], 15000);
+                iso("socat", ["-V"], 15000);
+                // Functional probe as the same unprivileged runner account (no sudo).
+                iso("bwrap", ["--unshare-all", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "true"], 30000);
+                console.log("RUNNER ISOLATION PREFLIGHT PASSED: bubblewrap installed and unprivileged bwrap probe succeeded");
+              } catch (e) {
+                let userns = "unreadable";
+                try { userns = readFileSync("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", "utf8").trim(); } catch { /* read-only diagnostic */ }
+                console.log(`RUNNER ISOLATION PREFLIGHT FAILED: ${String(e.message).split("\n")[0]} (apparmor_restrict_unprivileged_userns=${userns}); worker not started, no isolation weakening applied; a policy change needs founder approval (WAITING fallback)`);
+                launchToken = undefined;
+              }
             }
           } else {
             launchToken = undefined; // a custom LDL_WORKER_COMMAND never receives the credential
