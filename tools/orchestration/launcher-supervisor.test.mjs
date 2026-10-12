@@ -484,3 +484,29 @@ test("founder resume: the interrupt is cleared only after the decision is applie
   assert.match(w.control, /\*\*Founder decision:\*\* none/);
   assert.notEqual(w.control, control);
 });
+
+test("dispatchFreshWorker never runs the credentialed OAuth worker from an unmerged PR-head checkout", async () => {
+  const gate = { state: "STAGE1_CORRECTION_REQUIRED", pr: 826, issue: 73, controlIssue: 379, correctionReason: "findings" };
+  const io = { node: (f) => (f.endsWith("control-plane-bootstrap.mjs") ? JSON.stringify(gate) : assert.fail("no reservation or formatter before the credential refusal")) };
+  const dispatch = { route: "r", byReference: { state: "STAGE1_CORRECTION_REQUIRED", pr: 826, issue: 73, controlIssue: 379, correctionReason: "findings" } };
+  const out = await dispatchFreshWorker({ dispatch, io, controlIssue: 379, executionIssue: 73, authorize, reestablish, env: { LDL_WORKER_COMMAND: '["w"]' }, workerEnv: { CLAUDE_CODE_OAUTH_TOKEN: "tok" }, runWorker: () => assert.fail("no worker") });
+  assert.equal(out.launched, false);
+  assert.match(out.reason, /credential safety/);
+  assert.ok(!JSON.stringify(out).includes("tok\""));
+});
+
+test("reviewer wait: acknowledgement then final review advances the poll lower bound instead of re-matching the acknowledgement", async () => {
+  const sinces = [];
+  const stdouts = [
+    JSON.stringify({ matched: true, matches: [{ created_at: "2026-10-01T00:01:00Z" }] }),
+    JSON.stringify({ matched: true, matches: [{ created_at: "2026-10-01T00:09:00Z" }] }),
+  ];
+  const io = { node: (f, a) => { sinces.push(a[a.indexOf("--since") + 1]); return stdouts.shift(); } };
+  const stepDeps = { _io: { readComments: () => [{ id: 1, body: "@codex review", created_at: "2026-10-01T00:00:00Z" }], writeControlBody: () => {} } };
+  const deps = buildSupervisorDeps({ controlIssue: 379, executionIssue: 73, stepDeps, io, repo: "o/r", readIssue: () => ({ body: "", state: "OPEN" }), env: {} });
+  const wait = { kind: "issue", number: 825, repo: "o/r" };
+  assert.equal((await deps.waitForReviewer(wait, 60000)).matched, true);
+  assert.equal((await deps.waitForReviewer(wait, 60000)).matched, true);
+  assert.equal(sinces[0], "2026-10-01T00:00:00.000Z");
+  assert.equal(sinces[1], "2026-10-01T00:01:00.001Z");
+});

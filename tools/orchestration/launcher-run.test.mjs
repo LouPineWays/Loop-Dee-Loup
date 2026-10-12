@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseNextCommand, buildDeps } from "./launcher-run.mjs";
+import { parseNextCommand, buildDeps, qualifyClaudeWorker, claudeWorkerArgv, claudeSmokeArgv, SMOKE_MARKER, resolveWorkerLaunch, advancePollBound, CLAUDE_WORKER_ALLOWED_TOOLS } from "./launcher-run.mjs";
 import { runLauncherStep, Outcome } from "./launcher-step.mjs";
 
 test("parseNextCommand accepts only chained node-tools commands with plain tokens", () => {
@@ -188,4 +188,62 @@ test("correction finalization verdict: a PR closed without merge still fails clo
   };
   const r = await runLauncherStep({ controlIssue: 379, deps: buildDeps({ controlIssue: 379, executionIssue: 73, readPr, readIssue: () => ({ body, state: "OPEN" }), io }) });
   assert.equal(r.outcome, Outcome.FAIL_CLOSED);
+});
+
+test("worker qualification: read-only smoke argv cannot mutate and carries the credential only in the smoke env", () => {
+  const argv = claudeSmokeArgv();
+  assert.ok(!argv.includes("--dangerously-skip-permissions"));
+  assert.equal(argv[argv.indexOf("--allowedTools") + 1], "Read");
+  assert.match(argv[argv.indexOf("--disallowedTools") + 1], /Bash.*Edit.*Write/);
+  let seen;
+  const r = qualifyClaudeWorker({ token: "tok", env: { PATH: "x" }, run: (a, o) => { seen = o; return `${SMOKE_MARKER}
+`; } });
+  assert.equal(r.qualified, true);
+  assert.equal(seen.env.CLAUDE_CODE_OAUTH_TOKEN, "tok");
+});
+
+test("worker qualification fails closed: no credential, wrong response, or a throwing CLI", () => {
+  assert.equal(qualifyClaudeWorker({ run: () => SMOKE_MARKER }).qualified, false);
+  assert.equal(qualifyClaudeWorker({ token: "t", run: () => "nope" }).qualified, false);
+  const r = qualifyClaudeWorker({ token: "t", run: () => { const e = new Error("x"); e.status = 1; throw e; } });
+  assert.equal(r.qualified, false);
+  assert.ok(!JSON.stringify(r).includes("t\""));
+});
+
+test("worker argv uses no bypass flag and an explicit tool allowlist", () => {
+  const a = claudeWorkerArgv();
+  assert.ok(!a.some((x) => /dangerously|bypass/i.test(x)));
+  assert.ok(a.includes("--allowedTools"));
+});
+
+test("worker argv is deny-by-default (dontAsk) with one --allowedTools argv element per rule", () => {
+  const a = claudeWorkerArgv();
+  assert.equal(a[a.indexOf("--permission-mode") + 1], "dontAsk");
+  const rules = a.slice(a.indexOf("--allowedTools") + 1);
+  assert.deepEqual(rules, CLAUDE_WORKER_ALLOWED_TOOLS);
+  assert.ok(rules.every((r) => !/\s/.test(r)));
+});
+
+test("OAuth credential reaches only the qualified built-in worker, never a custom command or a failed smoke check", () => {
+  const ok = () => SMOKE_MARKER;
+  const custom = resolveWorkerLaunch({ token: "tok", customCommand: '["legacy"]', run: () => assert.fail("no smoke for custom"), });
+  assert.deepEqual(custom.workerEnv, {});
+  assert.equal(custom.command, undefined);
+  assert.equal(resolveWorkerLaunch({ token: "tok", run: () => "nope" }).workerEnv.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  assert.equal(resolveWorkerLaunch({ run: ok }).command, undefined);
+  const built = resolveWorkerLaunch({ token: "tok", run: ok });
+  assert.equal(built.workerEnv.CLAUDE_CODE_OAUTH_TOKEN, "tok");
+  assert.deepEqual(JSON.parse(built.command), claudeWorkerArgv());
+  assert.ok(!JSON.stringify(built.note ?? "").includes("tok\""));
+});
+
+test("advancePollBound moves past every matched reviewer item (acknowledgement before the final review)", () => {
+  const ack = JSON.stringify({ matched: true, matches: [{ created_at: "2026-10-01T00:01:00Z" }] });
+  const b1 = advancePollBound(0, ack);
+  assert.equal(b1, Date.parse("2026-10-01T00:01:00Z") + 1);
+  const both = JSON.stringify({ matched: true, matches: [{ created_at: "2026-10-01T00:01:00Z" }, { created_at: "2026-10-01T00:09:00Z" }] });
+  assert.equal(advancePollBound(b1, both), Date.parse("2026-10-01T00:09:00Z") + 1);
+  assert.equal(advancePollBound(b1, JSON.stringify({ matched: true, matches: [] })), b1);
+  assert.throws(() => advancePollBound(0, "not json"));
+  assert.throws(() => advancePollBound(0, JSON.stringify({ matches: [{ created_at: "x" }] })));
 });
