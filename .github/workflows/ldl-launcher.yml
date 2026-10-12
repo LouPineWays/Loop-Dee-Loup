@@ -23,7 +23,7 @@ name: LDL launcher
 #   - Secrets: GITHUB_TOKEN, plus the founder-provisioned CLAUDE_CODE_OAUTH_TOKEN (issue #906; a
 #     Claude subscription OAuth token, never a metered API key). It is handed to the launch script
 #     under LDL_WORKER_CLAUDE_OAUTH_TOKEN, scrubbed from every gate/gh/git child environment, and
-#     given only to the qualified worker process after a read-only authenticated smoke check.
+#     given only to the built-in qualified worker (never a custom LDL_WORKER_COMMAND, never a PR-head checkout) after a read-only authenticated smoke check; the CLI is installed only when that path is selected.
 #     Absent or unqualified, the launcher keeps its documented WAITING / manual-relaunch fallback.
 on:
   issue_comment:
@@ -62,9 +62,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-
-      - name: Install pinned Claude Code CLI
-        run: sudo npm install -g @anthropic-ai/claude-code@2.1.285
 
       - name: Verify trigger, authorization, and claim
         env:
@@ -169,6 +166,20 @@ jobs:
           // breakpoint, and returns only at a genuine terminal / waiting / fail-closed boundary. A
           // thrown error leaves the claim open so the next trigger reconciles it as ORPHANED.
           // Workers commit and push as the Actions identity using the job token (no persisted checkout credential).
+          // Install the pinned Claude Code CLI only now: the trigger is trusted and claimed, and the
+          // built-in OAuth worker path is the one actually selected (secret present, no custom
+          // LDL_WORKER_COMMAND). An install failure drops the credential and keeps the WAITING fallback.
+          let launchToken = workerToken;
+          if (launchToken && !env.LDL_WORKER_COMMAND) {
+            try {
+              execFileSync("sudo", ["npm", "install", "-g", "@anthropic-ai/claude-code@2.1.285"], { encoding: "utf8", stdio: ["ignore", "ignore", "inherit"] });
+            } catch {
+              console.log("CLAUDE CLI INSTALL FAILED: continuing without the OAuth worker (WAITING fallback)");
+              launchToken = undefined;
+            }
+          } else {
+            launchToken = undefined; // a custom LDL_WORKER_COMMAND never receives the credential
+          }
           execFileSync("gh", ["auth", "setup-git"], { encoding: "utf8" });
           execFileSync("git", ["config", "user.name", "github-actions[bot]"]);
           execFileSync("git", ["config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"]);
@@ -176,7 +187,7 @@ jobs:
             "tools/orchestration/launcher-run.mjs",
             "--control-issue", String(controlIssue),
             "--execution-issue", String(auth.authorization.executionIssue),
-          ], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, ...(workerToken ? { LDL_WORKER_CLAUDE_OAUTH_TOKEN: workerToken } : {}) } });
+          ], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, ...(launchToken ? { LDL_WORKER_CLAUDE_OAUTH_TOKEN: launchToken } : {}) } });
           const step = JSON.parse(out.trim().split("\n").pop());
           console.log(`LAUNCH RESULT: ${step.outcome} ${JSON.stringify(step.evidence ?? {})}`);
           // Settle (consume the nonce) ONLY now: the supervisor returned a durable boundary.
