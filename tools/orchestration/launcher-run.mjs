@@ -407,16 +407,23 @@ export function withoutMeteredKey(env = {}) {
   delete out.ANTHROPIC_API_KEY;
   return out;
 }
-// Read-only authenticated smoke check: no mutating tool is allowed or even available, one turn.
+// Authenticated smoke check through the SAME scrubbed Claude/Bash path the real worker uses (issue
+// #1108 Stage 1): CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set and one harmless Bash call (printf only)
+// must execute, so a Claude-specific sandbox failure surfaces here, before the worker, as a dropped
+// credential (WAITING fallback). No mutating tool is allowed: deny-by-default, Edit/Write disallowed.
+export const SMOKE_BASH_COMMAND = "printf 'LDL_%s_OK' SMOKE";
 export function claudeSmokeArgv() {
-  return ["claude", "-p", "--permission-mode", "plan", "--allowedTools", "Read", "--disallowedTools", "Bash Edit Write MultiEdit NotebookEdit", "--max-turns", "1"];
+  return ["claude", "-p", "--permission-mode", "dontAsk", "--allowedTools", "Read", "Bash(printf:*)", "--disallowedTools", "Edit Write MultiEdit NotebookEdit", "--max-turns", "4"];
 }
 // Pure-ish: returns { qualified, reason }. run(argv, { input, env }) -> stdout (injectable).
 export function qualifyClaudeWorker({ token, run, env = {} }) {
   if (!token) return { qualified: false, reason: "no worker credential supplied" };
   try {
     const argv = claudeSmokeArgv();
-    const out = String(run(argv, { input: `Reply with exactly ${SMOKE_MARKER} and nothing else.`, env: { ...withoutMeteredKey(env), CLAUDE_CODE_OAUTH_TOKEN: token } }) ?? "");
+    // The prompt never contains the marker literally: it can only be produced by running the Bash call.
+    const input = `Run exactly this one Bash command: ${SMOKE_BASH_COMMAND}
+Then reply with exactly its output and nothing else.`;
+    const out = String(run(argv, { input, env: { ...withoutMeteredKey(env), ...CLAUDE_WORKER_EXTRA_ENV, CLAUDE_CODE_OAUTH_TOKEN: token } }) ?? "");
     return out.trim() === SMOKE_MARKER ? { qualified: true } : { qualified: false, reason: "smoke check response did not carry the expected marker" };
   } catch (e) {
     return { qualified: false, reason: `smoke check failed (${e?.status ?? "error"})` };
@@ -431,7 +438,7 @@ export function resolveWorkerLaunch({ token, customCommand, run, env = {} }) {
   if (customCommand) return { workerEnv: {}, note: "custom LDL_WORKER_COMMAND configured: OAuth credential withheld" };
   const q = qualifyClaudeWorker({ token, env, run });
   if (!q.qualified) return { workerEnv: {}, note: `worker NOT qualified: ${q.reason}` };
-  return { command: JSON.stringify(claudeWorkerArgv()), workerEnv: { CLAUDE_CODE_OAUTH_TOKEN: token, ...CLAUDE_WORKER_EXTRA_ENV }, note: "worker qualified (read-only smoke check passed)" };
+  return { command: JSON.stringify(claudeWorkerArgv()), workerEnv: { CLAUDE_CODE_OAUTH_TOKEN: token, ...CLAUDE_WORKER_EXTRA_ENV }, note: "worker qualified (scrubbed Bash smoke check passed)" };
 }
 
 // Dispatch ONE fresh bounded worker by reference. The prompt is rendered by the existing
