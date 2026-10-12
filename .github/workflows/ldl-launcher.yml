@@ -101,6 +101,7 @@ jobs:
           node --input-type=module <<'JS'
           import { execFileSync } from "node:child_process";
           import { parseLaunchAuthorization, verifyTrustedTrigger, verifyDispatchLaunchRequest, resolveDispatchExecution, buildDispatchAuthorization, renderDispatchLaunchRecord } from "./tools/orchestration/launch-authorization.mjs";
+          import { TRANSITIONS, OPEN_PATH_STATES } from "./tools/orchestration/launcher-step.mjs";
           import { parseAttemptClaims, planClaim, renderClaimBody, formatAttemptId, parseAttemptId } from "./tools/orchestration/attempt-claim.mjs";
 
           // Capture then scrub the worker credential so no gh/git/gate child inherits it; only the
@@ -158,7 +159,7 @@ jobs:
                 { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"] });
               verdict = JSON.parse(gateOut.trim().split("\n").pop());
             } catch (e) { fail(`gate unavailable: ${String(e.message).split("\n")[0]}`); }
-            const resolved = resolveDispatchExecution(verdict, { controlIssue });
+            const resolved = resolveDispatchExecution(verdict, { controlIssue, launchableStates: new Set([...Object.keys(TRANSITIONS), ...OPEN_PATH_STATES]) });
             if (resolved.status !== "RESOLVED") fail(`control not dispatchable: ${resolved.reason}`);
             gateState = resolved.state;
             const built = buildDispatchAuthorization({ controlIssue, executionIssue: resolved.executionIssue, initiator, runId: env.RUN_ID });

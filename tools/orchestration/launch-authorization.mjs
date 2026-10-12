@@ -106,8 +106,10 @@ export function verifyTrustedTrigger(event, { authorization } = {}) {
 
 export const LAUNCH_REQUEST_HEADING = "## Launch Request (v1)";
 const POSITIVE_INT = /^[1-9]\d{0,9}$/;
-// Gate verdicts that can never name a dispatchable execution packet.
-const NON_DISPATCHABLE_STATES = new Set(["BLOCKED", "NOT_READY", "AMBIGUOUS"]);
+// The caller supplies `launchableStates`: exactly the verdict states launcher-step.mjs consumes
+// (Object.keys(TRANSITIONS) plus OPEN_PATH_STATES). Injected, not imported, because launcher-step's
+// import graph reaches this module. Controller-only states (e.g. PR_BREAKPOINT_NEEDS_FINALIZATION)
+// and an absent allowlist are refused (fail closed).
 
 // event: { name, action, actor, actorPermission, isFork, ref, defaultBranch, inputs }.
 // Trusted only for an explicit same-repo workflow_dispatch from the repository default branch's
@@ -124,18 +126,21 @@ export function verifyDispatchLaunchRequest(event) {
     return no("dispatch did not run the default-branch workflow");
   }
   const raw = event.inputs?.control_issue;
-  if (typeof raw !== "string" || !POSITIVE_INT.test(raw.trim())) return no("control_issue must be a positive issue number");
-  return { trusted: true, reason: "write-permission actor, same-repo default-branch dispatch", controlIssue: Number(raw.trim()) };
+  if (typeof raw !== "string" || !POSITIVE_INT.test(raw)) {
+    // Raw value must match exactly: the workflow concurrency key uses the untrimmed input.
+    return no("control_issue must be a positive issue number");
+  }
+  return { trusted: true, reason: "write-permission actor, same-repo default-branch dispatch", controlIssue: Number(raw) };
 }
 
 // Pure. verdict: the control-plane session-entry gate's JSON for this control issue. Resolves the
 // single current execution issue the verdict itself names; every reference it carries must agree
 // and its control identity must be exactly the requested one. Fails closed otherwise.
-export function resolveDispatchExecution(verdict, { controlIssue } = {}) {
+export function resolveDispatchExecution(verdict, { controlIssue, launchableStates } = {}) {
   const no = (reason) => ({ status: "REFUSED", reason });
   if (!Number.isInteger(controlIssue) || controlIssue <= 0) return no("controlIssue must be a positive integer");
   if (!verdict || typeof verdict !== "object" || typeof verdict.state !== "string") return no("gate returned no verdict state");
-  if (NON_DISPATCHABLE_STATES.has(verdict.state)) return no(`control is not dispatchable (${verdict.state})`);
+  if (!(launchableStates instanceof Set) || !launchableStates.has(verdict.state)) return no(`control is not launchable (${verdict.state})`);
   if (!POSITIVE_INT.test(String(verdict.controlIssue ?? ""))) return no("verdict names no control issue");
   if (Number(verdict.controlIssue) !== controlIssue) return no("verdict belongs to a different control issue");
   const refs = new Set();

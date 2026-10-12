@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { TRANSITIONS, OPEN_PATH_STATES } from "./launcher-step.mjs";
 import { parseLaunchAuthorization, verifyTrustedTrigger } from "./launch-authorization.mjs";
 
 const body = (extra = {}) => [
@@ -71,17 +72,19 @@ test("dispatch request: nonwriter, fork, wrong event, non-default ref, bad input
     { inputs: {} }, { inputs: { control_issue: "" } }, { inputs: { control_issue: "0" } },
     { inputs: { control_issue: "10abc" } }, { inputs: { control_issue: "-3" } }, { inputs: { control_issue: "010" } },
     { inputs: { control_issue: 10 } },
+    { inputs: { control_issue: "10 " } }, { inputs: { control_issue: " 10" } }, { inputs: { control_issue: "10\n" } },
   ];
   for (const o of bad) assert.equal(verifyDispatchLaunchRequest(dev(o)).trusted, false, JSON.stringify(o));
   assert.equal(verifyDispatchLaunchRequest(null).trusted, false);
 });
 
+const LAUNCHABLE = new Set([...Object.keys(TRANSITIONS), ...OPEN_PATH_STATES]);
 const verdict = (o = {}) => ({ state: "READY_TO_DISPATCH", controlIssue: 10, executionIssue: 73, ...o });
 
 test("execution issue resolved only from the verdict for the requested control", () => {
-  assert.deepEqual(resolveDispatchExecution(verdict(), { controlIssue: 10 }), { status: "RESOLVED", executionIssue: 73, state: "READY_TO_DISPATCH" });
-  assert.equal(resolveDispatchExecution(verdict({ executionIssue: undefined, workIssue: 73 }), { controlIssue: 10 }).executionIssue, 73);
-  assert.equal(resolveDispatchExecution(verdict({ workIssue: 73, issue: 73 }), { controlIssue: 10 }).status, "RESOLVED");
+  assert.deepEqual(resolveDispatchExecution(verdict(), { controlIssue: 10, launchableStates: LAUNCHABLE }), { status: "RESOLVED", executionIssue: 73, state: "READY_TO_DISPATCH" });
+  assert.equal(resolveDispatchExecution(verdict({ executionIssue: undefined, workIssue: 73 }), { controlIssue: 10, launchableStates: LAUNCHABLE }).executionIssue, 73);
+  assert.equal(resolveDispatchExecution(verdict({ workIssue: 73, issue: 73 }), { controlIssue: 10, launchableStates: LAUNCHABLE }).status, "RESOLVED");
 });
 
 test("stale, terminal, ambiguous, competing, cross-control or absent execution fails closed", () => {
@@ -89,10 +92,12 @@ test("stale, terminal, ambiguous, competing, cross-control or absent execution f
     verdict({ controlIssue: 11 }), verdict({ controlIssue: undefined }), verdict({ executionIssue: undefined }),
     verdict({ executionIssue: 73, workIssue: 74 }), verdict({ executionIssue: "73x" }), verdict({ executionIssue: 10 }),
     verdict({ state: "BLOCKED" }), verdict({ state: "NOT_READY" }), verdict({ state: "AMBIGUOUS" }),
+    verdict({ state: "PR_BREAKPOINT_NEEDS_FINALIZATION" }), verdict({ state: "READY_TO_PROJECT_NO_PR_COMPLETION" }),
+    verdict({ state: "POST_UNIT_REPAIR_REQUIRED" }), verdict({ state: "SOMETHING_UNKNOWN" }),
     { controlIssue: 10, executionIssue: 73 }, null,
   ];
-  for (const v of refused) assert.equal(resolveDispatchExecution(v, { controlIssue: 10 }).status, "REFUSED", JSON.stringify(v));
-  assert.equal(resolveDispatchExecution(verdict(), { controlIssue: 0 }).status, "REFUSED");
+  for (const v of refused) assert.equal(resolveDispatchExecution(v, { controlIssue: 10, launchableStates: LAUNCHABLE }).status, "REFUSED", JSON.stringify(v));
+  assert.equal(resolveDispatchExecution(verdict(), { controlIssue: 0, launchableStates: LAUNCHABLE }).status, "REFUSED");
 });
 
 test("dispatch authorization is deterministic, run-bound, and rejects incomplete provenance", () => {
