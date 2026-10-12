@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseNextCommand, buildDeps } from "./launcher-run.mjs";
+import { parseNextCommand, buildDeps, qualifyClaudeWorker, claudeWorkerArgv, claudeSmokeArgv, SMOKE_MARKER } from "./launcher-run.mjs";
 import { runLauncherStep, Outcome } from "./launcher-step.mjs";
 
 test("parseNextCommand accepts only chained node-tools commands with plain tokens", () => {
@@ -188,4 +188,30 @@ test("correction finalization verdict: a PR closed without merge still fails clo
   };
   const r = await runLauncherStep({ controlIssue: 379, deps: buildDeps({ controlIssue: 379, executionIssue: 73, readPr, readIssue: () => ({ body, state: "OPEN" }), io }) });
   assert.equal(r.outcome, Outcome.FAIL_CLOSED);
+});
+
+test("worker qualification: read-only smoke argv cannot mutate and carries the credential only in the smoke env", () => {
+  const argv = claudeSmokeArgv();
+  assert.ok(!argv.includes("--dangerously-skip-permissions"));
+  assert.equal(argv[argv.indexOf("--allowedTools") + 1], "Read");
+  assert.match(argv[argv.indexOf("--disallowedTools") + 1], /Bash.*Edit.*Write/);
+  let seen;
+  const r = qualifyClaudeWorker({ token: "tok", env: { PATH: "x" }, run: (a, o) => { seen = o; return `${SMOKE_MARKER}
+`; } });
+  assert.equal(r.qualified, true);
+  assert.equal(seen.env.CLAUDE_CODE_OAUTH_TOKEN, "tok");
+});
+
+test("worker qualification fails closed: no credential, wrong response, or a throwing CLI", () => {
+  assert.equal(qualifyClaudeWorker({ run: () => SMOKE_MARKER }).qualified, false);
+  assert.equal(qualifyClaudeWorker({ token: "t", run: () => "nope" }).qualified, false);
+  const r = qualifyClaudeWorker({ token: "t", run: () => { const e = new Error("x"); e.status = 1; throw e; } });
+  assert.equal(r.qualified, false);
+  assert.ok(!JSON.stringify(r).includes("t\""));
+});
+
+test("worker argv uses no bypass flag and an explicit tool allowlist", () => {
+  const a = claudeWorkerArgv();
+  assert.ok(!a.some((x) => /dangerously|bypass/i.test(x)));
+  assert.ok(a.includes("--allowedTools"));
 });

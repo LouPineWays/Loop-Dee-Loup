@@ -364,6 +364,37 @@ export function buildDeps({
   };
 }
 
+
+// Issue #906: qualified headless Claude Code worker for the Actions runner. The OAuth credential
+// (CLAUDE_CODE_OAUTH_TOKEN, a repository secret the workflow hands to this process under the name
+// LDL_WORKER_CLAUDE_OAUTH_TOKEN) is captured once, removed from this process's own environment so
+// no gate/gh/git child inherits it, and given ONLY to the worker process (workerEnv). It is never
+// printed. A metered ANTHROPIC_API_KEY is deliberately never read or forwarded here.
+export const WORKER_TOKEN_ENV = "LDL_WORKER_CLAUDE_OAUTH_TOKEN";
+// Non-interactive, no bypass flag: tools outside the allowlist are denied (not prompted) in -p mode,
+// so the worker can edit files and run git/gh/node/npm but nothing else, under the checkout's own
+// hooks (the action-envelope guard still applies).
+export const CLAUDE_WORKER_ALLOWED_TOOLS = "Read Glob Grep Edit Write Bash(git:*) Bash(gh:*) Bash(node:*) Bash(npm:*)";
+export function claudeWorkerArgv() {
+  return ["claude", "-p", "--permission-mode", "default", "--allowedTools", CLAUDE_WORKER_ALLOWED_TOOLS];
+}
+export const SMOKE_MARKER = "LDL_SMOKE_OK";
+// Read-only authenticated smoke check: no mutating tool is allowed or even available, one turn.
+export function claudeSmokeArgv() {
+  return ["claude", "-p", "--permission-mode", "plan", "--allowedTools", "Read", "--disallowedTools", "Bash Edit Write MultiEdit NotebookEdit", "--max-turns", "1"];
+}
+// Pure-ish: returns { qualified, reason }. run(argv, { input, env }) -> stdout (injectable).
+export function qualifyClaudeWorker({ token, run, env = {} }) {
+  if (!token) return { qualified: false, reason: "no worker credential supplied" };
+  try {
+    const argv = claudeSmokeArgv();
+    const out = String(run(argv, { input: `Reply with exactly ${SMOKE_MARKER} and nothing else.`, env: { ...env, CLAUDE_CODE_OAUTH_TOKEN: token } }) ?? "");
+    return out.includes(SMOKE_MARKER) ? { qualified: true } : { qualified: false, reason: "smoke check response did not carry the expected marker" };
+  } catch (e) {
+    return { qualified: false, reason: `smoke check failed (${e?.status ?? "error"})` };
+  }
+}
+
 // Dispatch ONE fresh bounded worker by reference. The prompt is rendered by the existing
 // formatters from a FRESH gate verdict that must still be the dispatched state (a stale dispatch is
 // refused). The worker command is repository configuration (LDL_WORKER_COMMAND: a JSON argv array,
@@ -371,7 +402,7 @@ export function buildDeps({
 // configured this reports not-launched so the supervisor stops at a durable waiting boundary and a
 // fresh `work on #<control>` remains the documented fallback. The worker's own exit/report never
 // unlocks anything: the supervisor re-reads durable state afterwards.
-export async function dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize, reestablish, env = process.env, runWorker }) {
+export async function dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize, reestablish, env = process.env, workerEnv = {}, runWorker }) {
   const raw = env.LDL_WORKER_COMMAND;
   if (!raw) return { launched: false, reason: "no fresh-worker runner configured (LDL_WORKER_COMMAND); resume with a fresh `work on #<control>`" };
   let argv;
@@ -435,7 +466,7 @@ export async function dispatchFreshWorker({ dispatch, io, controlIssue, executio
   const run =
     runWorker ??
     ((prompt, { cwd } = {}) =>
-      execFileSync(argv[0], argv.slice(1), { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["pipe", "ignore", "inherit"], input: prompt, cwd, env: { ...env, LDL_WORKER_ROUTE: String(freshDispatch.route) } }));
+      execFileSync(argv[0], argv.slice(1), { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["pipe", "ignore", "inherit"], input: prompt, cwd, env: { ...env, ...workerEnv, LDL_WORKER_ROUTE: String(freshDispatch.route) } }));
   try {
     for (const p of prompts) run(p, { cwd: workerCwd });
   } finally {
@@ -452,7 +483,7 @@ export async function dispatchFreshWorker({ dispatch, io, controlIssue, executio
 
 // Production supervisor bindings over buildDeps (all durable reads/writes go through the same
 // scripts and REST readers as the step itself).
-export function buildSupervisorDeps({ controlIssue, executionIssue, stepDeps, io, repo = null, readIssue, env = process.env, sleep, now, runWorker }) {
+export function buildSupervisorDeps({ controlIssue, executionIssue, stepDeps, io, repo = null, readIssue, env = process.env, workerEnv = {}, sleep, now, runWorker }) {
   const rIssue = readIssue ?? (({ repo: r, number }) => readGithubIssue({ repo: r, number, fields: ["body", "state"] }));
   const { readComments, writeControlBody } = stepDeps._io;
   const controlBody = () => rIssue({ repo, number: controlIssue }).body ?? "";
@@ -461,7 +492,7 @@ export function buildSupervisorDeps({ controlIssue, executionIssue, stepDeps, io
   return {
     step: () => runLauncherStep({ controlIssue, deps: stepDeps }),
     dispatchWorker: async (dispatch) =>
-      dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize: (v, a) => authorizeLauncherVerdict(v, a), reestablish: (fresh) => resolveOpenPath(fresh.state, fresh, stepDeps), env, runWorker }),
+      dispatchFreshWorker({ dispatch, io, controlIssue, executionIssue, authorize: (v, a) => authorizeLauncherVerdict(v, a), reestablish: (fresh) => resolveOpenPath(fresh.state, fresh, stepDeps), env, workerEnv, runWorker }),
     now,
     sleep,
     // Canonical poller (tools/review-watch/poll.mjs) for the bounded reviewer wait: since = the
@@ -572,11 +603,30 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     process.exit(1);
   }
   const stepDeps = buildDeps({ controlIssue, executionIssue, io: realIo, repo: id.repo });
+  // Capture then scrub the worker credential before any child process is spawned.
+  const workerToken = process.env[WORKER_TOKEN_ENV];
+  delete process.env[WORKER_TOKEN_ENV];
+  const workerEnv = {};
+  if (workerToken && !process.env.LDL_WORKER_COMMAND) {
+    // Qualify (read-only, authenticated) before enabling worker execution; otherwise stay at the
+    // documented WAITING / manual-relaunch fallback.
+    const q = qualifyClaudeWorker({
+      token: workerToken,
+      env: process.env,
+      run: (argv, { input, env }) => execFileSync(argv[0], argv.slice(1), { encoding: "utf8", input, env, timeout: 120000, stdio: ["pipe", "pipe", "ignore"] }),
+    });
+    console.error(q.qualified ? "worker qualified (read-only smoke check passed)" : `worker NOT qualified: ${q.reason}`);
+    if (q.qualified) {
+      process.env.LDL_WORKER_COMMAND = JSON.stringify(claudeWorkerArgv());
+      workerEnv.CLAUDE_CODE_OAUTH_TOKEN = workerToken;
+    }
+  } else if (workerToken) {
+    workerEnv.CLAUDE_CODE_OAUTH_TOKEN = workerToken;
+  }
   const deps = buildSupervisorDeps({
-    controlIssue, executionIssue, stepDeps, io: realIo, repo: id.repo,
+    controlIssue, executionIssue, stepDeps, io: realIo, repo: id.repo, workerEnv,
   });
   const waitBudgetMs = Number(process.env.LDL_WAIT_BUDGET_MS ?? 0) || 0;
   const r = await runLauncherSupervisor({ deps, maxSteps: Number(process.env.LDL_MAX_STEPS ?? 25) || 25, waitBudgetMs });
   console.log(JSON.stringify({ outcome: r.outcome, evidence: { reason: r.reason ?? null, trail: r.trail } }));
 }
-
