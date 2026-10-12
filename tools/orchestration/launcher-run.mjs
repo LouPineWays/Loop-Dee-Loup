@@ -16,7 +16,7 @@
 // Tests: node --test tools/orchestration/launcher-run.test.mjs launcher-supervisor.test.mjs
 
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { unwrapBoundSegment } from "./control-plane-continuation.mjs";
 import { runLauncherStep, authorizeLauncherVerdict, parseDecisionSurface, resolveOpenPath, isWriterComment, extractVerdictReferences, DECISION_SURFACE_HEADING } from "./launcher-step.mjs";
@@ -404,7 +404,11 @@ export function advancePollBound(prevMs, stdout) {
 // Per-run unpredictable nonce: the expected output cannot be guessed or derived from the prompt
 // text, so a model that skipped the Bash call cannot satisfy the smoke check (issue #1108 Audit #1113).
 export const newSmokeNonce = () => randomBytes(8).toString("hex");
-export const smokeMarker = (nonce) => `LDL_${nonce}_OK`;
+// The expected output is sha256(nonce): the prompt exposes only the nonce and the command, and a model
+// cannot reliably compute a SHA-256 digest without executing it, so only a real Bash run yields the marker.
+export const smokeMarker = (nonce) => createHash("sha256").update(nonce).digest("hex");
+// sha256sum prints "<digest>  -" (or " *-" in binary mode); accept only that exact shape.
+const smokeOutputDigest = (out) => /^([0-9a-f]{64}) [ *]-$/.exec(out)?.[1];
 // A metered ANTHROPIC_API_KEY must never reach the Claude CLI subprocesses (smoke or worker).
 export function withoutMeteredKey(env = {}) {
   const out = { ...env };
@@ -412,23 +416,23 @@ export function withoutMeteredKey(env = {}) {
   return out;
 }
 // Authenticated smoke check through the SAME scrubbed Claude/Bash path the real worker uses (issue
-// #1108 Stage 1): CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set and one harmless Bash call (printf only)
+// #1108 Stage 1): CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set and one harmless Bash call (printf piped to sha256sum only)
 // must execute, so a Claude-specific sandbox failure surfaces here, before the worker, as a dropped
 // credential (WAITING fallback). No mutating tool is allowed: deny-by-default, Edit/Write disallowed.
-export const smokeBashCommand = (nonce) => `printf 'LDL_%s_OK' ${nonce}`;
+export const smokeBashCommand = (nonce) => `printf '%s' ${nonce} | sha256sum`;
 export function claudeSmokeArgv() {
-  return ["claude", "-p", "--permission-mode", "dontAsk", "--allowedTools", "Read", "Bash(printf:*)", "--disallowedTools", "Edit Write MultiEdit NotebookEdit", "--max-turns", "4"];
+  return ["claude", "-p", "--permission-mode", "dontAsk", "--allowedTools", "Read", "Bash(printf:*)", "Bash(sha256sum:*)", "--disallowedTools", "Edit Write MultiEdit NotebookEdit", "--max-turns", "4"];
 }
 // Pure-ish: returns { qualified, reason }. run(argv, { input, env }) -> stdout (injectable).
 export function qualifyClaudeWorker({ token, run, env = {}, nonce = newSmokeNonce() }) {
   if (!token) return { qualified: false, reason: "no worker credential supplied" };
   try {
     const argv = claudeSmokeArgv();
-    // The prompt never contains the marker literally: it can only be produced by running the Bash call.
+    // The prompt carries the nonce and command but not the digest: the marker can only come from running the Bash call.
     const input = `Run exactly this one Bash command: ${smokeBashCommand(nonce)}
 Then reply with exactly its output and nothing else.`;
     const out = String(run(argv, { input, env: { ...withoutMeteredKey(env), ...CLAUDE_WORKER_EXTRA_ENV, CLAUDE_CODE_OAUTH_TOKEN: token } }) ?? "");
-    return out.trim() === smokeMarker(nonce) ? { qualified: true } : { qualified: false, reason: "smoke check response did not carry the expected marker" };
+    return smokeOutputDigest(out.trim()) === smokeMarker(nonce) ? { qualified: true } : { qualified: false, reason: "smoke check response did not carry the expected marker" };
   } catch (e) {
     return { qualified: false, reason: `smoke check failed (${e?.status ?? "error"})` };
   }
