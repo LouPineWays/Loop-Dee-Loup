@@ -6,6 +6,12 @@ name: LDL launcher
 # (tools/orchestration/launcher-run.mjs: the supervisor loop), and settles the claim once a
 # genuine terminal, waiting, or fail-closed boundary is reached.
 #
+# A control-issue-only workflow_dispatch (Run workflow, issue #1094) is the one-action launch REQUEST:
+# the pressing actor's live write permission is verified, the sole execution issue is resolved from
+# the session-entry gate verdict (never typed), the request nonce is derived from the run id, and an
+# auditable `## Launch Request (v1)` record precedes the claim. A dispatch that supplies a nonce
+# keeps the legacy comment-authorized path.
+#
 # A Launch Authorization comment is a launch REQUEST, never execution authority: the launcher step
 # derives mutation authority from the gate verdict's own execution-authority envelope and refuses
 # any verdict that does not belong to the requested control/execution issue.
@@ -31,11 +37,12 @@ on:
   workflow_dispatch:
     inputs:
       control_issue:
-        description: Control issue number
+        description: Control issue number (the only input needed; your Run workflow press is the launch request)
         required: true
       nonce:
-        description: Launch Authorization nonce
-        required: true
+        description: Legacy only - leave empty. A Launch Authorization nonce selects the legacy comment-authorized path.
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -70,6 +77,11 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_ACTION: ${{ github.event.action }}
           ACTOR: ${{ github.actor }}
+          # The identity that pressed Run workflow / Re-run (differs from ACTOR on a re-run).
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          EVENT_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          IS_FORK: ${{ github.event.repository.fork }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           IS_PR: ${{ github.event.issue.pull_request != null }}
           COMMENT_BODY: ${{ github.event.comment.body }}
@@ -88,7 +100,7 @@ jobs:
         run: |
           node --input-type=module <<'JS'
           import { execFileSync } from "node:child_process";
-          import { parseLaunchAuthorization, verifyTrustedTrigger } from "./tools/orchestration/launch-authorization.mjs";
+          import { parseLaunchAuthorization, verifyTrustedTrigger, verifyDispatchLaunchRequest, resolveDispatchExecution, buildDispatchAuthorization, renderDispatchLaunchRecord } from "./tools/orchestration/launch-authorization.mjs";
           import { parseAttemptClaims, planClaim, renderClaimBody, formatAttemptId, parseAttemptId } from "./tools/orchestration/attempt-claim.mjs";
 
           // Capture then scrub the worker credential so no gh/git/gate child inherits it; only the
@@ -101,6 +113,9 @@ jobs:
           const fail = (msg) => { console.log(`LAUNCH REFUSED: ${msg}`); process.exit(0); };
 
           const isDispatch = env.EVENT_NAME === "workflow_dispatch";
+          // A dispatch carrying no nonce is the control-issue-only launch request (issue #1094); a
+          // dispatch that supplies a nonce stays on the legacy comment-authorized path unchanged.
+          const requestMode = isDispatch && (env.INPUT_NONCE ?? "").trim() === "";
           const controlIssue = Number(isDispatch ? env.INPUT_CONTROL_ISSUE : env.ISSUE_NUMBER);
           if (!Number.isInteger(controlIssue) || controlIssue <= 0) fail("no control issue");
 
@@ -120,10 +135,41 @@ jobs:
             id: c.id, body: c.body, author: c.user?.login, authorPermission: permission(c.user?.login),
           }));
 
-          const auth = parseLaunchAuthorization(comments, { controlIssue });
-          if (auth.status !== "LAUNCH_REQUESTED") fail(`authorization ${auth.status}: ${auth.reason}`);
+          let auth;
+          let gateState = null;
+          if (requestMode) {
+            // The CURRENT repository permission, read from GitHub, of the identity that actually
+            // pressed Run workflow / Re-run; no caller-supplied field is trusted.
+            const initiator = env.TRIGGERING_ACTOR || env.ACTOR;
+            const requestFor = (who) => verifyDispatchLaunchRequest({
+              name: env.EVENT_NAME, action: "dispatch", actor: who, actorPermission: permission(who),
+              isFork: env.IS_FORK === "false", ref: env.EVENT_REF, defaultBranch: env.DEFAULT_BRANCH,
+              inputs: { control_issue: env.INPUT_CONTROL_ISSUE },
+            });
+            const request = requestFor(initiator);
+            if (!request.trusted) fail(`untrusted dispatch: ${request.reason}`);
+            // A re-run by a different person must not borrow the original dispatcher's authority.
+            if (env.ACTOR !== initiator && !requestFor(env.ACTOR).trusted) fail("untrusted dispatch: original dispatcher is not a current writer");
+            // The gate freshens the control plane over git, so credentials are set up first.
+            execFileSync("gh", ["auth", "setup-git"], { encoding: "utf8" });
+            let verdict;
+            try {
+              const gateOut = execFileSync("node", ["tools/orchestration/control-plane-bootstrap.mjs", "session-entry-gate", "--control-issue", String(controlIssue)],
+                { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"] });
+              verdict = JSON.parse(gateOut.trim().split("\n").pop());
+            } catch (e) { fail(`gate unavailable: ${String(e.message).split("\n")[0]}`); }
+            const resolved = resolveDispatchExecution(verdict, { controlIssue });
+            if (resolved.status !== "RESOLVED") fail(`control not dispatchable: ${resolved.reason}`);
+            gateState = resolved.state;
+            const built = buildDispatchAuthorization({ controlIssue, executionIssue: resolved.executionIssue, initiator, runId: env.RUN_ID });
+            if (!built) fail("could not form a dispatch request identity");
+            auth = { status: "LAUNCH_REQUESTED", authorization: built };
+          } else {
+            auth = parseLaunchAuthorization(comments, { controlIssue });
+            if (auth.status !== "LAUNCH_REQUESTED") fail(`authorization ${auth.status}: ${auth.reason}`);
+          }
 
-          const trigger = verifyTrustedTrigger({
+          const trigger = requestMode ? { trusted: true } : verifyTrustedTrigger({
             name: env.EVENT_NAME,
             action: isDispatch ? "dispatch" : env.EVENT_ACTION,
             actor: env.ACTOR,
@@ -153,6 +199,13 @@ jobs:
           const plan = planClaim(claims, liveness, { attemptId, nonce: auth.authorization.nonce });
           if (plan.action !== "CLAIM" && plan.action !== "RECONCILE_THEN_CLAIM") fail(`${plan.action}: ${plan.reason}`);
 
+          // Durable, auditable request record (initiator, control, execution, attempt) BEFORE the claim.
+          if (requestMode) {
+            execFileSync("gh", ["api", `repos/${env.REPO}/issues/${controlIssue}/comments`, "-F", "body=@-"], {
+              input: renderDispatchLaunchRecord({ authorization: auth.authorization, attemptId, state: gateState, requestedAt: new Date().toISOString() }),
+              encoding: "utf8",
+            });
+          }
           const body = renderClaimBody({
             attemptId, nonce: auth.authorization.nonce, claimedAt: new Date().toISOString(),
             runner: "github-actions", phase: "CLAIMED",
@@ -180,7 +233,7 @@ jobs:
           } else {
             launchToken = undefined; // a custom LDL_WORKER_COMMAND never receives the credential
           }
-          execFileSync("gh", ["auth", "setup-git"], { encoding: "utf8" });
+          if (!requestMode) execFileSync("gh", ["auth", "setup-git"], { encoding: "utf8" });
           execFileSync("git", ["config", "user.name", "github-actions[bot]"]);
           execFileSync("git", ["config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"]);
           const out = execFileSync("node", [

@@ -92,3 +92,99 @@ export function verifyTrustedTrigger(event, { authorization } = {}) {
   if (nonce !== authorization.nonce) return no("nonce does not match the authorization");
   return { trusted: true, reason: "trusted actor, same-repo event, matching nonce" };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Dispatch launch request (issue #1094). An ordinary Actions "Run workflow" press carrying ONLY a
+// control issue number is itself the launch REQUEST: the authenticated GitHub actor who pressed it
+// is the initiator, verified against live repository permission. Nothing the caller types (execution
+// issue, objective, permission, nonce) is trusted. The sole current execution issue is resolved
+// from the canonical gate verdict for the control issue, and the request is bound to a unique
+// request identity derived from the Actions run id. Like a comment, this is a REQUEST only: mutation
+// authority still comes from the gate verdict's execution-authority envelope
+// (launcher-step.mjs authorizeLauncherVerdict). The legacy comment + nonce route is unchanged.
+// ---------------------------------------------------------------------------------------------
+
+export const LAUNCH_REQUEST_HEADING = "## Launch Request (v1)";
+const POSITIVE_INT = /^[1-9]\d{0,9}$/;
+// Gate verdicts that can never name a dispatchable execution packet.
+const NON_DISPATCHABLE_STATES = new Set(["BLOCKED", "NOT_READY", "AMBIGUOUS"]);
+
+// event: { name, action, actor, actorPermission, isFork, ref, defaultBranch, inputs }.
+// Trusted only for an explicit same-repo workflow_dispatch from the repository default branch's
+// code, by an actor whose CURRENT permission (read back from GitHub) is write/maintain/admin, whose
+// only input is a well-formed control issue number. Returns { trusted, reason, controlIssue? }.
+export function verifyDispatchLaunchRequest(event) {
+  const no = (reason) => ({ trusted: false, reason });
+  if (!event || typeof event !== "object") return no("no event");
+  if (event.name !== "workflow_dispatch" || event.action !== "dispatch") return no("not an explicit workflow_dispatch");
+  if (event.isFork !== false) return no("fork or unknown-origin event");
+  if (typeof event.actor !== "string" || event.actor.trim() === "") return no("no authenticated actor");
+  if (!hasWritePermission(event.actorPermission)) return no("actor lacks write permission");
+  if (typeof event.defaultBranch !== "string" || event.defaultBranch === "" || event.ref !== `refs/heads/${event.defaultBranch}`) {
+    return no("dispatch did not run the default-branch workflow");
+  }
+  const raw = event.inputs?.control_issue;
+  if (typeof raw !== "string" || !POSITIVE_INT.test(raw.trim())) return no("control_issue must be a positive issue number");
+  return { trusted: true, reason: "write-permission actor, same-repo default-branch dispatch", controlIssue: Number(raw.trim()) };
+}
+
+// Pure. verdict: the control-plane session-entry gate's JSON for this control issue. Resolves the
+// single current execution issue the verdict itself names; every reference it carries must agree
+// and its control identity must be exactly the requested one. Fails closed otherwise.
+export function resolveDispatchExecution(verdict, { controlIssue } = {}) {
+  const no = (reason) => ({ status: "REFUSED", reason });
+  if (!Number.isInteger(controlIssue) || controlIssue <= 0) return no("controlIssue must be a positive integer");
+  if (!verdict || typeof verdict !== "object" || typeof verdict.state !== "string") return no("gate returned no verdict state");
+  if (NON_DISPATCHABLE_STATES.has(verdict.state)) return no(`control is not dispatchable (${verdict.state})`);
+  if (!POSITIVE_INT.test(String(verdict.controlIssue ?? ""))) return no("verdict names no control issue");
+  if (Number(verdict.controlIssue) !== controlIssue) return no("verdict belongs to a different control issue");
+  const refs = new Set();
+  for (const k of ["executionIssue", "workIssue", "issue"]) {
+    if (verdict[k] == null) continue;
+    if (!POSITIVE_INT.test(String(verdict[k]))) return no(`verdict ${k} is malformed`);
+    refs.add(Number(verdict[k]));
+  }
+  if (refs.size === 0) return no("verdict names no current execution issue");
+  if (refs.size > 1) return no("verdict names competing execution issues");
+  const executionIssue = [...refs][0];
+  if (executionIssue === controlIssue) return no("execution issue equals the control issue");
+  return { status: "RESOLVED", executionIssue, state: verdict.state };
+}
+
+// Pure. The request identity is unique per Actions run (never reused across dispatches), so a
+// duplicate press is a new request but a re-run of the same run keeps the same request nonce and is
+// stopped as REPLAY by planClaim once settled. Shape matches parseLaunchAuthorization's output.
+export function buildDispatchAuthorization({ controlIssue, executionIssue, initiator, runId } = {}) {
+  if (!Number.isInteger(controlIssue) || controlIssue <= 0) return null;
+  if (!Number.isInteger(executionIssue) || executionIssue <= 0) return null;
+  if (typeof initiator !== "string" || initiator.trim() === "") return null;
+  if (!/^\d+$/.test(String(runId ?? ""))) return null;
+  return {
+    commentId: null,
+    controlIssue,
+    executionIssue,
+    objective: `Execution #${executionIssue} under control #${controlIssue}`,
+    authorizedBy: initiator.trim(),
+    nonce: `dispatch-${runId}`,
+  };
+}
+
+// Pure. Durable, auditable record of an accepted dispatch request. Not an authorization: the
+// heading differs from LAUNCH_AUTHORIZATION_HEADING, so parseLaunchAuthorization never reads it.
+export function renderDispatchLaunchRecord({ authorization, attemptId, state, requestedAt } = {}) {
+  return [
+    LAUNCH_REQUEST_HEADING,
+    "",
+    "- **Source:** workflow_dispatch (control issue only)",
+    `- **Initiator:** ${authorization.authorizedBy}`,
+    `- **Control issue:** #${authorization.controlIssue}`,
+    `- **Execution issue:** #${authorization.executionIssue}`,
+    `- **Gate state:** ${String(state ?? "").replace(/[^A-Z_]/g, "")}`,
+    `- **Attempt id:** ${attemptId}`,
+    `- **Request nonce:** ${authorization.nonce}`,
+    `- **Requested at:** ${requestedAt}`,
+    "",
+    "A launch request, not execution authority; mutation authority is the current gate verdict's execution-authority envelope.",
+    "",
+  ].join("\n");
+}
