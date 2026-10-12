@@ -274,6 +274,9 @@ function analyzeXargs(tokens, anyXargs = false) {
   const li = skipLaunchers(tokens, 0);
   if (li === -1) return tokens.some((t) => baseName(t) === "xargs") ? XARGS_REASON : null;
   if (anyXargs && li < tokens.length && /[$`]/.test(tokens[li])) return XARGS_REASON;
+  // a shell-expanded command position may itself be `xargs` supplied by the environment (Audit #1083), so
+  // it followed by `git` (or another expansion/wrapper) cannot be proven benign even without a literal xargs
+  if (li < tokens.length && /[$`]/.test(tokens[li]) && tokens.slice(li + 1).some((t) => baseName(t) === "git" || /[$`]/.test(t) || WRAPPERS.has(baseName(t)))) return XARGS_REASON;
   if (baseName(tokens[li] ?? "") !== "xargs") {
     // a shell wrapper's inline payload may itself run xargs
     if (WRAPPERS.has(baseName(tokens[li] ?? ""))) {
@@ -290,6 +293,9 @@ function analyzeXargs(tokens, anyXargs = false) {
       const xi = tokens.findIndex((t, k) => k > li && /\bxargs\b/.test(t));
       if (xi !== -1 && tokens.slice(xi + 1).some((t) => baseName(t) === "git" || /[$`]/.test(t) || WRAPPERS.has(baseName(t)))) return XARGS_REASON;
       if (anyXargs && tokens.slice(li).some((t) => /[$`]/.test(t))) return XARGS_REASON;
+      // a shell-expanded token (inherited `X=xargs`) followed by git/another expansion/wrapper, with no literal xargs (Audit #1083)
+      const di = tokens.findIndex((t, k) => k > li && /[$`]/.test(t));
+      if (di !== -1 && tokens.slice(di + 1).some((t) => baseName(t) === "git" || /[$`]/.test(t) || WRAPPERS.has(baseName(t)))) return XARGS_REASON;
     }
     return null;
   }
