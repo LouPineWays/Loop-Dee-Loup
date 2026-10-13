@@ -288,7 +288,7 @@ test("isolation diagnostics mocks: oversized os-release, userns and fact values 
   const logs = [];
   const huge = "Z".repeat(500000);
   const execFileSync = (cmd, args) => {
-    if (args.includes("--unshare-all")) throw new Error("boom probe");
+    if (args.includes("--unshare-all")) throw new Error("boom probe " + huge);
     return huge;
   };
   const readFileSync = (p) => {
@@ -301,7 +301,7 @@ test("isolation diagnostics mocks: oversized os-release, userns and fact values 
   const d = logs.find((l) => l.includes("DIAGNOSTICS"));
   assert.ok(d.length <= 16000, "diagnostics line " + d.length + " exceeds cap");
   const failed = logs.find((l) => l.includes("PREFLIGHT FAILED"));
-  assert.ok(failed.length < 2000, "FAILED line stays bounded");
+  assert.ok(failed.length < 2000, "FAILED line stays bounded with an oversized single-line exception: " + failed.length);
   assert.ok(!/Z{4001}/.test(d), "no run beyond the per-value cap");
 });
 

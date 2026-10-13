@@ -266,7 +266,7 @@ jobs:
               } catch (e) {
                 let userns = "unreadable";
                 try { userns = readFileSync("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", "utf8").trim().slice(0, 200); } catch { /* read-only diagnostic */ }
-                console.log(`RUNNER ISOLATION PREFLIGHT FAILED: ${String(e.message).split("\n")[0]} (apparmor_restrict_unprivileged_userns=${userns}); worker not started, no isolation weakening applied; a policy change needs founder approval (WAITING fallback)`);
+                console.log(`RUNNER ISOLATION PREFLIGHT FAILED: ${String(e.message).split("\n")[0].slice(0, 500)} (apparmor_restrict_unprivileged_userns=${userns}); worker not started, no isolation weakening applied; a policy change needs founder approval (WAITING fallback)`);
                 launchToken = undefined; // fail closed first; diagnostics below can never leave the credential in place
                 // Read-only host diagnostics (issue #1118 unit C, founder-approved #1120 Q1=A): facts only,
                 // recorded on this failed trusted path, in the credential-free child env. Nothing is
