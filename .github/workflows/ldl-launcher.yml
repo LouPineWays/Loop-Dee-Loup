@@ -493,7 +493,7 @@ jobs:
               try {
                 execFileSync("bwrap", PROBE, { encoding: "utf8", env: dEnv, stdio: ["ignore", "ignore", "pipe"], timeout: 30000 });
                 probe = "passed";
-              } catch (e) { probe = `failed: ${first(e)}`; }
+              } catch (e) { probe = `failed: exit=${e.status ?? "none"} signal=${e.signal ?? "none"} stderr=${String(e.stderr || e.message || e).replace(/\s*\n\s*/g, " | ").slice(0, 500)}`; }
             }
           } else probe = "skipped: install did not complete";
           // Snapshot after the probe so a denial produced by the probe itself is captured.
