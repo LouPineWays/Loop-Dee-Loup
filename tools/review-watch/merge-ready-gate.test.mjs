@@ -11,7 +11,14 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { run, parseArgs } from "./merge-ready-gate.mjs";
+import {
+  run,
+  parseArgs,
+  combineMergeReadyResult,
+  checkRequiredCi,
+  evaluateCiEvidence,
+  readRequiredCheckPolicy,
+} from "./merge-ready-gate.mjs";
 
 const ARGS = { repo: "LouPineWays/YouTubery", pr: "49", head: "abc123", issue: "48" };
 
@@ -23,10 +30,17 @@ function lifecycleResult(overrides = {}) {
   return { exitCode: 0, state: "MERGE_READY", ...overrides };
 }
 
-function impls({ stage1 = stage1Result(), lifecycle = lifecycleResult() } = {}) {
+// Issue #1129: merge authorization also requires required-CI evidence bound to the gated head;
+// the legacy tests exercise OTHER legs, so a passing CI result is injected by default.
+function passingCi(head = ARGS.head) {
+  return { exitCode: 0, state: "CI_PASSED", head };
+}
+
+function impls({ stage1 = stage1Result(), lifecycle = lifecycleResult(), ci = passingCi() } = {}) {
   return {
     stage1RunImpl: async () => stage1,
     checkMergeReadyImpl: async () => lifecycle,
+    checkRequiredCiImpl: async () => ci,
   };
 }
 
@@ -185,6 +199,7 @@ function correctionImpls({ stage1 = stage1Result({ exitCode: 2, state: "NOT_REQU
     stage1RunImpl: async () => stage1,
     checkMergeReadyImpl: async () => lifecycle,
     checkCorrectionDeltaImpl: async () => correctionDelta,
+    checkRequiredCiImpl: async () => passingCi(),
   };
 }
 
@@ -276,6 +291,7 @@ test("run: --reviewed-head is never consulted when stage1 already succeeds (RESP
     {
       stage1RunImpl: async () => stage1Result(),
       checkMergeReadyImpl: async () => lifecycleResult(),
+      checkRequiredCiImpl: async () => passingCi(),
       checkCorrectionDeltaImpl: async () => {
         called = true;
         return { exitCode: 0, state: "CORRECTION_SATISFIED" };
@@ -369,6 +385,7 @@ test("run: maps --pr to stage1-gate's --number and passes --head/--issue to the 
       lifecycleArgs = args;
       return lifecycleResult();
     },
+    checkRequiredCiImpl: async () => passingCi(),
   });
   assert.equal(result.exitCode, 0);
   assert.equal(stage1Args.repo, ARGS.repo);
@@ -377,4 +394,262 @@ test("run: maps --pr to stage1-gate's --number and passes --head/--issue to the 
   assert.equal(lifecycleArgs.repo, ARGS.repo);
   assert.equal(lifecycleArgs.pr, ARGS.pr);
   assert.equal(lifecycleArgs.issue, ARGS.issue);
+});
+
+// -- Issue #1129: exact-head required CI/check evidence --------------------------------------------
+
+const H = "af52e922c2e4839cb1f6ae0dabcd91faaf2b5ad5";
+const FAILED_H = "dcbfe19591931eac29038deac510acfcfc76b0df";
+
+test("run: CI failed on the gated head -> BLOCKED by ci, never exit 0 (the #951/#950/PR #952 dcbfe195 shape)", async () => {
+  const result = await run(
+    { ...ARGS, head: FAILED_H },
+    impls({ ci: { exitCode: 2, state: "CI_FAILED", head: FAILED_H, message: "required CI failed" } }),
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "BLOCKED");
+  assert.deepEqual(result.blockedBy, [{ component: "ci", state: "CI_FAILED" }]);
+});
+
+test("run: CI pending, missing and head-mismatch are all BLOCKED by ci", async () => {
+  for (const state of ["CI_PENDING", "CI_REQUIRED_CHECK_MISSING", "CI_HEAD_MISMATCH"]) {
+    const result = await run(ARGS, impls({ ci: { exitCode: 2, state, head: ARGS.head } }));
+    assert.equal(result.exitCode, 2, state);
+    assert.deepEqual(result.blockedBy, [{ component: "ci", state }]);
+  }
+});
+
+test("run: unreadable/ambiguous CI evidence is OPERATIONAL_ERROR (exit 1), never success", async () => {
+  const result = await run(ARGS, impls({ ci: { exitCode: 1, state: "CI_UNVERIFIABLE", message: "HTTP 403" } }));
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.state, "OPERATIONAL_ERROR");
+  assert.match(result.message, /HTTP 403/);
+});
+
+test("run: a throwing CI check is OPERATIONAL_ERROR", async () => {
+  const result = await run(ARGS, { ...impls(), checkRequiredCiImpl: async () => { throw new Error("boom"); } });
+  assert.equal(result.exitCode, 1);
+  assert.match(result.message, /boom/);
+});
+
+test("run: CI_PASSED bound to a different head than the gated head fails closed (older-head green)", async () => {
+  const result = await run(ARGS, impls({ ci: { exitCode: 0, state: "CI_PASSED", head: "0000000000000000000000000000000000000000" } }));
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.state, "MALFORMED_GATE_OUTPUT");
+});
+
+test("run: CI is not consulted when another leg already blocks (no wasted gh call)", async () => {
+  let called = false;
+  const result = await run(ARGS, {
+    ...impls({ stage1: stage1Result({ exitCode: 2, state: "PENDING" }) }),
+    checkRequiredCiImpl: async () => { called = true; return passingCi(); },
+  });
+  assert.equal(called, false);
+  assert.equal(result.exitCode, 2);
+  assert.deepEqual(result.blockedBy, [{ component: "stage1", state: "PENDING" }]);
+});
+
+test("combineMergeReadyResult: absent CI evidence can never yield exit 0", () => {
+  const result = combineMergeReadyResult({ stage1: stage1Result(), lifecycle: lifecycleResult() }, { head: H });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.state, "MALFORMED_GATE_OUTPUT");
+});
+
+test("combineMergeReadyResult: correction-satisfied path also requires passing CI", () => {
+  const input = {
+    stage1: stage1Result({ exitCode: 2, state: "NOT_REQUESTED" }),
+    lifecycle: lifecycleResult(),
+    correctionDelta: { exitCode: 0, state: "CORRECTION_SATISFIED" },
+  };
+  const blocked = combineMergeReadyResult({ ...input, ci: { exitCode: 2, state: "CI_FAILED", head: FAILED_H } }, { head: FAILED_H });
+  assert.equal(blocked.exitCode, 2);
+  const ok = combineMergeReadyResult({ ...input, ci: { exitCode: 0, state: "CI_PASSED", head: H } }, { head: H });
+  assert.equal(ok.exitCode, 0);
+  assert.equal(ok.state, "PRE_MERGE_READY_CORRECTION_SATISFIED");
+});
+
+// -- checkRequiredCi / evaluateCiEvidence / readRequiredCheckPolicy -----------------------------
+
+const UNPROTECTED = { protected: false };
+function runOf(name, conclusion, { status = "completed", sha = H, appId = 15368 } = {}) {
+  return { name, status, conclusion, head_sha: sha, app: { id: appId } };
+}
+function fakeGh({ branch = UNPROTECTED, rules = [], runs = [], statuses = [], sha = H, extra = {} } = {}) {
+  const calls = [];
+  const impl = (path, opts = {}) => {
+    calls.push(path);
+    if (extra[path]) return typeof extra[path] === "function" ? extra[path]() : extra[path];
+    if (/\/rules\/branches\//.test(path)) return opts.paginate ? (Array.isArray(rules) && rules.pages ? rules.pages : [rules]) : rules;
+    if (/\/branches\/[^/]+$/.test(path)) return branch;
+    if (/\/check-runs/.test(path)) return opts.paginate ? [{ total_count: runs.length, check_runs: runs }] : { total_count: runs.length, check_runs: runs };
+    if (/\/status\?/.test(path)) return { state: "success", total_count: statuses.length, sha, statuses };
+    throw new Error("unexpected path " + path);
+  };
+  impl.calls = calls;
+  return impl;
+}
+function prReader(heads) {
+  let i = 0;
+  return ({ fields }) => {
+    const head = heads[Math.min(i++, heads.length - 1)];
+    const out = {};
+    for (const f of fields) out[f] = f === "headRefOid" ? head : f === "baseRefName" ? "main" : "OPEN";
+    return out;
+  };
+}
+const CI_ARGS = { repo: "o/r", pr: "952", head: H };
+
+test("checkRequiredCi: all observed checks green on the current head, no declared policy -> CI_PASSED (the af52e922 / run 37626653304 positive case)", async () => {
+  const result = await checkRequiredCi(CI_ARGS, { ghApiImpl: fakeGh({ runs: [runOf("verify", "success")] }), readPrImpl: prReader([H, H]) });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "CI_PASSED");
+  assert.equal(result.head, H);
+  assert.equal(result.policy.source, "none-declared");
+});
+
+test("checkRequiredCi: a failed run on the current head -> CI_FAILED exit 2 (the dcbfe195 / run 37624396190 shape)", async () => {
+  const result = await checkRequiredCi(
+    { ...CI_ARGS, head: FAILED_H },
+    { ghApiImpl: fakeGh({ runs: [runOf("verify", "failure", { sha: FAILED_H })] }), readPrImpl: prReader([FAILED_H]) },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "CI_FAILED");
+  assert.equal(result.blocking[0].name, "verify");
+});
+
+test("checkRequiredCi: pending (in_progress/queued) checks -> CI_PENDING, not success", async () => {
+  for (const status of ["in_progress", "queued"]) {
+    const result = await checkRequiredCi(CI_ARGS, {
+      ghApiImpl: fakeGh({ runs: [runOf("verify", null, { status })] }),
+      readPrImpl: prReader([H]),
+    });
+    assert.equal(result.state, "CI_PENDING", status);
+    assert.equal(result.exitCode, 2);
+  }
+});
+
+test("checkRequiredCi: checks that are green only on an OLDER head never authorize the newer head (check-run head_sha mismatch fails closed)", async () => {
+  const result = await checkRequiredCi(CI_ARGS, {
+    ghApiImpl: fakeGh({ runs: [runOf("verify", "success", { sha: FAILED_H })] }),
+    readPrImpl: prReader([H]),
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.state, "CI_UNVERIFIABLE");
+});
+
+test("checkRequiredCi: the PR head differing from the decided head -> CI_HEAD_MISMATCH exit 2 (a newer green head cannot authorize an older decision)", async () => {
+  const result = await checkRequiredCi(
+    { ...CI_ARGS, head: FAILED_H },
+    { ghApiImpl: fakeGh({ runs: [runOf("verify", "success")] }), readPrImpl: prReader([H]) },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "CI_HEAD_MISMATCH");
+});
+
+test("checkRequiredCi: the PR head changing while evidence is read -> CI_HEAD_MISMATCH", async () => {
+  const result = await checkRequiredCi(CI_ARGS, {
+    ghApiImpl: fakeGh({ runs: [runOf("verify", "success")] }),
+    readPrImpl: prReader([H, FAILED_H]),
+  });
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "CI_HEAD_MISMATCH");
+});
+
+test("checkRequiredCi: a short abbreviated decided head still binds to the full live head", async () => {
+  const result = await checkRequiredCi(
+    { ...CI_ARGS, head: H.slice(0, 10) },
+    { ghApiImpl: fakeGh({ runs: [runOf("verify", "success")] }), readPrImpl: prReader([H]) },
+  );
+  assert.equal(result.state, "CI_PASSED");
+  assert.equal(result.head, H);
+});
+
+test("checkRequiredCi: declared required checks -- missing context -> CI_REQUIRED_CHECK_MISSING; skipped does not satisfy; success does", async () => {
+  const protectedBranch = { protected: true, protection: { required_status_checks: { enforcement_level: "everyone", contexts: ["verify"], checks: [{ context: "verify", app_id: 15368 }] } } };
+  const missing = await checkRequiredCi(CI_ARGS, { ghApiImpl: fakeGh({ branch: protectedBranch, runs: [runOf("other", "success")] }), readPrImpl: prReader([H]) });
+  assert.equal(missing.state, "CI_REQUIRED_CHECK_MISSING");
+  assert.deepEqual(missing.missing, ["verify"]);
+  const skipped = await checkRequiredCi(CI_ARGS, { ghApiImpl: fakeGh({ branch: protectedBranch, runs: [runOf("verify", "skipped")] }), readPrImpl: prReader([H]) });
+  assert.equal(skipped.exitCode, 2);
+  assert.equal(skipped.state, "CI_FAILED");
+  const ok = await checkRequiredCi(CI_ARGS, { ghApiImpl: fakeGh({ branch: protectedBranch, runs: [runOf("verify", "success"), runOf("flaky-optional", "failure")] }), readPrImpl: prReader([H]) });
+  assert.equal(ok.state, "CI_PASSED");
+  assert.equal(ok.policy.source, "branch-protection");
+  const wrongApp = await checkRequiredCi(CI_ARGS, { ghApiImpl: fakeGh({ branch: protectedBranch, runs: [runOf("verify", "success", { appId: 1 })] }), readPrImpl: prReader([H]) });
+  assert.equal(wrongApp.state, "CI_REQUIRED_CHECK_MISSING");
+});
+
+test("checkRequiredCi: ruleset required_status_checks are honored", async () => {
+  const rules = [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "verify", integration_id: 15368 }] } }];
+  const result = await checkRequiredCi(CI_ARGS, { ghApiImpl: fakeGh({ rules, runs: [] }), readPrImpl: prReader([H]) });
+  assert.equal(result.state, "CI_REQUIRED_CHECK_MISSING");
+});
+
+test("checkRequiredCi: required_status_checks rule on a later rules page is honored", async () => {
+  const filler = Array.from({ length: 30 }, () => ({ type: "deletion" }));
+  const later = [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "verify" }] } }];
+  const rules = [];
+  rules.pages = [filler, later];
+  const ghApiImpl = fakeGh({ rules, runs: [runOf("other", "success")] });
+  const result = await checkRequiredCi(CI_ARGS, { ghApiImpl, readPrImpl: prReader([H]) });
+  assert.equal(result.state, "CI_REQUIRED_CHECK_MISSING");
+  assert.ok(ghApiImpl.calls.some((c) => /rules\/branches\/main\?per_page=100/.test(c)));
+});
+
+test("checkRequiredCi: conflicting duplicate runs for one context (success + failure) -> CI_FAILED", async () => {
+  const result = await checkRequiredCi(CI_ARGS, {
+    ghApiImpl: fakeGh({ runs: [runOf("verify", "success"), runOf("verify", "failure", { appId: 99 })] }),
+    readPrImpl: prReader([H]),
+  });
+  assert.equal(result.state, "CI_FAILED");
+});
+
+test("checkRequiredCi: a failing legacy commit status blocks; pending status -> CI_PENDING", async () => {
+  const failing = await checkRequiredCi(CI_ARGS, { ghApiImpl: fakeGh({ statuses: [{ context: "ci/legacy", state: "failure" }] }), readPrImpl: prReader([H]) });
+  assert.equal(failing.state, "CI_FAILED");
+  const pending = await checkRequiredCi(CI_ARGS, { ghApiImpl: fakeGh({ statuses: [{ context: "ci/legacy", state: "pending" }] }), readPrImpl: prReader([H]) });
+  assert.equal(pending.state, "CI_PENDING");
+});
+
+test("checkRequiredCi: unreadable/ambiguous evidence fails closed to exit 1", async () => {
+  const cases = {
+    "policy 403": fakeGh({ extra: { "repos/o/r/branches/main": () => { throw new Error("HTTP 403"); } } }),
+    "branch summary without boolean protected": fakeGh({ branch: {} }),
+    "rules not an array": fakeGh({ extra: { "repos/o/r/rules/branches/main?per_page=100": {} } }),
+    "required workflows rule": fakeGh({ rules: [{ type: "workflows", parameters: { workflows: [{ path: ".github/workflows/ci.yml" }] } }] }),
+    "malformed rule entry": fakeGh({ rules: [null] }),
+    "unrecognized conclusion": fakeGh({ runs: [runOf("verify", "mystery")] }),
+    "truncated check-run list": fakeGh({ extra: { [`repos/o/r/commits/${H}/check-runs?per_page=100&filter=latest`]: [{ total_count: 5, check_runs: [runOf("verify", "success")] }] } }),
+    "truncated status list": fakeGh({ extra: { [`repos/o/r/commits/${H}/status?per_page=100`]: { total_count: 3, sha: H, statuses: [] } } }),
+    "malformed check run": fakeGh({ runs: [{ nope: true }] }),
+  };
+  for (const [label, ghApiImpl] of Object.entries(cases)) {
+    const result = await checkRequiredCi(CI_ARGS, { ghApiImpl, readPrImpl: prReader([H]) });
+    assert.equal(result.exitCode, 1, label);
+    assert.equal(result.state, "CI_UNVERIFIABLE", label);
+  }
+  const closed = await checkRequiredCi(CI_ARGS, { ghApiImpl: fakeGh(), readPrImpl: ({ fields }) => ({ headRefOid: H, baseRefName: "main", state: "MERGED" }) });
+  assert.equal(closed.exitCode, 1);
+  const noHead = await checkRequiredCi({ repo: "o/r", pr: "1", head: "not-a-sha" }, { ghApiImpl: fakeGh(), readPrImpl: prReader([H]) });
+  assert.equal(noHead.exitCode, 1);
+});
+
+test("readRequiredCheckPolicy: protected branch lacking a readable summary falls back to the dedicated endpoint; 'not enabled' 404 means none; other errors throw", () => {
+  const dedicatedPath = "repos/o/r/branches/main/protection/required_status_checks";
+  const policy = readRequiredCheckPolicy(
+    { repo: "o/r", base: "main" },
+    { ghApiImpl: fakeGh({ branch: { protected: true }, extra: { [dedicatedPath]: { contexts: ["verify"] } } }) },
+  );
+  assert.deepEqual(policy.required, [{ context: "verify", appId: null }]);
+  const e404 = () => { const e = new Error("gh api failed"); e.ghStderr = "gh: Required status checks not enabled (HTTP 404)"; throw e; };
+  const none = readRequiredCheckPolicy({ repo: "o/r", base: "main" }, { ghApiImpl: fakeGh({ branch: { protected: true }, extra: { [dedicatedPath]: e404 } }) });
+  assert.deepEqual(none, { required: [], source: "none-declared" });
+  const e404other = () => { const e = new Error("gh api failed"); e.ghStderr = "gh: Not Found (HTTP 404)"; throw e; };
+  assert.throws(() => readRequiredCheckPolicy({ repo: "o/r", base: "main" }, { ghApiImpl: fakeGh({ branch: { protected: true }, extra: { [dedicatedPath]: e404other } }) }));
+});
+
+test("evaluateCiEvidence: no declared policy, zero observed checks -> CI_PASSED with observed 0 (nothing is required; recorded explicitly)", () => {
+  const result = evaluateCiEvidence({ head: H, policy: { required: [], source: "none-declared" }, checkRuns: [], statuses: [] });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.observed, 0);
 });

@@ -355,7 +355,7 @@ import {
 // which imports stage1DispositionMatchesHead from this module) into a 3-node cycle; every
 // side only reads the others' bindings from inside function bodies, never at module-top-level,
 // so this remains safe under ESM's live-binding semantics regardless of load order.
-import { combineMergeReadyResult } from "../review-watch/merge-ready-gate.mjs";
+import { combineMergeReadyResult, checkRequiredCi } from "../review-watch/merge-ready-gate.mjs";
 // Issue #486: the deterministic action-envelope table every verdict below is stamped with.
 import { getActionEnvelope, getCorrectionContinuation } from "./action-envelope.mjs";
 import { bindVerdictContinuation } from "./control-plane-continuation.mjs";
@@ -517,7 +517,51 @@ function hasFindingsStage1Response(stage1) {
 // out of scope. The new verdict carries `reviewedHead` (the exact head Stage 1 was satisfied at) and
 // NEVER a correctedHead: an ordinary satisfied PR has no correction-satisfied reviewed/corrected pair
 // and none is fabricated here.
-function ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeReady }) {
+// Issue #1129 (control #953; live #951/#950/PR #952): every merge-authorizing verdict below also
+// requires passing required-CI evidence bound to the exact current head (`ci`, merge-ready-gate.mjs's
+// `checkRequiredCi`). Returns `null` only for a trustworthy CI_PASSED result whose head is the
+// context head; anything else is a non-merge verdict with a concise machine-readable reason:
+// pending -> NO_ACTION_YET (wait and re-invoke); failed/missing/head-moved/unverifiable/absent ->
+// AMBIGUOUS (fail-closed founder-visible stop). A `ci` that is absent is never success -- the
+// caller omitting the evidence cannot authorize merge.
+function ciBlockVerdict(ci, context, { stage1, mergeReady }) {
+  const base = { stopAfter: true, ...context, stage1, mergeReady };
+  if (!hasTrustworthyExitCode(ci)) {
+    return {
+      state: "AMBIGUOUS",
+      ...base,
+      reason: "required CI evidence for the current head is absent or lacks a trustworthy exitCode; merge is not authorized (fail closed)",
+    };
+  }
+  if (ci.exitCode === 0) {
+    const head = typeof context.head === "string" ? context.head.toLowerCase() : "";
+    if (
+      ci.state === "CI_PASSED" &&
+      typeof ci.head === "string" &&
+      head.length > 0 &&
+      ci.head.toLowerCase().startsWith(head)
+    ) {
+      return null;
+    }
+    return {
+      state: "AMBIGUOUS",
+      ...base,
+      ci,
+      reason: `required CI evidence is not a CI_PASSED result bound to head ${context.head}; merge is not authorized (fail closed)`,
+    };
+  }
+  if (ci.exitCode === 2 && ci.state === "CI_PENDING") {
+    return { state: "NO_ACTION_YET", ...base, ci, reason: ci.message ?? `required CI is pending at head ${context.head}` };
+  }
+  return {
+    state: "AMBIGUOUS",
+    ...base,
+    ci,
+    reason: `required CI is not satisfied at head ${context.head}: ${ci.state ?? "unknown"} ${ci.message ?? ""}`.trim(),
+  };
+}
+
+function ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeReady, ci }) {
   if (mergeConflict) {
     if (!hasTrustworthyExitCode(mergeConflict) || mergeConflict.exitCode === 1) {
       return {
@@ -558,11 +602,15 @@ function ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeRe
       };
     }
   }
-  return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
+  return ciBlockVerdict(ci, context, { stage1, mergeReady }) ?? {
+    state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
+    stopAfter: true,
+    ...context,
+  };
 }
 
 export function resolvePreMergeVerdict(
-  { stage1, mergeReady, stage1Disposition = null, correctionDelta = null, mergeConflict = null, unfinalizedCorrection = null },
+  { stage1, mergeReady, stage1Disposition = null, correctionDelta = null, mergeConflict = null, unfinalizedCorrection = null, ci = null },
   context = {},
 ) {
   if (!hasTrustworthyExitCode(stage1) || !hasTrustworthyExitCode(mergeReady)) {
@@ -623,7 +671,7 @@ export function resolvePreMergeVerdict(
       // <sha>` against the same evidence reaches the same exit-0/BLOCKED outcome this verdict
       // authorizes -- never a documented gate that stays permanently blocked while this
       // verdict says merge anyway.
-      const composed = combineMergeReadyResult({ stage1, lifecycle: mergeReady, correctionDelta }, context);
+      const composed = combineMergeReadyResult({ stage1, lifecycle: mergeReady, correctionDelta, ci }, context);
       if (composed.exitCode === 0) {
         // Issue #665 (live #639/#638/PR #640 reproduction): every documented merge
         // prerequisite passed, but GitHub's own live mergeable state against the current
@@ -678,6 +726,12 @@ export function resolvePreMergeVerdict(
         // ordinary closing-reference repair instruction instead of mandating
         // finalize-correction-breakpoint.mjs a second time over evidence it already verified.
         return { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, ...context, correctionReason: "closing-reference" };
+      }
+      // Issue #1129: the only remaining blocker is required CI (failed/pending/missing/unreadable/
+      // moved head) -- a non-merge verdict, never the generic fall-through below.
+      if (isMergeReadyState(mergeReady.state)) {
+        const ciBlocked = ciBlockVerdict(ci, context, { stage1, mergeReady });
+        if (ciBlocked) return ciBlocked;
       }
       // Any other composed outcome for an otherwise-satisfied correction delta (an
       // operational error from the composed check itself, or a combination this gate does
@@ -779,7 +833,13 @@ export function resolvePreMergeVerdict(
 
   if (stage1.state === "EXEMPT") {
     if (isMergeReadyState(mergeReady.state)) {
-      return { state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2", stopAfter: true, ...context };
+      return (
+        ciBlockVerdict(ci, context, { stage1, mergeReady }) ?? {
+          state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
+          stopAfter: true,
+          ...context,
+        }
+      );
     }
     // Stage 1 review finding on PR #613 (P1): EXEMPT carries no findings at all -- the only
     // possible correction here is the closing reference. See the CORRECTION_SATISFIED branch
@@ -801,7 +861,7 @@ export function resolvePreMergeVerdict(
     // automated-sync classifier at all.
     if (hasFindingsStage1Response(stage1)) {
       if (stage1DispositionSatisfiedAtHead && isMergeReadyState(mergeReady.state)) {
-        return ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeReady });
+        return ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeReady, ci });
       }
       // The one genuinely findings-bearing path: #611's #438/PR #610 regression.
       // finalize-correction-breakpoint.mjs remains mandatory here.
@@ -809,7 +869,7 @@ export function resolvePreMergeVerdict(
     }
     if (isCleanStage1Response(stage1)) {
       if (isMergeReadyState(mergeReady.state)) {
-        return ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeReady });
+        return ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeReady, ci });
       }
       // Stage 1 review finding on PR #613 (P1): a clean-pass response has no findings either --
       // same closing-reference-only reasoning as the EXEMPT branch above.
@@ -1386,6 +1446,7 @@ async function resolvePreMerge(
     listStage1TriggerHeadsImpl = defaultListStage1TriggerHeads,
     readCorrectionCommitsImpl = defaultReadCorrectionCommits,
     readTargetCommitsImpl = defaultReadTargetBranchCommits,
+    checkRequiredCiImpl = checkRequiredCi,
   },
 ) {
   let stage1;
@@ -1514,9 +1575,29 @@ async function resolvePreMerge(
     }
   }
 
+  // Issue #1129 (control #953): required-CI evidence for the exact current head, fetched only when
+  // the evidence could otherwise reach a merge-authorizing verdict (no extra `gh` calls on paths that
+  // end in NO_ACTION_YET/correction/AMBIGUOUS regardless of CI). Merge-authorizing branches inside
+  // resolvePreMergeVerdict treat a missing `ci` as a fail-closed non-merge verdict.
+  let ci = null;
+  if (
+    mergeReady &&
+    mergeReady.exitCode === 0 &&
+    isMergeReadyState(mergeReady.state) &&
+    ((stage1.state === "NOT_REQUESTED" && correctionDelta && correctionDelta.exitCode === 0 && correctionDelta.state === "CORRECTION_SATISFIED") ||
+      stage1.state === "EXEMPT" ||
+      stage1.state === "RESPONSE_RECEIVED")
+  ) {
+    try {
+      ci = await checkRequiredCiImpl({ repo, pr, head });
+    } catch (err) {
+      ci = { exitCode: 1, state: "CI_UNVERIFIABLE", message: `required CI check threw: ${err.message}` };
+    }
+  }
+
   const context = { repo, pr, head, issue, ...(controlIssue != null ? { controlIssue } : {}) };
   const verdict = resolvePreMergeVerdict(
-    { stage1, mergeReady, stage1Disposition, correctionDelta, mergeConflict, unfinalizedCorrection },
+    { stage1, mergeReady, stage1Disposition, correctionDelta, mergeConflict, unfinalizedCorrection, ci },
     context,
   );
   return { exitCode: exitCodeFor(verdict.state), ...verdict };
@@ -2599,7 +2680,7 @@ async function resolveStalePointerCorrectionRecovery(
 // the head itself, only once the Execution reference has already checked out.
 async function resolvePreMergeFromControlBody(
   { repo, body, prIssue, controlIssueNumber, head, ghPrHeadImpl },
-  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl, checkRequiredCiImpl },
 ) {
   const executionField = readExecutionBulletField(body);
   const executionRef = executionField.conflict
@@ -2630,7 +2711,7 @@ async function resolvePreMergeFromControlBody(
   const stage1Disposition = parseControlBullet(body, "Stage 1");
   return resolvePreMerge(
     { repo, pr: prIssue, head: resolvedHead, issue: executionRef.issue, stage1Disposition, controlIssue: controlIssueNumber },
-    { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+    { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl, checkRequiredCiImpl },
   );
 }
 
@@ -2866,6 +2947,7 @@ async function runNextReviewTransitionGateCore(
     readTargetCommitsImpl = defaultReadTargetBranchCommits,
     reconcileStage2CorrectionPrImpl = reconcileStage2CorrectionPr,
     reconcileExistingStage2AuditIssueImpl = reconcileExistingStage2AuditIssue,
+    checkRequiredCiImpl = checkRequiredCi,
     evaluateEvidenceCorrectionImpl = evaluateEvidenceCorrection,
     evaluateUnusableRecoveryImpl = evaluateUnusableRecovery,
   } = {},
@@ -2921,7 +3003,7 @@ async function runNextReviewTransitionGateCore(
         stage1Disposition: args.stage1Disposition ?? null,
         controlIssue: null,
       },
-      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl },
+      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, checkRequiredCiImpl },
     );
   }
 
@@ -3033,7 +3115,7 @@ async function runNextReviewTransitionGateCore(
       const head = args.head || prState.headRefOid;
       return resolvePreMergeFromControlBody(
         { repo, body, prIssue: prRef.issue, controlIssueNumber, head, ghPrHeadImpl },
-        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl, checkRequiredCiImpl },
       );
     }
     // CLOSED without merging (or any other state gh might report): a genuinely contradictory
@@ -3069,7 +3151,7 @@ async function runNextReviewTransitionGateCore(
     if (args.head) {
       return resolvePreMergeFromControlBody(
         { repo, body, prIssue: prRef.issue, controlIssueNumber, head: args.head, ghPrHeadImpl },
-        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl, checkRequiredCiImpl },
       );
     }
     // No settled "Stage 2" reference exists here (the auditRef.kind === "issue" branch above
@@ -3317,7 +3399,7 @@ async function runNextReviewTransitionGateCore(
     const head = prState.headRefOid;
     return resolvePreMergeFromControlBody(
       { repo, body, prIssue: prRef.issue, controlIssueNumber, head, ghPrHeadImpl },
-      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl },
+      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl, checkRequiredCiImpl },
     );
   }
 
