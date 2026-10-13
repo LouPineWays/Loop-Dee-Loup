@@ -515,7 +515,7 @@ const runPost = ({ simulate = "Inst bubblewrap (0.9 Ubuntu)\nInst socat (1.8 Ubu
     if (cmd === "dpkg-deb" && args[0] === "-c") return contents;
     if (cmd === "dpkg-deb" && args[0] === "-e") return "";
     if (cmd === "bwrap" && args[0] === "--version") { if (!installed) throw new Error("ENOENT"); return "bubblewrap 0.9"; }
-    if (cmd === "bwrap") { if (probe === "ok") return ""; throw err("x", "bwrap: setting up uid map: Permission denied\nmore"); }
+    if (cmd === "bwrap") { if (probe === "ok") return ""; const e = err("x", "bwrap: setting up uid map: Permission denied\nmore"); e.status = 1; throw e; }
     if (cmd === "find" && mutate && installed) return "deadbeef  /etc/apparmor.d/abstractions/base\n";
     if (cmd === "dpkg-query") return installed ? "1.0" : "unavailable";
     return cmd + "-out\n";
@@ -553,7 +553,8 @@ test("post-install mocks: probe passes after a clean inspected install; bounded,
 
 test("post-install mocks: a genuine probe failure is reported as evidence with exact stderr", () => {
   const r = runPost({ probe: "fail" });
-  assert.match(r.logs[2], /bwrap_probe=failed: bwrap: setting up uid map: Permission denied/);
+  assert.match(r.logs[2], /bwrap_probe=failed: exit=1 signal=none stderr=bwrap: setting up uid map: Permission denied \| more/);
+  assert.ok(r.logs[2].length <= 2000);
   assert.equal(r.exitCode, undefined);
 });
 
