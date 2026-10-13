@@ -16,9 +16,9 @@ import {
   findSupersededCandidates,
   parseOptionalIssueRef,
   parseOptionalIssueRefGuarded,
-  resolvePreMergeVerdict,
+  resolvePreMergeVerdict as rawResolvePreMergeVerdict,
   resolvePostMergeVerdict,
-  runNextReviewTransitionGate,
+  runNextReviewTransitionGate as rawRunNextReviewTransitionGate,
   reconcileStage2CorrectionPr,
   composeStage2CorrectionFinalizeCommand,
   findMatchingOpenAuditIssues,
@@ -26,6 +26,23 @@ import {
   verifyCorrectionProvenance,
   reduceCompareCommits,
 } from "./next-review-transition-gate.mjs";
+
+// Issue #1129 (control #953): every merge-authorizing pre-merge verdict now also requires passing
+// required-CI evidence bound to the exact current head. The legacy tests below were written before
+// that prerequisite and exercise OTHER evidence, so these wrappers inject a passing CI result by
+// default; each CI-specific test passes an explicit `ci` / `checkRequiredCiImpl` instead, and the
+// "required CI" section further down proves a missing/failed/pending/stale result never authorizes merge.
+const passingCi = (head) => ({ exitCode: 0, state: "CI_PASSED", head: String(head ?? "") });
+function resolvePreMergeVerdict(inputs, context = {}) {
+  const ctx = context.head ? context : { ...context, head: "deadbeefdeadbeef" };
+  return rawResolvePreMergeVerdict({ ci: passingCi(ctx.head), ...inputs }, ctx);
+}
+function runNextReviewTransitionGate(args, impls = {}) {
+  return rawRunNextReviewTransitionGate(args, {
+    checkRequiredCiImpl: async ({ head }) => passingCi(head),
+    ...impls,
+  });
+}
 
 // -- parseOptionalIssueRef ------------------------------------------------------------------
 
@@ -4759,4 +4776,141 @@ test("#1070: wrong-issue and prefix-colliding inline mentions do not fire the le
     assert.equal(result.state, "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION", body);
     assert.equal(result.pr, 1021);
   }
+});
+
+// -- Issue #1129 (control #953; live #951/#950/PR #952): exact-head required CI before merge ---------
+// Every merge-authorizing pre-merge branch -- ordinary clean/satisfied, EXEMPT, and
+// correction-satisfied -- must be denied unless a trustworthy CI_PASSED result bound to the
+// context head is supplied. These tests use the RAW verdict function (no default passing CI).
+
+const CI_GREEN_HEAD = "af52e922c2e4839cb1f6ae0dabcd91faaf2b5ad5";
+const CI_RED_HEAD = "dcbfe19591931eac29038deac510acfcfc76b0df";
+const ciPass = (head) => ({ exitCode: 0, state: "CI_PASSED", head });
+const ciOutcomes = (head) => ({
+  failed: { exitCode: 2, state: "CI_FAILED", head, message: `required CI failed at head ${head}: verify` },
+  pending: { exitCode: 2, state: "CI_PENDING", head, message: `required CI still pending at head ${head}: verify` },
+  missing: { exitCode: 2, state: "CI_REQUIRED_CHECK_MISSING", head, message: "required check(s) not reported" },
+  mismatch: { exitCode: 2, state: "CI_HEAD_MISMATCH", head: CI_GREEN_HEAD, message: "head moved" },
+  unverifiable: { exitCode: 1, state: "CI_UNVERIFIABLE", head, message: "HTTP 403" },
+});
+const mergeBranches = {
+  ordinary: (head) => ({ inputs: { stage1: stage1("RESPONSE_RECEIVED"), mergeReady: mergeReady("MERGE_READY") }, ctx: { repo: "o/r", pr: 952, head, issue: 950 }, merge: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2" }),
+  exempt: (head) => ({ inputs: { stage1: stage1("EXEMPT"), mergeReady: mergeReady("MERGE_READY_NO_WORK_ISSUE") }, ctx: { repo: "o/r", pr: 952, head, issue: 950 }, merge: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2" }),
+  correctionSatisfied: (head) => ({
+    inputs: { stage1: stage1("NOT_REQUESTED"), mergeReady: mergeReady("MERGE_READY"), correctionDelta: correctionDelta("CORRECTION_SATISFIED") },
+    ctx: { repo: "o/r", pr: 952, head, issue: 950 },
+    merge: "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
+  }),
+};
+
+test("#1129 resolvePreMergeVerdict: a current-head CI_PASSED authorizes each established merge branch unchanged (ordinary, EXEMPT, correction-satisfied)", () => {
+  for (const [name, make] of Object.entries(mergeBranches)) {
+    const { inputs, ctx, merge } = make(CI_GREEN_HEAD);
+    const v = rawResolvePreMergeVerdict({ ...inputs, ci: ciPass(CI_GREEN_HEAD) }, ctx);
+    assert.equal(v.state, merge, name);
+  }
+});
+
+test("#1129 resolvePreMergeVerdict: failed/missing/head-moved/unverifiable CI -> AMBIGUOUS on every merge-authorizing branch with a machine-readable ci + reason, never a merge verdict (the dcbfe195 / run 37624396190 shape)", () => {
+  for (const [name, make] of Object.entries(mergeBranches)) {
+    const { inputs, ctx } = make(CI_RED_HEAD);
+    for (const key of ["failed", "missing", "mismatch", "unverifiable"]) {
+      const ci = ciOutcomes(CI_RED_HEAD)[key];
+      const v = rawResolvePreMergeVerdict({ ...inputs, ci }, ctx);
+      assert.equal(v.state, "AMBIGUOUS", `${name}/${key}`);
+      assert.equal(v.stopAfter, true);
+      assert.equal(v.ci.state, ci.state, `${name}/${key}`);
+      assert.match(v.reason, /CI/);
+    }
+  }
+});
+
+test("#1129 resolvePreMergeVerdict: pending CI -> NO_ACTION_YET (wait) with the ci evidence, on every merge-authorizing branch", () => {
+  for (const [name, make] of Object.entries(mergeBranches)) {
+    const { inputs, ctx } = make(CI_GREEN_HEAD);
+    const v = rawResolvePreMergeVerdict({ ...inputs, ci: ciOutcomes(CI_GREEN_HEAD).pending }, ctx);
+    assert.equal(v.state, "NO_ACTION_YET", name);
+    assert.equal(v.ci.state, "CI_PENDING");
+  }
+});
+
+test("#1129 resolvePreMergeVerdict: absent, malformed, or older-head-bound CI never authorizes merge on any branch", () => {
+  for (const [name, make] of Object.entries(mergeBranches)) {
+    const { inputs, ctx } = make(CI_GREEN_HEAD);
+    for (const ci of [undefined, null, {}, { state: "CI_PASSED", head: CI_GREEN_HEAD }, ciPass(CI_RED_HEAD), { exitCode: 0, state: "CI_PENDING", head: CI_GREEN_HEAD }]) {
+      const v = rawResolvePreMergeVerdict({ ...inputs, ...(ci === undefined ? {} : { ci }) }, ctx);
+      assert.equal(v.state, "AMBIGUOUS", `${name}/${JSON.stringify(ci)}`);
+    }
+  }
+});
+
+test("#1129 resolvePreMergeVerdict: CI never overrides an existing non-merge outcome -- closing-reference correction, conflict recovery and mergeability UNKNOWN keep their verdicts", () => {
+  const ctx = { repo: "o/r", pr: 952, head: CI_GREEN_HEAD, issue: 950 };
+  const bad = ciOutcomes(CI_GREEN_HEAD).failed;
+  const closing = rawResolvePreMergeVerdict(
+    { stage1: stage1("NOT_REQUESTED"), mergeReady: mergeReady("BLOCKED_CLOSING_REFERENCE"), correctionDelta: correctionDelta("CORRECTION_SATISFIED"), ci: bad },
+    ctx,
+  );
+  assert.equal(closing.state, "STAGE1_CORRECTION_REQUIRED");
+  const conflict = rawResolvePreMergeVerdict(
+    { stage1: stage1("NOT_REQUESTED"), mergeReady: mergeReady("MERGE_READY"), correctionDelta: correctionDelta("CORRECTION_SATISFIED"), mergeConflict: { exitCode: 0, mergeable: "CONFLICTING" }, ci: ciPass(CI_GREEN_HEAD) },
+    ctx,
+  );
+  assert.equal(conflict.state, "STAGE1_CORRECTION_SATISFIED_MERGE_CONFLICT");
+  const unknown = rawResolvePreMergeVerdict(
+    { stage1: stage1("RESPONSE_RECEIVED"), mergeReady: mergeReady("MERGE_READY"), mergeConflict: { exitCode: 0, mergeable: "UNKNOWN" }, ci: ciPass(CI_GREEN_HEAD) },
+    ctx,
+  );
+  assert.equal(unknown.state, "NO_ACTION_YET");
+});
+
+test("#1129 runNextReviewTransitionGate: correction-satisfied head with failing CI -> non-merge AMBIGUOUS, passing CI on the later green head -> ordinary merge authorization (direct reference)", async () => {
+  const impls = (head, ci) => ({
+    ghIssueViewImpl: async () => ({ body: "", state: "OPEN" }),
+    stage1RunImpl: async () => stage1("NOT_REQUESTED"),
+    checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+    checkCorrectionDeltaImpl: async () => ({ exitCode: 0, state: "CORRECTION_SATISFIED", reviewedHead: "30b36035c9", correctedHead: head }),
+    checkMergeConflictImpl: async () => ({ exitCode: 0, mergeable: "MERGEABLE" }),
+    checkRequiredCiImpl: async (args) => {
+      assert.equal(args.head, head);
+      assert.equal(args.pr, "952");
+      return ci;
+    },
+  });
+  const args = (head) => ({ repo: "o/r", pr: "952", head, issue: "950", stage1Disposition: `correction-satisfied at ${head} (reviewed 30b36035c9)` });
+  const denied = await rawRunNextReviewTransitionGate(args(CI_RED_HEAD), impls(CI_RED_HEAD, ciOutcomes(CI_RED_HEAD).failed));
+  assert.equal(denied.state, "AMBIGUOUS");
+  assert.notEqual(denied.exitCode, 0);
+  assert.equal(denied.ci.state, "CI_FAILED");
+  const allowed = await rawRunNextReviewTransitionGate(args(CI_GREEN_HEAD), impls(CI_GREEN_HEAD, ciPass(CI_GREEN_HEAD)));
+  assert.equal(allowed.state, "STAGE1_CORRECTION_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+  assert.equal(allowed.exitCode, 0);
+});
+
+test("#1129 runNextReviewTransitionGate: a throwing CI check fails closed; CI is not fetched when the verdict cannot reach merge (PENDING Stage 1)", async () => {
+  const base = {
+    ghIssueViewImpl: async () => ({ body: "", state: "OPEN" }),
+    checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+  };
+  const args = { repo: "o/r", pr: "376", head: CI_GREEN_HEAD, issue: "375" };
+  const threw = await rawRunNextReviewTransitionGate(args, {
+    ...base,
+    stage1RunImpl: async () => stage1("RESPONSE_RECEIVED"),
+    checkRequiredCiImpl: async () => {
+      throw new Error("boom");
+    },
+  });
+  assert.equal(threw.state, "AMBIGUOUS");
+  assert.notEqual(threw.exitCode, 0);
+  let called = false;
+  const pending = await rawRunNextReviewTransitionGate(args, {
+    ...base,
+    stage1RunImpl: async () => stage1("PENDING"),
+    checkRequiredCiImpl: async () => {
+      called = true;
+      return ciPass(CI_GREEN_HEAD);
+    },
+  });
+  assert.equal(called, false);
+  assert.equal(pending.state, "NO_ACTION_YET");
 });

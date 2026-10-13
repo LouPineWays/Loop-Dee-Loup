@@ -135,7 +135,7 @@ test("non-genuine provider failure with a reaction stays non-genuine (PENDING)",
 test("composition: structured clean evidence + MERGE_READY resolves the normal merge/Stage 2 transition", async () => {
   const stage1 = await runWith([reaction()]);
   const verdict = resolvePreMergeVerdict(
-    { stage1, mergeReady: { exitCode: 0, state: "MERGE_READY" } },
+    { stage1, mergeReady: { exitCode: 0, state: "MERGE_READY" }, ci: { exitCode: 0, state: "CI_PASSED", head: base.head } },
     { head: base.head },
   );
   assert.equal(verdict.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
