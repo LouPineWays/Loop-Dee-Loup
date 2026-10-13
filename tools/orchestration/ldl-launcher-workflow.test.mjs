@@ -497,7 +497,7 @@ test("post-install route: no launch/claim/worker/policy-change pathway; allowlis
 });
 
 // Mock-run: scripted command responses.
-const runPost = ({ simulate = "Inst bubblewrap (0.9 Ubuntu)\nInst socat (1.8 Ubuntu)\n", contents = "./usr/bin/bwrap\n", script = "#!/bin/sh\nexit 0\n", failOn = null, probe = "ok", mutate = false } = {}) => {
+const runPost = ({ simulate = "Inst bubblewrap (0.9 Ubuntu)\nInst socat (1.8 Ubuntu)\n", contents = "./usr/bin/bwrap\n", script = "#!/bin/sh\nexit 0\n", failOn = null, probe = "ok", mutate = false, configScript = false } = {}) => {
   const code = postScript().replace(/^import .*$/gm, "");
   const calls = [];
   const logs = [];
@@ -516,12 +516,12 @@ const runPost = ({ simulate = "Inst bubblewrap (0.9 Ubuntu)\nInst socat (1.8 Ubu
     if (cmd === "dpkg-deb" && args[0] === "-e") return "";
     if (cmd === "bwrap" && args[0] === "--version") { if (!installed) throw new Error("ENOENT"); return "bubblewrap 0.9"; }
     if (cmd === "bwrap") { if (probe === "ok") return ""; throw err("x", "bwrap: setting up uid map: Permission denied\nmore"); }
-    if (cmd === "ls" && mutate && installed) return "bwrap-userns-restrict\n";
+    if (cmd === "find" && mutate && installed) return "deadbeef  /etc/apparmor.d/abstractions/base\n";
     if (cmd === "dpkg-query") return installed ? "1.0" : "unavailable";
     return cmd + "-out\n";
   };
-  const readFileSync = (p) => { if (/postinst|preinst|prerm|postrm|triggers/.test(p)) return script; return p === "/etc/os-release" ? "PRETTY_NAME=Ubuntu 24.04\nVERSION_ID=24.04" : "1"; };
-  const readdirSync = (d) => (/ctl-/.test(d) ? ["postinst"] : [...files.keys()]);
+  const readFileSync = (p) => { if (/postinst|preinst|prerm|postrm|triggers|config/.test(p)) return script; return p === "/etc/os-release" ? "PRETTY_NAME=Ubuntu 24.04\nVERSION_ID=24.04" : "1"; };
+  const readdirSync = (d) => (/ctl-/.test(d) ? [configScript ? "config" : "postinst"] : [...files.keys()]);
   const mkdtempSync = () => "/tmp/ldl-debs-x";
   const join = (...a) => a.join("/");
   const createHash = () => ({ update(t) { this.t = t; return this; }, digest() { return Buffer.from(String(this.t)).toString("hex").slice(0, 16); } });
@@ -562,6 +562,9 @@ test("post-install mocks: apparmor in the plan, contents, or a maintainer script
     { simulate: "Inst bubblewrap (1)\nInst apparmor-profiles (2)\n" },
     { contents: "./etc/apparmor.d/bwrap\n" },
     { script: "#!/bin/sh\napparmor_parser -r /etc/apparmor.d/x\n" },
+    { script: "#!/bin/sh\napparmor_parser -r /etc/apparmor.d/x\n", configScript: true },
+    { simulate: "Inst bubblewrap (1)\nRemv conflicting-pkg [1]\n" },
+    { simulate: "Inst bubblewrap (1)\nPurg conflicting-pkg [1]\n" },
   ]) {
     const r = runPost(o);
     assert.equal(sudoIdx(r, "install"), -1, "no install attempted");
@@ -590,4 +593,16 @@ test("post-install mocks: install error is reported, probe skipped, evidence sti
 test("post-install mocks: an unanticipated pre/post policy change is flagged as a boundary violation", () => {
   const r = runPost({ mutate: true });
   assert.match(r.logs[2], /policy_change=BOUNDARY VIOLATION: changed=\[[^\]]*apparmor_d_digest/);
+});
+
+test("post-install mocks: boundary violation fails the job; apt calls forbid removal; final snapshot follows the probe", () => {
+  const r = runPost({ mutate: true });
+  assert.equal(r.exitCode, 1);
+  for (const c of r.calls.filter((c) => (c.cmd === "apt-get" && (c.args[0] === "-s" || c.args[0] === "install")) || (c.cmd === "sudo" && c.args[1] === "install"))) {
+    assert.ok(c.args.includes("--no-remove"));
+  }
+  const probeIdx = r.calls.findIndex((c) => c.cmd === "bwrap" && c.args[0] === "--unshare-all");
+  const lastDmesg = r.calls.map((c) => c.cmd).lastIndexOf("dmesg");
+  assert.ok(lastDmesg > probeIdx, "post snapshot reads dmesg after the probe");
+  assert.ok(r.calls.some((c) => c.cmd === "find" && c.args.includes("sha256sum")), "AppArmor dir contents are hashed");
 });

@@ -427,6 +427,8 @@ jobs:
             const profilePaths = ["/etc/apparmor.d/bwrap-userns-restrict", "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict", "/etc/apparmor.d/bwrap"];
             const hashes = profilePaths.map((p) => `${p}=${(fact("sha256sum", [p]).split(/\s+/)[0] || "unavailable").slice(0, 64)}`);
             const dirList = fact("ls", ["-1", "/etc/apparmor.d"]);
+            const dirContent = fact("find", ["/etc/apparmor.d", "-type", "f", "-exec", "sha256sum", "{}", "+"]);
+            const dirContentSorted = dirContent === "unavailable" ? dirContent : dirContent.split("\n").sort().join("\n");
             const listParts = [lines(dirList, /bwrap|bubblewrap/i, 20), lines(fact("ls", ["-1", "/usr/share/apparmor/extra-profiles"]), /bwrap|bubblewrap/i, 20)];
             const listed = listParts.every((x) => x === "unavailable") ? "unavailable" : listParts.map((x) => (x === "unavailable" ? "source-unavailable" : x)).flat();
             const aa = fact("aa-status", []);
@@ -436,7 +438,7 @@ jobs:
             const userns = `apparmor_restrict_unprivileged_userns=${proc("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")} unprivileged_userns_clone=${proc("/proc/sys/kernel/unprivileged_userns_clone")} max_user_namespaces=${proc("/proc/sys/user/max_user_namespaces")}`;
             const packages = ["bubblewrap", "socat", "apparmor"].map((pk) => `${pk}=${cap(fact("dpkg-query", ["-W", "-f=${Version}", pk]), 200)}`).join(" ");
             // Policy-relevant facts compared pre/post; each is "unavailable" when unreadable.
-            const policy = { userns, profile_hashes: hashes.join(","), apparmor_d_digest: digest(dirList), profiles_loaded_digest: digest(profilesLoaded) };
+            const policy = { userns, profile_hashes: hashes.join(","), apparmor_d_digest: digest(dirContentSorted), profiles_loaded_digest: digest(profilesLoaded) };
             const text = `os=${osRelease}; kernel=${cap(fact("uname", ["-r"]), 200)}; ${userns}; packages=${packages}; bwrap_profile_hashes=[${hashes.join(", ")}]; apparmor_d_digest=${policy.apparmor_d_digest}; bwrap_profile_names=${capJson(listed, 1000)}; aa-status=${capJson(aa, 2000)}; profiles_loaded_digest=${policy.profiles_loaded_digest}; apparmor_denied=${capJson(denied, 1500)}`;
             return { policy, text: text.slice(0, 7000) };
           };
@@ -449,7 +451,9 @@ jobs:
           const staged = [];
           try {
             execFileSync("sudo", ["apt-get", "update", "-qq"], { encoding: "utf8", env: dEnv, stdio: ["ignore", "ignore", "pipe"], timeout: 180000 });
-            const sim = execFileSync("apt-get", ["-s", "install", "-y", "-qq", ...PKGS], { encoding: "utf8", env: dEnv, stdio: ["ignore", "pipe", "pipe"], timeout: 60000 });
+            const sim = execFileSync("apt-get", ["-s", "install", "-y", "-qq", "--no-remove", ...PKGS], { encoding: "utf8", env: dEnv, stdio: ["ignore", "pipe", "pipe"], timeout: 60000 });
+            const removal = sim.split("\n").find((l) => /^(Remv|Purg) /.test(l));
+            if (removal) throw new Error(`install plan includes a package removal: ${removal.slice(0, 80)}`);
             const plan = sim.split("\n").map((l) => /^Inst (\S+)/.exec(l)?.[1]).filter(Boolean);
             if (plan.length > 40) throw new Error(`install plan too large to inspect (${plan.length} packages)`);
             const hit = plan.find((n) => /apparmor/i.test(n));
@@ -466,7 +470,7 @@ jobs:
                 const ctl = join(dir, `ctl-${f}`);
                 execFileSync("dpkg-deb", ["-e", deb, ctl], { encoding: "utf8", env: dEnv, stdio: ["ignore", "ignore", "pipe"], timeout: 30000 });
                 for (const name of readdirSync(ctl)) {
-                  if (!/^(preinst|postinst|prerm|postrm|triggers)$/.test(name)) continue;
+                  if (!/^(preinst|postinst|prerm|postrm|triggers|config)$/.test(name)) continue;
                   if (/apparmor|aa-(enforce|complain|disable|status)/i.test(readFileSync(join(ctl, name), "utf8"))) throw new Error(`${f} ${name} references apparmor`);
                 }
                 staged.push(f.slice(0, 80));
@@ -478,12 +482,11 @@ jobs:
             install = `refused-before-install: ${refusal} (cannot rule out a policy side effect; founder review required; nothing installed)`;
           } else {
             try {
-              execFileSync("sudo", ["apt-get", "install", "-y", "-qq", ...PKGS], { encoding: "utf8", env: dEnv, stdio: ["ignore", "ignore", "pipe"], timeout: 300000 });
+              execFileSync("sudo", ["apt-get", "install", "-y", "-qq", "--no-remove", ...PKGS], { encoding: "utf8", env: dEnv, stdio: ["ignore", "ignore", "pipe"], timeout: 300000 });
               install = `ok (inspected ${staged.length} package files; none reference apparmor)`;
             } catch (e) { install = `failed: ${first(e)}`; }
           }
           // 2. Post-install facts and the EXACT unchanged unprivileged probe (no sudo), only after install.
-          const post = snapshot();
           if (install.startsWith("ok")) {
             if (fact("bwrap", ["--version"]) === "unavailable") probe = "unavailable: bwrap --version failed after install";
             else {
@@ -493,6 +496,8 @@ jobs:
               } catch (e) { probe = `failed: ${first(e)}`; }
             }
           } else probe = "skipped: install did not complete";
+          // Snapshot after the probe so a denial produced by the probe itself is captured.
+          const post = snapshot();
           const changed = [];
           const unknown = [];
           for (const k of Object.keys(pre.policy)) {
@@ -504,5 +509,5 @@ jobs:
           console.log(`HOSTED POST-INSTALL ISOLATION DIAGNOSTIC pre-install (credential-free, no worker): ${pre.text}`);
           console.log(`HOSTED POST-INSTALL ISOLATION DIAGNOSTIC post-install (credential-free, no worker): ${post.text}`);
           console.log(`HOSTED POST-INSTALL ISOLATION DIAGNOSTIC result (credential-free, no worker; only ${PKGS.join("+")} may be installed): install=${install.slice(0, 600)}; policy_change=${policyChange.slice(0, 400)}; bwrap_probe=${probe}`.slice(0, 2000));
-          if (refusal || !install.startsWith("ok")) process.exitCode = 1;
+          if (refusal || !install.startsWith("ok") || changed.length) process.exitCode = 1;
           POSTDIAG
