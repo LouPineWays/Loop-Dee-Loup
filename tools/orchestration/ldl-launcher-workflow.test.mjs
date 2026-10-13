@@ -199,7 +199,7 @@ const diagCode = () => {
   const b = iso(yml);
   const at = b.indexOf("// Read-only host diagnostics");
   assert.ok(at > 0, "diagnostics block present");
-  const endMarker = "apparmor_denied=${JSON.stringify(denied)}`);";
+  const endMarker = "apparmor_denied=${capJson(denied, 4000)}`;";
   const end = b.indexOf(endMarker, at);
   assert.ok(end > at, "diagnostics block end");
   return { all: b, diag: b.slice(at, end + endMarker.length), before: b.slice(0, at), after: b.slice(end + endMarker.length) };
@@ -281,4 +281,46 @@ test("isolation diagnostics mocks: denial lines beyond a 4 KB dmesg prefix are s
   const d = logs.find((l) => l.includes("DIAGNOSTICS"));
   assert.match(d, /apparmor_denied=\["audit: apparmor=\\"DENIED\\"[^\]]*bwrap/);
   for (const e of envs.filter(Boolean)) assert.deepEqual(Object.keys(e), ["PATH"]);
+});
+
+test("isolation diagnostics mocks: oversized os-release, userns and fact values keep the whole diagnostics line bounded", () => {
+  const b = iso(yml);
+  const logs = [];
+  const huge = "Z".repeat(500000);
+  const execFileSync = (cmd, args) => {
+    if (args.includes("--unshare-all")) throw new Error("boom probe");
+    return huge;
+  };
+  const readFileSync = (p) => {
+    if (p.includes("userns")) return huge;
+    if (p.includes("os-release")) return "PRETTY_NAME=" + huge + "\nVERSION_ID=" + huge + "\n";
+    throw new Error("ENOENT");
+  };
+  const fn = new Function("execFileSync", "readFileSync", "process", "console", "let launchToken = 'tok'; if (true) { if (launchToken) {\n" + b + "\nreturn launchToken;");
+  fn(execFileSync, readFileSync, { env: { PATH: "x" } }, { log: (m) => logs.push(m) });
+  const d = logs.find((l) => l.includes("DIAGNOSTICS"));
+  assert.ok(d.length <= 16000, "diagnostics line " + d.length + " exceeds cap");
+  const failed = logs.find((l) => l.includes("PREFLIGHT FAILED"));
+  assert.ok(failed.length < 2000, "FAILED line stays bounded");
+  assert.ok(!/Z{4001}/.test(d), "no run beyond the per-value cap");
+});
+
+test("isolation diagnostics mocks: oversized earlier fields never starve the trailing apparmor_denied evidence (#1118)", () => {
+  const b = iso(yml);
+  const logs = [];
+  const longName = "bwrap-" + "n".repeat(390);
+  const execFileSync = (cmd, args) => {
+    if (args.includes("--unshare-all")) throw new Error("boom probe");
+    if (cmd === "ls") return Array.from({ length: 40 }, () => longName).join("\n");
+    if (cmd === "aa-status") return "A".repeat(500000);
+    if (cmd === "dpkg-query") return "P".repeat(500000);
+    if (cmd === "dmesg") return 'apparmor="DENIED" operation="userns_create" profile="bwrap-userns-restrict"';
+    return "x";
+  };
+  const readFileSync = () => { throw new Error("ENOENT"); };
+  const fn = new Function("execFileSync", "readFileSync", "process", "console", "let launchToken = 'tok'; if (true) { if (launchToken) {\n" + b + "\nreturn launchToken;");
+  fn(execFileSync, readFileSync, { env: { PATH: "x" } }, { log: (m) => logs.push(m) });
+  const d = logs.find((l) => l.includes("DIAGNOSTICS"));
+  assert.ok(d.length <= 16000);
+  assert.match(d, /apparmor_denied=\["apparmor=\\"DENIED\\"[^\]]*userns_create/);
 });
