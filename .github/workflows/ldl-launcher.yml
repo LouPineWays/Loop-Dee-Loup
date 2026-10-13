@@ -251,8 +251,9 @@ jobs:
               // token lives only in launchToken, never in process.env). No sysctl, AppArmor, or
               // scrub change is ever made: on failure the credential is dropped (WAITING fallback)
               // and the worker is never started unisolated.
-              const isoEnv = { ...process.env };
-              delete isoEnv.LDL_WORKER_CLAUDE_OAUTH_TOKEN;
+              // Allowlisted env: no job token (GH_TOKEN/GITHUB_TOKEN), runner credential, or worker secret reaches these children.
+              const isoEnv = {};
+              for (const k of ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "DEBIAN_FRONTEND"]) if (process.env[k] !== undefined) isoEnv[k] = process.env[k];
               const iso = (cmd, args, timeout) => execFileSync(cmd, args, { encoding: "utf8", env: isoEnv, stdio: ["ignore", "ignore", "inherit"], timeout });
               try {
                 iso("sudo", ["apt-get", "update", "-qq"], 180000);
@@ -272,17 +273,20 @@ jobs:
                 // loaded, copied, removed, or changed; anything absent or permission-denied is "unavailable".
                 const fact = (cmd, args) => {
                   try {
-                    return execFileSync(cmd, args, { encoding: "utf8", env: isoEnv, stdio: ["ignore", "pipe", "ignore"], timeout: 15000 }).trim().slice(0, 4000);
+                    return execFileSync(cmd, args, { encoding: "utf8", env: isoEnv, stdio: ["ignore", "pipe", "ignore"], timeout: 15000 }).trim();
                   } catch { return "unavailable"; }
                 };
-                const lines = (text, re, max) => (text === "unavailable" ? [] : text.split("\n").filter((l) => re.test(l)).slice(0, max).map((l) => l.slice(0, 400)));
+                const lines = (text, re, max) => (text === "unavailable" ? "unavailable" : text.split("\n").filter((l) => re.test(l)).slice(0, max).map((l) => l.slice(0, 400)));
                 let osRelease = "unavailable";
                 try { osRelease = readFileSync("/etc/os-release", "utf8").split("\n").filter((l) => /^(PRETTY_NAME|VERSION_ID)=/.test(l)).join(" "); } catch { /* unavailable */ }
                 const profilePaths = ["/etc/apparmor.d/bwrap-userns-restrict", "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict", "/etc/apparmor.d/bwrap"];
                 const hashes = profilePaths.map((p) => `${p}=${(fact("sha256sum", [p]).split(/\s+/)[0] || "unavailable").slice(0, 64)}`);
-                const listed = [...lines(fact("ls", ["-1", "/etc/apparmor.d"]), /bwrap|bubblewrap/i, 20), ...lines(fact("ls", ["-1", "/usr/share/apparmor/extra-profiles"]), /bwrap|bubblewrap/i, 20)];
-                const denied = lines(fact("dmesg", []), /apparmor="DENIED"/i, 200).filter((l) => /bwrap|bubblewrap|userns/i.test(l)).slice(0, 20);
-                console.log(`RUNNER ISOLATION DIAGNOSTICS (read-only): os=${osRelease}; kernel=${fact("uname", ["-r"])}; apparmor_restrict_unprivileged_userns=${userns}; packages=${fact("dpkg-query", ["-W", "-f=${Package}=${Version} ", "bubblewrap", "apparmor"])}; bwrap_profile_hashes=[${hashes.join(", ")}]; bwrap_profile_names=[${listed.join(", ")}]; aa-status=${JSON.stringify(fact("aa-status", []))}; apparmor_denied=${JSON.stringify(denied)}`);
+                const cap = (v) => (typeof v === "string" ? v.slice(0, 4000) : v);
+                const listParts = [lines(fact("ls", ["-1", "/etc/apparmor.d"]), /bwrap|bubblewrap/i, 20), lines(fact("ls", ["-1", "/usr/share/apparmor/extra-profiles"]), /bwrap|bubblewrap/i, 20)];
+                const listed = listParts.some((x) => x === "unavailable") ? "unavailable" : listParts.flat();
+                const dm = lines(fact("dmesg", []), /apparmor="DENIED"/i, Infinity);
+                const denied = dm === "unavailable" ? "unavailable" : dm.filter((l) => /bwrap|bubblewrap|userns/i.test(l)).slice(0, 20);
+                console.log(`RUNNER ISOLATION DIAGNOSTICS (read-only): os=${osRelease}; kernel=${cap(fact("uname", ["-r"]))}; apparmor_restrict_unprivileged_userns=${userns}; packages=${cap(fact("dpkg-query", ["-W", "-f=${Package}=${Version} ", "bubblewrap", "apparmor"]))}; bwrap_profile_hashes=[${hashes.join(", ")}]; bwrap_profile_names=${JSON.stringify(listed)}; aa-status=${JSON.stringify(cap(fact("aa-status", [])))}; apparmor_denied=${JSON.stringify(denied)}`);
               }
             }
           } else {
