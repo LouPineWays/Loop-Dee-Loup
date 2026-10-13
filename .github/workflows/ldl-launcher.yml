@@ -266,7 +266,23 @@ jobs:
                 let userns = "unreadable";
                 try { userns = readFileSync("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", "utf8").trim(); } catch { /* read-only diagnostic */ }
                 console.log(`RUNNER ISOLATION PREFLIGHT FAILED: ${String(e.message).split("\n")[0]} (apparmor_restrict_unprivileged_userns=${userns}); worker not started, no isolation weakening applied; a policy change needs founder approval (WAITING fallback)`);
-                launchToken = undefined;
+                launchToken = undefined; // fail closed first; diagnostics below can never leave the credential in place
+                // Read-only host diagnostics (issue #1118 unit C, founder-approved #1120 Q1=A): facts only,
+                // recorded on this failed trusted path, in the credential-free child env. Nothing is
+                // loaded, copied, removed, or changed; anything absent or permission-denied is "unavailable".
+                const fact = (cmd, args) => {
+                  try {
+                    return execFileSync(cmd, args, { encoding: "utf8", env: isoEnv, stdio: ["ignore", "pipe", "ignore"], timeout: 15000 }).trim().slice(0, 4000);
+                  } catch { return "unavailable"; }
+                };
+                const lines = (text, re, max) => (text === "unavailable" ? [] : text.split("\n").filter((l) => re.test(l)).slice(0, max).map((l) => l.slice(0, 400)));
+                let osRelease = "unavailable";
+                try { osRelease = readFileSync("/etc/os-release", "utf8").split("\n").filter((l) => /^(PRETTY_NAME|VERSION_ID)=/.test(l)).join(" "); } catch { /* unavailable */ }
+                const profilePaths = ["/etc/apparmor.d/bwrap-userns-restrict", "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict", "/etc/apparmor.d/bwrap"];
+                const hashes = profilePaths.map((p) => `${p}=${(fact("sha256sum", [p]).split(/\s+/)[0] || "unavailable").slice(0, 64)}`);
+                const listed = [...lines(fact("ls", ["-1", "/etc/apparmor.d"]), /bwrap|bubblewrap/i, 20), ...lines(fact("ls", ["-1", "/usr/share/apparmor/extra-profiles"]), /bwrap|bubblewrap/i, 20)];
+                const denied = lines(fact("dmesg", []), /apparmor="DENIED"/i, 200).filter((l) => /bwrap|bubblewrap|userns/i.test(l)).slice(0, 20);
+                console.log(`RUNNER ISOLATION DIAGNOSTICS (read-only): os=${osRelease}; kernel=${fact("uname", ["-r"])}; apparmor_restrict_unprivileged_userns=${userns}; packages=${fact("dpkg-query", ["-W", "-f=${Package}=${Version} ", "bubblewrap", "apparmor"])}; bwrap_profile_hashes=[${hashes.join(", ")}]; bwrap_profile_names=[${listed.join(", ")}]; aa-status=${JSON.stringify(fact("aa-status", []))}; apparmor_denied=${JSON.stringify(denied)}`);
               }
             }
           } else {
