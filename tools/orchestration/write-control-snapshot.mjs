@@ -42,7 +42,7 @@ import { readFileSync } from "node:fs";
 import { validateControlSnapshot, validateActivationPair } from "./control-field-validator.mjs";
 import { readGithubIssue } from "./github-read.mjs";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
-import { ghRestEditIssueBody } from "../review-watch/lifecycle-gate.mjs";
+import { ghRestEditIssueBody, isKnownAttributionDecoration } from "../review-watch/lifecycle-gate.mjs";
 
 // Issue #818: persistence goes through REST (`PATCH /repos/{repo}/issues/{n}` via `gh api --input -`,
 // the #808 helper), not `gh issue edit`, which uses GitHub GraphQL — HTTP 403 in the remote/cloud
@@ -111,6 +111,22 @@ export function checkWriteControlSnapshot(
         message: `Refusing to overwrite ${repo ?? "<repo>"}#${controlIssue}: its live body is not the base the proposed snapshot was composed from. Re-read and recompose.`,
       };
     }
+    // Revalidate the execution packet (parent binding + ACTIVE grant) against the body just read,
+    // so a grant revoked after the caller's initial check cannot be consumed.
+    if (typeof activation.verifyExecution !== "function") {
+      return { exitCode: 1, message: "activation requires a verifyExecution proof callback; refusing to write without revalidating the execution packet." };
+    }
+    const packet = activation.verifyExecution(execution.body ?? "");
+    if (!packet || !packet.ok) {
+      return {
+        exitCode: 2,
+        state: "BLOCKED",
+        controlIssue: Number(controlIssue),
+        repo: repo ?? null,
+        errors: [packet?.reason ?? "execution packet proof failed"],
+        message: `Refusing to activate ${repo ?? "<repo>"}#${controlIssue}: execution packet no longer proves the activation (${packet?.reason ?? "unproven"}); nothing was written.`,
+      };
+    }
     const pair = validateActivationPair(proposedBody, {
       controlIssue: Number(controlIssue),
       executionIssue: Number(activation.executionIssue),
@@ -142,7 +158,7 @@ export function checkWriteControlSnapshot(
     } catch (err) {
       return { exitCode: 1, state: "READBACK_FAILED", message: `wrote ${repo}#${controlIssue} but the independent readback failed: ${err.message}` };
     }
-    const sameBody = normalizeBody(back.body).startsWith(normalizeBody(proposedBody));
+    const sameBody = normalizeBody(back.body) === normalizeBody(proposedBody) || isKnownAttributionDecoration(proposedBody, back.body ?? "");
     const pairBack = validateActivationPair(back.body ?? "", {
       controlIssue: Number(controlIssue),
       executionIssue: Number(activation.executionIssue),

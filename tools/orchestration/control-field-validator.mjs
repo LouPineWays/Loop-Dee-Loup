@@ -421,13 +421,15 @@ export function validateActivationPair(body, { controlIssue = null, executionIss
     }
   }
 
-  const founder = parseControlBullet(body, "Founder decision") ?? parseHeadingField(body, "Founder interrupt");
-  if (founder !== null && !isNoneSentinel(founder)) {
-    errors.push(`control still advertises Founder decision/interrupt ${JSON.stringify(founder)} — an activated pair must record none`);
-  }
-  const blocker = parseControlBullet(body, "Blocker") ?? parseHeadingField(body, "Current blocker");
-  if (blocker !== null && !isNoneSentinel(blocker)) {
-    errors.push(`control still records Blocker ${JSON.stringify(blocker)} — an activated pair must record none`);
+  for (const [kind, value] of [
+    ["Founder decision", parseControlBullet(body, "Founder decision")],
+    ["Founder interrupt", parseHeadingField(body, "Founder interrupt")],
+    ["Blocker", parseControlBullet(body, "Blocker")],
+    ["Current blocker", parseHeadingField(body, "Current blocker")],
+  ]) {
+    if (value !== null && !isNoneSentinel(value)) {
+      errors.push(`control still advertises ${kind} ${JSON.stringify(value)} — an activated pair must record none`);
+    }
   }
   return errors.length === 0 ? { ok: true } : { ok: false, errors };
 }

@@ -11,9 +11,10 @@ const GRANT_JSON = JSON.stringify({
   executorSubstrate: [{ component: "authority-guards", paths: ["tools/orchestration/write-control-snapshot.mjs"], intendedChange: "x", verification: "y" }],
 });
 const jsonBlock = (j) => `${FENCE}json\n${j}\n${FENCE}`;
-const ACTIVE_THICK = `### Observable outcome\nfoo\n\n### INACTIVE proposed exact substrate grant\n\n${jsonBlock(GRANT_JSON)}\n\n### ACTIVE founder-approved exact protected component grant — 2026-10-13\nApproved.\n\n${jsonBlock(GRANT_JSON)}\n`;
-const INACTIVE_ONLY_THICK = `### INACTIVE proposed exact substrate grant\n\n${jsonBlock(GRANT_JSON)}\n`;
-const BAD_COMPONENT_THICK = `### ACTIVE grant\n${jsonBlock('{"executorSubstrate":[{"component":"nope"}]}')}\n`;
+const ACTIVE_THICK = `### Parent loop\n#10\n\n### Observable outcome\nfoo\n\n### INACTIVE proposed exact substrate grant\n\n${jsonBlock(GRANT_JSON)}\n\n### ACTIVE founder-approved exact protected component grant — 2026-10-13\nApproved.\n\n${jsonBlock(GRANT_JSON)}\n`;
+const INACTIVE_ONLY_THICK = `### Parent loop\n#10\n\n### INACTIVE proposed exact substrate grant\n\n${jsonBlock(GRANT_JSON)}\n`;
+const PARENT = "### Parent loop\n#10\n";
+const BAD_COMPONENT_THICK = `### Parent loop\n#10\n\n### ACTIVE grant\n${jsonBlock('{"executorSubstrate":[{"component":"nope"}]}')}\n`;
 
 // The literal #1149 shape: template headings, NEEDS_FOUNDER, prose blocker, pending decision.
 const BODY_1149 = `### State
@@ -153,7 +154,7 @@ test("(f) handoff-only emits a deterministic qualified-executor handoff with no 
 });
 
 test("(g) a normal fresh control with no pending state activates without needing a grant witness", () => {
-  const w = makeWorld({ control: "- **Lifecycle:** READY_FOR_PLAN\n- **Execution:** none\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n", exec: "plain thick" });
+  const w = makeWorld({ control: "- **Lifecycle:** READY_FOR_PLAN\n- **Execution:** none\n- **Route:** planning worker\n- **Blocker:** none\n- **Founder decision:** none\n", exec: PARENT });
   const r = run(w);
   assert.equal(r.exitCode, 0, JSON.stringify(r));
   assert.equal(r.state, "ACTIVATED");
@@ -166,7 +167,7 @@ test("#438/#1151: CLOSED control + open child is rejected; reopened-but-DONE/#80
   assert.match(rc.message, /Reopen the existing control/);
   assert.equal(closed.writes.length, 0);
 
-  const reopened = makeWorld({ control: BODY_438, exec: "plain thick" });
+  const reopened = makeWorld({ control: BODY_438, exec: PARENT });
   const ro = run(reopened);
   assert.equal(ro.state, "ACTIVATED", JSON.stringify(ro));
   const body = reopened.issues[10].body;
@@ -201,4 +202,47 @@ test("buildActivatedControlBody converges the lifecycle, pointer, route and bloc
   assert.match(b, /- \*\*Lifecycle:\*\* READY/);
   assert.match(b, /- \*\*Execution:\*\* #5/);
   assert.match(b, /- \*\*Blocker:\*\* none/);
+});
+
+// Issue #1151 Stage 1 correction regressions.
+test("hybrid control: bullet none + pending heading is still pending and needs the witness", () => {
+  const hybrid = "- **Lifecycle:** NEEDS_FOUNDER\n- **Execution:** #11\n- **Founder decision:** none\n- **Blocker:** none\n\n### Founder interrupt\n\nApprove the exact grant.\n";
+  assert.equal(controlAdvertisesPendingState(hybrid), true);
+  const w = makeWorld({ control: hybrid, exec: PARENT });
+  const r = run(w);
+  assert.equal(r.state, "BLOCKED");
+  assert.equal(w.writes.length, 0);
+});
+
+test("unrelated pending decision is not cleared by an unrelated ACTIVE grant", () => {
+  const product = "- **Lifecycle:** NEEDS_FOUNDER\n- **Execution:** #11\n- **Founder decision:** pending pricing choice for the paid tier\n- **Blocker:** none\n";
+  const w = makeWorld({ control: product });
+  assert.equal(run(w).state, "BLOCKED");
+  assert.equal(w.writes.length, 0);
+  const other = BODY_1149.replace("exact protected workflow component grant", "exact grant for component routing-policy");
+  assert.equal(run(makeWorld({ control: other })).state, "BLOCKED");
+});
+
+test("execution packet must name this control in Parent loop", () => {
+  for (const exec of [ACTIVE_THICK.replace("#10", "#99"), ACTIVE_THICK.replace("### Parent loop\n#10\n\n", ""), ACTIVE_THICK.replace("#10", "#10 and #99")]) {
+    const w = makeWorld({ exec });
+    assert.equal(run(w).state, "BLOCKED");
+    assert.equal(w.writes.length, 0);
+  }
+});
+
+test("grant revoked between initial check and write is revalidated at the mutation boundary", () => {
+  const w = makeWorld();
+  let reads = 0;
+  const readIssueImpl = (a) => (a.number === 11 && ++reads > 1 ? { body: INACTIVE_ONLY_THICK, state: "OPEN" } : w.readIssueImpl(a));
+  const r = activateControlPair({ repo: "o/r", controlIssue: 10, executionIssue: 11 }, { readIssueImpl, ghEditImpl: w.ghEditImpl, runGateImpl: w.runGateImpl });
+  assert.equal(r.exitCode, 2);
+  assert.equal(w.writes.length, 0);
+});
+
+test("planning routes are rejected", () => {
+  const w = makeWorld();
+  const r = run(w, { route: "planning worker" });
+  assert.equal(r.state, "REJECTED");
+  assert.equal(w.writes.length, 0);
 });

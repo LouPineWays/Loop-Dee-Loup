@@ -43,7 +43,7 @@
 import { execFileSync } from "node:child_process";
 import { readGithubIssue } from "./github-read.mjs";
 import { upsertControlBullet, resolveRepoIdentity, parseControlBullet, parseHeadingField, isNoneSentinel } from "./ready-dispatch-gate.mjs";
-import { parseAuthority } from "./executor-substrate-authority.mjs";
+import { parseAuthority, EXECUTOR_COMPONENTS } from "./executor-substrate-authority.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 
 const DEFAULT_ROUTE = "implementation worker";
@@ -82,11 +82,69 @@ export function findActiveGrantWitness(executionBody) {
   return { ok: false, reason: problems[0] ?? "execution Issue body carries no ACTIVE grant section" };
 }
 
+// Pure. Every non-none pending value the control advertises, across BOTH representations (the
+// bullet block and the template headings). Either representation being non-none is pending; a
+// bullet saying `none` never masks a pending heading (or vice versa).
+export function pendingValues(body) {
+  const sources = [
+    ["Founder decision", parseControlBullet(body, "Founder decision")],
+    ["Founder interrupt", parseHeadingField(body, "Founder interrupt")],
+    ["Blocker", parseControlBullet(body, "Blocker")],
+    ["Current blocker", parseHeadingField(body, "Current blocker")],
+  ];
+  return sources.filter(([, v]) => v !== null && !isNoneSentinel(v)).map(([label, value]) => ({ label, value }));
+}
+
 // Pure. True when the control still advertises an unresolved Founder decision or Blocker.
 export function controlAdvertisesPendingState(body) {
-  const founder = parseControlBullet(body, "Founder decision") ?? parseHeadingField(body, "Founder interrupt");
-  const blocker = parseControlBullet(body, "Blocker") ?? parseHeadingField(body, "Current blocker");
-  return (founder !== null && !isNoneSentinel(founder)) || (blocker !== null && !isNoneSentinel(blocker));
+  return pendingValues(body).length > 0;
+}
+
+// Pure. The witnessed ACTIVE grant may clear a pending state only when that state is itself a
+// canonical grant-specific pending state: it must be about an exact protected/executor-substrate
+// component grant, and any registered component it names must be among the witnessed components.
+// A product choice, credential, external prerequisite, or different component stays pending.
+export function pendingMatchesGrant(body, components) {
+  const witnessed = new Set(components);
+  for (const { label, value } of pendingValues(body)) {
+    if (!/\bgrant\b/i.test(value) || !/\b(protected|executor[- ]substrate|component|exact)\b/i.test(value)) {
+      return { ok: false, reason: `${label} ${JSON.stringify(value)} is not a canonical grant-specific pending state` };
+    }
+    for (const { component } of EXECUTOR_COMPONENTS) {
+      if (value.includes(component) && !witnessed.has(component)) {
+        return { ok: false, reason: `${label} names component "${component}" but the ACTIVE grant covers only ${[...witnessed].join(", ")}` };
+      }
+    }
+  }
+  return { ok: true };
+}
+
+// Pure. The thick packet's `### Parent loop` provenance must identify exactly this control.
+export function parentLoopIdentifiesControl(executionBody, controlIssue) {
+  const lines = String(executionBody ?? "").split(/\r?\n/);
+  const idx = lines.findIndex((l) => /^###\s+Parent loop\s*$/i.test(l.trim()));
+  if (idx === -1) return { ok: false, reason: "execution Issue has no `### Parent loop` section binding it to the control" };
+  const end = lines.findIndex((l, i) => i > idx && /^#{1,6}\s+/.test(l));
+  const section = lines.slice(idx + 1, end === -1 ? lines.length : end).join("\n");
+  const refs = new Set([...section.matchAll(/(?:\/issues\/|#)(\d+)\b/g)].map((m) => Number(m[1])));
+  if (refs.size !== 1 || !refs.has(Number(controlIssue))) {
+    return { ok: false, reason: `execution Issue Parent loop references ${refs.size ? [...refs].map((n) => `#${n}`).join(", ") : "no Issue"}, not exactly control #${controlIssue}` };
+  }
+  return { ok: true };
+}
+
+// Pure. Full execution-packet proof used both before composing and at the write boundary:
+// parent binding always; ACTIVE grant witness matching the pending state when the control is pending.
+export function verifyExecutionPacket({ controlBody, executionBody, controlIssue }) {
+  const parent = parentLoopIdentifiesControl(executionBody, controlIssue);
+  if (!parent.ok) return parent;
+  if (controlAdvertisesPendingState(controlBody)) {
+    const witness = findActiveGrantWitness(executionBody);
+    if (!witness.ok) return witness;
+    const match = pendingMatchesGrant(controlBody, witness.components);
+    if (!match.ok) return match;
+  }
+  return { ok: true };
 }
 
 // Pure. Composes the activated control snapshot from the live body.
@@ -97,7 +155,33 @@ export function buildActivatedControlBody(body, { executionIssue, route = DEFAUL
   next = upsertControlBullet(next, "Route", route);
   next = upsertControlBullet(next, "Founder decision", "none");
   next = upsertControlBullet(next, "Blocker", "none");
+  // The witnessed grant settles the decision in every representation, so the template headings
+  // must not keep advertising the stale pending prose.
+  next = setHeadingField(next, "Founder interrupt", "none");
+  next = setHeadingField(next, "Current blocker", "none");
   return next;
+}
+
+// Pure. Rewrites the first non-empty line of an existing `### label` section (the line
+// parseHeadingField reads) to `value`; other lines in the section are left untouched. No-op if absent.
+function setHeadingField(body, label, value) {
+  const lines = body.split("\n");
+  let idx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim() === `### ${label}`) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx === -1) return body;
+  for (let i = idx + 1; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (t.startsWith("### ")) break;
+    if (t === "") continue;
+    lines[i] = value;
+    break;
+  }
+  return lines.join("\n");
 }
 
 function defaultRunGate({ controlIssue }) {
@@ -126,6 +210,15 @@ export function activateControlPair(
   const c = Number(controlIssue);
   const e = Number(executionIssue);
   if (c === e) return { exitCode: 2, state: "REJECTED", errors: ["control and execution Issue must differ"], message: "control and execution Issue must differ" };
+
+  if (/plan/i.test(String(route))) {
+    return {
+      exitCode: 2,
+      state: "REJECTED",
+      errors: [`route ${JSON.stringify(route)} is a planning route; activation projects READY (direct execution) only`],
+      message: `Refusing to activate with planning route ${JSON.stringify(route)}: READY projects the direct execution-worker transition and would bypass the planning-stage boundary.`,
+    };
+  }
 
   if (handoffOnly) {
     return {
@@ -169,18 +262,16 @@ export function activateControlPair(
     };
   }
 
-  if (controlAdvertisesPendingState(control.body)) {
-    const witness = findActiveGrantWitness(execution.body);
-    if (!witness.ok) {
-      return {
-        exitCode: 2,
-        state: "BLOCKED",
-        controlIssue: c,
-        executionIssue: e,
-        errors: [witness.reason],
-        message: `Not activating ${repo}#${c}: it records a pending decision/blocker and ${repo}#${e} carries no mechanically valid ACTIVE grant (${witness.reason}). Control left unchanged.`,
-      };
-    }
+  const proof = verifyExecutionPacket({ controlBody: control.body, executionBody: execution.body, controlIssue: c });
+  if (!proof.ok) {
+    return {
+      exitCode: 2,
+      state: "BLOCKED",
+      controlIssue: c,
+      executionIssue: e,
+      errors: [proof.reason],
+      message: `Not activating ${repo}#${c}: ${proof.reason}. Control left unchanged.`,
+    };
   }
 
   const proposed = buildActivatedControlBody(control.body, { executionIssue: e, route });
@@ -188,7 +279,12 @@ export function activateControlPair(
 
   if (!alreadyActive) {
     const written = writeImpl(
-      { repo, controlIssue: c, proposedBody: proposed, activation: { executionIssue: e, baseBody: control.body } },
+      { repo, controlIssue: c, proposedBody: proposed, activation: {
+          executionIssue: e,
+          baseBody: control.body,
+          verifyExecution: (executionBody) => verifyExecutionPacket({ controlBody: control.body, executionBody, controlIssue: c }),
+        },
+      },
       { readIssueImpl, ...(ghEditImpl ? { ghEditImpl } : {}) },
     );
     if (written.exitCode !== 0) return { ...written, controlIssue: c, executionIssue: e };
@@ -234,16 +330,20 @@ function parseArgs(argv) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  let repo = args.repo;
-  if (!repo) {
-    const identity = resolveRepoIdentity();
-    if (!identity.ok) {
-      console.error(`Could not determine the current repository identity (--repo was not supplied): ${identity.reason}`);
-      process.exit(1);
-      return;
-    }
-    repo = identity.repo;
+  const identity = resolveRepoIdentity();
+  if (!identity.ok) {
+    console.error(`Could not determine the current repository identity: ${identity.reason}`);
+    process.exit(1);
+    return;
   }
+  // The fresh gate and the qualified handoff both resolve repository identity from this checkout,
+  // so an explicit --repo that differs would mutate one repository and verify another.
+  if (args.repo && args.repo.toLowerCase() !== String(identity.repo).toLowerCase()) {
+    console.error(`Refusing --repo ${args.repo}: it differs from this checkout's repository ${identity.repo}; run from the target repository's checkout.`);
+    process.exit(2);
+    return;
+  }
+  const repo = identity.repo;
   const result = activateControlPair({
     repo,
     controlIssue: args["control-issue"],
