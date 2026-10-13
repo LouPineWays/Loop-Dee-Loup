@@ -2306,7 +2306,8 @@ async function resolveEvidenceOnlyRouting({ repo, context, postAudit, verdict },
       }
       if (!evaluated.replacement.pending) {
         return ambiguous(
-          `evidence-recovery re-audit #${evaluated.replacement.number} already carries a non-pending verdict while the ` +
+          `evidence-recovery re-audit #${evaluated.replacement.number} is not in the canonical pre-audit pending state ` +
+            `(${(evaluated.replacement.pendingErrors ?? []).join("; ") || "unspecified canonical pending-state failure"}) while the ` +
             `current Stage 2 pointer still names predecessor #${context.auditIssue}; refusing to project or trigger it`,
         );
       }

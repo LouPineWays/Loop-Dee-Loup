@@ -4050,6 +4050,21 @@ test("#883 gate: a non-pending re-audit, provenance mismatch, ambiguity, or an e
   }
 });
 
+test("#949 gate: a pending-field failure is reported specifically, never as a non-pending verdict", async () => {
+  const result = await runNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322" },
+    {
+      ...EVIDENCE_GATE_BASE,
+      evaluateEvidenceCorrectionImpl: async () =>
+        evidenceSatisfied({ number: 390, state: "OPEN", pending: false, pendingErrors: ['"Next authorized action" is "x", expected "Pending audit."'] }),
+    },
+  );
+  assert.equal(result.state, "AMBIGUOUS");
+  assert.match(result.reason, /Next authorized action/);
+  assert.match(result.reason, /not in the canonical pre-audit pending state/);
+  assert.doesNotMatch(result.reason, /non-pending verdict/);
+});
+
 test("#883 gate: an open correction PR (source correction underway) is reconciled BEFORE any evidence-only evaluation", async () => {
   let evaluated = 0;
   const result = await runNextReviewTransitionGate(
