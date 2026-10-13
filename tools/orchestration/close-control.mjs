@@ -285,6 +285,31 @@ export async function checkCloseControl(
     };
   }
 
+  // Issue #1151: never terminalize a control while its sole current thick packet is still OPEN —
+  // that strands an executable child under a terminal parent. The thick work Issue is normally
+  // closed by `close-work-issue` just before this runs; a still-OPEN current packet (or one that
+  // cannot be read) fails closed with the control left byte-for-byte unchanged.
+  const currentExecution = parseExecutionReference(controlData.body ?? "");
+  if (currentExecution.kind === "issue") {
+    let execData;
+    try {
+      execData = await ghIssueViewImpl({ repo, number: currentExecution.issue });
+    } catch (err) {
+      return { exitCode: 1, message: `gh issue view failed for current execution packet ${repo}#${currentExecution.issue}: ${err.message}` };
+    }
+    if (execData.state !== "CLOSED") {
+      return {
+        exitCode: 2,
+        state: "REJECTED",
+        controlIssue: controlIssueNumber,
+        errors: [`current execution packet ${repo}#${currentExecution.issue} is still ${JSON.stringify(execData.state)}`],
+        message:
+          `Refusing to terminalize ${repo}#${controlIssue}: its current execution packet #${currentExecution.issue} is still open ` +
+          "(state: " + JSON.stringify(execData.state) + ") — closing the control would strand an executable thick packet under a terminal parent.",
+      };
+    }
+  }
+
   // Stage 1 review finding on this PR (invariant 1): `next-review-transition-gate.mjs` chains
   // `close-audit` and this command with shell `&&`, but `close-audit`'s own CLI exits 0 even for
   // its normal, non-error `NOT_TERMINAL_YET` result (the audit correctly stayed open) — a 0-exit

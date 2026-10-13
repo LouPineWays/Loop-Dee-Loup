@@ -374,3 +374,60 @@ export function validateControlSnapshot(body, { fields = DEFAULT_CONTROL_FIELD_S
   }
   return errors.length === 0 ? { ok: true } : { ok: false, errors };
 }
+
+// Pure. Issue #1151: the "active pair" invariant for a control being activated/reactivated for a
+// new thick execution packet. `validateControlSnapshot` above is field-local by design; this is
+// the additive pair-level check an activation write (write-control-snapshot.mjs `activation`
+// option, activate-control-pair.mjs) layers on top of it. A proposed control body is an
+// executable pair with thick Issue `executionIssue` only when ALL of these hold, reusing the
+// same parsers the gates read with (never a second interpretation):
+//   - the control Issue is GitHub OPEN (a CLOSED control with an open child is non-executable);
+//   - its lifecycle (ad hoc "Lifecycle" bullet, else "### State") is a known, non-terminal,
+//     non-blocking value — "DONE" (or anything unrecognized) is never dispatchable;
+//   - its sole Execution pointer is exactly `executionIssue` (a historical/competing packet such
+//     as #804 beside new #1151 is rejected, via readExecutionBulletField's own conflict rule);
+//   - the thick Issue is itself GitHub OPEN;
+//   - it no longer advertises a pending Founder decision or an active Blocker (an already-proven
+//     approval must not be re-presented as pending once the control is activated).
+// No comment or prose is interpreted as consent here; this only judges the proposed snapshot
+// against live GitHub states supplied by the caller.
+export function validateActivationPair(body, { controlIssue = null, executionIssue, controlState, executionState } = {}) {
+  const errors = [];
+  if (String(controlState ?? "").toUpperCase() !== "OPEN") {
+    errors.push(`control Issue${controlIssue ? ` #${controlIssue}` : ""} is GitHub ${JSON.stringify(controlState ?? null)}, not OPEN — an open thick packet under a non-open control is not executable`);
+  }
+  if (String(executionState ?? "").toUpperCase() !== "OPEN") {
+    errors.push(`execution Issue #${executionIssue} is GitHub ${JSON.stringify(executionState ?? null)}, not OPEN — it cannot be the control's active packet`);
+  }
+
+  const lifecycle = parseControlBullet(body, "Lifecycle") ?? parseHeadingField(body, "State");
+  if (lifecycle === null) {
+    errors.push("control body records no Lifecycle/State, so the pair's lifecycle cannot be proven nonterminal");
+  } else if (/^done\b/i.test(lifecycle.trim())) {
+    errors.push(`control lifecycle ${JSON.stringify(lifecycle)} is terminal (DONE) — a terminal control cannot own an active packet`);
+  } else if (!isKnownLifecycleValue(lifecycle.trim()) || isBlockingLifecycleValue(lifecycle.trim())) {
+    errors.push(`control lifecycle ${JSON.stringify(lifecycle)} is not a known nonterminal, non-blocking value`);
+  }
+
+  const field = readExecutionBulletField(body);
+  if (field.conflict) {
+    errors.push(describeExecutionConflict(field));
+  } else {
+    const parsed = field.value === null || field.value === undefined ? { ok: false, reason: "no Execution pointer recorded" } : parseExecutionPointer(field.value);
+    if (!parsed.ok) {
+      errors.push(`control Execution pointer ${JSON.stringify(field.value ?? null)} is not a single current packet: ${parsed.reason}`);
+    } else if (parsed.issue !== Number(executionIssue)) {
+      errors.push(`control Execution pointer names #${parsed.issue}, not the activated packet #${executionIssue} — the sole current packet must be the activated one`);
+    }
+  }
+
+  const founder = parseControlBullet(body, "Founder decision") ?? parseHeadingField(body, "Founder interrupt");
+  if (founder !== null && !isNoneSentinel(founder)) {
+    errors.push(`control still advertises Founder decision/interrupt ${JSON.stringify(founder)} — an activated pair must record none`);
+  }
+  const blocker = parseControlBullet(body, "Blocker") ?? parseHeadingField(body, "Current blocker");
+  if (blocker !== null && !isNoneSentinel(blocker)) {
+    errors.push(`control still records Blocker ${JSON.stringify(blocker)} — an activated pair must record none`);
+  }
+  return errors.length === 0 ? { ok: true } : { ok: false, errors };
+}

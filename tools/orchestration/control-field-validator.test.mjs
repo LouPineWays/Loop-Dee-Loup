@@ -594,3 +594,25 @@ test("validateControlSnapshot: rejects the exact #577 hybrid contradiction as a 
   assert.equal(result.ok, false);
   assert.ok(result.errors.some((e) => /Lifecycle.*State.*contradictory/s.test(e)));
 });
+
+// Issue #1151: validateActivationPair — the open control/thick "active pair" invariant.
+import { validateActivationPair } from "./control-field-validator.mjs";
+
+const PAIR_OK = "- **Lifecycle:** READY\n- **Execution:** #1151\n- **Route:** implementation worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+const pairArgs = { controlIssue: 438, executionIssue: 1151, controlState: "OPEN", executionState: "OPEN" };
+
+test("#1151 validateActivationPair: accepts an OPEN control, READY, sole Execution = the OPEN packet, nothing pending", () => {
+  assert.deepEqual(validateActivationPair(PAIR_OK, pairArgs), { ok: true });
+});
+
+test("#1151 validateActivationPair: rejects CLOSED control, DONE lifecycle, historical #804 pointer, competing pointer, closed packet, pending decision/blocker", () => {
+  const bad = (body, args = pairArgs) => validateActivationPair(body, args);
+  assert.equal(bad(PAIR_OK, { ...pairArgs, controlState: "CLOSED" }).ok, false);
+  assert.equal(bad(PAIR_OK, { ...pairArgs, executionState: "CLOSED" }).ok, false);
+  assert.equal(bad(PAIR_OK.replace("READY", "DONE")).ok, false);
+  assert.equal(bad(PAIR_OK.replace("#1151", "#804")).ok, false);
+  assert.equal(bad(PAIR_OK.replace("#1151", "#804 and #1151")).ok, false);
+  assert.equal(bad(PAIR_OK.replace("Founder decision:** none", "Founder decision:** pending exact grant")).ok, false);
+  assert.equal(bad(PAIR_OK.replace("Blocker:** none", "Blocker:** Blocked by #5.")).ok, false);
+  assert.equal(bad("- **Execution:** #1151\n").ok, false, "no lifecycle recorded");
+});

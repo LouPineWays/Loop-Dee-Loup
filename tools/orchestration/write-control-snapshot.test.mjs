@@ -251,3 +251,67 @@ for (const [name, reply] of [
     assert.notEqual(r.state, "WRITTEN");
   });
 }
+
+// Issue #1151: activation mode — stale refusal, open-pair validation, independent readback.
+const ACT_BODY = "- **Lifecycle:** READY\n- **Execution:** #1151\n- **Route:** implementation worker\n- **Blocker:** none\n- **Founder decision:** none\n";
+const ACT_BASE = "- **Lifecycle:** DONE\n- **Execution:** #804\n";
+
+function actWorld({ state = "OPEN", liveBody = ACT_BASE, persist = true } = {}) {
+  const w = { body: liveBody, writes: 0 };
+  w.readIssueImpl = ({ number }) => (number === 1151 ? { body: "", state: "OPEN" } : { body: w.body, state });
+  w.ghEditImpl = ({ body }) => { w.writes++; if (persist) w.body = body; };
+  return w;
+}
+const actCall = (w, over = {}) =>
+  checkWriteControlSnapshot(
+    { repo: "o/r", controlIssue: 438, proposedBody: ACT_BODY, activation: { executionIssue: 1151, baseBody: ACT_BASE }, ...over },
+    { readIssueImpl: w.readIssueImpl, ghEditImpl: w.ghEditImpl },
+  );
+
+test("#1151 activation: OPEN control + unchanged base -> WRITTEN verified after independent readback", () => {
+  const w = actWorld();
+  const r = actCall(w);
+  assert.equal(r.exitCode, 0);
+  assert.equal(r.verified, true);
+  assert.equal(w.writes, 1);
+});
+
+test("#1151 activation: CLOSED control is rejected and never written (closed control + open child)", () => {
+  const w = actWorld({ state: "CLOSED" });
+  const r = actCall(w);
+  assert.equal(r.exitCode, 2);
+  assert.equal(w.writes, 0);
+});
+
+test("#1151 activation: changed live body -> STALE_CONTROL, no overwrite", () => {
+  const w = actWorld({ liveBody: ACT_BASE + "- extra\n" });
+  const r = actCall(w);
+  assert.equal(r.exitCode, 2);
+  assert.equal(r.state, "STALE_CONTROL");
+  assert.equal(w.writes, 0);
+});
+
+test("#1151 activation: proposal still carrying DONE or a different packet pointer is rejected before write", () => {
+  for (const proposedBody of [ACT_BODY.replace("READY", "DONE"), ACT_BODY.replace("#1151", "#804")]) {
+    const w = actWorld();
+    assert.equal(actCall(w, { proposedBody }).exitCode, 2);
+    assert.equal(w.writes, 0);
+  }
+});
+
+test("#1151 activation: a write that does not persist fails readback and never reports success", () => {
+  const w = actWorld({ persist: false });
+  const r = actCall(w);
+  assert.equal(r.exitCode, 1);
+  assert.equal(r.state, "READBACK_MISMATCH");
+});
+
+test("#1151 non-activation calls are unchanged (no reads, no pair checks)", () => {
+  let reads = 0;
+  const r = checkWriteControlSnapshot(
+    { repo: "o/r", controlIssue: 499, proposedBody: "- **PR:** #509\n" },
+    { ghEditImpl: () => {}, readIssueImpl: () => { reads++; } },
+  );
+  assert.equal(r.exitCode, 0);
+  assert.equal(reads, 0);
+});
