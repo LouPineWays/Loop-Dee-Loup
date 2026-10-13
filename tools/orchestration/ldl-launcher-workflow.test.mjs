@@ -149,7 +149,8 @@ test("isolation preflight: installs bubblewrap+socat, then a functional unprivil
 
 test("isolation preflight: credential-free env, timeouts, fail closed by dropping the credential", () => {
   const b = iso(yml);
-  assert.match(b, /delete isoEnv\.LDL_WORKER_CLAUDE_OAUTH_TOKEN/);
+  assert.match(b, /const isoEnv = \{\};[\s\S]*?for \(const k of \["PATH"[^\]]*\]\)/);
+  assert.doesNotMatch(b.slice(b.indexOf("const isoEnv"), b.indexOf("const iso =")), /GH_TOKEN|GITHUB_TOKEN|\.\.\.process\.env/);
   assert.match(b, /timeout/);
   assert.match(b, /RUNNER ISOLATION PREFLIGHT FAILED[\s\S]*launchToken = undefined;/);
   assert.doesNotMatch(b, /console\.log\([^)]*(workerToken|launchToken)/);
@@ -191,4 +192,93 @@ test("isolation preflight mocks: success keeps the credential; any step failure 
     assert.match(r.logs.join("\n"), /RUNNER ISOLATION PREFLIGHT FAILED: boom/);
     assert.doesNotMatch(r.logs.join("\n"), /secret|tok\b/);
   }
+});
+
+// Issue #1118 unit C (#1120 Q1=A): read-only diagnostics on the trusted failed-preflight path only.
+const diagCode = () => {
+  const b = iso(yml);
+  const at = b.indexOf("// Read-only host diagnostics");
+  assert.ok(at > 0, "diagnostics block present");
+  const endMarker = "apparmor_denied=${JSON.stringify(denied)}`);";
+  const end = b.indexOf(endMarker, at);
+  assert.ok(end > at, "diagnostics block end");
+  return { all: b, diag: b.slice(at, end + endMarker.length), before: b.slice(0, at), after: b.slice(end + endMarker.length) };
+};
+
+test("isolation diagnostics: only in the failure path, after the unchanged FAILED line and credential drop", () => {
+  const { all, diag, before, after } = diagCode();
+  assert.ok(all.indexOf("RUNNER ISOLATION PREFLIGHT PASSED") < all.indexOf("} catch (e) {"));
+  assert.ok(all.indexOf("} catch (e) {") < all.indexOf("RUNNER ISOLATION DIAGNOSTICS"));
+  assert.doesNotMatch(before.slice(0, before.indexOf("} catch (e) {")), /DIAGNOSTICS|dmesg|aa-status/);
+  assert.match(before, /RUNNER ISOLATION PREFLIGHT FAILED/);
+  assert.match(all, /iso\("bwrap", \["--unshare-all", "--ro-bind", "\/", "\/", "--dev", "\/dev", "--proc", "\/proc", "true"\], 30000\)/);
+  assert.match(all, /launchToken = undefined;[^\n]*\n\s*\/\/ Read-only host diagnostics/);
+  assert.doesNotMatch(after.split("} else {")[0], /launchToken/);
+  assert.ok(diag.length > 0);
+});
+
+test("isolation diagnostics: credential-free env, read-only commands, no capture of env/secrets or host logs", () => {
+  const { diag } = diagCode();
+  const code = diag.replace(/^\s*\/\/.*$/gm, "");
+  assert.match(code, /env: isoEnv/);
+  assert.doesNotMatch(code, /process\.env|workerToken|launchToken|OAUTH|GITHUB_TOKEN|secret/i);
+  assert.doesNotMatch(code, /"sudo"|\benv\b\s*"|printenv|"cat"|journalctl|syslog|\/var\/log/);
+  const cmds = [...code.matchAll(/fact\("([\w-]+)"/g)].map((m) => m[1]);
+  assert.deepEqual([...new Set(cmds)].sort(), ["aa-status", "dmesg", "dpkg-query", "ls", "sha256sum", "uname"]);
+  // No profile load/copy/remove, sysctl/userns change, share-net, scrub disable, or writes.
+  assert.doesNotMatch(code, /apparmor_parser|aa-enforce|aa-complain|aa-disable|sysctl|\bcp\b|\bmv\b|\brm\b|writeFileSync|"tee"|--share-net|SCRUB|userns_clone|restrict_unprivileged_userns=0/);
+});
+
+test("isolation diagnostics mocks: emitted only on failure; unavailable facts tolerated; no credential in output", () => {
+  const ok = runPreflight();
+  assert.doesNotMatch(ok.logs.join("\n"), /DIAGNOSTICS/);
+  const r = runPreflight("--unshare-all");
+  const out = r.logs.join("\n");
+  assert.equal(r.result, undefined);
+  assert.match(out, /RUNNER ISOLATION PREFLIGHT FAILED: boom/);
+  assert.match(out, /RUNNER ISOLATION DIAGNOSTICS \(read-only\)/);
+  assert.doesNotMatch(out, /secret|\btok\b/);
+  // Every diagnostic command ran with a credential-free env (mock records only args; check source).
+  assert.doesNotMatch(r.calls.join("\n"), /sudo (?!apt-get|npm)/);
+});
+
+test("isolation diagnostics mocks: permission-denied or absent facts become unavailable, not failures", () => {
+  const b = iso(yml);
+  const logs = [];
+  const execFileSync = (cmd, args) => {
+    if (["--unshare-all"].some((x) => args.includes(x))) throw new Error("boom probe");
+    if (["dmesg", "aa-status", "sha256sum", "ls", "dpkg-query"].includes(cmd)) throw new Error("denied");
+    if (cmd === "uname") return "6.8.0-test\n";
+    return "";
+  };
+  const readFileSync = (p) => { if (p.includes("userns")) return "1"; throw new Error("ENOENT"); };
+  const fn = new Function("execFileSync", "readFileSync", "process", "console", "let launchToken = 'tok'; if (true) { if (launchToken) {\n" + b + "\nreturn launchToken;");
+  const result = fn(execFileSync, readFileSync, { env: { PATH: "x", LDL_WORKER_CLAUDE_OAUTH_TOKEN: "secret" } }, { log: (m) => logs.push(m) });
+  assert.equal(result, undefined);
+  const d = logs.find((l) => l.includes("DIAGNOSTICS"));
+  assert.match(d, /os=unavailable/);
+  assert.match(d, /kernel=6\.8\.0-test/);
+  assert.match(d, /aa-status="unavailable"/);
+  assert.match(d, /apparmor_denied="unavailable"/);
+  assert.match(d, /bwrap_profile_names="unavailable"/);
+  assert.match(d, /bwrap-userns-restrict=unavailable/);
+});
+
+test("isolation diagnostics mocks: denial lines beyond a 4 KB dmesg prefix are still found; env excludes job token", () => {
+  const b = iso(yml);
+  const logs = [];
+  const envs = [];
+  const big = "x kernel noise line\n".repeat(1000) + 'audit: apparmor="DENIED" operation="userns_create" comm="bwrap"\n';
+  const execFileSync = (cmd, args, opts) => {
+    envs.push(opts && opts.env);
+    if (args.includes("--unshare-all")) throw new Error("boom probe");
+    if (cmd === "dmesg") return big;
+    return "";
+  };
+  const readFileSync = (p) => { if (p.includes("userns")) return "1"; throw new Error("ENOENT"); };
+  const fn = new Function("execFileSync", "readFileSync", "process", "console", "let launchToken = 'tok'; if (true) { if (launchToken) {\n" + b + "\nreturn launchToken;");
+  fn(execFileSync, readFileSync, { env: { PATH: "x", GH_TOKEN: "ghs_job", GITHUB_TOKEN: "ghs_job2", LDL_WORKER_CLAUDE_OAUTH_TOKEN: "secret" } }, { log: (m) => logs.push(m) });
+  const d = logs.find((l) => l.includes("DIAGNOSTICS"));
+  assert.match(d, /apparmor_denied=\["audit: apparmor=\\"DENIED\\"[^\]]*bwrap/);
+  for (const e of envs.filter(Boolean)) assert.deepEqual(Object.keys(e), ["PATH"]);
 });
