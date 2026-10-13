@@ -360,7 +360,7 @@ jobs:
           const profilePaths = ["/etc/apparmor.d/bwrap-userns-restrict", "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict", "/etc/apparmor.d/bwrap"];
           const hashes = profilePaths.map((p) => `${p}=${(fact("sha256sum", [p]).split(/\s+/)[0] || "unavailable").slice(0, 64)}`);
           const listParts = [lines(fact("ls", ["-1", "/etc/apparmor.d"]), /bwrap|bubblewrap/i, 20), lines(fact("ls", ["-1", "/usr/share/apparmor/extra-profiles"]), /bwrap|bubblewrap/i, 20)];
-          const listed = listParts.some((x) => x === "unavailable") ? "unavailable" : listParts.flat();
+          const listed = listParts.every((x) => x === "unavailable") ? "unavailable" : listParts.map((x) => (x === "unavailable" ? "source-unavailable" : x)).flat();
           const dm = lines(fact("dmesg", []), /apparmor="DENIED"/i, Infinity);
           const denied = dm === "unavailable" ? "unavailable" : dm.filter((l) => /bwrap|bubblewrap|userns/i.test(l)).slice(0, 20);
           // The unchanged functional probe, only when bwrap is already present (nothing is installed).
@@ -372,6 +372,6 @@ jobs:
             } catch (e) { probe = `failed: ${String(e.stderr || e.message).split("\n")[0].slice(0, 500)}`; }
           }
           const userns = `apparmor_restrict_unprivileged_userns=${proc("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")} unprivileged_userns_clone=${proc("/proc/sys/kernel/unprivileged_userns_clone")} max_user_namespaces=${proc("/proc/sys/user/max_user_namespaces")}`;
-          const payload = `HOSTED ISOLATION DIAGNOSTIC (read-only, credential-free, no worker): os=${osRelease}; kernel=${cap(fact("uname", ["-r"]), 200)}; ${userns}; packages=${cap(fact("dpkg-query", ["-W", "-f=${Package}=${Version} ", "bubblewrap", "apparmor"]), 1000)}; bwrap_profile_hashes=[${hashes.join(", ")}]; bwrap_profile_names=${capJson(listed, 2000)}; aa-status=${capJson(fact("aa-status", []), 3000)}; apparmor_denied=${capJson(denied, 4000)}; bwrap_probe=${probe}`;
+          const payload = `HOSTED ISOLATION DIAGNOSTIC (read-only, credential-free, no worker): os=${osRelease}; kernel=${cap(fact("uname", ["-r"]), 200)}; ${userns}; packages=${["bubblewrap", "apparmor"].map((pk) => `${pk}=${cap(fact("dpkg-query", ["-W", "-f=${Version}", pk]), 200)}`).join(" ")}; bwrap_profile_hashes=[${hashes.join(", ")}]; bwrap_profile_names=${capJson(listed, 2000)}; aa-status=${capJson(fact("aa-status", []), 3000)}; apparmor_denied=${capJson(denied, 4000)}; bwrap_probe=${probe}`;
           console.log(payload.slice(0, 16000));
           DIAG

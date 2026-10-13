@@ -405,13 +405,15 @@ test("diagnostic route: concurrency never shares the per-control-issue launch gr
 });
 
 // Mock-run the embedded diagnostic script with a stubbed execFileSync/readFileSync.
-const runDiag = ({ bwrap, probe = "ok", denyAll = false } = {}) => {
+const runDiag = ({ bwrap, probe = "ok", denyAll = false, partial = false } = {}) => {
   const code = diagScript().replace(/^import .*$/gm, "");
   const calls = [];
   const logs = [];
   const execFileSync = (cmd, args, opts) => {
     calls.push({ cmd, args, env: opts?.env });
     if (denyAll) throw new Error("denied");
+    if (partial && cmd === "dpkg-query") { if (args.includes("bubblewrap")) throw new Error("not installed"); return "2.4.0"; }
+    if (partial && cmd === "ls") { if (args.includes("/usr/share/apparmor/extra-profiles")) throw new Error("ENOENT"); return "bwrap-userns-restrict\nother\n"; }
     if (cmd === "bwrap" && args[0] === "--version") { if (!bwrap) throw new Error("ENOENT"); return "bubblewrap 0.9\n"; }
     if (cmd === "bwrap") { if (probe === "ok") return ""; const e = new Error("x"); e.stderr = "bwrap: setting up uid map: Permission denied\nmore"; throw e; }
     return `${cmd}-out\n`;
@@ -434,6 +436,12 @@ test("diagnostic route mocks: probe passed and failed both end in a bounded fact
       assert.ok(["aa-status", "bwrap", "dmesg", "dpkg-query", "ls", "sha256sum", "uname"].includes(c.cmd), c.cmd);
     }
   }
+});
+
+test("diagnostic route mocks: partial failures keep the evidence that was collected (#1139 Stage 1)", () => {
+  const r = runDiag({ bwrap: false, partial: true });
+  assert.match(r.out, /packages=bubblewrap=unavailable apparmor=2\.4\.0;/);
+  assert.match(r.out, /bwrap_profile_names=\["bwrap-userns-restrict","source-unavailable"\]/);
 });
 
 test("diagnostic route mocks: missing bwrap skips the probe with an explicit limit; denied facts are unavailable", () => {
