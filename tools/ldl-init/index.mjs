@@ -723,6 +723,14 @@ export const HARD_MODULE_DEPENDENCIES = [
   // unmanaged, preserved tools/orchestration/github-read.mjs lets install/update report success
   // while the mandatory gates fail at ESM load time.
   { dest: "tools/orchestration/close-control.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  // Issue #1151 Stage 1 correction: activate-control-pair.mjs and write-control-snapshot.mjs hard-import these managed modules.
+  { dest: "tools/orchestration/activate-control-pair.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/activate-control-pair.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
+  { dest: "tools/orchestration/activate-control-pair.mjs", dependsOnDest: "tools/orchestration/executor-substrate-authority.mjs" },
+  { dest: "tools/orchestration/activate-control-pair.mjs", dependsOnDest: "tools/orchestration/write-control-snapshot.mjs" },
+  { dest: "tools/orchestration/write-control-snapshot.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/write-control-snapshot.mjs", dependsOnDest: "tools/orchestration/control-field-validator.mjs" },
+  { dest: "tools/orchestration/write-control-snapshot.mjs", dependsOnDest: "tools/review-watch/lifecycle-gate.mjs" },
   // Issue #852 Stage 1 review finding (P2, on PR #854): close-control.mjs hard-imports the REST
   // helpers ghRestCloseIssue/ghRestCommentIssue from lifecycle-gate.mjs; a preserved older
   // unmanaged lifecycle-gate.mjs would make install/update succeed yet fail at ESM load time.

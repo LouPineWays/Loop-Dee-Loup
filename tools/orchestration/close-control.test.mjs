@@ -25,8 +25,11 @@ const OPEN_BODY = `- **Execution:** #486
 // Standard fixture: control Issue #487 (OPEN, OPEN_BODY, so its own Stage 2/Execution already
 // correspond to audit #538 / work issue #486), audit Issue #538 (CLOSED). Individual tests
 // override either issue's `state`/`body` via the optional overrides.
-function makeGhIssueViewImpl({ controlIssue = 487, controlState = "OPEN", controlBody = OPEN_BODY, auditIssue = 538, auditState = "CLOSED" } = {}) {
+function makeGhIssueViewImpl({ controlIssue = 487, controlState = "OPEN", controlBody = OPEN_BODY, auditIssue = 538, auditState = "CLOSED", workIssue = 486, workState = "CLOSED" } = {}) {
   return async ({ number }) => {
+    if (Number(number) === Number(workIssue)) {
+      return { state: workState, body: "" };
+    }
     if (Number(number) === Number(auditIssue) && Number(auditIssue) !== Number(controlIssue)) {
       return { state: auditState, body: "" };
     }
@@ -379,4 +382,39 @@ test("#852 checkCloseControl closes via REST after the snapshot write; a not-clo
   );
   assert.equal(bad.exitCode, 1);
   assert.match(bad.message, /already terminal/);
+});
+
+// Issue #1151: never terminalize a control whose sole current thick packet is still open.
+test("#1151 checkCloseControl: REJECTED — control body's current Execution packet still OPEN is never stranded under a terminal parent; nothing is written, closed, or commented", async () => {
+  const calls = { edit: 0, close: 0, comment: 0 };
+  const result = await checkCloseControl(
+    { repo: "owner/repo", "control-issue": 487, "audit-issue": 538, "work-issue": 486 },
+    {
+      ghIssueViewImpl: makeGhIssueViewImpl({ workState: "OPEN" }),
+      ghEditImpl: () => { calls.edit++; },
+      ghCloseImpl: async () => { calls.close++; },
+      ghCommentImpl: async () => { calls.comment++; },
+    },
+  );
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "REJECTED");
+  assert.match(result.message, /current execution packet #486 is still open/);
+  assert.deepEqual(calls, { edit: 0, close: 0, comment: 0 });
+});
+
+test("#1151 checkCloseControl: REJECTED even on the no --work-issue shape when the control's own Execution packet is still OPEN", async () => {
+  const result = await checkCloseControl(
+    { repo: "owner/repo", "control-issue": 487, "audit-issue": 538 },
+    { ghIssueViewImpl: makeGhIssueViewImpl({ workState: "OPEN" }), ghEditImpl: () => {}, ghCloseImpl: async () => {}, ghCommentImpl: async () => {} },
+  );
+  assert.equal(result.exitCode, 2);
+});
+
+test("#1151 checkCloseControl: a historically completed (CLOSED) thick packet still allows a normal CLEAN close", async () => {
+  const result = await checkCloseControl(
+    { repo: "owner/repo", "control-issue": 487, "audit-issue": 538, "work-issue": 486 },
+    { ghIssueViewImpl: makeGhIssueViewImpl({ workState: "CLOSED" }), ghEditImpl: () => {}, ghCloseImpl: async () => {}, ghCommentImpl: async () => {} },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.state, "CLOSED");
 });
