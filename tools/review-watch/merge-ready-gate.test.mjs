@@ -479,7 +479,7 @@ function fakeGh({ branch = UNPROTECTED, rules = [], runs = [], statuses = [], sh
   const impl = (path, opts = {}) => {
     calls.push(path);
     if (extra[path]) return typeof extra[path] === "function" ? extra[path]() : extra[path];
-    if (/\/rules\/branches\//.test(path)) return rules;
+    if (/\/rules\/branches\//.test(path)) return opts.paginate ? (Array.isArray(rules) && rules.pages ? rules.pages : [rules]) : rules;
     if (/\/branches\/[^/]+$/.test(path)) return branch;
     if (/\/check-runs/.test(path)) return opts.paginate ? [{ total_count: runs.length, check_runs: runs }] : { total_count: runs.length, check_runs: runs };
     if (/\/status\?/.test(path)) return { state: "success", total_count: statuses.length, sha, statuses };
@@ -585,6 +585,17 @@ test("checkRequiredCi: ruleset required_status_checks are honored", async () => 
   assert.equal(result.state, "CI_REQUIRED_CHECK_MISSING");
 });
 
+test("checkRequiredCi: required_status_checks rule on a later rules page is honored", async () => {
+  const filler = Array.from({ length: 30 }, () => ({ type: "deletion" }));
+  const later = [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "verify" }] } }];
+  const rules = [];
+  rules.pages = [filler, later];
+  const ghApiImpl = fakeGh({ rules, runs: [runOf("other", "success")] });
+  const result = await checkRequiredCi(CI_ARGS, { ghApiImpl, readPrImpl: prReader([H]) });
+  assert.equal(result.state, "CI_REQUIRED_CHECK_MISSING");
+  assert.ok(ghApiImpl.calls.some((c) => /rules\/branches\/main\?per_page=100/.test(c)));
+});
+
 test("checkRequiredCi: conflicting duplicate runs for one context (success + failure) -> CI_FAILED", async () => {
   const result = await checkRequiredCi(CI_ARGS, {
     ghApiImpl: fakeGh({ runs: [runOf("verify", "success"), runOf("verify", "failure", { appId: 99 })] }),
@@ -604,7 +615,9 @@ test("checkRequiredCi: unreadable/ambiguous evidence fails closed to exit 1", as
   const cases = {
     "policy 403": fakeGh({ extra: { "repos/o/r/branches/main": () => { throw new Error("HTTP 403"); } } }),
     "branch summary without boolean protected": fakeGh({ branch: {} }),
-    "rules not an array": fakeGh({ rules: {} }),
+    "rules not an array": fakeGh({ extra: { "repos/o/r/rules/branches/main?per_page=100": {} } }),
+    "required workflows rule": fakeGh({ rules: [{ type: "workflows", parameters: { workflows: [{ path: ".github/workflows/ci.yml" }] } }] }),
+    "malformed rule entry": fakeGh({ rules: [null] }),
     "unrecognized conclusion": fakeGh({ runs: [runOf("verify", "mystery")] }),
     "truncated check-run list": fakeGh({ extra: { [`repos/o/r/commits/${H}/check-runs?per_page=100&filter=latest`]: [{ total_count: 5, check_runs: [runOf("verify", "success")] }] } }),
     "truncated status list": fakeGh({ extra: { [`repos/o/r/commits/${H}/status?per_page=100`]: { total_count: 3, sha: H, statuses: [] } } }),

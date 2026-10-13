@@ -167,11 +167,18 @@ export function readRequiredCheckPolicy({ repo, base }, { ghApiImpl = defaultGhA
     }
     if (required.length > 0) sources.push("branch-protection");
   }
-  const rules = ghApiImpl(`repos/${repo}/rules/branches/${bp}`);
-  if (!Array.isArray(rules)) throw new Error("branch rules response is not an array");
+  // The rules endpoint defaults to 30 results per page, so request every page (100 per page) and
+  // flatten; a response that is not an array of rule pages/objects is unreadable and fails closed.
+  const pages = ghApiImpl(`repos/${repo}/rules/branches/${bp}?per_page=100`, { paginate: true });
+  if (!Array.isArray(pages)) throw new Error("branch rules response is not an array");
+  const rules = pages.flatMap((page) => (Array.isArray(page) ? page : [page]));
   let fromRules = 0;
   for (const rule of rules) {
-    if (rule?.type !== "required_status_checks") continue;
+    if (!rule || typeof rule !== "object" || typeof rule.type !== "string") throw new Error("branch rules response contains a malformed rule");
+    // A required `workflows` rule makes named workflows mandatory, but their evidence is not
+    // modeled here; an empty policy plus zero observed checks must never read as green.
+    if (rule.type === "workflows") throw new Error("branch ruleset declares a required 'workflows' rule, which this gate cannot verify");
+    if (rule.type !== "required_status_checks") continue;
     const items = normalizeRequired(rule?.parameters?.required_status_checks, "ruleset required_status_checks");
     fromRules += items.length;
     required.push(...items);
