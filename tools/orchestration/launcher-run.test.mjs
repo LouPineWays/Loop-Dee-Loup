@@ -77,6 +77,8 @@ test("clean Stage 1 satisfied merges the exact authorized head after finalize + 
   assert.ok(order.indexOf("tools/orchestration/finalize-stage1-satisfied-breakpoint.mjs") < order.indexOf("tools/review-watch/merge-ready-gate.mjs"));
   const merge = calls.find((c) => c[0] === "gh" && c[1] === "pr" && c[2] === "merge");
   assert.ok(merge.includes("--match-head-commit") && merge.includes("h1"));
+  const gate = calls.find((c) => c[1] === "tools/review-watch/merge-ready-gate.mjs");
+  assert.ok(gate.includes("--require-positive-ci") && gate[gate.indexOf("--require-positive-ci") + 1] === "true");
 });
 
 test("a head that moved since the verdict is never merged", async () => {

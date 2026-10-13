@@ -310,7 +310,7 @@ export function buildDeps({
             "--control-issue", String(controlIssue), "--execution-issue", String(executionIssue), "--pr", String(pr),
           ]);
         }
-        io.node("tools/review-watch/merge-ready-gate.mjs", ["--repo", String(verdict.repo), "--pr", String(pr), "--head", head, "--issue", String(executionIssue)]);
+        io.node("tools/review-watch/merge-ready-gate.mjs", ["--repo", String(verdict.repo), "--pr", String(pr), "--head", head, "--issue", String(executionIssue), "--require-positive-ci", "true"]);
         io.gh(["pr", "merge", String(pr), "--squash", "--match-head-commit", head, "--body", `Addresses #${executionIssue} (LDL launcher merge)`]);
       } else {
         throw new Error(`no executor for ${state}`);
