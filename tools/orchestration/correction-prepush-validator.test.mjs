@@ -261,6 +261,12 @@ const FIND_EXEC_BYPASSES = [
   "find . -exec \"$X\" push origin HEAD:b \;",
   "find . -exec env git {} origin HEAD:b \;",
   "find . -ok sh -c 'git push' \;",
+  "touch push; find $(printf push) -maxdepth 0 -exec ionice git {} origin HEAD:b \;",
+  "find /tmp/g -maxdepth 0 -exec {} push origin HEAD:b \;",
+  "find push -exec sh -c 'git \"$1\" origin HEAD:b' sh {} \;",
+  "touch push; find push -exec nice --adjustment 5 git {} origin HEAD:b \;",
+  "find push -exec env --unset X git {} origin HEAD:b \;",
+  "find g -exec {} \"$S\" o \;",
 ];
 
 test("find -exec git with a replacement/expansion subcommand fails closed (Audit #1085)", async () => {
