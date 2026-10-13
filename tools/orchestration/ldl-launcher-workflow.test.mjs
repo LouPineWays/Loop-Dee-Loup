@@ -488,7 +488,7 @@ test("post-install route: no launch/claim/worker/policy-change pathway; allowlis
   assert.match(code, /const PKGS = \["bubblewrap", "socat"\];/);
   // sudo is used only for apt-get update and the PKGS install, never for bwrap.
   const sudos = [...code.matchAll(/execFileSync\("sudo", \[([^\]]*)\]/g)].map((m) => m[1]);
-  assert.deepEqual(sudos, ['"apt-get", "update", "-qq"', '"apt-get", "install", "-y", "-qq", ...PKGS']);
+  assert.deepEqual(sudos, ['"apt-get", "update", "-qq"', '"apt-get", "install", "-y", "-qq", "--no-remove", ...PKGS']);
   assert.match(code, /const PROBE = \["--unshare-all", "--ro-bind", "\/", "\/", "--dev", "\/dev", "--proc", "\/proc", "true"\];/);
   assert.match(code, /execFileSync\("bwrap", PROBE,/);
   // Inspection precedes install.
