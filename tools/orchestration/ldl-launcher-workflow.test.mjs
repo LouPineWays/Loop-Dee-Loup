@@ -24,7 +24,8 @@ test("dispatch form: control_issue is the only required input; nonce is optional
   const inputs = onBlock.slice(onBlock.indexOf("inputs:"));
   assert.match(inputs, /control_issue:\s*\n\s+description:[^\n]*\n\s+required: true/);
   assert.match(inputs, /nonce:\s*\n\s+description:[^\n]*\n\s+required: false/);
-  assert.deepEqual([...inputs.matchAll(/^ {6}(\w+):$/gm)].map((m) => m[1]), ["control_issue", "nonce", "diagnostic_only"]);
+  assert.deepEqual([...inputs.matchAll(/^ {6}(\w+):$/gm)].map((m) => m[1]), ["control_issue", "nonce", "diagnostic_only", "post_install_diagnostic"]);
+  assert.match(inputs, /post_install_diagnostic:\s*\n\s+description:[^\n]*\n\s+type: boolean\n\s+required: false\n\s+default: false/);
   assert.match(inputs, /diagnostic_only:\s*\n\s+description:[^\n]*\n\s+type: boolean\n\s+required: false\n\s+default: false/);
 });
 
@@ -43,7 +44,7 @@ test("non-default-ref dispatch guard is hygiene; secret is environment-scoped (A
   // Exactly one job; its `if` is evaluated before checkout or any step, so a dispatch selected on
   // a non-default ref never runs repository code or touches a credential.
   const jobs = yml.slice(yml.indexOf("\njobs:"));
-  assert.deepEqual([...jobs.matchAll(/^ {2}([\w-]+):\s*$/gm)].map((m) => m[1]), ["authorize-and-claim", "isolation-diagnostic"]);
+  assert.deepEqual([...jobs.matchAll(/^ {2}([\w-]+):\s*$/gm)].map((m) => m[1]), ["authorize-and-claim", "isolation-diagnostic", "post-install-isolation-diagnostic"]);
   const job = jobs.slice(jobs.indexOf("authorize-and-claim:"), jobs.indexOf("\n  isolation-diagnostic:"));
   const guard = /\n {4}if: >-\n([\s\S]*?)\n {4}runs-on:/.exec(job);
   assert.ok(guard, "job-level if precedes runs-on and steps");
@@ -329,7 +330,8 @@ test("isolation diagnostics mocks: oversized earlier fields never starve the tra
 // Issue #1139: credential-free, no-worker hosted isolation diagnostic route in the same workflow file.
 const jobsText = yml.slice(yml.indexOf("\njobs:"));
 const launchJob = jobsText.slice(jobsText.indexOf("  authorize-and-claim:"), jobsText.indexOf("\n  isolation-diagnostic:"));
-const diagJob = jobsText.slice(jobsText.indexOf("  isolation-diagnostic:"));
+const diagJob = jobsText.slice(jobsText.indexOf("  isolation-diagnostic:"), jobsText.indexOf("\n  # Post-install diagnostic entry point"));
+const postJob = jobsText.slice(jobsText.indexOf("  post-install-isolation-diagnostic:"));
 const diagScript = () => {
   const m = /<<'DIAG'\n([\s\S]*?)\n\s*DIAG\n/.exec(diagJob);
   assert.ok(m, "diagnostic script present");
@@ -345,6 +347,7 @@ const evalIf = (cond, ctx) => {
     .replace(/startsWith\(github\.event\.comment\.body, '([^']*)'\)/g, "ctx.body.startsWith('$1')")
     .replace(/github\.event_name/g, "ctx.event")
     .replace(/github\.ref/g, "ctx.ref")
+    .replace(/inputs\.post_install_diagnostic/g, "ctx.post")
     .replace(/inputs\.diagnostic_only/g, "ctx.diag");
   return new Function("ctx", `return Boolean(${js});`)(ctx);
 };
@@ -380,6 +383,7 @@ test("diagnostic route: no pathway to launch, claim, install, worker, or GitHub 
 test("diagnostic route: job guards are mutually exclusive for every event/ref/input combination", () => {
   const launch = diagCond(launchJob);
   const diag = diagCond(diagJob);
+  const post = diagCond(postJob);
   const events = [
     { event: "workflow_dispatch", pr: null, body: "" },
     { event: "issue_comment", pr: null, body: "/ldl launch 1 x" },
@@ -387,21 +391,24 @@ test("diagnostic route: job guards are mutually exclusive for every event/ref/in
     { event: "issue_comment", pr: null, body: "hello" },
     { event: "push", pr: null, body: "" },
   ];
-  for (const e of events) for (const ref of ["refs/heads/main", "refs/heads/feature"]) for (const dg of [true, false, null]) {
-    const ctx = { ...e, ref, default: "main", diag: dg };
+  for (const e of events) for (const ref of ["refs/heads/main", "refs/heads/feature"]) for (const dg of [true, false, null]) for (const pg of [true, false, null]) {
+    const ctx = { ...e, ref, default: "main", diag: dg, post: pg };
     const l = evalIf(launch, ctx);
     const d = evalIf(diag, ctx);
-    assert.ok(!(l && d), `exclusive: ${JSON.stringify(ctx)}`);
-    // Diagnostic runs exactly for an explicit default-branch diagnostic dispatch.
-    assert.equal(d, e.event === "workflow_dispatch" && dg === true && ref === "refs/heads/main", JSON.stringify(ctx));
+    const q = evalIf(post, ctx);
+    assert.ok([l, d, q].filter(Boolean).length <= 1, `exclusive: ${JSON.stringify(ctx)}`);
+    // Read-only diagnostic runs exactly for an explicit default-branch diagnostic_only dispatch without post-install.
+    assert.equal(d, e.event === "workflow_dispatch" && dg === true && pg !== true && ref === "refs/heads/main", JSON.stringify(ctx));
+    // Post-install runs exactly for an explicit default-branch post-install dispatch without diagnostic_only.
+    assert.equal(q, e.event === "workflow_dispatch" && pg === true && dg !== true && ref === "refs/heads/main", JSON.stringify(ctx));
     // Ordinary launch is unchanged for every non-diagnostic request.
-    if (dg !== true) assert.equal(l, (e.event === "workflow_dispatch" && ref === "refs/heads/main") || (e.event === "issue_comment" && e.pr === null && e.body.startsWith("/ldl launch ")), JSON.stringify(ctx));
-    if (dg === true) assert.equal(l, false, "diagnostic request never launches");
+    if (dg !== true && pg !== true) assert.equal(l, (e.event === "workflow_dispatch" && ref === "refs/heads/main") || (e.event === "issue_comment" && e.pr === null && e.body.startsWith("/ldl launch ")), JSON.stringify(ctx));
+    if (dg === true || pg === true) assert.equal(l, false, "diagnostic request never launches");
   }
 });
 
 test("diagnostic route: concurrency never shares the per-control-issue launch group", () => {
-  assert.match(yml, /group: ldl-launcher-\$\{\{ inputs\.diagnostic_only && 'diagnostic' \|\| github\.event\.issue\.number \|\| inputs\.control_issue \}\}/);
+  assert.match(yml, /group: ldl-launcher-\$\{\{ inputs\.diagnostic_only && 'diagnostic' \|\| inputs\.post_install_diagnostic && 'diagnostic-post-install' \|\| github\.event\.issue\.number \|\| inputs\.control_issue \}\}/);
 });
 
 // Mock-run the embedded diagnostic script with a stubbed execFileSync/readFileSync.
@@ -451,4 +458,136 @@ test("diagnostic route mocks: missing bwrap skips the probe with an explicit lim
   const d = runDiag({ denyAll: true });
   assert.match(d.out, /os=unavailable; kernel=unavailable; apparmor_restrict_unprivileged_userns=unavailable/);
   assert.match(d.out, /aa-status="unavailable"; apparmor_denied="unavailable"; bwrap_probe=skipped/);
+});
+
+// ---- Issue #1143: explicit post-install diagnostic job ----
+const postScript = () => {
+  const m = /<<'POSTDIAG'\n([\s\S]*?)\n\s*POSTDIAG\n/.exec(postJob);
+  assert.ok(m, "post-install script present");
+  return m[1].split("\n").map((l) => l.replace(/^ {10}/, "")).join("\n");
+};
+
+test("post-install route: no environment, checkout, secrets, or write permission; one step; no interpolation", () => {
+  assert.match(postJob, /\n {4}permissions: \{\}\n/);
+  assert.doesNotMatch(postJob, /\n {4}environment:/);
+  assert.doesNotMatch(postJob, /secrets\.|\$\{\{\s*github\.token|GITHUB_TOKEN|GH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|LDL_WORKER/);
+  assert.doesNotMatch(postJob, /actions\/checkout|uses:/);
+  assert.doesNotMatch(postJob, /\n\s+needs:/);
+  assert.equal([...postJob.matchAll(/^ {6}- name:/gm)].length, 1);
+  assert.doesNotMatch(postScript(), /\$\{\{/);
+  assert.match(postJob, /timeout-minutes: 20/);
+});
+
+test("post-install route: no launch/claim/worker/policy-change pathway; allowlisted env; only bubblewrap+socat installed", () => {
+  const code = postScript().replace(/^\s*\/\/.*$/gm, "");
+  assert.doesNotMatch(code, /launcher-run|launch-authorization|attempt-claim|launcher-step|control-plane-bootstrap|session-entry-gate|"gh"|"git"|"npm"|claude|renderClaimBody|auth setup-git/i);
+  assert.doesNotMatch(code, /process\.env\s*[,)}]|\.\.\.process\.env|OAUTH|TOKEN|secret/i);
+  assert.doesNotMatch(code, /sysctl|apparmor_parser|aa-enforce|aa-complain|aa-disable|writeFileSync|"tee"|--share-net|SCRUB|unconfined|apparmor-utils|apparmor-profiles|"cp"|"mv"|systemctl|"service"/);
+  assert.match(code, /for \(const k of \["PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "DEBIAN_FRONTEND"\]\)/);
+  for (const m of code.matchAll(/execFileSync\([^\n]*/g)) assert.match(m[0], /env: dEnv/);
+  assert.match(code, /const PKGS = \["bubblewrap", "socat"\];/);
+  // sudo is used only for apt-get update and the PKGS install, never for bwrap.
+  const sudos = [...code.matchAll(/execFileSync\("sudo", \[([^\]]*)\]/g)].map((m) => m[1]);
+  assert.deepEqual(sudos, ['"apt-get", "update", "-qq"', '"apt-get", "install", "-y", "-qq", ...PKGS']);
+  assert.match(code, /const PROBE = \["--unshare-all", "--ro-bind", "\/", "\/", "--dev", "\/dev", "--proc", "\/proc", "true"\];/);
+  assert.match(code, /execFileSync\("bwrap", PROBE,/);
+  // Inspection precedes install.
+  assert.ok(code.indexOf('"-s", "install"') < code.indexOf('"apt-get", "install", "-y"'));
+  assert.ok(code.indexOf('"dpkg-deb"') < code.indexOf('"apt-get", "install", "-y"'));
+});
+
+// Mock-run: scripted command responses.
+const runPost = ({ simulate = "Inst bubblewrap (0.9 Ubuntu)\nInst socat (1.8 Ubuntu)\n", contents = "./usr/bin/bwrap\n", script = "#!/bin/sh\nexit 0\n", failOn = null, probe = "ok", mutate = false } = {}) => {
+  const code = postScript().replace(/^import .*$/gm, "");
+  const calls = [];
+  const logs = [];
+  let installed = false;
+  const files = new Map();
+  const err = (m, stderr) => { const e = new Error(m); e.stderr = stderr; return e; };
+  const execFileSync = (cmd, args, opts) => {
+    calls.push({ cmd, args, env: opts?.env });
+    const key = cmd === "sudo" ? "sudo:" + args[1] : cmd + ":" + (args[0] ?? "");
+    if (failOn && (failOn === key || failOn === cmd)) throw err("boom", "E: simulated failure on " + key + "\nrest");
+    if (cmd === "sudo" && args[1] === "install") { installed = true; return ""; }
+    if (cmd === "sudo") return "";
+    if (cmd === "apt-get" && args[0] === "-s") return simulate;
+    if (cmd === "apt-get" && args[0] === "download") { for (const n of args.slice(1)) files.set(n + ".deb", 1); return ""; }
+    if (cmd === "dpkg-deb" && args[0] === "-c") return contents;
+    if (cmd === "dpkg-deb" && args[0] === "-e") return "";
+    if (cmd === "bwrap" && args[0] === "--version") { if (!installed) throw new Error("ENOENT"); return "bubblewrap 0.9"; }
+    if (cmd === "bwrap") { if (probe === "ok") return ""; throw err("x", "bwrap: setting up uid map: Permission denied\nmore"); }
+    if (cmd === "ls" && mutate && installed) return "bwrap-userns-restrict\n";
+    if (cmd === "dpkg-query") return installed ? "1.0" : "unavailable";
+    return cmd + "-out\n";
+  };
+  const readFileSync = (p) => { if (/postinst|preinst|prerm|postrm|triggers/.test(p)) return script; return p === "/etc/os-release" ? "PRETTY_NAME=Ubuntu 24.04\nVERSION_ID=24.04" : "1"; };
+  const readdirSync = (d) => (/ctl-/.test(d) ? ["postinst"] : [...files.keys()]);
+  const mkdtempSync = () => "/tmp/ldl-debs-x";
+  const join = (...a) => a.join("/");
+  const createHash = () => ({ update(t) { this.t = t; return this; }, digest() { return Buffer.from(String(this.t)).toString("hex").slice(0, 16); } });
+  const proc = { env: { PATH: "/bin", HOME: "/h", GITHUB_TOKEN: "ghs_secret", CLAUDE_CODE_OAUTH_TOKEN: "sk-secret" } };
+  new Function("execFileSync", "readFileSync", "readdirSync", "mkdtempSync", "createHash", "tmpdir", "join", "process", "console", code)(
+    execFileSync, readFileSync, readdirSync, mkdtempSync, createHash, () => "/tmp", join, proc, { log: (m) => logs.push(m) });
+  return { calls, out: logs.join("\n"), logs, exitCode: proc.exitCode };
+};
+
+const sudoIdx = (r, sub) => r.calls.findIndex((c) => c.cmd === "sudo" && c.args[1] === sub);
+
+test("post-install mocks: probe passes after a clean inspected install; bounded, no secrets, no policy change", () => {
+  const r = runPost();
+  assert.equal(r.logs.length, 3);
+  assert.match(r.logs[0], /pre-install/);
+  assert.match(r.logs[1], /post-install/);
+  assert.match(r.logs[2], /install=ok \(inspected 2 package files; none reference apparmor\); policy_change=none-observed.*bwrap_probe=passed/);
+  assert.ok(r.logs.every((l) => l.length <= 8000));
+  assert.doesNotMatch(r.out, /secret|ghs_|sk-/);
+  assert.equal(r.exitCode, undefined);
+  // Inspection before install; probe after install, unprivileged.
+  assert.ok(r.calls.findIndex((c) => c.cmd === "dpkg-deb") < sudoIdx(r, "install"));
+  const pi = r.calls.findIndex((c) => c.cmd === "bwrap" && c.args[0] === "--unshare-all");
+  assert.ok(pi > sudoIdx(r, "install"));
+  assert.deepEqual(r.calls[pi].args, ["--unshare-all", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "true"]);
+  for (const c of r.calls) assert.ok(!c.env || (!("GITHUB_TOKEN" in c.env) && !("CLAUDE_CODE_OAUTH_TOKEN" in c.env)));
+  assert.ok(!r.calls.some((c) => c.cmd === "sudo" && c.args.includes("bwrap")));
+});
+
+test("post-install mocks: a genuine probe failure is reported as evidence with exact stderr", () => {
+  const r = runPost({ probe: "fail" });
+  assert.match(r.logs[2], /bwrap_probe=failed: bwrap: setting up uid map: Permission denied/);
+  assert.equal(r.exitCode, undefined);
+});
+
+test("post-install mocks: apparmor in the plan, contents, or a maintainer script refuses BEFORE install", () => {
+  for (const o of [
+    { simulate: "Inst bubblewrap (1)\nInst apparmor-profiles (2)\n" },
+    { contents: "./etc/apparmor.d/bwrap\n" },
+    { script: "#!/bin/sh\napparmor_parser -r /etc/apparmor.d/x\n" },
+  ]) {
+    const r = runPost(o);
+    assert.equal(sudoIdx(r, "install"), -1, "no install attempted");
+    assert.ok(!r.calls.some((c) => c.cmd === "bwrap" && c.args[0] === "--unshare-all"));
+    assert.match(r.logs[2], /install=refused-before-install:.*nothing installed.*bwrap_probe=skipped: install did not complete/);
+    assert.equal(r.exitCode, 1);
+  }
+});
+
+test("post-install mocks: any uninspectable step refuses (simulate, download, dpkg-deb, apt update)", () => {
+  for (const failOn of ["apt-get:-s", "apt-get:download", "dpkg-deb", "sudo:update"]) {
+    const r = runPost({ failOn });
+    assert.equal(sudoIdx(r, "install"), -1, failOn);
+    assert.match(r.logs[2], /refused-before-install/);
+    assert.equal(r.exitCode, 1);
+  }
+});
+
+test("post-install mocks: install error is reported, probe skipped, evidence still emitted", () => {
+  const r = runPost({ failOn: "sudo:install" });
+  assert.match(r.logs[2], /install=failed: E: simulated failure on sudo:install.*bwrap_probe=skipped: install did not complete/);
+  assert.equal(r.logs.length, 3);
+  assert.equal(r.exitCode, 1);
+});
+
+test("post-install mocks: an unanticipated pre/post policy change is flagged as a boundary violation", () => {
+  const r = runPost({ mutate: true });
+  assert.match(r.logs[2], /policy_change=BOUNDARY VIOLATION: changed=\[[^\]]*apparmor_d_digest/);
 });
