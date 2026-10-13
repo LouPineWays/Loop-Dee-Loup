@@ -507,6 +507,27 @@ test("checkRequiredCi: all observed checks green on the current head, no declare
   assert.equal(result.policy.source, "none-declared");
 });
 
+test("checkRequiredCi: requirePositive + no declared policy + zero observed checks -> CI_NO_POSITIVE_EVIDENCE exit 2 (#1127: nothing verified is not green)", async () => {
+  const result = await checkRequiredCi({ ...CI_ARGS, requirePositive: true }, { ghApiImpl: fakeGh({ runs: [] }), readPrImpl: prReader([H, H]) });
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "CI_NO_POSITIVE_EVIDENCE");
+  const lenient = await checkRequiredCi(CI_ARGS, { ghApiImpl: fakeGh({ runs: [] }), readPrImpl: prReader([H, H]) });
+  assert.equal(lenient.state, "CI_PASSED");
+});
+
+test("checkRequiredCi: requirePositive with an observed green check still passes", async () => {
+  const result = await checkRequiredCi({ ...CI_ARGS, requirePositive: true }, { ghApiImpl: fakeGh({ runs: [runOf("verify", "success")] }), readPrImpl: prReader([H, H]) });
+  assert.equal(result.state, "CI_PASSED");
+});
+
+test("run: --require-positive-ci true is forwarded to the CI check; absent it is not", async () => {
+  const seen = [];
+  const base = { ...impls(), checkRequiredCiImpl: async (a) => { seen.push(a.requirePositive); return passingCi(); } };
+  await run({ ...ARGS, "require-positive-ci": "true" }, base);
+  await run(ARGS, base);
+  assert.deepEqual(seen, [true, false]);
+});
+
 test("checkRequiredCi: a failed run on the current head -> CI_FAILED exit 2 (the dcbfe195 / run 37624396190 shape)", async () => {
   const result = await checkRequiredCi(
     { ...CI_ARGS, head: FAILED_H },

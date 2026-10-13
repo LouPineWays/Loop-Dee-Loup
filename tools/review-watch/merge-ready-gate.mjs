@@ -259,7 +259,7 @@ export function evaluateCiEvidence({ head, policy, checkRuns, statuses }) {
 // unreadable, unauthorized, truncated, malformed or ambiguous read -- never treated as success).
 // The PR head is read before and after the evidence reads; a changed head is CI_HEAD_MISMATCH.
 // This is a conservative read-time binding at the merge handoff, not GitHub-side head protection.
-export async function checkRequiredCi({ repo, pr, head }, { ghApiImpl = defaultGhApi, readPrImpl = readGithubPr } = {}) {
+export async function checkRequiredCi({ repo, pr, head, requirePositive = false }, { ghApiImpl = defaultGhApi, readPrImpl = readGithubPr } = {}) {
   const id = { repo: repo ?? null, pr: pr ?? null };
   const unverifiable = (message) => ({ exitCode: 1, state: "CI_UNVERIFIABLE", ...id, head: head ?? null, message });
   if (!repo || !pr || !isHexSha(head)) return unverifiable("checkRequiredCi requires repo, pr and a commit sha head");
@@ -285,6 +285,12 @@ export async function checkRequiredCi({ repo, pr, head }, { ghApiImpl = defaultG
     const after = readPrImpl({ repo, number: pr, fields: ["headRefOid"] });
     if (String(after.headRefOid).toLowerCase() !== live) {
       return { exitCode: 2, state: "CI_HEAD_MISMATCH", ...id, head: String(after.headRefOid).toLowerCase(), message: `PR head changed from ${live} while CI evidence was read` };
+    }
+    // Issue #1127: an unattended merge needs POSITIVE exact-head evidence. With no declared policy
+    // and zero observed checks (e.g. a PR touching no path-filtered workflow) nothing was verified,
+    // so the generic CI_PASSED ("nothing required") must not authorize it: blocked, not green.
+    if (requirePositive && result.exitCode === 0 && result.observed === 0 && result.policy.required.length === 0) {
+      return { ...id, exitCode: 2, state: "CI_NO_POSITIVE_EVIDENCE", head: live, policy: result.policy, observed: 0, message: `no required check is declared and no check ran at head ${live}; an unattended merge needs positive CI evidence` };
     }
     return { ...id, ...result };
   } catch (err) {
@@ -482,7 +488,7 @@ export async function run(
       (stage1.exitCode === 2 && correctionDelta && correctionDelta.exitCode === 0 && correctionDelta.state === "CORRECTION_SATISFIED"));
   if (otherLegsPass) {
     try {
-      ci = await checkRequiredCiImpl({ repo, pr, head });
+      ci = await checkRequiredCiImpl({ repo, pr, head, requirePositive: args["require-positive-ci"] === "true" || args.requirePositiveCi === true });
     } catch (err) {
       ci = { exitCode: 1, state: "CI_UNVERIFIABLE", message: `required-ci threw: ${err.message}` };
     }
