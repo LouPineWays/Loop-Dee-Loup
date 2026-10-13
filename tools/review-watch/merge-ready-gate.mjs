@@ -239,6 +239,7 @@ export function evaluateCiEvidence({ head, policy, checkRuns, statuses }) {
     head,
     policy: { source: policy.source, required: requiredList.map((r) => r.context) },
     observed: entries.length,
+    passed: entries.filter((e) => e.state === "passed").length,
   };
   const failed = blocking.filter((b) => b.state === "failed" || b.state === "neutral");
   const unknown = blocking.filter((b) => b.state === "unknown");
@@ -289,8 +290,8 @@ export async function checkRequiredCi({ repo, pr, head, requirePositive = false 
     // Issue #1127: an unattended merge needs POSITIVE exact-head evidence. With no declared policy
     // and zero observed checks (e.g. a PR touching no path-filtered workflow) nothing was verified,
     // so the generic CI_PASSED ("nothing required") must not authorize it: blocked, not green.
-    if (requirePositive && result.exitCode === 0 && result.observed === 0 && result.policy.required.length === 0) {
-      return { ...id, exitCode: 2, state: "CI_NO_POSITIVE_EVIDENCE", head: live, policy: result.policy, observed: 0, message: `no required check is declared and no check ran at head ${live}; an unattended merge needs positive CI evidence` };
+    if (requirePositive && result.exitCode === 0 && result.passed === 0 && result.policy.required.length === 0) {
+      return { ...id, exitCode: 2, state: "CI_NO_POSITIVE_EVIDENCE", head: live, policy: result.policy, observed: result.observed, passed: 0, message: `no required check is declared and no check succeeded at head ${live}; an unattended merge needs positive CI evidence` };
     }
     return { ...id, ...result };
   } catch (err) {

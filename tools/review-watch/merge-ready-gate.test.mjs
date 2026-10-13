@@ -520,6 +520,14 @@ test("checkRequiredCi: requirePositive with an observed green check still passes
   assert.equal(result.state, "CI_PASSED");
 });
 
+test("checkRequiredCi: requirePositive + no declared policy + only neutral/skipped checks -> CI_NO_POSITIVE_EVIDENCE (#1127 Stage 1: observed is not passed)", async () => {
+  const result = await checkRequiredCi({ ...CI_ARGS, requirePositive: true }, { ghApiImpl: fakeGh({ runs: [runOf("verify", "skipped"), runOf("lint", "neutral")] }), readPrImpl: prReader([H, H]) });
+  assert.equal(result.exitCode, 2);
+  assert.equal(result.state, "CI_NO_POSITIVE_EVIDENCE");
+  const lenient = await checkRequiredCi(CI_ARGS, { ghApiImpl: fakeGh({ runs: [runOf("verify", "skipped")] }), readPrImpl: prReader([H, H]) });
+  assert.equal(lenient.state, "CI_PASSED");
+});
+
 test("run: --require-positive-ci true is forwarded to the CI check; absent it is not", async () => {
   const seen = [];
   const base = { ...impls(), checkRequiredCiImpl: async (a) => { seen.push(a.requirePositive); return passingCi(); } };
