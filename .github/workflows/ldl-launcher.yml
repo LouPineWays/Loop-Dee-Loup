@@ -281,12 +281,15 @@ jobs:
                 try { osRelease = readFileSync("/etc/os-release", "utf8").split("\n").filter((l) => /^(PRETTY_NAME|VERSION_ID)=/.test(l)).map((l) => l.slice(0, 200)).join(" ").slice(0, 600); } catch { /* unavailable */ }
                 const profilePaths = ["/etc/apparmor.d/bwrap-userns-restrict", "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict", "/etc/apparmor.d/bwrap"];
                 const hashes = profilePaths.map((p) => `${p}=${(fact("sha256sum", [p]).split(/\s+/)[0] || "unavailable").slice(0, 64)}`);
-                const cap = (v) => (typeof v === "string" ? v.slice(0, 4000) : v);
+                // Per-field budgets so the whole line fits the hard cap and no trailing field (apparmor_denied) is ever starved:
+                // 600+200+200+1000+~450+2000+3000+4000 plus labels is well under 16000.
+                const cap = (v, n) => (typeof v === "string" ? v.slice(0, n) : v);
+                const capJson = (v, n) => JSON.stringify(v).slice(0, n);
                 const listParts = [lines(fact("ls", ["-1", "/etc/apparmor.d"]), /bwrap|bubblewrap/i, 20), lines(fact("ls", ["-1", "/usr/share/apparmor/extra-profiles"]), /bwrap|bubblewrap/i, 20)];
                 const listed = listParts.some((x) => x === "unavailable") ? "unavailable" : listParts.flat();
                 const dm = lines(fact("dmesg", []), /apparmor="DENIED"/i, Infinity);
                 const denied = dm === "unavailable" ? "unavailable" : dm.filter((l) => /bwrap|bubblewrap|userns/i.test(l)).slice(0, 20);
-                const diagnosticsPayload = `RUNNER ISOLATION DIAGNOSTICS (read-only): os=${osRelease}; kernel=${cap(fact("uname", ["-r"]))}; apparmor_restrict_unprivileged_userns=${userns}; packages=${cap(fact("dpkg-query", ["-W", "-f=${Package}=${Version} ", "bubblewrap", "apparmor"]))}; bwrap_profile_hashes=[${hashes.join(", ")}]; bwrap_profile_names=${JSON.stringify(listed)}; aa-status=${JSON.stringify(cap(fact("aa-status", [])))}; apparmor_denied=${JSON.stringify(denied)}`;
+                const diagnosticsPayload = `RUNNER ISOLATION DIAGNOSTICS (read-only): os=${osRelease}; kernel=${cap(fact("uname", ["-r"]), 200)}; apparmor_restrict_unprivileged_userns=${userns}; packages=${cap(fact("dpkg-query", ["-W", "-f=${Package}=${Version} ", "bubblewrap", "apparmor"]), 1000)}; bwrap_profile_hashes=[${hashes.join(", ")}]; bwrap_profile_names=${capJson(listed, 2000)}; aa-status=${capJson(fact("aa-status", []), 3000)}; apparmor_denied=${capJson(denied, 4000)}`;
                 console.log(diagnosticsPayload.slice(0, 16000)); // whole-line hard cap
               }
             }
