@@ -20,11 +20,12 @@ test("triggers: issue_comment and workflow_dispatch only; no PR or fork-reachabl
   assert.doesNotMatch(onBlock, /pull_request|pull_request_target|workflow_run|schedule|push:/);
 });
 
-test("dispatch form: control_issue is the only required input; nonce is optional legacy", () => {
+test("dispatch form: control_issue is the only required input; nonce is optional legacy; diagnostic_only defaults off", () => {
   const inputs = onBlock.slice(onBlock.indexOf("inputs:"));
   assert.match(inputs, /control_issue:\s*\n\s+description:[^\n]*\n\s+required: true/);
   assert.match(inputs, /nonce:\s*\n\s+description:[^\n]*\n\s+required: false/);
-  assert.deepEqual([...inputs.matchAll(/^ {6}(\w+):$/gm)].map((m) => m[1]), ["control_issue", "nonce"]);
+  assert.deepEqual([...inputs.matchAll(/^ {6}(\w+):$/gm)].map((m) => m[1]), ["control_issue", "nonce", "diagnostic_only"]);
+  assert.match(inputs, /diagnostic_only:\s*\n\s+description:[^\n]*\n\s+type: boolean\n\s+required: false\n\s+default: false/);
 });
 
 test("dispatch trust: actor permission, default-branch ref, fork flag come from event context and the module", () => {
@@ -42,8 +43,8 @@ test("non-default-ref dispatch guard is hygiene; secret is environment-scoped (A
   // Exactly one job; its `if` is evaluated before checkout or any step, so a dispatch selected on
   // a non-default ref never runs repository code or touches a credential.
   const jobs = yml.slice(yml.indexOf("\njobs:"));
-  assert.deepEqual([...jobs.matchAll(/^ {2}([\w-]+):\s*$/gm)].map((m) => m[1]), ["authorize-and-claim"]);
-  const job = jobs.slice(jobs.indexOf("authorize-and-claim:"));
+  assert.deepEqual([...jobs.matchAll(/^ {2}([\w-]+):\s*$/gm)].map((m) => m[1]), ["authorize-and-claim", "isolation-diagnostic"]);
+  const job = jobs.slice(jobs.indexOf("authorize-and-claim:"), jobs.indexOf("\n  isolation-diagnostic:"));
   const guard = /\n {4}if: >-\n([\s\S]*?)\n {4}runs-on:/.exec(job);
   assert.ok(guard, "job-level if precedes runs-on and steps");
   assert.ok(job.indexOf("\n    if: >-") < job.indexOf("steps:"));
@@ -323,4 +324,131 @@ test("isolation diagnostics mocks: oversized earlier fields never starve the tra
   const d = logs.find((l) => l.includes("DIAGNOSTICS"));
   assert.ok(d.length <= 16000);
   assert.match(d, /apparmor_denied=\["apparmor=\\"DENIED\\"[^\]]*userns_create/);
+});
+
+// Issue #1139: credential-free, no-worker hosted isolation diagnostic route in the same workflow file.
+const jobsText = yml.slice(yml.indexOf("\njobs:"));
+const launchJob = jobsText.slice(jobsText.indexOf("  authorize-and-claim:"), jobsText.indexOf("\n  isolation-diagnostic:"));
+const diagJob = jobsText.slice(jobsText.indexOf("  isolation-diagnostic:"));
+const diagScript = () => {
+  const m = /<<'DIAG'\n([\s\S]*?)\n\s*DIAG\n/.exec(diagJob);
+  assert.ok(m, "diagnostic script present");
+  return m[1].split("\n").map((l) => l.replace(/^ {10}/, "")).join("\n");
+};
+const diagCond = (job) => /\n {4}if: >-\n([\s\S]*?)\n {4}runs-on:/.exec(job)[1].replace(/\s+/g, " ");
+
+// Evaluate the two job-level `if` expressions over a small context (the only operators used).
+const evalIf = (cond, ctx) => {
+  const js = cond
+    .replace(/format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/g, "('refs/heads/' + ctx.default)")
+    .replace(/github\.event\.issue\.pull_request == null/g, "ctx.pr === null")
+    .replace(/startsWith\(github\.event\.comment\.body, '([^']*)'\)/g, "ctx.body.startsWith('$1')")
+    .replace(/github\.event_name/g, "ctx.event")
+    .replace(/github\.ref/g, "ctx.ref")
+    .replace(/inputs\.diagnostic_only/g, "ctx.diag");
+  return new Function("ctx", `return Boolean(${js});`)(ctx);
+};
+
+test("diagnostic route: a separate job with no environment, no checkout, empty token permissions, bounded time", () => {
+  assert.match(diagJob, /\n {4}permissions: \{\}\n/);
+  assert.doesNotMatch(diagJob, /\n {4}environment:/);
+  assert.doesNotMatch(diagJob, /secrets\.|\$\{\{\s*github\.token|GITHUB_TOKEN|GH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|LDL_WORKER/);
+  assert.doesNotMatch(diagJob, /actions\/checkout|uses:/);
+  assert.match(diagJob, /timeout-minutes: 10/);
+  assert.doesNotMatch(diagJob, /\n\s+needs:/);
+  // Exactly one step, and it only runs the embedded read-only script.
+  assert.equal([...diagJob.matchAll(/^ {6}- name:/gm)].length, 1);
+  // No expression interpolation reaches the script text.
+  assert.doesNotMatch(diagScript(), /\$\{\{/);
+});
+
+test("diagnostic route: no pathway to launch, claim, install, worker, or GitHub write", () => {
+  const code = diagScript().replace(/^\s*\/\/.*$/gm, "");
+  assert.doesNotMatch(code, /launcher-run|launch-authorization|attempt-claim|launcher-step|control-plane-bootstrap|session-entry-gate|"gh"|"git"|"npm"|"sudo"|"apt-get"|claude|renderClaimBody|auth setup-git/i);
+  assert.doesNotMatch(code, /process\.env\s*[,)}]|\.\.\.process\.env|OAUTH|TOKEN|secret/i);
+  assert.doesNotMatch(code, /sysctl|apparmor_parser|aa-enforce|aa-complain|aa-disable|writeFileSync|"tee"|--share-net|SCRUB|unconfined/);
+  // Children get only the allowlisted env.
+  assert.match(code, /for \(const k of \["PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR"\]\)/);
+  for (const m of code.matchAll(/execFileSync\([^\n]*/g)) assert.match(m[0], /env: dEnv/);
+  const cmds = [...code.matchAll(/(?:fact|execFileSync)\("([\w-]+)"/g)].map((m) => m[1]);
+  assert.deepEqual([...new Set(cmds)].sort(), ["aa-status", "bwrap", "dmesg", "dpkg-query", "ls", "sha256sum", "uname"]);
+  // The launch job's worker path is not duplicated here; the only text shared is the read-only probe.
+  assert.match(code, /if \(fact\("bwrap", \["--version"\]\) !== "unavailable"\)/);
+  assert.match(code, /"--unshare-all", "--ro-bind", "\/", "\/", "--dev", "\/dev", "--proc", "\/proc", "true"/);
+});
+
+test("diagnostic route: job guards are mutually exclusive for every event/ref/input combination", () => {
+  const launch = diagCond(launchJob);
+  const diag = diagCond(diagJob);
+  const events = [
+    { event: "workflow_dispatch", pr: null, body: "" },
+    { event: "issue_comment", pr: null, body: "/ldl launch 1 x" },
+    { event: "issue_comment", pr: {}, body: "/ldl launch 1 x" },
+    { event: "issue_comment", pr: null, body: "hello" },
+    { event: "push", pr: null, body: "" },
+  ];
+  for (const e of events) for (const ref of ["refs/heads/main", "refs/heads/feature"]) for (const dg of [true, false, null]) {
+    const ctx = { ...e, ref, default: "main", diag: dg };
+    const l = evalIf(launch, ctx);
+    const d = evalIf(diag, ctx);
+    assert.ok(!(l && d), `exclusive: ${JSON.stringify(ctx)}`);
+    // Diagnostic runs exactly for an explicit default-branch diagnostic dispatch.
+    assert.equal(d, e.event === "workflow_dispatch" && dg === true && ref === "refs/heads/main", JSON.stringify(ctx));
+    // Ordinary launch is unchanged for every non-diagnostic request.
+    if (dg !== true) assert.equal(l, (e.event === "workflow_dispatch" && ref === "refs/heads/main") || (e.event === "issue_comment" && e.pr === null && e.body.startsWith("/ldl launch ")), JSON.stringify(ctx));
+    if (dg === true) assert.equal(l, false, "diagnostic request never launches");
+  }
+});
+
+test("diagnostic route: concurrency never shares the per-control-issue launch group", () => {
+  assert.match(yml, /group: ldl-launcher-\$\{\{ inputs\.diagnostic_only && 'diagnostic' \|\| github\.event\.issue\.number \|\| inputs\.control_issue \}\}/);
+});
+
+// Mock-run the embedded diagnostic script with a stubbed execFileSync/readFileSync.
+const runDiag = ({ bwrap, probe = "ok", denyAll = false, partial = false } = {}) => {
+  const code = diagScript().replace(/^import .*$/gm, "");
+  const calls = [];
+  const logs = [];
+  const execFileSync = (cmd, args, opts) => {
+    calls.push({ cmd, args, env: opts?.env });
+    if (denyAll) throw new Error("denied");
+    if (partial && cmd === "dpkg-query") { if (args.includes("bubblewrap")) throw new Error("not installed"); return "2.4.0"; }
+    if (partial && cmd === "ls") { if (args.includes("/usr/share/apparmor/extra-profiles")) throw new Error("ENOENT"); return "bwrap-userns-restrict\nother\n"; }
+    if (cmd === "bwrap" && args[0] === "--version") { if (!bwrap) throw new Error("ENOENT"); return "bubblewrap 0.9\n"; }
+    if (cmd === "bwrap") { if (probe === "ok") return ""; const e = new Error("x"); e.stderr = "bwrap: setting up uid map: Permission denied\nmore"; throw e; }
+    return `${cmd}-out\n`;
+  };
+  const readFileSync = (p) => { if (denyAll) throw new Error("EACCES"); return p === "/etc/os-release" ? "PRETTY_NAME=Ubuntu 24.04\nVERSION_ID=24.04\nX=1" : "1"; };
+  const process = { env: { PATH: "/bin", HOME: "/h", GITHUB_TOKEN: "ghs_secret", CLAUDE_CODE_OAUTH_TOKEN: "sk-secret", ACTIONS_RUNTIME_TOKEN: "rt" } };
+  new Function("execFileSync", "readFileSync", "process", "console", code)(execFileSync, readFileSync, process, { log: (m) => logs.push(m) });
+  return { calls, out: logs.join("\n") };
+};
+
+test("diagnostic route mocks: probe passed and failed both end in a bounded fact line, never a launch", () => {
+  for (const probe of ["ok", "fail"]) {
+    const r = runDiag({ bwrap: true, probe });
+    assert.match(r.out, /^HOSTED ISOLATION DIAGNOSTIC \(read-only, credential-free, no worker\)/);
+    assert.match(r.out, probe === "ok" ? /bwrap_probe=passed/ : /bwrap_probe=failed: bwrap: setting up uid map: Permission denied/);
+    assert.ok(r.out.length <= 16000);
+    assert.doesNotMatch(r.out, /secret|ghs_|sk-|rt\b/);
+    for (const c of r.calls) {
+      assert.deepEqual(Object.keys(c.env).sort(), ["HOME", "PATH"]);
+      assert.ok(["aa-status", "bwrap", "dmesg", "dpkg-query", "ls", "sha256sum", "uname"].includes(c.cmd), c.cmd);
+    }
+  }
+});
+
+test("diagnostic route mocks: partial failures keep the evidence that was collected (#1139 Stage 1)", () => {
+  const r = runDiag({ bwrap: false, partial: true });
+  assert.match(r.out, /packages=bubblewrap=unavailable apparmor=2\.4\.0;/);
+  assert.match(r.out, /bwrap_profile_names=\["bwrap-userns-restrict","source-unavailable"\]/);
+});
+
+test("diagnostic route mocks: missing bwrap skips the probe with an explicit limit; denied facts are unavailable", () => {
+  const r = runDiag({ bwrap: false });
+  assert.match(r.out, /bwrap_probe=skipped: bwrap not installed \(this route installs nothing; not the prior post-install state\)/);
+  assert.equal(r.calls.filter((c) => c.cmd === "bwrap" && c.args[0] !== "--version").length, 0);
+  const d = runDiag({ denyAll: true });
+  assert.match(d.out, /os=unavailable; kernel=unavailable; apparmor_restrict_unprivileged_userns=unavailable/);
+  assert.match(d.out, /aa-status="unavailable"; apparmor_denied="unavailable"; bwrap_probe=skipped/);
 });

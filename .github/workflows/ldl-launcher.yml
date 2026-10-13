@@ -50,6 +50,11 @@ on:
         description: Legacy only - leave empty. A Launch Authorization nonce selects the legacy comment-authorized path.
         required: false
         default: ""
+      diagnostic_only:
+        description: Read-only hosted isolation diagnostic ONLY (no launch, claim, credential, or worker; control_issue is ignored - enter any number). Leave unchecked to launch.
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -58,7 +63,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: ldl-launcher-${{ github.event.issue.number || inputs.control_issue }}
+  group: ldl-launcher-${{ inputs.diagnostic_only && 'diagnostic' || github.event.issue.number || inputs.control_issue }}
   cancel-in-progress: false
 
 jobs:
@@ -66,12 +71,15 @@ jobs:
     # Hygiene guard (Audit #1096), not a trust boundary: the unmodified workflow does not START for
     # a dispatch on a non-default ref. A modified branch copy can omit this `if`, so the secret's
     # protection is the `ldl-launcher` environment's default-branch deployment policy (see header).
+    # A diagnostic_only dispatch NEVER enters this job (issue #1139): it is served solely by the
+    # credential-free isolation-diagnostic job below, whatever its probe result.
     if: >-
-      (github.event_name == 'workflow_dispatch' &&
+      inputs.diagnostic_only != true &&
+      ((github.event_name == 'workflow_dispatch' &&
        github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request == null &&
-       startsWith(github.event.comment.body, '/ldl launch '))
+       startsWith(github.event.comment.body, '/ldl launch ')))
     runs-on: ubuntu-latest
     environment: ldl-launcher
     timeout-minutes: 350
@@ -314,3 +322,56 @@ jobs:
           execFileSync("gh", ["api", `repos/${env.REPO}/issues/${controlIssue}/comments`, "-F", "body=@-"],
             { input: settled, encoding: "utf8" });
           JS
+
+  # Diagnostic-only entry point (issue #1139, founder-approved #1120 Q1=A). Logically disjoint from
+  # the launch job: no environment (so no deployment secret), no repository checkout, an empty job
+  # token permission set, no steps that authorize, claim, install, or launch anything, and it only
+  # runs for an explicit diagnostic_only dispatch. Read-only facts, bounded and nonsecret; every
+  # child process gets an allowlisted environment; absent or unreadable facts are "unavailable".
+  # It installs nothing, so a missing bubblewrap is reported as a limit, never as the prior
+  # post-install runner state. Hygiene `if` as above; the job holds no credential either way.
+  isolation-diagnostic:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.diagnostic_only == true &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 10
+    steps:
+      - name: Read-only isolation diagnostic
+        run: |
+          node --input-type=module <<'DIAG'
+          import { execFileSync } from "node:child_process";
+          import { readFileSync } from "node:fs";
+          const dEnv = {};
+          for (const k of ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR"]) if (process.env[k] !== undefined) dEnv[k] = process.env[k];
+          const fact = (cmd, args) => {
+            try {
+              return execFileSync(cmd, args, { encoding: "utf8", env: dEnv, stdio: ["ignore", "pipe", "ignore"], timeout: 15000 }).trim();
+            } catch { return "unavailable"; }
+          };
+          const proc = (p) => { try { return readFileSync(p, "utf8").trim().slice(0, 200); } catch { return "unavailable"; } };
+          const cap = (v, n) => (typeof v === "string" ? v.slice(0, n) : v);
+          const capJson = (v, n) => JSON.stringify(v).slice(0, n);
+          const lines = (text, re, max) => (text === "unavailable" ? "unavailable" : text.split("\n").filter((l) => re.test(l)).slice(0, max).map((l) => l.slice(0, 400)));
+          let osRelease = "unavailable";
+          try { osRelease = readFileSync("/etc/os-release", "utf8").split("\n").filter((l) => /^(PRETTY_NAME|VERSION_ID)=/.test(l)).map((l) => l.slice(0, 200)).join(" ").slice(0, 600); } catch { /* unavailable */ }
+          const profilePaths = ["/etc/apparmor.d/bwrap-userns-restrict", "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict", "/etc/apparmor.d/bwrap"];
+          const hashes = profilePaths.map((p) => `${p}=${(fact("sha256sum", [p]).split(/\s+/)[0] || "unavailable").slice(0, 64)}`);
+          const listParts = [lines(fact("ls", ["-1", "/etc/apparmor.d"]), /bwrap|bubblewrap/i, 20), lines(fact("ls", ["-1", "/usr/share/apparmor/extra-profiles"]), /bwrap|bubblewrap/i, 20)];
+          const listed = listParts.every((x) => x === "unavailable") ? "unavailable" : listParts.map((x) => (x === "unavailable" ? "source-unavailable" : x)).flat();
+          const dm = lines(fact("dmesg", []), /apparmor="DENIED"/i, Infinity);
+          const denied = dm === "unavailable" ? "unavailable" : dm.filter((l) => /bwrap|bubblewrap|userns/i.test(l)).slice(0, 20);
+          // The unchanged functional probe, only when bwrap is already present (nothing is installed).
+          let probe = "skipped: bwrap not installed (this route installs nothing; not the prior post-install state)";
+          if (fact("bwrap", ["--version"]) !== "unavailable") {
+            try {
+              execFileSync("bwrap", ["--unshare-all", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "true"], { encoding: "utf8", env: dEnv, stdio: ["ignore", "ignore", "pipe"], timeout: 30000 });
+              probe = "passed";
+            } catch (e) { probe = `failed: ${String(e.stderr || e.message).split("\n")[0].slice(0, 500)}`; }
+          }
+          const userns = `apparmor_restrict_unprivileged_userns=${proc("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")} unprivileged_userns_clone=${proc("/proc/sys/kernel/unprivileged_userns_clone")} max_user_namespaces=${proc("/proc/sys/user/max_user_namespaces")}`;
+          const payload = `HOSTED ISOLATION DIAGNOSTIC (read-only, credential-free, no worker): os=${osRelease}; kernel=${cap(fact("uname", ["-r"]), 200)}; ${userns}; packages=${["bubblewrap", "apparmor"].map((pk) => `${pk}=${cap(fact("dpkg-query", ["-W", "-f=${Version}", pk]), 200)}`).join(" ")}; bwrap_profile_hashes=[${hashes.join(", ")}]; bwrap_profile_names=${capJson(listed, 2000)}; aa-status=${capJson(fact("aa-status", []), 3000)}; apparmor_denied=${capJson(denied, 4000)}; bwrap_probe=${probe}`;
+          console.log(payload.slice(0, 16000));
+          DIAG
