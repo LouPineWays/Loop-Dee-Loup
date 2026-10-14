@@ -2726,12 +2726,114 @@ test("checkReadyDispatch: #448 reproduction -- Lifecycle READY / PR none / Stage
     },
   );
   assert.equal(prListCalls, 1);
-  assert.equal(result.exitCode, 3);
-  assert.equal(result.state, "NOT_READY");
-  assert.ok(!("executionIssue" in result), "NOT_READY never authorizes a fresh dispatch reference");
-  assert.ok(result.reasons.some((r) => r.includes("pull/453") && r.includes("already")));
-  // A no-action/fallthrough verdict never becomes a bounded dispatch authorization.
-  assert.deepEqual(result.actionEnvelope, { mode: "fallthrough", authorizedActions: [] });
+  // Issue #1008: a crossed-but-unprovable checkpoint (no live head here) is a recognized stop, never
+  // READY_TO_DISPATCH and never generic fallthrough.
+  assert.equal(result.exitCode, 15);
+  assert.equal(result.state, "POST_UNIT_REPAIR_REQUIRED");
+  assert.equal(result.recoveryRefusal, "HEAD_UNVERIFIED");
+  assert.match(result.reason, /#453/);
+  assert.deepEqual(result.actionEnvelope, { mode: "none", authorizedActions: [] });
+});
+
+// -- Issue #1008: partial PR/Stage 1 checkpoint recovery from a READY control ---------------------
+
+const R1008 = "LouPineWays/Loop-Dee-Loup";
+const HEAD1008 = "8f158dcc66845c639cd758e3fca37731a3384ad1";
+const BODY1008 =
+  "- **Lifecycle:** READY\n- **Execution:** #1005\n- **Route:** implementation worker\n" +
+  "- **PR:** none\n- **Stage 1:** none\n- **Blocker:** none\n- **Founder decision:** none\n";
+const pr1008 = (over = {}) => ({
+  number: 1007, url: `https://github.com/${R1008}/pull/1007`, state: "OPEN",
+  headRefName: "issue-1005-x", headRefOid: HEAD1008, body: "Addresses #1005", ...over,
+});
+async function gate1008({ body = BODY1008, prs = [pr1008()], stage1 = { exitCode: 0, state: "PENDING" }, onStage1 } = {}) {
+  return checkReadyDispatch(
+    { repo: R1008, controlIssue: 1006 },
+    {
+      ghIssueViewImpl: async () => ({ body, state: "OPEN" }),
+      ghPrListImpl: async () => prs,
+      stage1GateRunImpl: async (args) => {
+        if (onStage1) onStage1(args);
+        if (stage1 instanceof Error) throw stage1;
+        return stage1;
+      },
+    },
+  );
+}
+
+test("#1008: READY control + unique open linked PR + Stage 1 requested at exact head -> bounded finalize-only recovery, never a dispatch", async () => {
+  let seen;
+  const r = await gate1008({ onStage1: (a) => { seen = a; } });
+  assert.deepEqual(seen, { repo: R1008, number: 1007, head: HEAD1008 });
+  assert.equal(r.state, "PR_BREAKPOINT_NEEDS_FINALIZATION");
+  assert.equal(r.exitCode, 13);
+  assert.equal(r.recovery, "PARTIAL_PR_CHECKPOINT");
+  assert.equal(r.pr, 1007);
+  assert.equal(r.head, HEAD1008);
+  assert.equal(
+    r.nextCommand,
+    `node tools/orchestration/finalize-pr-breakpoint.mjs --control-issue 1006 --execution-issue 1005 --pr 1007 --head ${HEAD1008}`,
+  );
+  // Exactly the finalizer: no trigger (no Stage 1 fabrication), no dispatch authorization.
+  assert.deepEqual(r.actionEnvelope.authorizedActions, ["run-finalize-pr-breakpoint"]);
+});
+
+test("#1008: an exempt or response-received Stage 1 at the exact head is also recoverable", async () => {
+  for (const state of ["EXEMPT", "RESPONSE_RECEIVED"]) {
+    const r = await gate1008({ stage1: { exitCode: 0, state } });
+    assert.equal(r.state, "PR_BREAKPOINT_NEEDS_FINALIZATION", state);
+    assert.equal(r.stage1State, state);
+  }
+});
+
+test("#1008: #1006 original mixed-case no-blocker control (bullet none / heading None) reaches the recovery verdict", async () => {
+  const body = BODY1008 + "\n### Current blocker\n\nNone\n";
+  const r = await gate1008({ body });
+  assert.equal(r.state, "PR_BREAKPOINT_NEEDS_FINALIZATION");
+});
+
+test("#1008 negatives: every missing proof fails closed to the repair stop with a machine-readable code", async () => {
+  const cases = [
+    ["COMPETING_OPEN_PRS", { prs: [pr1008(), pr1008({ number: 1010, headRefName: "issue-1005-y" })] }],
+    ["HEAD_UNVERIFIED", { prs: [pr1008({ headRefOid: "" })] }],
+    ["NO_OPEN_LINKED_PR", { prs: [pr1008({ state: "CLOSED" })] }],
+    ["MERGED_LINKED_PR_PRESENT", { prs: [pr1008(), pr1008({ number: 900, state: "MERGED" })] }],
+    ["STAGE1_NOT_REQUESTED", { stage1: { exitCode: 2, state: "NOT_REQUESTED" } }],
+    ["STAGE1_UNRESOLVED", { stage1: { exitCode: 1, message: "boom" } }],
+    ["STAGE1_UNRESOLVED", { stage1: { exitCode: 2, state: "FINDINGS_LACK_FORMAL_REVIEW" } }],
+    ["STAGE1_EVIDENCE_UNREADABLE", { stage1: new Error("network") }],
+  ];
+  for (const [code, opts] of cases) {
+    const r = await gate1008(opts);
+    assert.equal(r.state, "POST_UNIT_REPAIR_REQUIRED", code);
+    assert.equal(r.recoveryRefusal, code);
+    assert.deepEqual(r.actionEnvelope, { mode: "none", authorizedActions: [] }, code);
+    assert.ok(!("nextCommand" in r), code);
+  }
+});
+
+test("#1008: a wrongly linked PR (different execution Issue) is not a crossed checkpoint -- dispatch proceeds as before", async () => {
+  const r = await gate1008({ prs: [pr1008({ headRefName: "issue-999-x", body: "Addresses #999" })] });
+  assert.equal(r.state, "READY_TO_DISPATCH");
+});
+
+test("#1008: a real blocker or founder decision on the control stays BLOCKED before any recovery is considered", async () => {
+  let stage1Called = false;
+  const r = await gate1008({
+    body: BODY1008.replace("- **Blocker:** none", "- **Blocker:** waiting on external API key"),
+    onStage1: () => { stage1Called = true; },
+  });
+  assert.equal(r.state, "BLOCKED");
+  assert.equal(stage1Called, false);
+  const r2 = await gate1008({ body: BODY1008.replace("- **Founder decision:** none", "- **Founder decision:** pending: choose X") });
+  assert.equal(r2.state, "BLOCKED");
+});
+
+test("#1008: a control already at REVIEW with the PR recorded never takes the READY recovery route (idempotent re-entry)", async () => {
+  const body = BODY1008.replace("Lifecycle:** READY", "Lifecycle:** REVIEW").replace("PR:** none", "PR:** #1007").replace("Stage 1:** none", "Stage 1:** requested");
+  const r = await gate1008({ body });
+  assert.notEqual(r.state, "PR_BREAKPOINT_NEEDS_FINALIZATION");
+  assert.notEqual(r.recovery, "PARTIAL_PR_CHECKPOINT");
 });
 
 test("checkReadyDispatch: true pre-PR negative control -- Lifecycle READY / PR none, and no linked PR actually exists -- still dispatches normally (#456 Verification scenario 7)", async () => {

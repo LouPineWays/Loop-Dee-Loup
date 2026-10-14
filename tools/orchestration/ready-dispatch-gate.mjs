@@ -199,6 +199,7 @@ import { readGithubIssue, readGithubPr } from "./github-read.mjs";
 import { parseStage2Verdict, parseFormField } from "../review-watch/lifecycle-gate.mjs";
 // Issue #486: the deterministic action-envelope table every verdict below is stamped with.
 import { getActionEnvelope } from "./action-envelope.mjs";
+import { run as defaultStage1GateRun } from "../review-watch/stage1-gate.mjs";
 import { bindVerdictContinuation } from "./control-plane-continuation.mjs";
 // Issue #856: shared Plan Index "Integration/PR route" classifier (pure; no import cycle).
 import { classifyIntegrationRoute, planLevelRouteFailure } from "./parse-execution-plan.mjs";
@@ -1992,6 +1993,57 @@ export function composePrBreakpointFinalizeCommand({ repo, controlIssue, executi
   );
 }
 
+// Issue #1008 (live #1006/#1005/PR #1007 and #927/#928/#929): finalize-only form of
+// `composePrBreakpointFinalizeCommand`. Used when Stage 1 evidence at the exact head was ALREADY
+// proven by the gate, so the recovery never posts (fabricates) a trigger -- only the existing
+// finalizer (validated writer + fresh read-back) runs.
+export function composePrCheckpointRecoveryCommand({ controlIssue, executionIssue, pr, head }) {
+  return (
+    `node tools/orchestration/finalize-pr-breakpoint.mjs --control-issue ${controlIssue} ` +
+    `--execution-issue ${executionIssue} --pr ${pr} --head ${head}`
+  );
+}
+
+// Issue #1008: decides whether a plain `Lifecycle: READY` control whose execution Issue already
+// has a linked PR is a provable, partially recorded PR/Stage 1 checkpoint. Eligible only with
+// exactly one linked OPEN PR (no competing open PR, no merged linked PR) carrying a live head and
+// durable Stage 1 request/exemption AT that head. Every other shape returns
+// `{ eligible: false, code, reason }`.
+export async function evaluatePartialPrCheckpoint({ repo, executionIssue, prList }, { stage1GateRunImpl = defaultStage1GateRun } = {}) {
+  const linked = (Array.isArray(prList) ? prList : []).filter((pr) => referencesExecutionIssue(pr ?? {}, executionIssue));
+  const open = linked.filter((pr) => String(pr?.state ?? "").toUpperCase() === "OPEN");
+  const merged = linked.filter((pr) => String(pr?.state ?? "").toUpperCase() === "MERGED");
+  if (open.length === 0) {
+    return { eligible: false, code: "NO_OPEN_LINKED_PR", reason: "the linked PR is not open (closed/merged)" };
+  }
+  if (open.length > 1) {
+    return { eligible: false, code: "COMPETING_OPEN_PRS", reason: `multiple open PRs (${open.map((p) => `#${p.number}`).join(", ")}) link execution Issue #${executionIssue}` };
+  }
+  if (merged.length > 0) {
+    return { eligible: false, code: "MERGED_LINKED_PR_PRESENT", reason: `an open linked PR coexists with merged linked PR(s) (${merged.map((p) => `#${p.number}`).join(", ")}); ownership is ambiguous` };
+  }
+  const pr = open[0];
+  const head = typeof pr.headRefOid === "string" ? pr.headRefOid.trim() : "";
+  if (!head || !Number.isInteger(pr.number)) {
+    return { eligible: false, code: "HEAD_UNVERIFIED", reason: `open linked PR #${pr.number} has no verifiable live head` };
+  }
+  let stage1;
+  try {
+    stage1 = await stage1GateRunImpl({ repo, number: pr.number, head });
+  } catch (err) {
+    return { eligible: false, code: "STAGE1_EVIDENCE_UNREADABLE", reason: `Stage 1 evidence for PR #${pr.number} at ${head} could not be read: ${err.message}` };
+  }
+  const state = stage1?.state;
+  if (state !== "EXEMPT" && state !== "PENDING" && state !== "RESPONSE_RECEIVED") {
+    return {
+      eligible: false,
+      code: state === "NOT_REQUESTED" ? "STAGE1_NOT_REQUESTED" : "STAGE1_UNRESOLVED",
+      reason: `Stage 1 is not provably requested/exempt at PR #${pr.number}'s exact head ${head} (${state ?? `exitCode ${stage1?.exitCode}: ${stage1?.message ?? "unknown"}`})`,
+    };
+  }
+  return { eligible: true, pr, head, stage1State: state };
+}
+
 // Issue #856: recognized fail-closed stop for a post-unit state the plan cannot continue
 // mechanically (unit-owned owner missing its PR, a linked PR that is not open). Exit 15, never
 // 1 (operational error) or 3 (fallthrough): the controller stops with the blocked contract.
@@ -2018,6 +2070,8 @@ async function checkReadyDispatchCore(
     // lookup (reconcileReadyPrBreakpoint below) is injected the same way as every other
     // `gh`-backed call in this file, so tests never touch the real network/`gh` CLI.
     ghPrListImpl = defaultGhPrList,
+    // Issue #1008: Stage 1 evidence read for the READY partial-PR-checkpoint recovery check.
+    stage1GateRunImpl = defaultStage1GateRun,
     // Issue #498 unit 498-B: left un-defaulted here (rather than defaulting straight to
     // `defaultRunPrepareDispatchManifestImpl`) so the effective default below can thread this
     // invocation's own `parseExecutionPlanImpl` through to `probeReplanRequired`'s dry-run
@@ -2575,9 +2629,17 @@ async function checkReadyDispatchCore(
   // plan/unit machinery whose own durable state could otherwise prove a PR already exists, so
   // this reconciles against the one narrow execution-linked PR lookup the Shared Contract
   // authorizes for exactly this route before ever authorizing a fresh dispatch.
+  // Issue #1008: the production default also enumerates open PRs so a PR linked only by the
+  // permitted `issue-<N>-...` branch name is visible (same acquisition the ROUTED path uses).
+  let readyPrList = [];
   const reconciliation = await reconcileReadyPrBreakpoint(
     { repo: resolvedRepo, executionIssue: result.executionIssue },
-    { ghPrListImpl },
+    {
+      ghPrListImpl: async (a) => {
+        readyPrList = await (ghPrListImpl === defaultGhPrList ? defaultOpenExecutionLinkedPrList : ghPrListImpl)(a);
+        return readyPrList;
+      },
+    },
   );
   if (reconciliation.operationalError) {
     return {
@@ -2588,16 +2650,48 @@ async function checkReadyDispatchCore(
     };
   }
   if (reconciliation.crossed) {
+    // Issue #1008: a provably unambiguous partial PR/Stage 1 checkpoint resumes through the
+    // existing finalizer (one bounded action); anything else stops with a machine-readable reason.
+    const recovery = await evaluatePartialPrCheckpoint(
+      { repo: resolvedRepo, executionIssue: result.executionIssue, prList: readyPrList },
+      { stage1GateRunImpl },
+    );
+    if (recovery.eligible) {
+      return {
+        exitCode: EXIT_CODES_BY_STATUS.PR_BREAKPOINT_NEEDS_FINALIZATION,
+        state: "PR_BREAKPOINT_NEEDS_FINALIZATION",
+        stopAfter: true,
+        controlIssue: Number(controlIssue),
+        repo: resolvedRepo,
+        executionIssue: result.executionIssue,
+        pr: recovery.pr.number,
+        prUrl: recovery.pr.url,
+        head: recovery.head,
+        recovery: "PARTIAL_PR_CHECKPOINT",
+        stage1State: recovery.stage1State,
+        reason:
+          `execution Issue #${result.executionIssue} has exactly one open linked PR #${recovery.pr.number} with Stage 1 ` +
+          `${recovery.stage1State} at its live head, but the control Issue still records Lifecycle "READY" / no PR; ` +
+          `finalize the existing PR/Stage 1 breakpoint, do not redispatch`,
+        nextCommand: composePrCheckpointRecoveryCommand({
+          controlIssue: Number(controlIssue),
+          executionIssue: result.executionIssue,
+          pr: recovery.pr.number,
+          head: recovery.head,
+        }),
+      };
+    }
     return {
-      exitCode: 3,
-      state: "NOT_READY",
-      controlIssue: Number(controlIssue),
-      repo: resolvedRepo,
-      reasons: [
-        `execution Issue #${result.executionIssue} already has a linked PR (${reconciliation.pr.url}, state ${reconciliation.pr.state}) ` +
-          `even though this control Issue's own "PR" bullet does not record it -- the PR/Stage 1 breakpoint has already been crossed; ` +
-          `do not redispatch implementation, reconcile toward post-PR handling instead`,
-      ],
+      ...postUnitRepairRequiredVerdict({
+        controlIssue,
+        resolvedRepo,
+        executionIssue: result.executionIssue,
+        reason:
+          `execution Issue #${result.executionIssue} already has a linked PR even though this control Issue's own "PR" bullet does not record it, ` +
+          `but the checkpoint cannot be projected mechanically (${recovery.code}: ${recovery.reason}); ` +
+          `do not redispatch implementation or open another PR`,
+      }),
+      recoveryRefusal: recovery.code,
     };
   }
 

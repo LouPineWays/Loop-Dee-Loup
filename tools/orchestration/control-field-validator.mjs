@@ -218,11 +218,23 @@ export function validateLifecycleStateCoherence(body) {
 // "### Current blocker" heading reading "Blocked by #764." A body carrying only one
 // representation (the supported legacy-bullet-only or template-heading-only shapes) is not a
 // conflict -- this only fires when both are present and disagree.
+//
+// Issue #1008 (live #1006/#1005/PR #1007 reproduction): the two no-blocker sentinels this
+// repository authors differ only in spelling (`- **Blocker:** none` vs `### Current blocker` /
+// `None`), so strict string equality rejected a semantically unchanged no-blocker snapshot and
+// stranded `finalize-pr-breakpoint.mjs`. Only the exact bare sentinel (case-insensitive, optional
+// trailing period) on BOTH sides is treated as equivalent; any other disagreement -- including a
+// sentinel with trailing explanation versus a real blocker -- still fails closed.
+export function isBareNoBlockerSentinel(value) {
+  return typeof value === "string" && /^none\.?$/i.test(value.trim());
+}
+
 export function validateBlockerRepresentationCoherence(body) {
   const bullet = parseControlBullet(body, "Blocker");
   const heading = parseHeadingField(body, "Current blocker");
   if (bullet === null || heading === null) return { ok: true };
   if (bullet.trim() === heading.trim()) return { ok: true };
+  if (isBareNoBlockerSentinel(bullet) && isBareNoBlockerSentinel(heading)) return { ok: true };
   return {
     ok: false,
     label: "Blocker/Current blocker",

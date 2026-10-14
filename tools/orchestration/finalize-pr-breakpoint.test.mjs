@@ -16,6 +16,7 @@ import {
   verifyFinalizedBody,
   canonicalizePreStage2Bullet,
 } from "./finalize-pr-breakpoint.mjs";
+import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 
 const READY_BODY = `## Current state
 
@@ -838,4 +839,43 @@ test("#1070: URL-form pointers still allow a genuine new post-audit correction P
   });
   assert.equal(r.result.state, "FINALIZED");
   assert.equal(r.writes.length, 1);
+});
+
+// -- Issue #1008: #1006 original shape -- `Blocker: none` bullet vs `Current blocker: None` heading --
+
+test("run(): #1008 -- equivalent mixed-case no-blocker representations finalize through the REAL validated writer (REVIEW / PR / Stage 1 requested)", async () => {
+  let currentBody = READY_BODY + "\n### Current blocker\n\nNone\n";
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 448, executionIssue: 447, pr: 453, head: "579188a" },
+    {
+      ghIssueViewImpl: async () => currentBody,
+      ghPrViewImpl: makePrViewStub(LINKED_PR_VIEW_447),
+      stage1GateRunImpl: makeStage1GateStub({ exitCode: 2, state: "PENDING" }),
+      writeControlSnapshotImpl: async ({ repo, controlIssue, proposedBody }) => {
+        const verdict = checkWriteControlSnapshot(
+          { repo, controlIssue, proposedBody },
+          { ghEditImpl: ({ body }) => { currentBody = body; } },
+        );
+        return verdict;
+      },
+    },
+  );
+  assert.equal(result.state, "FINALIZED", JSON.stringify(result));
+  assert.match(currentBody, /- \*\*PR:\*\* #453/);
+  assert.match(currentBody, /- \*\*Lifecycle:\*\* REVIEW/);
+});
+
+test("run(): #1008 -- a genuinely contradictory blocker representation still fails closed at the real writer", async () => {
+  const currentBody = READY_BODY + "\n### Current blocker\n\nBlocked by #764.\n";
+  const result = await run(
+    { repo: "owner/repo", controlIssue: 448, executionIssue: 447, pr: 453, head: "579188a" },
+    {
+      ghIssueViewImpl: async () => currentBody,
+      ghPrViewImpl: makePrViewStub(LINKED_PR_VIEW_447),
+      stage1GateRunImpl: makeStage1GateStub({ exitCode: 2, state: "PENDING" }),
+      writeControlSnapshotImpl: async ({ repo, controlIssue, proposedBody }) =>
+        checkWriteControlSnapshot({ repo, controlIssue, proposedBody }, { ghEditImpl: () => { throw new Error("must not write"); } }),
+    },
+  );
+  assert.equal(result.state, "PR_BREAKPOINT_UNVERIFIED");
 });
