@@ -80,7 +80,7 @@ export function findActiveGrantWitness(executionBody) {
       problems.push(`ACTIVE grant record invalid: ${authorityProblems.join("; ") || "no grants"}`);
       continue;
     }
-    return { ok: true, components: [...grants.keys()] };
+    return { ok: true, components: [...grants.keys()], sectionText: heading + "\n" + section };
   }
   return { ok: false, reason: problems[0] ?? "execution Issue body carries no ACTIVE grant section" };
 }
@@ -173,9 +173,11 @@ export function isTerminalControl(controlBody, controlState) {
 // control (issue #1165). Never an OPEN child alone, a comment, or prose: the thick packet's own body
 // must carry an ACTIVE section whose fenced JSON either (a) is a dedicated new-packet record
 //   {"newPacketAuthority": {"controlIssue": <C>, "executionIssue": <E>}}
-// naming exactly this pair. A pre-existing ACTIVE component grant is never sufficient: it may be a
-// leftover from the completed cycle.
-// Parent-loop binding to this exact control is verified separately.
+// naming exactly this pair, or (b) the execution Issue's own mechanically valid ACTIVE component-scoped
+// grant (Audit #1167: the literal #1165 packet carries this shape, never a newPacketAuthority record).
+// Either way the thick Issue's own body is the witness; Parent-loop binding to this exact control, the
+// single-candidate rule and the no-competing-packet rule are verified separately and still apply, and an
+// absent, revoked, inactive, malformed or other-parent grant never qualifies.
 export function findNewPacketAuthority(executionBody, { controlIssue, executionIssue }) {
   const lines = String(executionBody ?? "").split(/\r?\n/);
   const headingIdx = lines.map((l, i) => (/^#{1,6}\s+/.test(l) ? i : -1)).filter((i) => i >= 0);
@@ -195,6 +197,16 @@ export function findNewPacketAuthority(executionBody, { controlIssue, executionI
     if (a && Number(a.controlIssue) === Number(controlIssue) && Number(a.executionIssue) === Number(executionIssue)) {
       return { ok: true, via: "newPacketAuthority" };
     }
+  }
+  const grant = findActiveGrantWitness(executionBody);
+  if (grant.ok) {
+    // Packet-specific: a component grant is only terminal authority when its own section is not bound to a
+    // different packet (a leftover grant from a historical same-parent Issue names that Issue). Any Issue
+    // reference other than this exact control/execution pair disqualifies it (Stage 1 finding on PR #1168).
+    const allowed = new Set([Number(controlIssue), Number(executionIssue)]);
+    const foreign = [...grant.sectionText.matchAll(/(?:\/issues\/|#)(\d+)\b/g)].map((m) => Number(m[1])).filter((n) => !allowed.has(n));
+    if (foreign.length === 0) return { ok: true, via: "activeGrant", components: grant.components };
+    return { ok: false, reason: `ACTIVE component grant references other Issue(s) ${[...new Set(foreign)].map((n) => "#" + n).join(", ")}, so it is not proven packet-specific to #${executionIssue} under #${controlIssue}` };
   }
   return { ok: false, reason: "terminal control has no explicit founder-authorized new-packet record in the execution Issue (an open child Issue, comment, or GitHub OPEN state alone is never sufficient authority)" };
 }
