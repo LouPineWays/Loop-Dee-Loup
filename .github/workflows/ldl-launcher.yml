@@ -60,6 +60,14 @@ on:
         type: boolean
         required: false
         default: false
+      post_install_runner:
+        description: "POST-INSTALL diagnostic runner ONLY (issue #1150): ubuntu-latest (default, current behavior) or ubuntu-22.04 (temporary alternate host; GitHub retires it 2027-04-17). Ignored unless post_install_diagnostic is set; never affects the diagnostic_only or launch jobs."
+        type: choice
+        required: false
+        default: ubuntu-latest
+        options:
+          - ubuntu-latest
+          - ubuntu-22.04
 
 permissions:
   contents: write
@@ -390,13 +398,15 @@ jobs:
   # and inspects the real .deb files; any AppArmor-referencing package, file, or maintainer script,
   # or any step it cannot complete, REFUSES the install (founder review) instead of guessing.
   # Explicit opt-in input, mutually exclusive with diagnostic_only and the launch job.
+  # Runner (issue #1150): the post_install_runner choice input selects only the exact value ubuntu-22.04;
+  # any other or absent value falls back to ubuntu-latest, so no arbitrary runner label is reachable.
   post-install-isolation-diagnostic:
     if: >-
       github.event_name == 'workflow_dispatch' &&
       inputs.post_install_diagnostic == true &&
       inputs.diagnostic_only != true &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.post_install_runner == 'ubuntu-22.04' && 'ubuntu-22.04' || 'ubuntu-latest' }}
     permissions: {}
     timeout-minutes: 20
     steps:

@@ -24,9 +24,10 @@ test("dispatch form: control_issue is the only required input; nonce is optional
   const inputs = onBlock.slice(onBlock.indexOf("inputs:"));
   assert.match(inputs, /control_issue:\s*\n\s+description:[^\n]*\n\s+required: true/);
   assert.match(inputs, /nonce:\s*\n\s+description:[^\n]*\n\s+required: false/);
-  assert.deepEqual([...inputs.matchAll(/^ {6}(\w+):$/gm)].map((m) => m[1]), ["control_issue", "nonce", "diagnostic_only", "post_install_diagnostic"]);
+  assert.deepEqual([...inputs.matchAll(/^ {6}(\w+):$/gm)].map((m) => m[1]), ["control_issue", "nonce", "diagnostic_only", "post_install_diagnostic", "post_install_runner"]);
   assert.match(inputs, /post_install_diagnostic:\s*\n\s+description:[^\n]*\n\s+type: boolean\n\s+required: false\n\s+default: false/);
   assert.match(inputs, /diagnostic_only:\s*\n\s+description:[^\n]*\n\s+type: boolean\n\s+required: false\n\s+default: false/);
+  assert.match(inputs, /post_install_runner:\s*\n\s+description:[^\n]*\n\s+type: choice\n\s+required: false\n\s+default: ubuntu-latest\n\s+options:\n\s+- ubuntu-latest\n\s+- ubuntu-22\.04\n/);
 });
 
 test("dispatch trust: actor permission, default-branch ref, fork flag come from event context and the module", () => {
@@ -66,7 +67,8 @@ test("non-default-ref dispatch guard is hygiene; secret is environment-scoped (A
 });
 
 test("event-derived values reach the script only through env; no secret echoed; least privilege kept", () => {
-  const script = yml.slice(yml.indexOf("node --input-type=module"));
+  // The only expression allowed after the first script is the allowlisted post-install runner ternary (issue #1150).
+  const script = yml.slice(yml.indexOf("node --input-type=module")).replace(/^ {4}runs-on: \$\{\{ inputs\.post_install_runner == 'ubuntu-22\.04' && 'ubuntu-22\.04' \|\| 'ubuntu-latest' \}\}$/m, "");
   assert.doesNotMatch(script, /\$\{\{/);
   assert.doesNotMatch(script, /console\.log\([^)]*(workerToken|launchToken|OAUTH)/);
   assert.match(yml, /^permissions:\n {2}contents: write\n {2}pull-requests: write\n {2}issues: write\n {2}actions: read\n/m);
@@ -606,4 +608,57 @@ test("post-install mocks: boundary violation fails the job; apt calls forbid rem
   const lastDmesg = r.calls.map((c) => c.cmd).lastIndexOf("dmesg");
   assert.ok(lastDmesg > probeIdx, "post snapshot reads dmesg after the probe");
   assert.ok(r.calls.some((c) => c.cmd === "find" && c.args.includes("sha256sum")), "AppArmor dir contents are hashed");
+});
+
+// ---- Issue #1150: allowlisted ubuntu-22.04 alternate host for the post-install diagnostic ONLY ----
+const runsOn = (job) => /\n {4}runs-on: ([^\n]*)\n/.exec(job)[1];
+const evalRunsOn = (expr, selector) => {
+  const m = /^\$\{\{ inputs\.post_install_runner == '([^']+)' && '([^']+)' \|\| '([^']+)' \}\}$/.exec(expr);
+  assert.ok(m, "runs-on is the exact allowlist ternary");
+  return selector === m[1] ? m[2] : m[3];
+};
+
+test("runner selector: only the post-install job selects a host; allowlist of exactly ubuntu-latest and ubuntu-22.04", () => {
+  assert.equal(runsOn(launchJob), "ubuntu-latest");
+  assert.equal(runsOn(diagJob), "ubuntu-latest");
+  assert.equal(yml.match(/post_install_runner/g).length, 3, "declared once, referenced in its comment, used once in runs-on");
+  for (const job of [launchJob, diagJob]) assert.doesNotMatch(job, /post_install_runner/);
+  assert.equal([...yml.matchAll(/^\s+runs-on:/gm)].length, 3);
+  assert.doesNotMatch(yml, /runs-on: \$\{\{ *inputs\.(?!post_install_runner == 'ubuntu-22\.04')/);
+});
+
+test("runner selector: default and every non-allowlisted value resolve to ubuntu-latest; only exact ubuntu-22.04 selects it", () => {
+  const expr = runsOn(postJob);
+  assert.equal(evalRunsOn(expr, "ubuntu-22.04"), "ubuntu-22.04");
+  for (const v of ["ubuntu-latest", "", null, undefined, "ubuntu-24.04", "ubuntu-20.04", "UBUNTU-22.04", "ubuntu-22.04 ", "self-hosted", "windows-latest", "ubuntu-22.04,self-hosted", "${{ secrets.X }}"]) {
+    assert.equal(evalRunsOn(expr, v), "ubuntu-latest", JSON.stringify(v));
+  }
+});
+
+test("runner selector: does not change the job guards, so it cannot reach launch, claim, or worker paths", () => {
+  assert.doesNotMatch(diagCond(launchJob), /post_install_runner/);
+  assert.doesNotMatch(diagCond(diagJob), /post_install_runner/);
+  assert.doesNotMatch(diagCond(postJob), /post_install_runner/);
+  // A selected 22.04 post-install dispatch still runs only the post-install job and never launches.
+  const ctx = { event: "workflow_dispatch", pr: null, body: "", ref: "refs/heads/main", default: "main", diag: false, post: true };
+  assert.equal(evalIf(diagCond(postJob), ctx), true);
+  assert.equal(evalIf(diagCond(launchJob), ctx), false);
+  assert.equal(evalIf(diagCond(diagJob), ctx), false);
+  // Selecting 22.04 WITHOUT the post-install flag leaves ordinary launch unchanged and runs no diagnostic.
+  const launchCtx = { ...ctx, post: false };
+  assert.equal(evalIf(diagCond(launchJob), launchCtx), true);
+  assert.equal(evalIf(diagCond(postJob), launchCtx), false);
+  // Dual-diagnostic collision still runs nothing; non-default ref still runs nothing.
+  const both = { ...ctx, diag: true };
+  for (const j of [launchJob, diagJob, postJob]) assert.equal(evalIf(diagCond(j), both), false);
+  for (const j of [launchJob, diagJob, postJob]) assert.equal(evalIf(diagCond(j), { ...ctx, ref: "refs/heads/feature" }), false);
+  // Credential-free posture of the post-install job is unchanged by the selector.
+  assert.match(postJob, /\n {4}permissions: \{\}\n/);
+  assert.doesNotMatch(postJob, /\n {4}environment:|secrets\.|actions\/checkout/);
+  assert.match(launchJob, /\n {4}environment: ldl-launcher\n/);
+});
+
+test("runner selector: result line stays distinguishable from Actions success (probe verdict reported, not job status)", () => {
+  assert.match(postScript(), /bwrap_probe=\$\{probe\}/);
+  assert.match(postScript(), /os=\$\{osRelease\}; kernel=/);
 });
