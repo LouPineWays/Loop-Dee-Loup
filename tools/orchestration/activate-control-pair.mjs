@@ -80,7 +80,7 @@ export function findActiveGrantWitness(executionBody) {
       problems.push(`ACTIVE grant record invalid: ${authorityProblems.join("; ") || "no grants"}`);
       continue;
     }
-    return { ok: true, components: [...grants.keys()] };
+    return { ok: true, components: [...grants.keys()], sectionText: heading + "\n" + section };
   }
   return { ok: false, reason: problems[0] ?? "execution Issue body carries no ACTIVE grant section" };
 }
@@ -199,7 +199,15 @@ export function findNewPacketAuthority(executionBody, { controlIssue, executionI
     }
   }
   const grant = findActiveGrantWitness(executionBody);
-  if (grant.ok) return { ok: true, via: "activeGrant", components: grant.components };
+  if (grant.ok) {
+    // Packet-specific: a component grant is only terminal authority when its own section is not bound to a
+    // different packet (a leftover grant from a historical same-parent Issue names that Issue). Any Issue
+    // reference other than this exact control/execution pair disqualifies it (Stage 1 finding on PR #1168).
+    const allowed = new Set([Number(controlIssue), Number(executionIssue)]);
+    const foreign = [...grant.sectionText.matchAll(/(?:\/issues\/|#)(\d+)\b/g)].map((m) => Number(m[1])).filter((n) => !allowed.has(n));
+    if (foreign.length === 0) return { ok: true, via: "activeGrant", components: grant.components };
+    return { ok: false, reason: `ACTIVE component grant references other Issue(s) ${[...new Set(foreign)].map((n) => "#" + n).join(", ")}, so it is not proven packet-specific to #${executionIssue} under #${controlIssue}` };
+  }
   return { ok: false, reason: "terminal control has no explicit founder-authorized new-packet record in the execution Issue (an open child Issue, comment, or GitHub OPEN state alone is never sufficient authority)" };
 }
 

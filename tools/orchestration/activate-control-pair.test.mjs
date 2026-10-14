@@ -597,6 +597,11 @@ test("Audit #1167: the literal #1165 durable shape (Parent loop + ACTIVE exact c
   assert.equal(packet(literal.replace("#10\n", "#99\n")).ok, false);
   assert.equal(findNewPacketAuthority(literal.replace(GRANT_JSON, "{not json}"), pair).ok, false);
   assert.equal(findNewPacketAuthority("### Parent loop\n#10\n", pair).ok, false);
+  // Stage 1 finding (PR #1168): a leftover grant bound to a different historical packet is not authority.
+  const leftover = literal.replace("Founder directed.", "Founder directed for completed packet #804.");
+  assert.equal(findNewPacketAuthority(leftover, pair).ok, false);
+  const bound = literal.replace("Founder directed.", "Founder directed for #11 under #10.");
+  assert.equal(findNewPacketAuthority(bound, pair).ok, true);
 });
 
 test("#1165 review: a planning route on a pending control is not converted to implementation at entry", () => {
