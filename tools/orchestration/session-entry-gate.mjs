@@ -92,6 +92,7 @@ import { checkReconcileControlBlocker } from "./reconcile-control-blocker.mjs";
 import { checkControlPlaneFreshness } from "./control-plane-freshness.mjs";
 import { clearLastGateVerdict, persistLastGateVerdict } from "./action-envelope-hook.mjs";
 import { bindVerdictContinuation } from "./control-plane-continuation.mjs";
+import { resolveEntryActivation } from "./activate-control-pair.mjs";
 
 // Fail-closed circuit breaker against an unbounded chain loop — never expected in practice
 // (today's longest real chain is two hops: BLOCKED -> reconcile -> fresh ready-dispatch-gate),
@@ -137,6 +138,7 @@ export async function runSessionEntryGate(
     runNextReviewTransitionGateImpl = runNextReviewTransitionGate,
     checkReconcileControlBlockerImpl = checkReconcileControlBlocker,
     resolveRepoIdentityImpl = resolveRepoIdentity,
+    resolveEntryActivationImpl = resolveEntryActivation,
   } = {},
 ) {
   const provenance = [];
@@ -181,6 +183,39 @@ export async function runSessionEntryGate(
   provenance.push(provenanceEntry("ready-dispatch-gate", verdict));
   if (typeof verdict?.state !== "string") {
     return operationalError(verdict?.message ?? "ready-dispatch-gate.mjs produced no verdict.", provenance);
+  }
+
+  // Issue #1165: before a BLOCKED or fallthrough NOT_READY verdict is final, consume an
+  // already-settled authorization through the one canonical activation transaction (the stale-grant
+  // consumption, or the founder-authorized new packet under a control still projecting DONE). Every
+  // proof lives in activate-control-pair.mjs; anything unproven leaves the verdict untouched with no
+  // write. At most one attempt per entry, and the verdict that follows is a fresh ordinary gate
+  // evaluation of the persisted state, never an inference from the activation result.
+  if (verdict.state === "BLOCKED" || (verdict.state === "NOT_READY" && !verdict.postPrLifecycle)) {
+    let activation;
+    try {
+      activation = await resolveEntryActivationImpl({ repo: resolvedRepo, controlIssue });
+    } catch (err) {
+      return operationalError(`entry activation threw: ${err.message}`, provenance);
+    }
+    // Only an attempt that did something is provenance; an ineligible/unproven control is silent.
+    if (activation?.exitCode === 1 || (activation?.exitCode === 0 && (activation.state === "ACTIVATED_PENDING_GATE" || activation.state === "ALREADY_ACTIVE"))) {
+      provenance.push({ gate: "activate-control-pair", state: typeof activation?.state === "string" ? activation.state : null, leafExitCode: activation.exitCode, actionEnvelopeMode: null });
+    }
+    if (activation?.exitCode === 1) {
+      return operationalError(activation.message ?? "entry activation failed.", provenance, { activation });
+    }
+    if (activation?.exitCode === 0 && (activation.state === "ACTIVATED_PENDING_GATE" || activation.state === "ALREADY_ACTIVE")) {
+      try {
+        verdict = await checkReadyDispatchImpl({ repo: resolvedRepo, controlIssue });
+      } catch (err) {
+        return operationalError(`ready-dispatch-gate.mjs threw (post-activation re-invocation): ${err.message}`, provenance);
+      }
+      provenance.push(provenanceEntry("ready-dispatch-gate", verdict));
+      if (typeof verdict?.state !== "string") {
+        return operationalError(verdict?.message ?? "ready-dispatch-gate.mjs produced no verdict (post-activation).", provenance);
+      }
+    }
   }
 
   let hops = 0;

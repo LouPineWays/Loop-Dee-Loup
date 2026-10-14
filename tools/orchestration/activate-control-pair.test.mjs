@@ -4,7 +4,17 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { activateControlPair, findActiveGrantWitness, controlAdvertisesPendingState, buildActivatedControlBody } from "./activate-control-pair.mjs";
+import {
+  activateControlPair,
+  findActiveGrantWitness,
+  findNewPacketAuthority,
+  controlAdvertisesPendingState,
+  buildActivatedControlBody,
+  isTerminalControl,
+  resolveEntryActivation,
+} from "./activate-control-pair.mjs";
+import { defaultGhPatchControlIssue } from "./write-control-snapshot.mjs";
+import { validateActivationPair } from "./control-field-validator.mjs";
 
 const FENCE = "```";
 const GRANT_JSON = JSON.stringify({
@@ -23,7 +33,7 @@ NEEDS_FOUNDER
 
 ### Current state
 
-- **Execution:** #1150
+- **Execution:** #11
 - **Route:** none
 - **Founder decision:** pending exact protected workflow component grant
 
@@ -44,8 +54,12 @@ const BODY_438 = `- **Lifecycle:** DONE
 - **Founder decision:** none
 `;
 
-function makeWorld({ control = BODY_1149, controlState = "OPEN", exec = ACTIVE_THICK, execState = "OPEN", gate } = {}) {
-  const w = { issues: { 10: { body: control, state: controlState }, 11: { body: exec, state: execState } }, writes: [], gateCalls: 0 };
+function makeWorld({ control = BODY_1149, controlState = "OPEN", exec = ACTIVE_THICK, execState = "OPEN", gate, extra = {} } = {}) {
+  const w = { issues: { 10: { body: control, state: controlState }, 11: { body: exec, state: execState }, ...extra }, writes: [], patches: [], gateCalls: 0 };
+  w.reopenImpl = ({ controlIssue, body, state }) => {
+    w.patches.push({ body, state });
+    w.issues[controlIssue] = { body, state: state.toUpperCase() };
+  };
   w.readIssueImpl = ({ number }) => ({ ...w.issues[number] });
   w.ghEditImpl = ({ controlIssue, body }) => {
     w.writes.push(body);
@@ -58,7 +72,28 @@ function makeWorld({ control = BODY_1149, controlState = "OPEN", exec = ACTIVE_T
   return w;
 }
 const run = (w, extra = {}) =>
-  activateControlPair({ repo: "o/r", controlIssue: 10, executionIssue: 11, ...extra }, { readIssueImpl: w.readIssueImpl, ghEditImpl: w.ghEditImpl, runGateImpl: w.runGateImpl });
+  activateControlPair({ repo: "o/r", controlIssue: 10, executionIssue: 11, ...extra }, { readIssueImpl: w.readIssueImpl, ghEditImpl: w.ghEditImpl, reopenImpl: w.reopenImpl, runGateImpl: w.runGateImpl });
+
+const NEW_PACKET_THICK = `### Parent loop\n#10\n\n### ACTIVE founder-authorized new packet — 2026-10-14\nFounder directed this outcome.\n\n${jsonBlock(JSON.stringify({ newPacketAuthority: { controlIssue: 10, executionIssue: 11 } }))}\n`;
+// The #438 shape with the full completed cycle still projected as current pointers (issue #1165 fixture B).
+const BODY_438_FULL = `### State
+
+DONE
+
+### Current state
+
+- **Execution:** #804
+- **Route:** implementation worker
+- **Founder decision:** none
+- **PR:** #1159
+- **Stage 1:** CLEAN at e6f2fe7
+- **Stage 2:** #1160
+
+### Current blocker
+
+None
+`;
+const fx = (extra = {}) => ({ 804: { body: "old", state: "CLOSED" }, ...extra });
 
 test("witness: ACTIVE section with valid authority JSON is accepted; INACTIVE-only, malformed, revoked and unknown-component are not", () => {
   assert.equal(findActiveGrantWitness(ACTIVE_THICK).ok, true);
@@ -161,7 +196,7 @@ test("(f2) handoff-only fails closed (no HANDOFF) for absent, revoked, wrong-par
     revoked: makeWorld({ exec: revoked }),
     mismatched: makeWorld({ exec: BAD_COMPONENT_THICK }),
     wrongParent: makeWorld({ exec: ACTIVE_THICK.replace("#10", "#99") }),
-    closedControl: makeWorld({ controlState: "CLOSED" }),
+    closedControl: makeWorld({ controlState: "CLOSED", exec: PARENT }),
     closedExecution: makeWorld({ execState: "CLOSED" }),
   };
   for (const [name, w] of Object.entries(cases)) {
@@ -179,20 +214,20 @@ test("(g) a normal fresh control with no pending state activates without needing
   assert.equal(r.state, "ACTIVATED");
 });
 
-test("#438/#1151: CLOSED control + open child is rejected; reopened-but-DONE/#804 body is rewritten to READY/#1151 as the sole pointer", () => {
-  const closed = makeWorld({ control: BODY_438, controlState: "CLOSED" });
-  const rc = run(closed);
-  assert.equal(rc.exitCode, 2);
-  assert.match(rc.message, /Reopen the existing control/);
-  assert.equal(closed.writes.length, 0);
+test("#438/#1151: an OPEN/DONE control rewrites to READY/#1151 only with explicit new-packet authority", () => {
+  const unauthorized = makeWorld({ control: BODY_438, exec: PARENT });
+  const ru = run(unauthorized);
+  assert.equal(ru.state, "BLOCKED");
+  assert.match(ru.message, /new-packet record/);
+  assert.equal(unauthorized.writes.length, 0);
 
-  const reopened = makeWorld({ control: BODY_438, exec: PARENT });
+  const reopened = makeWorld({ control: BODY_438, exec: NEW_PACKET_THICK, extra: { 804: { body: "old", state: "CLOSED" } } });
   const ro = run(reopened);
   assert.equal(ro.state, "ACTIVATED", JSON.stringify(ro));
   const body = reopened.issues[10].body;
   assert.match(body, /- \*\*Lifecycle:\*\* READY/);
   assert.match(body, /- \*\*Execution:\*\* #11/);
-  assert.doesNotMatch(body, /#804/);
+  assert.match(body, /Completed packet history .*Execution #804/);
 });
 
 test("closed execution packet is never activated", () => {
@@ -264,4 +299,271 @@ test("planning routes are rejected", () => {
   const r = run(w, { route: "planning worker" });
   assert.equal(r.state, "REJECTED");
   assert.equal(w.writes.length, 0);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Issue #1165 - fixture B: post-completion packet under a terminal control (#438), reopen-and-activate.
+// ---------------------------------------------------------------------------------------------
+
+test("B1: CLOSED/DONE control + explicitly authorized new packet -> ONE state+body mutation, readback, fresh gate, ACTIVATED", () => {
+  const w = makeWorld({ control: BODY_438_FULL, controlState: "CLOSED", exec: NEW_PACKET_THICK, extra: fx() });
+  const r = run(w);
+  assert.equal(r.state, "ACTIVATED", JSON.stringify(r));
+  assert.equal(w.patches.length, 1, "exactly one combined state+body PATCH");
+  assert.equal(w.patches[0].state, "open");
+  assert.equal(w.writes.length, 0, "no body-only write, no standalone reopen");
+  assert.equal(w.issues[10].state, "OPEN");
+  const body = w.issues[10].body;
+  assert.match(body, /^### State\n\nREADY/m);
+  assert.match(body, /- \*\*Execution:\*\* #11/);
+  for (const label of ["PR", "Stage 1", "Stage 2"]) assert.match(body, new RegExp(`- \\*\\*${label}:\\*\\* none`));
+  assert.equal(w.gateCalls, 1);
+  // Historical cycle preserved as history, distinct from the current pointers.
+  assert.match(body, /Completed packet history .*Execution #804; PR #1159; Stage 1 CLEAN at e6f2fe7; Stage 2 #1160\./);
+  assert.deepEqual(validateActivationPair(body, { controlIssue: 10, executionIssue: 11, controlState: "OPEN", executionState: "OPEN" }), { ok: true });
+});
+
+test("B2: externally reopened OPEN/DONE control (the actual #438 shape) is recovered by one body write, no reopen call", () => {
+  const w = makeWorld({ control: BODY_438_FULL, exec: NEW_PACKET_THICK, extra: fx() });
+  const r = run(w);
+  assert.equal(r.state, "ACTIVATED", JSON.stringify(r));
+  assert.equal(w.writes.length, 1);
+  assert.equal(w.patches.length, 0);
+  assert.match(w.issues[10].body, /Completed packet history/);
+});
+
+test("B3: an OPEN child Issue binding the parent but carrying no authorization never reopens or activates", () => {
+  for (const controlState of ["CLOSED", "OPEN"]) {
+    const w = makeWorld({ control: BODY_438_FULL, controlState, exec: PARENT, extra: fx() });
+    const r = run(w);
+    assert.equal(r.exitCode, 2);
+    assert.equal(r.state, "BLOCKED");
+    assert.equal(w.writes.length + w.patches.length, 0);
+    assert.equal(w.issues[10].state, controlState);
+    assert.equal(w.gateCalls, 0);
+  }
+});
+
+test("B4: authorization naming a different pair, an INACTIVE record, or another parent is not authority", () => {
+  const wrongPair = NEW_PACKET_THICK.replace('"executionIssue":11', '"executionIssue":12');
+  const inactive = NEW_PACKET_THICK.replace("### ACTIVE founder", "### INACTIVE ACTIVE founder");
+  const wrongParent = NEW_PACKET_THICK.replace("#10\n", "#99\n");
+  for (const exec of [wrongPair, inactive, wrongParent]) {
+    const w = makeWorld({ control: BODY_438_FULL, controlState: "CLOSED", exec, extra: fx() });
+    assert.equal(run(w).exitCode, 2);
+    assert.equal(w.patches.length + w.writes.length, 0);
+  }
+  assert.equal(findNewPacketAuthority(NEW_PACKET_THICK, { controlIssue: 10, executionIssue: 11 }).via, "newPacketAuthority");
+});
+
+test("B5: a competing nonterminal packet (current Execution pointer still OPEN) blocks the activation", () => {
+  const w = makeWorld({ control: BODY_438_FULL, controlState: "CLOSED", exec: NEW_PACKET_THICK, extra: { 804: { body: "old", state: "OPEN" } } });
+  const r = run(w);
+  assert.equal(r.state, "BLOCKED");
+  assert.match(r.message, /competing/);
+  assert.equal(w.patches.length + w.writes.length, 0);
+  assert.equal(w.issues[10].state, "CLOSED");
+});
+
+test("B6: idempotent retry after success performs no write/reopen and reports ALREADY_ACTIVE", () => {
+  const w = makeWorld({ control: BODY_438_FULL, controlState: "CLOSED", exec: NEW_PACKET_THICK, extra: fx() });
+  assert.equal(run(w).state, "ACTIVATED");
+  const before = w.issues[10].body;
+  const again = run(w);
+  assert.equal(again.state, "ALREADY_ACTIVE");
+  assert.equal(w.patches.length, 1);
+  assert.equal(w.writes.length, 0);
+  assert.equal(w.issues[10].body, before);
+});
+
+test("B7: failed reopen write leaves the control CLOSED, never reports success, never runs the gate", () => {
+  const w = makeWorld({ control: BODY_438_FULL, controlState: "CLOSED", exec: NEW_PACKET_THICK, extra: fx() });
+  w.reopenImpl = () => {
+    throw new Error("HTTP 403");
+  };
+  const r = run(w);
+  assert.equal(r.exitCode, 1);
+  assert.equal(r.state, "REOPEN_WRITE_FAILED");
+  assert.equal(w.issues[10].state, "CLOSED");
+  assert.equal(w.gateCalls, 0);
+});
+
+test("B8: a readback that does not show the activated pair is rolled back to the closed base", () => {
+  const w = makeWorld({ control: BODY_438_FULL, controlState: "CLOSED", exec: NEW_PACKET_THICK, extra: fx() });
+  const base = w.issues[10].body;
+  w.reopenImpl = ({ controlIssue, body, state }) => {
+    w.patches.push({ body, state });
+    // Only the rollback (state closed) persists; the reopen "succeeds" but nothing sticks.
+    if (state === "closed") w.issues[controlIssue] = { body, state: "CLOSED" };
+  };
+  const r = run(w);
+  assert.equal(r.exitCode, 1);
+  assert.equal(r.state, "READBACK_MISMATCH");
+  assert.equal(r.rolledBack, true);
+  assert.deepEqual(w.patches.map((p) => p.state), ["open", "closed"]);
+  assert.equal(w.issues[10].state, "CLOSED");
+  assert.equal(w.issues[10].body, base);
+  assert.equal(w.gateCalls, 0);
+});
+
+test("B9: stale-base races refuse without writing (body changed, or someone already reopened it)", () => {
+  for (const mutate of [
+    (w) => (w.issues[10] = { ...w.issues[10], body: w.issues[10].body + "\nconcurrent edit" }),
+    (w) => (w.issues[10] = { ...w.issues[10], state: "OPEN" }),
+  ]) {
+    const w = makeWorld({ control: BODY_438_FULL, controlState: "CLOSED", exec: NEW_PACKET_THICK, extra: fx() });
+    let reads = 0;
+    const readIssueImpl = (a) => {
+      const out = w.readIssueImpl(a);
+      if (a.number === 11 && ++reads === 1) mutate(w); // after the caller's initial control+execution reads
+      return out;
+    };
+    const r = activateControlPair({ repo: "o/r", controlIssue: 10, executionIssue: 11 }, { readIssueImpl, ghEditImpl: w.ghEditImpl, reopenImpl: w.reopenImpl, runGateImpl: w.runGateImpl });
+    assert.equal(r.state, "STALE_CONTROL", JSON.stringify(r));
+    assert.equal(w.patches.length + w.writes.length, 0);
+  }
+});
+
+test("B10: gate not READY after the transaction is reported as such, never ACTIVATED", () => {
+  const w = makeWorld({ control: BODY_438_FULL, controlState: "CLOSED", exec: NEW_PACKET_THICK, extra: fx(), gate: () => ({ state: "NOT_READY" }) });
+  const r = run(w);
+  assert.equal(r.exitCode, 1);
+  assert.equal(r.state, "GATE_NOT_READY");
+});
+
+test("B11: handoff-only for a CLOSED terminal control proves authority read-only, then leaves it CLOSED", () => {
+  const w = makeWorld({ control: BODY_438_FULL, controlState: "CLOSED", exec: NEW_PACKET_THICK, extra: fx() });
+  const r = run(w, { handoffOnly: true });
+  assert.equal(r.state, "HANDOFF");
+  assert.equal(r.reopens, true);
+  assert.equal(r.founderPromptRequired, false);
+  assert.equal(w.patches.length + w.writes.length, 0);
+  assert.equal(w.issues[10].state, "CLOSED");
+  const unproven = makeWorld({ control: BODY_438_FULL, controlState: "CLOSED", exec: PARENT, extra: fx() });
+  assert.notEqual(run(unproven, { handoffOnly: true }).state, "HANDOFF");
+});
+
+test("B12: an actor whose canonical writer refuses leaves the control CLOSED and does not run the gate", () => {
+  const w = makeWorld({ control: BODY_438_FULL, controlState: "CLOSED", exec: NEW_PACKET_THICK, extra: fx() });
+  const r = activateControlPair(
+    { repo: "o/r", controlIssue: 10, executionIssue: 11 },
+    { readIssueImpl: w.readIssueImpl, writeImpl: () => ({ exitCode: 1, message: "canonical writer unavailable" }), runGateImpl: w.runGateImpl },
+  );
+  assert.equal(r.exitCode, 1);
+  assert.equal(w.issues[10].state, "CLOSED");
+  assert.equal(w.gateCalls, 0);
+});
+
+test("isTerminalControl: CLOSED or DONE lifecycle only", () => {
+  assert.equal(isTerminalControl("- **Lifecycle:** READY\n", "CLOSED"), true);
+  assert.equal(isTerminalControl("### State\n\nDONE\n", "OPEN"), true);
+  assert.equal(isTerminalControl("- **Lifecycle:** READY\n", "OPEN"), false);
+});
+
+test("defaultGhPatchControlIssue verifies identity, state, body and rejects malformed responses", () => {
+  const ok = (over = {}) => () => JSON.stringify({ number: 10, html_url: "https://github.com/o/r/issues/10", state: "open", body: "B", ...over });
+  assert.doesNotThrow(() => defaultGhPatchControlIssue({ repo: "o/r", controlIssue: 10, body: "B", state: "open" }, ok()));
+  for (const over of [{ number: 11 }, { html_url: "https://github.com/o/r/issues/11" }, { state: "closed" }, { body: "other" }, { pull_request: {} }]) {
+    assert.throws(() => defaultGhPatchControlIssue({ repo: "o/r", controlIssue: 10, body: "B", state: "open" }, ok(over)), undefined, JSON.stringify(over));
+  }
+  assert.throws(() => defaultGhPatchControlIssue({ repo: "o/r", controlIssue: 10, body: "B", state: "open" }, () => "not json"), /malformed/);
+  assert.throws(() => defaultGhPatchControlIssue({ repo: "o/r", controlIssue: 10, body: "B", state: "reopened" }, ok()), /unsupported state/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Issue #1165 - fixture A: the literal #1164/#1163 stale-approval shape.
+// ---------------------------------------------------------------------------------------------
+
+const BODY_1164 = `### State
+
+NEEDS_FOUNDER
+
+### Current state
+
+- **Execution:** #11
+- **Route:** none
+- **PR:** none
+- **Stage 1:** none
+- **Stage 2:** none
+- **Founder decision:** pending narrow credential-bearing proof / host-risk acceptance / exact protected-workflow grant
+- **Priority:** Now
+
+### Current blocker
+
+One-time credential-bearing worker qualification on the alternate host and exact protected-workflow modification are not yet separately authorized; material security assessment of this host-default user namespace posture remains to be accepted.
+
+### Founder interrupt
+
+May engineering use the already-observed disposable Ubuntu 22.04 hosted environment for one narrowly scoped credential-bearing Claude sandbox smoke after an exact component grant?
+`;
+const REVIEW_GRANT_JSON = JSON.stringify({ executorSubstrate: [{ component: "review-control", paths: [".github/workflows/ldl-launcher.yml"], intendedChange: "x", verification: "y" }] });
+const THICK_1163 = `### Parent loop\n#10 - governing thin control.\n\n### ACTIVE founder-approved qualification and exact protected-component grant - 2026-10-14\n**Founder approval:** Yes, authorized.\n\n${jsonBlock(REVIEW_GRANT_JSON)}\n\n### Required layers\nx\n`;
+
+test("A1: #1164 literal stale mixed prose (decision bullet + heading blocker + interrupt) is consumed by the ACTIVE grant", () => {
+  const w = makeWorld({ control: BODY_1164, exec: THICK_1163 });
+  const r = run(w);
+  assert.equal(r.state, "ACTIVATED", JSON.stringify(r));
+  const body = w.issues[10].body;
+  assert.match(body, /^### State\n\nREADY/m);
+  assert.match(body, /- \*\*Founder decision:\*\* none/);
+  assert.match(body, /### Current blocker\n\nnone/);
+  assert.equal(controlAdvertisesPendingState(body), false);
+  assert.equal(w.patches.length, 0);
+});
+
+test("A2: independent pending state is never consumed (decision, interrupt, Issue-prerequisite blocker, other scope, revoked grant)", () => {
+  const cases = {
+    independentDecision: BODY_1164.replace("- **Founder decision:** pending narrow credential-bearing proof / host-risk acceptance / exact protected-workflow grant", "- **Founder decision:** pending pricing choice for the paid tier"),
+    independentInterrupt: BODY_1164.replace(/### Founder interrupt\n\n.*\n/, "### Founder interrupt\n\nShould we rename the product?\n"),
+    issueBlocker: BODY_1164.replace("not yet separately authorized", "blocked by #99 which is not yet approved"),
+    otherScope: BODY_1164.replace("exact protected-workflow grant", "exact grant for component routing-policy"),
+  };
+  for (const [name, control] of Object.entries(cases)) {
+    const w = makeWorld({ control, exec: THICK_1163 });
+    const r = run(w);
+    assert.equal(r.state, "BLOCKED", name);
+    assert.equal(w.writes.length + w.patches.length, 0, name);
+  }
+  const revoked = makeWorld({ control: BODY_1164, exec: THICK_1163.replace("### ACTIVE founder-approved", "### REVOKED ACTIVE founder-approved") });
+  assert.equal(run(revoked).state, "BLOCKED");
+  assert.equal(revoked.writes.length, 0);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Issue #1165 - bounded ordinary-entry resolution (what session-entry-gate calls).
+// ---------------------------------------------------------------------------------------------
+
+function entry(w, { list = [], ...rest } = {}) {
+  return resolveEntryActivation({ repo: "o/r", controlIssue: 10 }, { readIssueImpl: w.readIssueImpl, ghEditImpl: w.ghEditImpl, listOpenIssuesImpl: () => list, ...rest });
+}
+
+test("entry A: stale ACTIVE grant is consumed from the control's sole Execution pointer without discovery", () => {
+  const w = makeWorld({ control: BODY_1164, exec: THICK_1163 });
+  const r = entry(w, {
+    listOpenIssuesImpl: () => {
+      throw new Error("must not list");
+    },
+  });
+  assert.equal(r.state, "ACTIVATED_PENDING_GATE", JSON.stringify(r));
+  assert.equal(w.issues[10].body.includes("NEEDS_FOUNDER"), false);
+});
+
+test("entry B: OPEN/DONE control finds exactly one authorized new packet and activates it", () => {
+  const w = makeWorld({ control: BODY_438_FULL, exec: NEW_PACKET_THICK, extra: fx() });
+  const r = entry(w, { list: [{ number: 11, body: NEW_PACKET_THICK }, { number: 12, body: "### Parent loop\n#10\n" }] });
+  assert.equal(r.state, "ACTIVATED_PENDING_GATE", JSON.stringify(r));
+  assert.match(w.issues[10].body, /- \*\*Execution:\*\* #11/);
+});
+
+test("entry B negatives: unauthorized child, two authorized packets, CLOSED control, no pending state -> no mutation", () => {
+  const unauth = makeWorld({ control: BODY_438_FULL, exec: PARENT, extra: fx() });
+  assert.equal(entry(unauth, { list: [{ number: 11, body: PARENT }] }).state, "NO_CANDIDATE");
+  const two = makeWorld({ control: BODY_438_FULL, exec: NEW_PACKET_THICK, extra: fx() });
+  const twoAuthorized = entry(two, { list: [{ number: 11, body: NEW_PACKET_THICK }, { number: 12, body: NEW_PACKET_THICK.replace('"executionIssue":11', '"executionIssue":12') }] });
+  assert.equal(twoAuthorized.state, "AMBIGUOUS_CANDIDATES");
+  const closed = makeWorld({ control: BODY_438_FULL, controlState: "CLOSED", exec: NEW_PACKET_THICK, extra: fx() });
+  assert.equal(entry(closed, { list: [{ number: 11, body: NEW_PACKET_THICK }] }).state, "NO_CANDIDATE");
+  const clean = makeWorld({ control: "- **Lifecycle:** EXECUTING\n- **Execution:** #11\n- **Blocker:** none\n- **Founder decision:** none\n", exec: PARENT });
+  assert.equal(entry(clean).state, "NO_CANDIDATE");
+  for (const w of [unauth, two, closed, clean]) assert.equal(w.writes.length + w.patches.length, 0);
 });

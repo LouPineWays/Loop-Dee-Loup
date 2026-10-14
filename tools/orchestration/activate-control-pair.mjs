@@ -29,8 +29,11 @@
 // get, after the same read-only control/execution/grant proof (no write), a deterministic HANDOFF record naming the exact command a qualified executor runs; no founder
 // question is produced for an already-proven grant.
 //
-// A CLOSED control is never activated here: reopen the existing control first (founder direction
-// permitting), then rerun. An open thick packet under a closed/DONE control is non-executable.
+// A terminal control (CLOSED, or OPEN while its snapshot reads DONE) is activated only for a new
+// post-completion packet with explicit founder-authorized new-packet authority in the thick Issue
+// (issue #1165): the GitHub state and the coherent READY snapshot are persisted as ONE guarded
+// mutation, independently read back, and gated; completed pointers are retired to "none" and kept as
+// a history line. It is never reopened as a standalone state change.
 //
 // Usage:
 //   node tools/orchestration/activate-control-pair.mjs --control-issue 1149 --execution-issue 1150 [--route "implementation worker"] [--handoff-only]
@@ -42,7 +45,7 @@
 
 import { execFileSync } from "node:child_process";
 import { readGithubIssue } from "./github-read.mjs";
-import { upsertControlBullet, resolveRepoIdentity, parseControlBullet, parseHeadingField, isNoneSentinel } from "./ready-dispatch-gate.mjs";
+import { upsertControlBullet, resolveRepoIdentity, parseControlBullet, parseHeadingField, isNoneSentinel, readExecutionBulletField, parseExecutionPointer } from "./ready-dispatch-gate.mjs";
 import { parseAuthority, EXECUTOR_COMPONENTS } from "./executor-substrate-authority.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 
@@ -104,11 +107,26 @@ export function controlAdvertisesPendingState(body) {
 // canonical grant-specific pending state: it must be about an exact protected/executor-substrate
 // component grant, and any registered component it names must be among the witnessed components.
 // A product choice, credential, external prerequisite, or different component stays pending.
+//
+// Issue #1165 (the #1164 reproduction): the control's "### Current blocker" prose explained the
+// same pending approval without ever using the word "grant". Two kinds of pending field are
+// therefore distinguished:
+//   - decision fields (`Founder decision`, `Founder interrupt`) carry the actual founder-owned
+//     question and must each be grant-specific;
+//   - blocker fields (`Blocker`, `Current blocker`) only explain the block; one is accepted when
+//     it is authorization-shaped and names no Issue prerequisite (an Issue-ref blocker is a real
+//     dependency owned by the blocker reconciler, never consumed here).
+const DECISION_LABELS = new Set(["Founder decision", "Founder interrupt"]);
+const AUTHORIZATION_SHAPED = /\b(grant\w*|authori[sz]\w*|approv\w*|accept\w*)\b/i;
 export function pendingMatchesGrant(body, components) {
   const witnessed = new Set(components);
   for (const { label, value } of pendingValues(body)) {
-    if (!/\bgrant\b/i.test(value) || !/\b(protected|executor[- ]substrate|component|exact)\b/i.test(value)) {
-      return { ok: false, reason: `${label} ${JSON.stringify(value)} is not a canonical grant-specific pending state` };
+    if (DECISION_LABELS.has(label)) {
+      if (!/\bgrant\b/i.test(value) || !/\b(protected|executor[- ]substrate|component|exact)\b/i.test(value)) {
+        return { ok: false, reason: `${label} ${JSON.stringify(value)} is not a canonical grant-specific pending state` };
+      }
+    } else if (!AUTHORIZATION_SHAPED.test(value) || /(?:#|\/issues\/|\/pull\/)\d+/.test(value)) {
+      return { ok: false, reason: `${label} ${JSON.stringify(value)} is not an authorization-shaped pending state free of an Issue prerequisite` };
     }
     for (const { component } of EXECUTOR_COMPONENTS) {
       if (value.includes(component) && !witnessed.has(component)) {
@@ -133,11 +151,57 @@ export function parentLoopIdentifiesControl(executionBody, controlIssue) {
   return { ok: true };
 }
 
+// Pure. True when the control is a completed/terminal control: GitHub CLOSED, or a lifecycle that
+// reads DONE (the externally or historically reopened OPEN/DONE shape, issue #1165). Activating
+// such a control is a new post-completion packet, never merely a stale-approval consumption.
+export function isTerminalControl(controlBody, controlState) {
+  if (String(controlState ?? "").toUpperCase() === "CLOSED") return true;
+  const lifecycle = parseControlBullet(controlBody, "Lifecycle") ?? parseHeadingField(controlBody, "State");
+  return lifecycle !== null && /^done\b/i.test(lifecycle.trim());
+}
+
+// Pure. Explicit founder-authorization witness for a NEW post-completion packet on a terminal
+// control (issue #1165). Never an OPEN child alone, a comment, or prose: the thick packet's own body
+// must carry an ACTIVE section whose fenced JSON either (a) is a dedicated new-packet record
+//   {"newPacketAuthority": {"controlIssue": <C>, "executionIssue": <E>}}
+// naming exactly this pair, or (b) is a valid ACTIVE exact component grant (findActiveGrantWitness)
+// - the founder's own explicit, packet-scoped authorization of this specific outcome.
+// Parent-loop binding to this exact control is verified separately.
+export function findNewPacketAuthority(executionBody, { controlIssue, executionIssue }) {
+  const lines = String(executionBody ?? "").split(/\r?\n/);
+  const headingIdx = lines.map((l, i) => (/^#{1,6}\s+/.test(l) ? i : -1)).filter((i) => i >= 0);
+  for (const start of headingIdx) {
+    const heading = lines[start];
+    if (!/\bACTIVE\b/.test(heading) || NOT_ACTIVE_WORDS.test(heading) || !/new[- ]packet|new[- ]work/i.test(heading)) continue;
+    const next = headingIdx.find((i) => i > start) ?? lines.length;
+    const fence = lines.slice(start + 1, next).join("\n").match(/```json\s*\n([\s\S]*?)\n```/);
+    if (!fence) continue;
+    let record;
+    try {
+      record = JSON.parse(fence[1]);
+    } catch {
+      continue;
+    }
+    const a = record?.newPacketAuthority;
+    if (a && Number(a.controlIssue) === Number(controlIssue) && Number(a.executionIssue) === Number(executionIssue)) {
+      return { ok: true, via: "newPacketAuthority" };
+    }
+  }
+  const grant = findActiveGrantWitness(executionBody);
+  if (grant.ok) return { ok: true, via: "activeGrant" };
+  return { ok: false, reason: "terminal control has no explicit founder-authorized new-packet record in the execution Issue (an open child Issue, comment, or GitHub OPEN state alone is never sufficient authority)" };
+}
+
 // Pure. Full execution-packet proof used both before composing and at the write boundary:
-// parent binding always; ACTIVE grant witness matching the pending state when the control is pending.
-export function verifyExecutionPacket({ controlBody, executionBody, controlIssue }) {
+// parent binding always; for a terminal control also the explicit new-packet authority; ACTIVE
+// grant witness matching the pending state when the control is pending.
+export function verifyExecutionPacket({ controlBody, executionBody, controlIssue, executionIssue = null, controlState = "OPEN" }) {
   const parent = parentLoopIdentifiesControl(executionBody, controlIssue);
   if (!parent.ok) return parent;
+  if (isTerminalControl(controlBody, controlState)) {
+    const authority = findNewPacketAuthority(executionBody, { controlIssue, executionIssue });
+    if (!authority.ok) return authority;
+  }
   if (controlAdvertisesPendingState(controlBody)) {
     const witness = findActiveGrantWitness(executionBody);
     if (!witness.ok) return witness;
@@ -147,11 +211,31 @@ export function verifyExecutionPacket({ controlBody, executionBody, controlIssue
   return { ok: true };
 }
 
-// Pure. Composes the activated control snapshot from the live body.
-export function buildActivatedControlBody(body, { executionIssue, route = DEFAULT_ROUTE }) {
+const HISTORY_FIELDS = ["Execution", "PR", "Stage 1", "Stage 2"];
+
+// Pure. Composes the activated control snapshot from the live body. For a terminal control the
+// historical current pointers (Execution, PR, Stage 1, Stage 2) are retired to "none" and
+// preserved verbatim as one prose history line, so a prior closed cycle is never erased.
+export function buildActivatedControlBody(body, { executionIssue, route = DEFAULT_ROUTE, retireHistory = false }) {
   let next = body ?? "";
+  if (retireHistory) {
+    const old = [];
+    for (const label of HISTORY_FIELDS) {
+      const value = label === "Execution" ? (readExecutionBulletField(next).value ?? null) : parseControlBullet(next, label);
+      if (value !== null && value !== undefined && !isNoneSentinel(value) && !new RegExp("^#" + executionIssue + "\b").test(value.trim())) {
+        old.push(label + " " + value.trim().replace(/\s+/g, " "));
+      }
+    }
+    for (const label of ["PR", "Stage 1", "Stage 2"]) {
+      if (parseControlBullet(next, label) !== null) next = upsertControlBullet(next, label, "none");
+    }
+    if (old.length > 0) {
+      const line = "Completed packet history (retired from current pointers when #" + executionIssue + " was activated): " + old.join("; ") + ".";
+      if (!next.includes(line)) next = next.replace(/\n*$/, "\n\n") + line + "\n";
+    }
+  }
   next = upsertControlBullet(next, "Lifecycle", "READY");
-  next = upsertControlBullet(next, "Execution", `#${executionIssue}`);
+  next = upsertControlBullet(next, "Execution", "#" + executionIssue);
   next = upsertControlBullet(next, "Route", route);
   next = upsertControlBullet(next, "Founder decision", "none");
   next = upsertControlBullet(next, "Blocker", "none");
@@ -163,12 +247,12 @@ export function buildActivatedControlBody(body, { executionIssue, route = DEFAUL
 }
 
 // Pure. Rewrites the first non-empty line of an existing `### label` section (the line
-// parseHeadingField reads) to `value`; other lines in the section are left untouched. No-op if absent.
+// parseHeadingField reads) to the given value; other lines in the section are left untouched. No-op if absent.
 function setHeadingField(body, label, value) {
   const lines = body.split("\n");
   let idx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i].trim() === `### ${label}`) {
+    if (lines[i].trim() === "### " + label) {
       idx = i;
       break;
     }
@@ -200,9 +284,17 @@ function handoffCommand({ controlIssue, executionIssue, route }) {
 const norm = (s) => String(s ?? "").replace(/\r\n/g, "\n").trimEnd();
 
 // All I/O injected. Returns a result object with exitCode.
+//
+// Issue #1165: this is also the one mandatory reopen-and-activate transaction. A terminal control
+// (GitHub CLOSED, or OPEN while its snapshot still reads DONE) is activated for a new packet only
+// when the thick packet carries explicit founder-authorized new-packet authority and no other
+// nonterminal packet competes; the GitHub state and the coherent READY snapshot are persisted by the
+// canonical writer as ONE guarded mutation, independently read back, and only a fresh gate returning
+// READY_TO_DISPATCH for exactly this packet reports ACTIVATED. This module never reopens a control
+// as a standalone GitHub state change: on any proof/writer failure the control is left as it was.
 export function activateControlPair(
-  { repo, controlIssue, executionIssue, route = DEFAULT_ROUTE, handoffOnly = false },
-  { readIssueImpl = readGithubIssue, writeImpl = checkWriteControlSnapshot, ghEditImpl, runGateImpl = defaultRunGate } = {},
+  { repo, controlIssue, executionIssue, route = DEFAULT_ROUTE, handoffOnly = false, skipGate = false },
+  { readIssueImpl = readGithubIssue, writeImpl = checkWriteControlSnapshot, ghEditImpl, reopenImpl, runGateImpl = defaultRunGate } = {},
 ) {
   if (!repo || !controlIssue || !executionIssue) {
     return { exitCode: 1, message: "Missing required args: --control-issue and --execution-issue are required (and a resolvable repository)." };
@@ -229,14 +321,9 @@ export function activateControlPair(
     return { exitCode: 1, message: `activation read failed: ${err.message}` };
   }
 
-  if (control.state !== "OPEN") {
-    return {
-      exitCode: 2,
-      state: "REJECTED",
-      controlIssue: c,
-      errors: [`control ${repo}#${c} is ${control.state}`],
-      message: `Refusing to activate: control ${repo}#${c} is ${control.state}. Reopen the existing control first; an open thick packet under a closed control is not executable.`,
-    };
+  const controlState = String(control.state ?? "").toUpperCase();
+  if (controlState !== "OPEN" && controlState !== "CLOSED") {
+    return { exitCode: 2, state: "REJECTED", controlIssue: c, errors: [`control ${repo}#${c} is ${control.state}`], message: `Refusing to activate: control ${repo}#${c} is ${control.state}.` };
   }
   if (execution.state !== "OPEN") {
     return {
@@ -248,7 +335,9 @@ export function activateControlPair(
     };
   }
 
-  const proof = verifyExecutionPacket({ controlBody: control.body, executionBody: execution.body, controlIssue: c });
+  const terminal = isTerminalControl(control.body, controlState);
+  const proofArgs = (executionBody) => ({ controlBody: control.body, executionBody, controlIssue: c, executionIssue: e, controlState });
+  const proof = verifyExecutionPacket(proofArgs(execution.body));
   if (!proof.ok) {
     return {
       exitCode: 2,
@@ -256,8 +345,33 @@ export function activateControlPair(
       controlIssue: c,
       executionIssue: e,
       errors: [proof.reason],
-      message: `Not activating ${repo}#${c}: ${proof.reason}. Control left unchanged.`,
+      message: `Not activating ${repo}#${c}: ${proof.reason}. Control left unchanged (no reopen, no write).`,
     };
+  }
+
+  // No competing nonterminal packet: a different Execution pointer must name a closed Issue.
+  const field = readExecutionBulletField(control.body);
+  if (field.conflict) {
+    return { exitCode: 2, state: "BLOCKED", controlIssue: c, executionIssue: e, errors: ["control Execution pointer is ambiguous"], message: `Not activating ${repo}#${c}: control Execution pointer is ambiguous. Control left unchanged.` };
+  }
+  const pointer = field.value ? parseExecutionPointer(field.value) : { ok: false };
+  if (pointer.ok && pointer.issue !== e) {
+    let other;
+    try {
+      other = readIssueImpl({ repo, number: pointer.issue, fields: ["body", "state"] });
+    } catch (err) {
+      return { exitCode: 1, message: `activation read of the control's current packet #${pointer.issue} failed: ${err.message}` };
+    }
+    if (String(other.state ?? "").toUpperCase() !== "CLOSED") {
+      return {
+        exitCode: 2,
+        state: "BLOCKED",
+        controlIssue: c,
+        executionIssue: e,
+        errors: [`competing packet #${pointer.issue} is ${other.state}`],
+        message: `Not activating ${repo}#${c}: its current Execution pointer #${pointer.issue} is ${other.state}, a competing nonterminal packet. Control left unchanged.`,
+      };
+    }
   }
 
   if (handoffOnly) {
@@ -267,27 +381,37 @@ export function activateControlPair(
       controlIssue: c,
       executionIssue: e,
       founderPromptRequired: false,
+      reopens: controlState === "CLOSED",
       command: handoffCommand({ controlIssue: c, executionIssue: e, route }),
       message:
-        "This actor cannot run the canonical control writer. A qualified repository executor runs the command above; " +
-        "the grant was read-only verified just now and must not be re-requested from the founder.",
+        "This actor cannot run the canonical control writer. A qualified repository executor runs the command above" +
+        (controlState === "CLOSED" ? " (it reopens and activates the control as one guarded mutation; the control stays CLOSED until then)" : "") +
+        "; the authorization was read-only verified just now and must not be re-requested from the founder.",
     };
   }
 
-  const proposed = buildActivatedControlBody(control.body, { executionIssue: e, route });
-  const alreadyActive = norm(proposed) === norm(control.body);
+  const proposed = buildActivatedControlBody(control.body, { executionIssue: e, route, retireHistory: terminal });
+  const alreadyActive = controlState === "OPEN" && norm(proposed) === norm(control.body);
 
   if (!alreadyActive) {
     const written = writeImpl(
       { repo, controlIssue: c, proposedBody: proposed, activation: {
           executionIssue: e,
           baseBody: control.body,
-          verifyExecution: (executionBody) => verifyExecutionPacket({ controlBody: control.body, executionBody, controlIssue: c }),
+          baseState: controlState,
+          reopen: controlState === "CLOSED",
+          verifyExecution: (executionBody) => verifyExecutionPacket(proofArgs(executionBody)),
         },
       },
-      { readIssueImpl, ...(ghEditImpl ? { ghEditImpl } : {}) },
+      { readIssueImpl, ...(ghEditImpl ? { ghEditImpl } : {}), ...(reopenImpl ? { ghReopenImpl: reopenImpl } : {}) },
     );
     if (written.exitCode !== 0) return { ...written, controlIssue: c, executionIssue: e };
+  }
+
+  if (skipGate) {
+    // The caller (the ordinary session-entry gate) runs the fresh gate itself in-process and judges
+    // it; the persisted pair has already been independently read back above.
+    return { exitCode: 0, state: alreadyActive ? "ALREADY_ACTIVE" : "ACTIVATED_PENDING_GATE", controlIssue: c, executionIssue: e, route };
   }
 
   let verdict;
@@ -314,6 +438,71 @@ export function activateControlPair(
     route: verdict.route ?? route,
     gateState: verdict.state,
   };
+}
+
+// Issue #1165: bounded ordinary-entry activation. The session-entry gate calls this once, before a
+// BLOCKED or fallthrough NOT_READY verdict is final, to consume an already-settled authorization:
+//   - stale grant: an OPEN, non-terminal control still advertising a pending state whose sole
+//     Execution pointer names a thick packet with a verifiable ACTIVE grant (consumption);
+//   - post-completion packet: an OPEN control whose snapshot still reads DONE, with exactly one OPEN
+//     thick Issue whose Parent loop binds exactly this control AND which carries explicit
+//     founder-authorized new-packet authority.
+// Every proof lives in activateControlPair (no second policy here); anything unproven, ambiguous or
+// absent returns a non-mutating NO_CANDIDATE/BLOCKED result. A CLOSED control is never activated at
+// ordinary entry: reopening it is an explicit actor operation (activate-control-pair CLI).
+export function resolveEntryActivation(
+  { repo, controlIssue },
+  { readIssueImpl = readGithubIssue, listOpenIssuesImpl = defaultListOpenIssues, activateImpl = activateControlPair, ...rest } = {},
+) {
+  const c = Number(controlIssue);
+  let control;
+  try {
+    control = readIssueImpl({ repo, number: c, fields: ["body", "state"] });
+  } catch (err) {
+    return { exitCode: 1, state: "READ_FAILED", message: "entry activation read failed: " + err.message };
+  }
+  if (String(control.state ?? "").toUpperCase() !== "OPEN") return { exitCode: 0, state: "NO_CANDIDATE", reason: "control is not OPEN" };
+  const terminal = isTerminalControl(control.body, control.state);
+  if (!terminal && !controlAdvertisesPendingState(control.body)) return { exitCode: 0, state: "NO_CANDIDATE", reason: "control advertises no pending state and is not terminal" };
+
+  let execution;
+  let route = DEFAULT_ROUTE;
+  if (terminal) {
+    let issues;
+    try {
+      issues = listOpenIssuesImpl({ repo });
+    } catch (err) {
+      return { exitCode: 1, state: "READ_FAILED", message: "entry activation could not list open Issues: " + err.message };
+    }
+    const candidates = issues.filter(
+      (i) => i.number !== c && parentLoopIdentifiesControl(i.body, c).ok && findNewPacketAuthority(i.body, { controlIssue: c, executionIssue: i.number }).ok,
+    );
+    if (candidates.length !== 1) {
+      return { exitCode: 0, state: candidates.length === 0 ? "NO_CANDIDATE" : "AMBIGUOUS_CANDIDATES", reason: candidates.length + " authorized new packet(s) bind this terminal control", candidates: candidates.map((i) => i.number) };
+    }
+    execution = candidates[0].number;
+  } else {
+    const field = readExecutionBulletField(control.body);
+    const pointer = !field.conflict && field.value ? parseExecutionPointer(field.value) : { ok: false };
+    if (!pointer.ok) return { exitCode: 0, state: "NO_CANDIDATE", reason: "control has no single current Execution pointer" };
+    execution = pointer.issue;
+    const existing = parseControlBullet(control.body, "Route");
+    if (existing && !isNoneSentinel(existing) && !/plan/i.test(existing)) route = existing.trim();
+  }
+  return activateImpl({ repo, controlIssue: c, executionIssue: execution, route, skipGate: true }, { readIssueImpl, ...rest });
+}
+
+// Bounded REST scan of the most recent open Issues (not PRs); bodies are screened by the proof above.
+export function defaultListOpenIssues({ repo, execFileImpl = execFileSync }) {
+  const out = [];
+  for (let page = 1; page <= 3; page++) {
+    const raw = execFileImpl("gh", ["api", "repos/" + repo + "/issues?state=open&sort=created&direction=desc&per_page=100&page=" + page], { encoding: "utf8", maxBuffer: 50 * 1024 * 1024 });
+    const rows = JSON.parse(raw);
+    if (!Array.isArray(rows)) throw new Error("open Issue listing is not a JSON array");
+    for (const row of rows) if (!row.pull_request) out.push({ number: Number(row.number), body: String(row.body ?? "") });
+    if (rows.length < 100) break;
+  }
+  return out;
 }
 
 function parseArgs(argv) {

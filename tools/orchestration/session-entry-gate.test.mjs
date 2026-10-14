@@ -17,6 +17,12 @@ import { getActionEnvelope } from "./action-envelope.mjs";
 
 const REPO = "LouPineWays/Loop-Dee-Loup";
 
+// Issue #1165: every pre-existing test is a control with nothing to consume; the real activation
+// path is covered by the dedicated #1165 tests below.
+function noActivation() {
+  return { exitCode: 0, state: "NO_CANDIDATE" };
+}
+
 function stubResolveRepoIdentity() {
   return { ok: true, repo: REPO };
 }
@@ -60,6 +66,7 @@ test("#639 reproduction: NOT_READY/REVIEW chain is resolved to the post-PR gate'
         throw new Error("must not be called for this shape");
       },
       resolveRepoIdentityImpl: stubResolveRepoIdentity,
+      resolveEntryActivationImpl: noActivation,
     },
   );
 
@@ -111,6 +118,7 @@ test("AUDIT_ISSUE_DETECTED chains to next-review-transition-gate by --audit-issu
         throw new Error("must not be called for this shape");
       },
       resolveRepoIdentityImpl: stubResolveRepoIdentity,
+      resolveEntryActivationImpl: noActivation,
     },
   );
 
@@ -159,6 +167,7 @@ test("BLOCKED + blockerReconciliationEligible -> UNBLOCKED authorizes exactly on
         return unblockedResult;
       },
       resolveRepoIdentityImpl: stubResolveRepoIdentity,
+      resolveEntryActivationImpl: noActivation,
     },
   );
 
@@ -199,6 +208,7 @@ for (const nonUnblockedState of ["INCOMPLETE_PREREQUISITE", "AMBIGUOUS_BLOCKER",
         },
         checkReconcileControlBlockerImpl: async () => reconciliationResult,
         resolveRepoIdentityImpl: stubResolveRepoIdentity,
+        resolveEntryActivationImpl: noActivation,
       },
     );
 
@@ -251,6 +261,7 @@ test("BLOCKED + blockerReconciliationEligible -> REJECTED fails operationally (o
       },
       checkReconcileControlBlockerImpl: async () => rejectedResult,
       resolveRepoIdentityImpl: stubResolveRepoIdentity,
+      resolveEntryActivationImpl: noActivation,
     },
   );
 
@@ -286,6 +297,7 @@ test("ordinary NOT_READY (no postPrLifecycle, mode fallthrough) never invokes a 
         throw new Error("must not be called for ordinary fallthrough NOT_READY");
       },
       resolveRepoIdentityImpl: stubResolveRepoIdentity,
+      resolveEntryActivationImpl: noActivation,
     },
   );
 
@@ -319,6 +331,7 @@ test("BLOCKED without blockerReconciliationEligible never invokes reconcile-cont
         throw new Error("must not be called");
       },
       resolveRepoIdentityImpl: stubResolveRepoIdentity,
+      resolveEntryActivationImpl: noActivation,
     },
   );
 
@@ -353,6 +366,7 @@ test("mode:bounded (READY_TO_DISPATCH) is returned without executing a further l
         throw new Error("must not be called for a bounded verdict");
       },
       resolveRepoIdentityImpl: stubResolveRepoIdentity,
+      resolveEntryActivationImpl: noActivation,
     },
   );
 
@@ -377,6 +391,7 @@ test("operational failure from ready-dispatch-gate.mjs is reported as ok:false, 
         throw new Error("must not be called");
       },
       resolveRepoIdentityImpl: stubResolveRepoIdentity,
+      resolveEntryActivationImpl: noActivation,
     },
   );
 
@@ -406,6 +421,7 @@ test("operational failure from a chained next-review-transition-gate.mjs call is
         throw new Error("must not be called");
       },
       resolveRepoIdentityImpl: stubResolveRepoIdentity,
+      resolveEntryActivationImpl: noActivation,
     },
   );
 
@@ -424,6 +440,7 @@ test("missing --control-issue is an immediate operational failure with no gate c
         return {};
       },
       resolveRepoIdentityImpl: stubResolveRepoIdentity,
+      resolveEntryActivationImpl: noActivation,
     },
   );
   assert.equal(result.ok, false);
@@ -470,6 +487,7 @@ test("an unrecognized chain-shaped verdict fails closed to an operational error 
         throw new Error("must not be called");
       },
       resolveRepoIdentityImpl: stubResolveRepoIdentity,
+      resolveEntryActivationImpl: noActivation,
     },
   );
 
@@ -502,10 +520,127 @@ test("an unbounded chain loop trips the circuit breaker instead of looping forev
         throw new Error("must not be called");
       },
       resolveRepoIdentityImpl: stubResolveRepoIdentity,
+      resolveEntryActivationImpl: noActivation,
     },
   );
 
   assert.equal(result.ok, false);
   assert.match(result.message, /Exceeded \d+ chained gate hops/);
   assert.equal(transitionCallCount, 6);
+});
+
+// -- Issue #1165: ordinary-entry activation (source-level reproduction of fixtures A and B) -----
+//
+// A stateful fake control world drives the REAL resolveEntryActivation/activateControlPair/
+// checkWriteControlSnapshot transaction through the ordinary session-entry router: the gate verdict
+// is derived from the live fake control body each call, so "fresh gate after persistence" is
+// genuinely re-evaluated. This is source-test evidence only, not real unassisted session proof.
+
+import { resolveEntryActivation } from "./activate-control-pair.mjs";
+
+const FENCE = "```";
+const jb = (obj) => `${FENCE}json\n${JSON.stringify(obj)}\n${FENCE}`;
+const REVIEW_GRANT = { executorSubstrate: [{ component: "review-control", paths: [".github/workflows/ldl-launcher.yml"], intendedChange: "x", verification: "y" }] };
+const THICK_1163 = `### Parent loop\n#1164 - control.\n\n### ACTIVE founder-approved qualification and exact protected-component grant - 2026-10-14\nYes, authorized.\n\n${jb(REVIEW_GRANT)}\n`;
+const BODY_1164 = `### State\n\nNEEDS_FOUNDER\n\n### Current state\n\n- **Execution:** #1163\n- **Route:** none\n- **Founder decision:** pending narrow proof / exact protected-workflow grant\n\n### Current blocker\n\nNot yet separately authorized; assessment remains to be accepted.\n\n### Founder interrupt\n\nMay engineering proceed after the exact component grant?\n`;
+const NEW_PACKET = `### Parent loop\n#438\n\n### ACTIVE founder-authorized new packet\n${jb({ newPacketAuthority: { controlIssue: 438, executionIssue: 1165 } })}\n`;
+const BODY_438 = `### State\n\nDONE\n\n### Current state\n\n- **Execution:** #1151\n- **Founder decision:** none\n- **PR:** #1159\n- **Stage 1:** CLEAN\n- **Stage 2:** #1160\n\n### Current blocker\n\nNone\n`;
+
+function makeEntryWorld({ controlNumber, control, controlState = "OPEN", issues, list = [] }) {
+  const w = { control: { body: control, state: controlState }, issues, writes: 0, gateCalls: 0, listCalls: 0 };
+  const lifecycle = () => (w.control.body.match(/^### State\n\n(.+)$/m) ?? w.control.body.match(/- \*\*Lifecycle:\*\* (.+)$/m))?.[1]?.trim();
+  w.checkReadyDispatchImpl = async () => {
+    w.gateCalls++;
+    const lc = lifecycle();
+    const exec = Number(w.control.body.match(/- \*\*Execution:\*\* #(\d+)/)?.[1]);
+    if (lc === "READY") {
+      return { exitCode: 0, state: "READY_TO_DISPATCH", controlIssue: controlNumber, executionIssue: exec, route: "implementation worker", actionEnvelope: getActionEnvelope("READY_TO_DISPATCH", {}) };
+    }
+    if (lc === "NEEDS_FOUNDER") {
+      return { exitCode: 4, state: "BLOCKED", controlIssue: controlNumber, blockerReconciliationEligible: true, actionEnvelope: getActionEnvelope("BLOCKED", { blockerReconciliationEligible: true }) };
+    }
+    return { exitCode: 3, state: "NOT_READY", controlIssue: controlNumber, reasons: ["terminal"], actionEnvelope: getActionEnvelope("NOT_READY", {}) };
+  };
+  const readIssueImpl = ({ number }) => (number === controlNumber ? { ...w.control } : { ...w.issues[number] });
+  const ghEditImpl = ({ body }) => {
+    w.writes++;
+    w.control = { ...w.control, body };
+  };
+  w.deps = {
+    checkReadyDispatchImpl: w.checkReadyDispatchImpl,
+    checkReconcileControlBlockerImpl: async () => ({ exitCode: 4, state: "AMBIGUOUS_BLOCKER" }),
+    runNextReviewTransitionGateImpl: async () => {
+      throw new Error("must not run");
+    },
+    resolveRepoIdentityImpl: stubResolveRepoIdentity,
+    resolveEntryActivationImpl: ({ repo, controlIssue }) =>
+      resolveEntryActivation({ repo, controlIssue }, { readIssueImpl, ghEditImpl, listOpenIssuesImpl: () => (w.listCalls++, list) }),
+  };
+  return w;
+}
+
+test("#1165 fixture A (#1164): ordinary entry on a stale ACTIVE-grant control reaches READY_TO_DISPATCH instead of BLOCKED/AMBIGUOUS_BLOCKER", async () => {
+  const w = makeEntryWorld({ controlNumber: 1164, control: BODY_1164, issues: { 1163: { body: THICK_1163, state: "OPEN" } } });
+  const result = await runSessionEntryGate({ repo: REPO, controlIssue: 1164 }, w.deps);
+  assert.equal(result.ok, true);
+  assert.equal(result.state, "READY_TO_DISPATCH");
+  assert.equal(result.executionIssue, 1163);
+  assert.equal(w.writes, 1);
+  assert.deepEqual(result.provenance.map((p) => p.gate), ["ready-dispatch-gate", "activate-control-pair", "ready-dispatch-gate"]);
+});
+
+test("#1165 fixture B (#438): ordinary entry on an OPEN/DONE control with an authorized new packet reaches READY_TO_DISPATCH for it", async () => {
+  const w = makeEntryWorld({ controlNumber: 438, control: BODY_438, issues: { 1151: { body: "old", state: "CLOSED" }, 1165: { body: NEW_PACKET, state: "OPEN" } }, list: [{ number: 1165, body: NEW_PACKET }] });
+  const result = await runSessionEntryGate({ repo: REPO, controlIssue: 438 }, w.deps);
+  assert.equal(result.state, "READY_TO_DISPATCH");
+  assert.equal(result.executionIssue, 1165);
+  assert.match(w.control.body, /Completed packet history .*Execution #1151; PR #1159/);
+  assert.match(w.control.body, /- \*\*PR:\*\* none/);
+});
+
+test("#1165 negatives at ordinary entry: unauthorized child / unproven grant leave the original verdict with no write", async () => {
+  const unauthorized = makeEntryWorld({ controlNumber: 438, control: BODY_438, issues: { 1151: { body: "old", state: "CLOSED" }, 1165: { body: "### Parent loop\n#438\n", state: "OPEN" } }, list: [{ number: 1165, body: "### Parent loop\n#438\n" }] });
+  const r1 = await runSessionEntryGate({ repo: REPO, controlIssue: 438 }, unauthorized.deps);
+  assert.equal(r1.state, "NOT_READY");
+  assert.equal(r1.actionEnvelope.mode, "fallthrough");
+  assert.equal(unauthorized.writes, 0);
+
+  const revoked = makeEntryWorld({ controlNumber: 1164, control: BODY_1164, issues: { 1163: { body: THICK_1163.replace("### ACTIVE", "### REVOKED ACTIVE"), state: "OPEN" } } });
+  const r2 = await runSessionEntryGate({ repo: REPO, controlIssue: 1164 }, revoked.deps);
+  assert.equal(r2.state, "BLOCKED");
+  assert.equal(r2.reconciliation.state, "AMBIGUOUS_BLOCKER");
+  assert.equal(revoked.writes, 0);
+});
+
+test("#1165 idempotence: a second ordinary entry after activation writes nothing and dispatches the same packet", async () => {
+  const w = makeEntryWorld({ controlNumber: 1164, control: BODY_1164, issues: { 1163: { body: THICK_1163, state: "OPEN" } } });
+  await runSessionEntryGate({ repo: REPO, controlIssue: 1164 }, w.deps);
+  const again = await runSessionEntryGate({ repo: REPO, controlIssue: 1164 }, w.deps);
+  assert.equal(again.state, "READY_TO_DISPATCH");
+  assert.equal(w.writes, 1);
+});
+
+test("#1165 an activation operational failure (readback/write) is an operational error, never a verdict", async () => {
+  const w = makeEntryWorld({ controlNumber: 1164, control: BODY_1164, issues: { 1163: { body: THICK_1163, state: "OPEN" } } });
+  const result = await runSessionEntryGate({ repo: REPO, controlIssue: 1164 }, { ...w.deps, resolveEntryActivationImpl: () => ({ exitCode: 1, state: "READBACK_MISMATCH", message: "readback mismatch" }) });
+  assert.equal(result.ok, false);
+  assert.match(result.message, /readback mismatch/);
+});
+
+test("#1165 post-PR chain verdicts never attempt activation", async () => {
+  let attempts = 0;
+  const result = await runSessionEntryGate(
+    { repo: REPO, controlIssue: 5 },
+    {
+      checkReadyDispatchImpl: async () => ({ exitCode: 3, state: "NOT_READY", postPrLifecycle: "REVIEW", actionEnvelope: getActionEnvelope("NOT_READY", { postPrLifecycle: "REVIEW" }) }),
+      runNextReviewTransitionGateImpl: async () => ({ exitCode: 5, state: "STAGE1_CORRECTION_REQUIRED", actionEnvelope: getActionEnvelope("STAGE1_CORRECTION_REQUIRED", { correctionReason: "x" }) }),
+      resolveRepoIdentityImpl: stubResolveRepoIdentity,
+      resolveEntryActivationImpl: () => {
+        attempts++;
+        return { exitCode: 0, state: "NO_CANDIDATE" };
+      },
+    },
+  );
+  assert.equal(result.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.equal(attempts, 0);
 });

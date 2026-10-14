@@ -349,3 +349,81 @@ test("Audit #1153 Stage 1: CLI refuses valueless --activate-execution / --base-b
     assert.match(r.stderr, /activate-control-pair\.mjs/, flag);
   }
 });
+
+// Issue #1165: combined reopen+activation mutation at the canonical writer.
+function reopenWorld({ state = "CLOSED", persistReopen = true } = {}) {
+  const w = { body: ACT_BASE, state, patches: [], writes: 0 };
+  w.readIssueImpl = ({ number }) => (number === 1151 ? { body: "", state: "OPEN" } : { body: w.body, state: w.state });
+  w.ghEditImpl = ({ body }) => { w.writes++; w.body = body; };
+  w.ghReopenImpl = ({ body, state: s }) => {
+    w.patches.push(s);
+    if (persistReopen || s === "closed") { w.body = body; w.state = s.toUpperCase(); }
+  };
+  return w;
+}
+const reopenCall = (w, activation = {}) =>
+  checkWriteControlSnapshot(
+    { repo: "o/r", controlIssue: 438, proposedBody: ACT_BODY, activation: { executionIssue: 1151, baseBody: ACT_BASE, baseState: "CLOSED", reopen: true, verifyExecution: () => ({ ok: true }), ...activation } },
+    { readIssueImpl: w.readIssueImpl, ghEditImpl: w.ghEditImpl, ghReopenImpl: w.ghReopenImpl },
+  );
+
+test("#1165 reopen: CLOSED control + coherent READY body -> ONE state+body mutation, verified after independent readback", () => {
+  const w = reopenWorld();
+  const r = reopenCall(w);
+  assert.equal(r.exitCode, 0, JSON.stringify(r));
+  assert.equal(r.verified, true);
+  assert.deepEqual(w.patches, ["open"]);
+  assert.equal(w.writes, 0);
+  assert.equal(w.state, "OPEN");
+});
+
+test("#1165 reopen: without the reopen flag a CLOSED control is still rejected and never written", () => {
+  const w = reopenWorld();
+  const r = reopenCall(w, { reopen: false });
+  assert.equal(r.exitCode, 2);
+  assert.deepEqual(w.patches, []);
+  assert.equal(w.state, "CLOSED");
+});
+
+test("#1165 reopen: a DONE/stale proposal is rejected by pair validation before any reopen", () => {
+  const w = reopenWorld();
+  const r = checkWriteControlSnapshot(
+    { repo: "o/r", controlIssue: 438, proposedBody: ACT_BASE, activation: { executionIssue: 1151, baseBody: ACT_BASE, baseState: "CLOSED", reopen: true, verifyExecution: () => ({ ok: true }) } },
+    { readIssueImpl: w.readIssueImpl, ghEditImpl: w.ghEditImpl, ghReopenImpl: w.ghReopenImpl },
+  );
+  assert.equal(r.exitCode, 2);
+  assert.deepEqual(w.patches, []);
+  assert.equal(w.state, "CLOSED");
+});
+
+test("#1165 reopen: live state or body no longer the base -> STALE_CONTROL, nothing written", () => {
+  const stateMoved = reopenWorld({ state: "OPEN" });
+  assert.equal(reopenCall(stateMoved).state, "STALE_CONTROL");
+  const bodyMoved = reopenWorld();
+  bodyMoved.body += "\nconcurrent";
+  assert.equal(reopenCall(bodyMoved).state, "STALE_CONTROL");
+  for (const w of [stateMoved, bodyMoved]) assert.deepEqual(w.patches, []);
+});
+
+test("#1165 reopen: failed write leaves CLOSED; revoked proof refuses; readback mismatch is restored to CLOSED", () => {
+  const failing = reopenWorld();
+  failing.ghReopenImpl = () => { throw new Error("HTTP 422"); };
+  const rf = reopenCall(failing);
+  assert.equal(rf.exitCode, 1);
+  assert.equal(rf.state, "REOPEN_WRITE_FAILED");
+  assert.equal(failing.state, "CLOSED");
+
+  const revoked = reopenWorld();
+  const rr = reopenCall(revoked, { verifyExecution: () => ({ ok: false, reason: "revoked" }) });
+  assert.equal(rr.exitCode, 2);
+  assert.deepEqual(revoked.patches, []);
+
+  const lossy = reopenWorld({ persistReopen: false });
+  const rl = reopenCall(lossy);
+  assert.equal(rl.exitCode, 1);
+  assert.equal(rl.state, "READBACK_MISMATCH");
+  assert.equal(rl.rolledBack, true);
+  assert.deepEqual(lossy.patches, ["open", "closed"]);
+  assert.equal(lossy.state, "CLOSED");
+  assert.equal(lossy.body, ACT_BASE);
+});
