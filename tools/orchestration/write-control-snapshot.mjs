@@ -23,8 +23,10 @@
 // configured `origin` remote via resolveRepoIdentity (issue #344) so a caller never hand-types
 // (or mistypes) the owner/repo slug that governs which Issue is mutated.
 //
-// Activation mode (issue #1151): add `--activate-execution <N> --base-body-file <path>` to also
-// require a stale-proof write, an executable control/thick pair, and an independent readback.
+// Activation mode (issue #1151) is programmatic only: `checkWriteControlSnapshot({ activation })`
+// requires an injected `verifyExecution` proof callback, which only activate-control-pair.mjs
+// supplies. The CLI deliberately exposes no activation flags (Audit #1153 finding 1); use
+// `node tools/orchestration/activate-control-pair.mjs --control-issue <C> --execution-issue <E>`.
 //
 // Exit codes:
 //   0 — WRITTEN. The proposed body passed validateControlSnapshot and was persisted verbatim
@@ -203,6 +205,14 @@ function readBodyFile(path) {
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const controlIssue = args["control-issue"];
+  if (args["activate-execution"] !== undefined || args["base-body-file"] !== undefined) {
+    console.error(
+      "--activate-execution/--base-body-file are not supported on this CLI (activation needs the execution-packet proof). " +
+        "Use: node tools/orchestration/activate-control-pair.mjs --control-issue <C> --execution-issue <E>",
+    );
+    process.exit(1);
+    return;
+  }
   if (!controlIssue) {
     console.error("Missing required arg: --control-issue is required.");
     process.exit(1);
@@ -234,25 +244,7 @@ function main() {
     return;
   }
 
-  let activation = null;
-  if (args["activate-execution"]) {
-    if (!args["base-body-file"]) {
-      console.error("--activate-execution requires --base-body-file (the live body the proposal was composed from) so a stale write can be refused.");
-      process.exit(1);
-      return;
-    }
-    let baseBody;
-    try {
-      baseBody = readFileSync(args["base-body-file"], "utf8");
-    } catch (err) {
-      console.error(`Could not read --base-body-file "${args["base-body-file"]}": ${err.message}`);
-      process.exit(1);
-      return;
-    }
-    activation = { executionIssue: Number(args["activate-execution"]), baseBody };
-  }
-
-  const result = checkWriteControlSnapshot({ repo: resolvedRepo, controlIssue, proposedBody, activation });
+  const result = checkWriteControlSnapshot({ repo: resolvedRepo, controlIssue, proposedBody });
   if (result.exitCode === 1) {
     console.error(result.message);
     process.exit(1);

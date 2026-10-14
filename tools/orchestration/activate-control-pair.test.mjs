@@ -143,7 +143,7 @@ test("(e) invalid proposed body is rejected by the canonical writer validation (
   assert.equal(w.writes.length, 0);
 });
 
-test("(f) handoff-only emits a deterministic qualified-executor handoff with no founder prompt and no I/O", () => {
+test("(f) handoff-only emits a deterministic qualified-executor handoff with no founder prompt, after read-only proof and no writes", () => {
   const w = makeWorld();
   const r = run(w, { handoffOnly: true });
   assert.equal(r.exitCode, 0);
@@ -151,6 +151,25 @@ test("(f) handoff-only emits a deterministic qualified-executor handoff with no 
   assert.equal(r.founderPromptRequired, false);
   assert.match(r.command, /activate-control-pair\.mjs --control-issue 10 --execution-issue 11/);
   assert.equal(w.writes.length, 0);
+  assert.equal(w.gateCalls, 0);
+});
+
+test("(f2) handoff-only fails closed (no HANDOFF) for absent, revoked, wrong-parent, and closed pairs; no writes", () => {
+  const revoked = ACTIVE_THICK.replace("### ACTIVE founder-approved", "### REVOKED ACTIVE founder-approved");
+  const cases = {
+    absent: makeWorld({ exec: INACTIVE_ONLY_THICK }),
+    revoked: makeWorld({ exec: revoked }),
+    mismatched: makeWorld({ exec: BAD_COMPONENT_THICK }),
+    wrongParent: makeWorld({ exec: ACTIVE_THICK.replace("#10", "#99") }),
+    closedControl: makeWorld({ controlState: "CLOSED" }),
+    closedExecution: makeWorld({ execState: "CLOSED" }),
+  };
+  for (const [name, w] of Object.entries(cases)) {
+    const r = run(w, { handoffOnly: true });
+    assert.equal(r.exitCode, 2, name);
+    assert.notEqual(r.state, "HANDOFF", name);
+    assert.equal(w.writes.length, 0, name);
+  }
 });
 
 test("(g) a normal fresh control with no pending state activates without needing a grant witness", () => {
