@@ -667,6 +667,7 @@ export async function evaluateEvidenceCorrection({ repo, auditIssue }, io = defa
         );
       }
     }
+    const pendingState = checkPreAuditPendingState(replacement.body ?? "");
     return {
       status: Status.SATISFIED,
       reason: "evidence correction durably satisfied; its single re-audit already exists",
@@ -674,7 +675,10 @@ export async function evaluateEvidenceCorrection({ repo, auditIssue }, io = defa
       replacement: {
         number: Number(replacement.number),
         state: replacement.state,
-        pending: checkPreAuditPendingState(replacement.body ?? "").ok,
+        pending: pendingState.ok,
+        // Issue #949: the specific canonical pending-state failures, so a caller never has to
+        // guess which field failed (a Findings/Next failure is not a non-PENDING Verdict).
+        pendingErrors: pendingState.ok ? [] : pendingState.errors,
       },
       ...extra,
       ...base,
