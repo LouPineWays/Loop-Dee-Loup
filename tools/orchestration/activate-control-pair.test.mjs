@@ -8,6 +8,7 @@ import {
   activateControlPair,
   findActiveGrantWitness,
   findNewPacketAuthority,
+  verifyExecutionPacket,
   controlAdvertisesPendingState,
   buildActivatedControlBody,
   isTerminalControl,
@@ -576,9 +577,26 @@ test("#1165 review: a blocker unrelated to the granted component is not accepted
   assert.equal(pendingMatchesGrant(control, ["review-control"]).ok, false);
 });
 
-test("#1165 review: a terminal control is not reopened on a leftover ACTIVE component grant alone", () => {
-  const leftover = `### Parent loop\n#10\n\n### ACTIVE founder-approved grant\n${jsonBlock(JSON.stringify({ executorSubstrate: [{ component: "review-control", paths: ["a"], intendedChange: "x", verification: "y" }] }))}\n`;
-  assert.equal(findNewPacketAuthority(leftover, { controlIssue: 10, executionIssue: 11 }).ok, false);
+test("#1165 review (narrowed by Audit #1167): a terminal control is not reopened on a revoked or other-parent leftover grant", () => {
+  const grant = jsonBlock(JSON.stringify({ executorSubstrate: [{ component: "review-control", paths: ["a"], intendedChange: "x", verification: "y" }] }));
+  const pair = { controlIssue: 10, executionIssue: 11 };
+  const revoked = `### Parent loop\n#10\n\n### REVOKED ACTIVE founder-approved grant\n${grant}\n`;
+  assert.equal(findNewPacketAuthority(revoked, pair).ok, false);
+  const otherParent = `### Parent loop\n#99\n\n### ACTIVE founder-approved grant\n${grant}\n`;
+  assert.equal(verifyExecutionPacket({ controlBody: BODY_438_FULL, executionBody: otherParent, ...pair, controlState: "CLOSED" }).ok, false);
+});
+
+test("Audit #1167: the literal #1165 durable shape (Parent loop + ACTIVE exact component-scoped grant, no newPacketAuthority) is terminal authority", () => {
+  const literal = `### Parent loop\n#10\n\n### ACTIVE exact component-scoped authorization for the founder-selected correction\nFounder directed.\n\n${jsonBlock(GRANT_JSON)}\n`;
+  const pair = { controlIssue: 10, executionIssue: 11 };
+  const a = findNewPacketAuthority(literal, pair);
+  assert.equal(a.ok, true);
+  assert.equal(a.via, "activeGrant");
+  const packet = (executionBody) => verifyExecutionPacket({ controlBody: BODY_438_FULL, executionBody, ...pair, controlState: "CLOSED" });
+  assert.equal(packet(literal).ok, true);
+  assert.equal(packet(literal.replace("#10\n", "#99\n")).ok, false);
+  assert.equal(findNewPacketAuthority(literal.replace(GRANT_JSON, "{not json}"), pair).ok, false);
+  assert.equal(findNewPacketAuthority("### Parent loop\n#10\n", pair).ok, false);
 });
 
 test("#1165 review: a planning route on a pending control is not converted to implementation at entry", () => {
