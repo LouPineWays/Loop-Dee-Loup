@@ -2009,7 +2009,19 @@ export function composePrCheckpointRecoveryCommand({ controlIssue, executionIssu
 // exactly one linked OPEN PR (no competing open PR, no merged linked PR) carrying a live head and
 // durable Stage 1 request/exemption AT that head. Every other shape returns
 // `{ eligible: false, code, reason }`.
-export async function evaluatePartialPrCheckpoint({ repo, executionIssue, prList }, { stage1GateRunImpl = defaultStage1GateRun } = {}) {
+export async function evaluatePartialPrCheckpoint({ repo, executionIssue, prList, controlBody = "" }, { stage1GateRunImpl = defaultStage1GateRun } = {}) {
+  // Stage 1 correction (P1): never silently reconcile contradictory durable state. The recovery
+  // is only for a control whose PR and Stage 1 fields are both absent or "none".
+  for (const label of ["PR", "Stage 1"]) {
+    const raw = parseControlBullet(controlBody, label);
+    if (raw !== null && !isNoneSentinel(raw)) {
+      return {
+        eligible: false,
+        code: "CONTROL_ALREADY_RECORDS_PR_STATE",
+        reason: `the control Issue already records a non-none "${label}" value (${JSON.stringify(raw)}); refusing to overwrite possibly contradictory durable state`,
+      };
+    }
+  }
   const linked = (Array.isArray(prList) ? prList : []).filter((pr) => referencesExecutionIssue(pr ?? {}, executionIssue));
   const open = linked.filter((pr) => String(pr?.state ?? "").toUpperCase() === "OPEN");
   const merged = linked.filter((pr) => String(pr?.state ?? "").toUpperCase() === "MERGED");
@@ -2629,14 +2641,15 @@ async function checkReadyDispatchCore(
   // plan/unit machinery whose own durable state could otherwise prove a PR already exists, so
   // this reconciles against the one narrow execution-linked PR lookup the Shared Contract
   // authorizes for exactly this route before ever authorizing a fresh dispatch.
-  // Issue #1008: the production default also enumerates open PRs so a PR linked only by the
-  // permitted `issue-<N>-...` branch name is visible (same acquisition the ROUTED path uses).
+  // Issue #1008 Stage 1 correction (P2): keep the existing all-state lookup (it already links
+  // `issue-<N>-...` branches via referencesExecutionIssue and carries head refs); an unrelated
+  // repository-wide open-PR count must not become a prerequisite for READY dispatch.
   let readyPrList = [];
   const reconciliation = await reconcileReadyPrBreakpoint(
     { repo: resolvedRepo, executionIssue: result.executionIssue },
     {
       ghPrListImpl: async (a) => {
-        readyPrList = await (ghPrListImpl === defaultGhPrList ? defaultOpenExecutionLinkedPrList : ghPrListImpl)(a);
+        readyPrList = await ghPrListImpl(a);
         return readyPrList;
       },
     },
@@ -2653,7 +2666,7 @@ async function checkReadyDispatchCore(
     // Issue #1008: a provably unambiguous partial PR/Stage 1 checkpoint resumes through the
     // existing finalizer (one bounded action); anything else stops with a machine-readable reason.
     const recovery = await evaluatePartialPrCheckpoint(
-      { repo: resolvedRepo, executionIssue: result.executionIssue, prList: readyPrList },
+      { repo: resolvedRepo, executionIssue: result.executionIssue, prList: readyPrList, controlBody: data.body ?? "" },
       { stage1GateRunImpl },
     );
     if (recovery.eligible) {

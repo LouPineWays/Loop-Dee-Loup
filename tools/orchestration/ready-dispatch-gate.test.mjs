@@ -2802,6 +2802,8 @@ test("#1008 negatives: every missing proof fails closed to the repair stop with 
     ["STAGE1_UNRESOLVED", { stage1: { exitCode: 1, message: "boom" } }],
     ["STAGE1_UNRESOLVED", { stage1: { exitCode: 2, state: "FINDINGS_LACK_FORMAL_REVIEW" } }],
     ["STAGE1_EVIDENCE_UNREADABLE", { stage1: new Error("network") }],
+    ["CONTROL_ALREADY_RECORDS_PR_STATE", { body: BODY1008.replace("- **PR:** none", "- **PR:** #999") }],
+    ["CONTROL_ALREADY_RECORDS_PR_STATE", { body: BODY1008.replace("- **Stage 1:** none", "- **Stage 1:** requested") }],
   ];
   for (const [code, opts] of cases) {
     const r = await gate1008(opts);
