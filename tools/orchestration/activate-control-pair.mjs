@@ -26,7 +26,7 @@
 // re-runs the gate: it never rewrites the body twice and never dispatches work itself.
 //
 // A caller that cannot run the canonical writer (remote/Chat-style author) passes --handoff-only to
-// get a deterministic HANDOFF record naming the exact command a qualified executor runs; no founder
+// get, after the same read-only control/execution/grant proof (no write), a deterministic HANDOFF record naming the exact command a qualified executor runs; no founder
 // question is produced for an already-proven grant.
 //
 // A CLOSED control is never activated here: reopen the existing control first (founder direction
@@ -220,20 +220,6 @@ export function activateControlPair(
     };
   }
 
-  if (handoffOnly) {
-    return {
-      exitCode: 0,
-      state: "HANDOFF",
-      controlIssue: c,
-      executionIssue: e,
-      founderPromptRequired: false,
-      command: handoffCommand({ controlIssue: c, executionIssue: e, route }),
-      message:
-        "This actor cannot run the canonical control writer. A qualified repository executor runs the command above; " +
-        "the proven grant must not be re-requested from the founder.",
-    };
-  }
-
   let control;
   let execution;
   try {
@@ -271,6 +257,20 @@ export function activateControlPair(
       executionIssue: e,
       errors: [proof.reason],
       message: `Not activating ${repo}#${c}: ${proof.reason}. Control left unchanged.`,
+    };
+  }
+
+  if (handoffOnly) {
+    return {
+      exitCode: 0,
+      state: "HANDOFF",
+      controlIssue: c,
+      executionIssue: e,
+      founderPromptRequired: false,
+      command: handoffCommand({ controlIssue: c, executionIssue: e, route }),
+      message:
+        "This actor cannot run the canonical control writer. A qualified repository executor runs the command above; " +
+        "the grant was read-only verified just now and must not be re-requested from the founder.",
     };
   }
 
