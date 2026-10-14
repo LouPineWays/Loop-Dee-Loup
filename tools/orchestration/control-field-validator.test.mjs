@@ -464,6 +464,22 @@ test("validateControlSnapshot: refuses a proposed body where '- **Blocker:** non
   assert.ok(result.errors.some((e) => /contradictory/.test(e)));
 });
 
+// -- Issue #1008: equivalent no-blocker sentinels (`none` bullet vs `None` heading) ----------
+
+test("validateBlockerRepresentationCoherence: 'none' bullet and 'None' heading are semantically equivalent (#1006 original shape)", () => {
+  const body = ["- **Blocker:** none", "", "### Current blocker", "", "None"].join("\n");
+  assert.deepEqual(validateBlockerRepresentationCoherence(body), { ok: true });
+  assert.deepEqual(validateBlockerRepresentationCoherence(["- **Blocker:** NONE.", "### Current blocker", "", "none"].join("\n")), { ok: true });
+});
+
+test("validateBlockerRepresentationCoherence: a no-blocker sentinel against a real blocker heading still fails closed (#1008 negative)", () => {
+  for (const heading of ["Blocked by #764.", "None - waiting on founder", "Waiting for credentials"]) {
+    const body = ["- **Blocker:** none", "", "### Current blocker", "", heading].join("\n");
+    assert.equal(validateBlockerRepresentationCoherence(body).ok, false, heading);
+  }
+  assert.equal(validateBlockerRepresentationCoherence(["- **Blocker:** none - see below", "### Current blocker", "", "None"].join("\n")).ok, false);
+});
+
 // -- Duplicate 'Blocked lifecycle'/'Blocked route' resume-state bullets (Stage 1 finding) ---
 
 test("validateBlockerAuthoringField: rejects a duplicate 'Blocked lifecycle' bullet instead of silently selecting the last occurrence", () => {

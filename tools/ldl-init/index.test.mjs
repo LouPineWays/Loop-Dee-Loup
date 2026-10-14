@@ -1578,6 +1578,18 @@ test("HARD_MODULE_DEPENDENCIES: covers ready-dispatch-gate.mjs -> prepare-dispat
   assert.equal(findHardDependencyCollisions({ toInstall: [{ destRel: dest, content: Buffer.from("x") }], toSkip: [] }).length, 0);
 });
 
+test("HARD_MODULE_DEPENDENCIES: covers ready-dispatch-gate.mjs -> stage1-gate.mjs and flags a preserved unmanaged stage1-gate.mjs (#1008)", () => {
+  const dest = "tools/orchestration/ready-dispatch-gate.mjs";
+  const dep = "tools/review-watch/stage1-gate.mjs";
+  assert.ok(HARD_MODULE_DEPENDENCIES.some((e) => e.dest === dest && e.dependsOnDest === dep));
+  const collisions = findHardDependencyCollisions({
+    toInstall: [{ destRel: dest, content: Buffer.from("x") }],
+    toSkip: [{ dest: dep, reason: "unmanaged" }],
+  });
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].dest, dep);
+});
+
 test("HARD_MODULE_DEPENDENCIES: covers close-control.mjs -> lifecycle-gate.mjs and flags a preserved unmanaged lifecycle-gate.mjs (#852)", () => {
   const dest = "tools/orchestration/close-control.mjs";
   const dep = "tools/review-watch/lifecycle-gate.mjs";

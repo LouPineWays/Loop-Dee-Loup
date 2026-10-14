@@ -718,6 +718,9 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/verify-audit-ready.mjs", dependsOnDest: "tools/review-watch/lifecycle-gate.mjs" },
   { dest: "tools/orchestration/verify-audit-ready.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
   { dest: "tools/orchestration/format-dispatch-prompt.mjs", dependsOnDest: "tools/orchestration/verify-audit-ready.mjs" },
+  // Issue #1008 Stage 1 correction (P2): ready-dispatch-gate.mjs hard-imports `run` from
+  // stage1-gate.mjs for the READY partial-PR-checkpoint recovery.
+  { dest: "tools/orchestration/ready-dispatch-gate.mjs", dependsOnDest: "tools/review-watch/stage1-gate.mjs" },
   // Issue #725 Stage 1 review finding (P2, on PR #763): every importer of the new shared
   // github-read.mjs REST boundary hard-imports readGithubIssue/readGithubPr. Without these edges an
   // unmanaged, preserved tools/orchestration/github-read.mjs lets install/update report success
