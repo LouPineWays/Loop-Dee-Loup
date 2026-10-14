@@ -24,10 +24,11 @@ test("dispatch form: control_issue is the only required input; nonce is optional
   const inputs = onBlock.slice(onBlock.indexOf("inputs:"));
   assert.match(inputs, /control_issue:\s*\n\s+description:[^\n]*\n\s+required: true/);
   assert.match(inputs, /nonce:\s*\n\s+description:[^\n]*\n\s+required: false/);
-  assert.deepEqual([...inputs.matchAll(/^ {6}(\w+):$/gm)].map((m) => m[1]), ["control_issue", "nonce", "diagnostic_only", "post_install_diagnostic", "post_install_runner"]);
+  assert.deepEqual([...inputs.matchAll(/^ {6}(\w+):$/gm)].map((m) => m[1]), ["control_issue", "nonce", "diagnostic_only", "post_install_diagnostic", "post_install_runner", "worker_runner"]);
   assert.match(inputs, /post_install_diagnostic:\s*\n\s+description:[^\n]*\n\s+type: boolean\n\s+required: false\n\s+default: false/);
   assert.match(inputs, /diagnostic_only:\s*\n\s+description:[^\n]*\n\s+type: boolean\n\s+required: false\n\s+default: false/);
   assert.match(inputs, /post_install_runner:\s*\n\s+description:[^\n]*\n\s+type: choice\n\s+required: false\n\s+default: ubuntu-latest\n\s+options:\n\s+- ubuntu-latest\n\s+- ubuntu-22\.04\n/);
+  assert.match(inputs, /worker_runner:\s*\n\s+description:[^\n]*\n\s+type: choice\n\s+required: false\n\s+default: ubuntu-latest\n\s+options:\n\s+- ubuntu-latest\n\s+- ubuntu-22\.04\n/);
 });
 
 test("dispatch trust: actor permission, default-branch ref, fork flag come from event context and the module", () => {
@@ -619,12 +620,11 @@ const evalRunsOn = (expr, selector) => {
 };
 
 test("runner selector: only the post-install job selects a host; allowlist of exactly ubuntu-latest and ubuntu-22.04", () => {
-  assert.equal(runsOn(launchJob), "ubuntu-latest");
   assert.equal(runsOn(diagJob), "ubuntu-latest");
   assert.equal(yml.match(/post_install_runner/g).length, 3, "declared once, referenced in its comment, used once in runs-on");
   for (const job of [launchJob, diagJob]) assert.doesNotMatch(job, /post_install_runner/);
   assert.equal([...yml.matchAll(/^\s+runs-on:/gm)].length, 3);
-  assert.doesNotMatch(yml, /runs-on: \$\{\{ *inputs\.(?!post_install_runner == 'ubuntu-22\.04')/);
+  assert.doesNotMatch(yml, /runs-on: \$\{\{ *inputs\.(?!(post_install_runner|worker_runner) == 'ubuntu-22\.04')/);
 });
 
 test("runner selector: default and every non-allowlisted value resolve to ubuntu-latest; only exact ubuntu-22.04 selects it", () => {
@@ -633,6 +633,41 @@ test("runner selector: default and every non-allowlisted value resolve to ubuntu
   for (const v of ["ubuntu-latest", "", null, undefined, "ubuntu-24.04", "ubuntu-20.04", "UBUNTU-22.04", "ubuntu-22.04 ", "self-hosted", "windows-latest", "ubuntu-22.04,self-hosted", "${{ secrets.X }}"]) {
     assert.equal(evalRunsOn(expr, v), "ubuntu-latest", JSON.stringify(v));
   }
+});
+
+// ---- Issue #1163: allowlisted ubuntu-22.04 selection for the credential-bearing launch job ONLY ----
+const evalWorkerRunsOn = (expr, selector) => {
+  const m = /^\$\{\{ inputs\.worker_runner == '([^']+)' && '([^']+)' \|\| '([^']+)' \}\}$/.exec(expr);
+  assert.ok(m, "launch runs-on is the exact allowlist ternary");
+  return selector === m[1] ? m[2] : m[3];
+};
+
+test("worker runner: only the launch job reads worker_runner; diagnostics and guards never do; one runs-on each", () => {
+  assert.equal(yml.match(/worker_runner/g).length, 3, "declared once, referenced in its comment, used once in runs-on");
+  for (const job of [diagJob, postJob]) assert.doesNotMatch(job, /worker_runner/);
+  assert.doesNotMatch(runsOn(postJob), /worker_runner/);
+  assert.doesNotMatch(runsOn(launchJob), /post_install_runner/);
+  for (const job of [launchJob, diagJob, postJob]) assert.doesNotMatch(diagCond(job), /worker_runner|post_install_runner/);
+});
+
+test("worker runner: default, issue_comment (no inputs) and every non-allowlisted value resolve to ubuntu-latest", () => {
+  const expr = runsOn(launchJob);
+  assert.equal(evalWorkerRunsOn(expr, "ubuntu-22.04"), "ubuntu-22.04");
+  for (const v of ["ubuntu-latest", "", null, undefined, "ubuntu-24.04", "ubuntu-20.04", "UBUNTU-22.04", "ubuntu-22.04 ", "self-hosted", "windows-latest", "ubuntu-22.04,self-hosted", "${{ secrets.X }}"]) {
+    assert.equal(evalWorkerRunsOn(expr, v), "ubuntu-latest", JSON.stringify(v));
+  }
+  // The post-install diagnostic's selector cannot pick the worker host, nor vice versa.
+  assert.equal(evalWorkerRunsOn(expr, "post_install_runner"), "ubuntu-latest");
+});
+
+test("worker runner: selector leaves trust, environment, permissions, and launch guard unchanged", () => {
+  assert.match(launchJob, /\n {4}environment: ldl-launcher\n/);
+  assert.doesNotMatch(launchJob, /\n {4}permissions:/);
+  const ctx = { event: "workflow_dispatch", pr: null, body: "", ref: "refs/heads/main", default: "main", diag: false, post: false };
+  assert.equal(evalIf(diagCond(launchJob), ctx), true);
+  assert.equal(evalIf(diagCond(launchJob), { ...ctx, ref: "refs/heads/feature" }), false);
+  assert.equal(evalIf(diagCond(launchJob), { ...ctx, post: true }), false);
+  assert.equal(evalIf(diagCond(launchJob), { ...ctx, diag: true }), false);
 });
 
 test("runner selector: does not change the job guards, so it cannot reach launch, claim, or worker paths", () => {
