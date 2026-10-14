@@ -15,6 +15,7 @@
 // Run with: node --test tools/orchestration/control-mutation-perimeter.test.mjs
 
 import test from "node:test";
+import { resolveEntryActivation } from "./activate-control-pair.mjs";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, dirname } from "node:path";
@@ -306,6 +307,9 @@ test("synthetic continuation: canonical blocked snapshot -> BLOCKED -> prerequis
   const impls = {
     resolveRepoIdentityImpl: () => ({ ok: true, repo: REPO }),
     checkReadyDispatchImpl: (args) => checkReadyDispatch(args, { ghIssueViewImpl, ghPrListImpl: async () => [] }),
+    // Issue #1165: the real entry-activation resolver runs here; an Issue-prerequisite blocker is not
+    // an authorization-shaped pending state and must stay with the blocker reconciler (no write).
+    resolveEntryActivationImpl: (args) => resolveEntryActivation(args, { readIssueImpl: ({ number }) => ({ ...store[Number(number)] }), ghEditImpl, listOpenIssuesImpl: () => [] }),
     checkReconcileControlBlockerImpl: (args) => checkReconcileControlBlocker(args, { ghIssueViewImpl, ghEditImpl }),
     runNextReviewTransitionGateImpl: async (args) => {
       transitionCalls.push(args);

@@ -41,6 +41,7 @@
 // Tests: node --test tools/orchestration/write-control-snapshot.test.mjs
 
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { validateControlSnapshot, validateActivationPair } from "./control-field-validator.mjs";
 import { readGithubIssue } from "./github-read.mjs";
 import { resolveRepoIdentity } from "./ready-dispatch-gate.mjs";
@@ -54,6 +55,38 @@ import { ghRestEditIssueBody, isKnownAttributionDecoration } from "../review-wat
 // Issue #835: tolerate only the one known trailing attribution block; any other mismatch still throws.
 export function defaultGhEditControlIssue({ repo, controlIssue, body }, runImpl) {
   ghRestEditIssueBody({ repo, auditIssue: controlIssue, body, allowKnownAttribution: true }, runImpl);
+}
+
+// Issue #1165: ONE guarded REST mutation that sets the control's GitHub state and its body together
+// (`PATCH /repos/{repo}/issues/{n}` with both `state` and `body`), so a completed control is never
+// reopened as a standalone state change that leaves an inconsistent OPEN/DONE pair. The response must
+// show the intended Issue (not a PR), in the requested state, with the written body echoed (or the one
+// known trailing attribution decoration). A single PATCH is not compare-and-swap; the caller's
+// pre-write re-read of live state+body is the stale-base proof.
+export function defaultGhPatchControlIssue({ repo, controlIssue, body, state }, runImpl = execFileSync) {
+  if (state !== "open" && state !== "closed") throw new Error(`refusing REST patch with unsupported state ${JSON.stringify(state)}`);
+  const raw = runImpl("gh", ["api", "-X", "PATCH", `repos/${repo}/issues/${controlIssue}`, "--input", "-"], {
+    encoding: "utf8",
+    input: JSON.stringify({ state, body }),
+    maxBuffer: 20 * 1024 * 1024,
+  });
+  let res;
+  try {
+    res = JSON.parse(raw);
+  } catch {
+    throw new Error("malformed (non-JSON) REST response from state+body patch");
+  }
+  if (!res || typeof res !== "object") throw new Error("malformed REST state+body patch response");
+  if (res.pull_request) throw new Error("REST state+body patch response describes a pull request, not an Issue");
+  if (Number(res.number) !== Number(controlIssue) || !String(res.html_url ?? "").toLowerCase().endsWith(`/${repo}/issues/${controlIssue}`.toLowerCase())) {
+    throw new Error(`REST state+body patch response identity does not match ${repo}#${controlIssue}`);
+  }
+  if (String(res.state ?? "").toLowerCase() !== state) {
+    throw new Error(`REST state+body patch response shows state ${JSON.stringify(res.state)}, expected ${state}`);
+  }
+  if (normalizeBody(res.body) !== normalizeBody(body) && !isKnownAttributionDecoration(body, res.body ?? "")) {
+    throw new Error("REST state+body patch response body does not match the body written");
+  }
 }
 
 // Pure core (`ghEditImpl` injected so tests never touch the network or the real `gh` CLI):
@@ -71,7 +104,7 @@ export function defaultGhEditControlIssue({ repo, controlIssue, body }, runImpl)
 // Without `activation` behavior is byte-for-byte unchanged.
 export function checkWriteControlSnapshot(
   { repo, controlIssue, proposedBody, activation = null },
-  { ghEditImpl = defaultGhEditControlIssue, readIssueImpl = readGithubIssue } = {},
+  { ghEditImpl = defaultGhEditControlIssue, readIssueImpl = readGithubIssue, ghReopenImpl = defaultGhPatchControlIssue } = {},
 ) {
   if (!controlIssue) {
     return { exitCode: 1, message: "Missing required arg: --control-issue is required." };
@@ -113,6 +146,20 @@ export function checkWriteControlSnapshot(
         message: `Refusing to overwrite ${repo ?? "<repo>"}#${controlIssue}: its live body is not the base the proposed snapshot was composed from. Re-read and recompose.`,
       };
     }
+    const liveState = String(live.state ?? "").toUpperCase();
+    if (activation.baseState && liveState !== String(activation.baseState).toUpperCase()) {
+      return {
+        exitCode: 2,
+        state: "STALE_CONTROL",
+        controlIssue: Number(controlIssue),
+        repo: repo ?? null,
+        errors: [`control GitHub state changed from ${activation.baseState} to ${live.state} since the proposal was composed; nothing was written`],
+        message: `Refusing to activate ${repo ?? "<repo>"}#${controlIssue}: its live GitHub state is no longer the base the proposal was composed from.`,
+      };
+    }
+    if (activation.reopen && liveState !== "CLOSED") {
+      return { exitCode: 2, state: "STALE_CONTROL", controlIssue: Number(controlIssue), repo: repo ?? null, errors: ["reopen requested but the control is not CLOSED; nothing was written"], message: "Refusing the reopen-and-activate write: the control is not CLOSED." };
+    }
     // Revalidate the execution packet (parent binding + ACTIVE grant) against the body just read,
     // so a grant revoked after the caller's initial check cannot be consumed.
     if (typeof activation.verifyExecution !== "function") {
@@ -132,7 +179,8 @@ export function checkWriteControlSnapshot(
     const pair = validateActivationPair(proposedBody, {
       controlIssue: Number(controlIssue),
       executionIssue: Number(activation.executionIssue),
-      controlState: live.state,
+      // The post-write state: a reopen transaction persists OPEN together with the body.
+      controlState: activation.reopen ? "OPEN" : live.state,
       executionState: execution.state,
     });
     if (!pair.ok) {
@@ -147,31 +195,57 @@ export function checkWriteControlSnapshot(
     }
   }
 
+  const reopening = Boolean(activation?.reopen);
   try {
-    ghEditImpl({ repo, controlIssue, body: proposedBody });
+    if (reopening) ghReopenImpl({ repo, controlIssue, body: proposedBody, state: "open" });
+    else ghEditImpl({ repo, controlIssue, body: proposedBody });
   } catch (err) {
-    return { exitCode: 1, message: `control snapshot REST write failed for ${repo}#${controlIssue}: ${err.message}` };
+    // A failed single-request reopen leaves the control exactly as it was (still CLOSED): the state
+    // and body travel in one PATCH, so there is no half-reopened intermediate to recover from.
+    return { exitCode: 1, ...(reopening ? { state: "REOPEN_WRITE_FAILED" } : {}), message: `control snapshot REST write failed for ${repo}#${controlIssue}: ${err.message}${reopening ? "; the control was not reopened" : ""}` };
   }
+
+  // A reopen that cannot be proven coherent is restored to the closed base (best effort) so an
+  // inconsistent OPEN pair is never left behind for an ordinary session to trip over.
+  // Rollback only when a fresh read proves the live control still holds exactly this operation's
+  // proposed snapshot: a concurrent actor's update (or an unreadable state) is never overwritten.
+  const rollbackReopen = () => {
+    if (!reopening) return null;
+    try {
+      const current = readIssueImpl({ repo, number: Number(controlIssue), fields: ["body", "state"] });
+      if (normalizeBody(current.body) !== normalizeBody(proposedBody)) return false;
+      ghReopenImpl({ repo, controlIssue, body: activation.baseBody, state: "closed" });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const rollbackNote = (rolledBack) => (rolledBack === null ? "" : rolledBack ? "; the control was restored to its closed base" : "; ROLLBACK NOT PERFORMED (failed, or the live control no longer holds this operation's snapshot) - the control may be left OPEN and must be repaired");
 
   if (activation) {
     let back;
+    let executionBack;
     try {
       back = readIssueImpl({ repo, number: Number(controlIssue), fields: ["body", "state"] });
+      executionBack = readIssueImpl({ repo, number: Number(activation.executionIssue), fields: ["body", "state"] });
     } catch (err) {
-      return { exitCode: 1, state: "READBACK_FAILED", message: `wrote ${repo}#${controlIssue} but the independent readback failed: ${err.message}` };
+      const rolledBack = rollbackReopen();
+      return { exitCode: 1, state: "READBACK_FAILED", rolledBack, message: `wrote ${repo}#${controlIssue} but the independent readback failed: ${err.message}${rollbackNote(rolledBack)}` };
     }
     const sameBody = normalizeBody(back.body) === normalizeBody(proposedBody) || isKnownAttributionDecoration(proposedBody, back.body ?? "");
     const pairBack = validateActivationPair(back.body ?? "", {
       controlIssue: Number(controlIssue),
       executionIssue: Number(activation.executionIssue),
       controlState: back.state,
-      executionState: "OPEN",
+      executionState: String(executionBack?.state ?? "").toUpperCase(),
     });
     if (!sameBody || !pairBack.ok) {
+      const rolledBack = rollbackReopen();
       return {
         exitCode: 1,
         state: "READBACK_MISMATCH",
-        message: `wrote ${repo}#${controlIssue} but the persisted body did not read back as the proposed activated pair${pairBack.ok ? "" : `: ${pairBack.errors.join("; ")}`}; do not report ready`,
+        rolledBack,
+        message: `wrote ${repo}#${controlIssue} but the persisted body did not read back as the proposed activated pair${pairBack.ok ? "" : `: ${pairBack.errors.join("; ")}`}; do not report ready${rollbackNote(rolledBack)}`,
       };
     }
     return { exitCode: 0, state: "WRITTEN", verified: true, controlIssue: Number(controlIssue), repo: repo ?? null };
