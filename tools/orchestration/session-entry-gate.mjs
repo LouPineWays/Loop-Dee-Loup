@@ -205,6 +205,16 @@ export async function runSessionEntryGate(
     if (activation?.exitCode === 1) {
       return operationalError(activation.message ?? "entry activation failed.", provenance, { activation });
     }
+    // Ambiguous execution authority (two authorized packets bind one terminal control) must fail
+    // closed: never fall through to the ordinary verdict where free reasoning could proceed.
+    if (activation?.exitCode === 0 && activation.state === "AMBIGUOUS_CANDIDATES") {
+      provenance.push({ gate: "activate-control-pair", state: "AMBIGUOUS_CANDIDATES", leafExitCode: 0, actionEnvelopeMode: null });
+      return operationalError(
+        `entry activation is ambiguous for ${resolvedRepo}#${controlIssue}: ${activation.reason ?? "multiple authorized packets"}${Array.isArray(activation.candidates) ? ` (candidates: ${activation.candidates.map((n) => "#" + n).join(", ")})` : ""}; founder must designate one packet. Stop.`,
+        provenance,
+        { activation },
+      );
+    }
     if (activation?.exitCode === 0 && (activation.state === "ACTIVATED_PENDING_GATE" || activation.state === "ALREADY_ACTIVE")) {
       try {
         verdict = await checkReadyDispatchImpl({ repo: resolvedRepo, controlIssue });

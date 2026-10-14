@@ -120,13 +120,22 @@ const DECISION_LABELS = new Set(["Founder decision", "Founder interrupt"]);
 const AUTHORIZATION_SHAPED = /\b(grant\w*|authori[sz]\w*|approv\w*|accept\w*)\b/i;
 export function pendingMatchesGrant(body, components) {
   const witnessed = new Set(components);
-  for (const { label, value } of pendingValues(body)) {
+  const pending = pendingValues(body);
+  const namesWitnessed = (v) => [...witnessed].some((c) => v.includes(c));
+  // A blocker field must be provably about the witnessed grant: it names a witnessed component, is itself
+  // grant-specific, or the control also carries a canonical grant-specific decision field (which the blocker then merely explains).
+  // An authorization-shaped blocker on an unrelated subject (e.g. privacy approval) never qualifies.
+  const isGrantSpecific = (v) => /\bgrant\b/i.test(v) && /\b(protected|executor[- ]substrate|component|exact)\b/i.test(v);
+  const hasGrantDecision = pending.some(({ label, value }) => DECISION_LABELS.has(label) && isGrantSpecific(value));
+  for (const { label, value } of pending) {
     if (DECISION_LABELS.has(label)) {
       if (!/\bgrant\b/i.test(value) || !/\b(protected|executor[- ]substrate|component|exact)\b/i.test(value)) {
         return { ok: false, reason: `${label} ${JSON.stringify(value)} is not a canonical grant-specific pending state` };
       }
     } else if (!AUTHORIZATION_SHAPED.test(value) || /(?:#|\/issues\/|\/pull\/)\d+/.test(value)) {
       return { ok: false, reason: `${label} ${JSON.stringify(value)} is not an authorization-shaped pending state free of an Issue prerequisite` };
+    } else if (!namesWitnessed(value) && !hasGrantDecision && !isGrantSpecific(value)) {
+      return { ok: false, reason: `${label} ${JSON.stringify(value)} is not proven to concern the witnessed granted component(s) ${[...witnessed].join(", ")}` };
     }
     for (const { component } of EXECUTOR_COMPONENTS) {
       if (value.includes(component) && !witnessed.has(component)) {
@@ -164,8 +173,8 @@ export function isTerminalControl(controlBody, controlState) {
 // control (issue #1165). Never an OPEN child alone, a comment, or prose: the thick packet's own body
 // must carry an ACTIVE section whose fenced JSON either (a) is a dedicated new-packet record
 //   {"newPacketAuthority": {"controlIssue": <C>, "executionIssue": <E>}}
-// naming exactly this pair, or (b) is a valid ACTIVE exact component grant (findActiveGrantWitness)
-// - the founder's own explicit, packet-scoped authorization of this specific outcome.
+// naming exactly this pair. A pre-existing ACTIVE component grant is never sufficient: it may be a
+// leftover from the completed cycle.
 // Parent-loop binding to this exact control is verified separately.
 export function findNewPacketAuthority(executionBody, { controlIssue, executionIssue }) {
   const lines = String(executionBody ?? "").split(/\r?\n/);
@@ -187,8 +196,6 @@ export function findNewPacketAuthority(executionBody, { controlIssue, executionI
       return { ok: true, via: "newPacketAuthority" };
     }
   }
-  const grant = findActiveGrantWitness(executionBody);
-  if (grant.ok) return { ok: true, via: "activeGrant" };
   return { ok: false, reason: "terminal control has no explicit founder-authorized new-packet record in the execution Issue (an open child Issue, comment, or GitHub OPEN state alone is never sufficient authority)" };
 }
 
@@ -222,7 +229,7 @@ export function buildActivatedControlBody(body, { executionIssue, route = DEFAUL
     const old = [];
     for (const label of HISTORY_FIELDS) {
       const value = label === "Execution" ? (readExecutionBulletField(next).value ?? null) : parseControlBullet(next, label);
-      if (value !== null && value !== undefined && !isNoneSentinel(value) && !new RegExp("^#" + executionIssue + "\b").test(value.trim())) {
+      if (value !== null && value !== undefined && !isNoneSentinel(value) && !new RegExp("^#" + executionIssue + "\\b").test(value.trim())) {
         old.push(label + " " + value.trim().replace(/\s+/g, " "));
       }
     }
@@ -487,15 +494,20 @@ export function resolveEntryActivation(
     if (!pointer.ok) return { exitCode: 0, state: "NO_CANDIDATE", reason: "control has no single current Execution pointer" };
     execution = pointer.issue;
     const existing = parseControlBullet(control.body, "Route");
-    if (existing && !isNoneSentinel(existing) && !/plan/i.test(existing)) route = existing.trim();
+    if (existing && !isNoneSentinel(existing)) {
+      // A planning route must not be silently converted to direct implementation.
+      if (/plan/i.test(existing)) return { exitCode: 0, state: "NO_CANDIDATE", reason: "control records a planning route; not converted to implementation at ordinary entry" };
+      route = existing.trim();
+    }
   }
   return activateImpl({ repo, controlIssue: c, executionIssue: execution, route, skipGate: true }, { readIssueImpl, ...rest });
 }
 
-// Bounded REST scan of the most recent open Issues (not PRs); bodies are screened by the proof above.
+// Exhaustive REST scan of every open Issue (not PRs; paginated until a short page). Uniqueness is the
+// safety condition for the reopen mutation, so no older competing packet may be invisible.
 export function defaultListOpenIssues({ repo, execFileImpl = execFileSync }) {
   const out = [];
-  for (let page = 1; page <= 3; page++) {
+  for (let page = 1; ; page++) {
     const raw = execFileImpl("gh", ["api", "repos/" + repo + "/issues?state=open&sort=created&direction=desc&per_page=100&page=" + page], { encoding: "utf8", maxBuffer: 50 * 1024 * 1024 });
     const rows = JSON.parse(raw);
     if (!Array.isArray(rows)) throw new Error("open Issue listing is not a JSON array");

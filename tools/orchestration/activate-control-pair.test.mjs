@@ -12,6 +12,8 @@ import {
   buildActivatedControlBody,
   isTerminalControl,
   resolveEntryActivation,
+  pendingMatchesGrant,
+  defaultListOpenIssues,
 } from "./activate-control-pair.mjs";
 import { defaultGhPatchControlIssue } from "./write-control-snapshot.mjs";
 import { validateActivationPair } from "./control-field-validator.mjs";
@@ -393,8 +395,9 @@ test("B8: a readback that does not show the activated pair is rolled back to the
   const base = w.issues[10].body;
   w.reopenImpl = ({ controlIssue, body, state }) => {
     w.patches.push({ body, state });
-    // Only the rollback (state closed) persists; the reopen "succeeds" but nothing sticks.
-    if (state === "closed") w.issues[controlIssue] = { body, state: "CLOSED" };
+    w.issues[controlIssue] = { body, state: state.toUpperCase() };
+    // The execution packet is closed right after the reopen lands, so the readback cannot show a live pair.
+    if (state === "open") w.issues[11] = { ...w.issues[11], state: "CLOSED" };
   };
   const r = run(w);
   assert.equal(r.exitCode, 1);
@@ -566,4 +569,41 @@ test("entry B negatives: unauthorized child, two authorized packets, CLOSED cont
   const clean = makeWorld({ control: "- **Lifecycle:** EXECUTING\n- **Execution:** #11\n- **Blocker:** none\n- **Founder decision:** none\n", exec: PARENT });
   assert.equal(entry(clean).state, "NO_CANDIDATE");
   for (const w of [unauth, two, closed, clean]) assert.equal(w.writes.length + w.patches.length, 0);
+});
+
+test("#1165 review: a blocker unrelated to the granted component is not accepted by an unrelated ACTIVE grant", () => {
+  const control = "### Current state\n\n- **Founder decision:** none\n- **Blocker:** Awaiting privacy approval\n";
+  assert.equal(pendingMatchesGrant(control, ["review-control"]).ok, false);
+});
+
+test("#1165 review: a terminal control is not reopened on a leftover ACTIVE component grant alone", () => {
+  const leftover = `### Parent loop\n#10\n\n### ACTIVE founder-approved grant\n${jsonBlock(JSON.stringify({ executorSubstrate: [{ component: "review-control", paths: ["a"], intendedChange: "x", verification: "y" }] }))}\n`;
+  assert.equal(findNewPacketAuthority(leftover, { controlIssue: 10, executionIssue: 11 }).ok, false);
+});
+
+test("#1165 review: a planning route on a pending control is not converted to implementation at entry", () => {
+  const control = BODY_1164.replace("- **Route:** none", "- **Route:** planning worker");
+  const w = makeWorld({ control, exec: THICK_1163 });
+  const r = entry(w);
+  assert.equal(r.state, "NO_CANDIDATE");
+  assert.equal(w.writes.length + w.patches.length, 0);
+});
+
+test("#1165 review: terminal discovery paginates open Issues to exhaustion", () => {
+  const pages = [];
+  const exec = (cmd, args) => {
+    const page = Number(/&page=(\d+)$/.exec(args[1])[1]);
+    pages.push(page);
+    const rows = page < 4 ? Array.from({ length: 100 }, (_, i) => ({ number: page * 1000 + i, body: "" })) : [{ number: 7, body: "tail" }];
+    return JSON.stringify(rows);
+  };
+  const out = defaultListOpenIssues({ repo: "o/r", execFileImpl: exec });
+  assert.deepEqual(pages, [1, 2, 3, 4]);
+  assert.equal(out.length, 301);
+});
+
+test("#1165 review: history retirement does not archive the packet being activated", () => {
+  const body = BODY_438_FULL.replace("- **Execution:** #804", "- **Execution:** #11");
+  const next = buildActivatedControlBody(body, { executionIssue: 11, retireHistory: true });
+  assert.doesNotMatch(next, /Completed packet history[^\n]*Execution #11/);
 });

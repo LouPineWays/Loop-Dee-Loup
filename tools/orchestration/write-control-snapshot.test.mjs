@@ -351,9 +351,10 @@ test("Audit #1153 Stage 1: CLI refuses valueless --activate-execution / --base-b
 });
 
 // Issue #1165: combined reopen+activation mutation at the canonical writer.
-function reopenWorld({ state = "CLOSED", persistReopen = true } = {}) {
+function reopenWorld({ state = "CLOSED", persistReopen = true, execClosesAfterWrite = false } = {}) {
   const w = { body: ACT_BASE, state, patches: [], writes: 0 };
-  w.readIssueImpl = ({ number }) => (number === 1151 ? { body: "", state: "OPEN" } : { body: w.body, state: w.state });
+  w.readIssueImpl = ({ number }) =>
+    number === 1151 ? { body: "", state: execClosesAfterWrite && w.patches.length > 0 ? "CLOSED" : "OPEN" } : { body: w.body, state: w.state };
   w.ghEditImpl = ({ body }) => { w.writes++; w.body = body; };
   w.ghReopenImpl = ({ body, state: s }) => {
     w.patches.push(s);
@@ -418,7 +419,8 @@ test("#1165 reopen: failed write leaves CLOSED; revoked proof refuses; readback 
   assert.equal(rr.exitCode, 2);
   assert.deepEqual(revoked.patches, []);
 
-  const lossy = reopenWorld({ persistReopen: false });
+  // The execution issue closing between the pre-write check and the readback is revalidated live.
+  const lossy = reopenWorld({ execClosesAfterWrite: true });
   const rl = reopenCall(lossy);
   assert.equal(rl.exitCode, 1);
   assert.equal(rl.state, "READBACK_MISMATCH");
@@ -426,4 +428,22 @@ test("#1165 reopen: failed write leaves CLOSED; revoked proof refuses; readback 
   assert.deepEqual(lossy.patches, ["open", "closed"]);
   assert.equal(lossy.state, "CLOSED");
   assert.equal(lossy.body, ACT_BASE);
+});
+
+test("#1165 reopen: rollback never overwrites a concurrent actor's update to the reopened control", () => {
+  const w = reopenWorld({ execClosesAfterWrite: true });
+  const origRead = w.readIssueImpl;
+  let controlReads = 0;
+  w.readIssueImpl = (a) => {
+    const out = origRead(a);
+    // After the writer's own readback, another actor edits the control before rollback re-reads it.
+    if (a.number === 438 && ++controlReads === 2) w.body = w.body + "\nconcurrent actor edit";
+    return out;
+  };
+  const r = reopenCall(w);
+  assert.equal(r.exitCode, 1);
+  assert.equal(r.state, "READBACK_MISMATCH");
+  assert.equal(r.rolledBack, false);
+  assert.deepEqual(w.patches, ["open"]);
+  assert.match(w.body, /concurrent actor edit/);
 });

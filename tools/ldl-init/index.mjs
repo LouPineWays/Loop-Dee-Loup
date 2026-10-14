@@ -825,6 +825,8 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/ready-dispatch-gate.mjs", dependsOnDest: "tools/orchestration/control-plane-continuation.mjs" },
   { dest: "tools/orchestration/next-review-transition-gate.mjs", dependsOnDest: "tools/orchestration/control-plane-continuation.mjs" },
   { dest: "tools/orchestration/session-entry-gate.mjs", dependsOnDest: "tools/orchestration/control-plane-continuation.mjs" },
+  // Issue #1165 Stage 1 finding: session-entry-gate.mjs hard-imports resolveEntryActivation.
+  { dest: "tools/orchestration/session-entry-gate.mjs", dependsOnDest: "tools/orchestration/activate-control-pair.mjs" },
   { dest: "tools/orchestration/action-envelope.mjs", dependsOnDest: "tools/orchestration/control-plane-continuation.mjs" },
   { dest: "tools/orchestration/launcher-run.mjs", dependsOnDest: "tools/orchestration/control-plane-continuation.mjs" },
   // Issue #1047 Stage 1 finding (P2): ready-dispatch-gate.mjs dynamically imports

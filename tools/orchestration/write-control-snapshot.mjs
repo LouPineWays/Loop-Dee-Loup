@@ -207,21 +207,27 @@ export function checkWriteControlSnapshot(
 
   // A reopen that cannot be proven coherent is restored to the closed base (best effort) so an
   // inconsistent OPEN pair is never left behind for an ordinary session to trip over.
+  // Rollback only when a fresh read proves the live control still holds exactly this operation's
+  // proposed snapshot: a concurrent actor's update (or an unreadable state) is never overwritten.
   const rollbackReopen = () => {
     if (!reopening) return null;
     try {
+      const current = readIssueImpl({ repo, number: Number(controlIssue), fields: ["body", "state"] });
+      if (normalizeBody(current.body) !== normalizeBody(proposedBody)) return false;
       ghReopenImpl({ repo, controlIssue, body: activation.baseBody, state: "closed" });
       return true;
     } catch {
       return false;
     }
   };
-  const rollbackNote = (rolledBack) => (rolledBack === null ? "" : rolledBack ? "; the control was restored to its closed base" : "; ROLLBACK FAILED - the control may be left OPEN and must be repaired");
+  const rollbackNote = (rolledBack) => (rolledBack === null ? "" : rolledBack ? "; the control was restored to its closed base" : "; ROLLBACK NOT PERFORMED (failed, or the live control no longer holds this operation's snapshot) - the control may be left OPEN and must be repaired");
 
   if (activation) {
     let back;
+    let executionBack;
     try {
       back = readIssueImpl({ repo, number: Number(controlIssue), fields: ["body", "state"] });
+      executionBack = readIssueImpl({ repo, number: Number(activation.executionIssue), fields: ["body", "state"] });
     } catch (err) {
       const rolledBack = rollbackReopen();
       return { exitCode: 1, state: "READBACK_FAILED", rolledBack, message: `wrote ${repo}#${controlIssue} but the independent readback failed: ${err.message}${rollbackNote(rolledBack)}` };
@@ -231,7 +237,7 @@ export function checkWriteControlSnapshot(
       controlIssue: Number(controlIssue),
       executionIssue: Number(activation.executionIssue),
       controlState: back.state,
-      executionState: "OPEN",
+      executionState: String(executionBack?.state ?? "").toUpperCase(),
     });
     if (!sameBody || !pairBack.ok) {
       const rolledBack = rollbackReopen();
