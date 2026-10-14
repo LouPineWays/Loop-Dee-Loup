@@ -636,10 +636,11 @@ test("runner selector: default and every non-allowlisted value resolve to ubuntu
 });
 
 // ---- Issue #1163: allowlisted ubuntu-22.04 selection for the credential-bearing launch job ONLY ----
-const evalWorkerRunsOn = (expr, selector) => {
-  const m = /^\$\{\{ inputs\.worker_runner == '([^']+)' && '([^']+)' \|\| '([^']+)' \}\}$/.exec(expr);
-  assert.ok(m, "launch runs-on is the exact allowlist ternary");
-  return selector === m[1] ? m[2] : m[3];
+const evalWorkerRunsOn = (expr, selector, control = "1164") => {
+  const m = /^\$\{\{ inputs\.worker_runner == '([^']+)' && inputs\.control_issue == '([^']+)' && '([^']+)' \|\| '([^']+)' \}\}$/.exec(expr);
+  assert.ok(m, "launch runs-on is the exact allowlist ternary bound to the qualification control");
+  assert.equal(m[2], "1164");
+  return selector === m[1] && control === m[2] ? m[3] : m[4];
 };
 
 test("worker runner: only the launch job reads worker_runner; diagnostics and guards never do; one runs-on each", () => {
@@ -656,6 +657,12 @@ test("worker runner: default, issue_comment (no inputs) and every non-allowliste
   for (const v of ["ubuntu-latest", "", null, undefined, "ubuntu-24.04", "ubuntu-20.04", "UBUNTU-22.04", "ubuntu-22.04 ", "self-hosted", "windows-latest", "ubuntu-22.04,self-hosted", "${{ secrets.X }}"]) {
     assert.equal(evalWorkerRunsOn(expr, v), "ubuntu-latest", JSON.stringify(v));
   }
+  // Audit #1171: the 22.04 host is bound to the one qualification control; any other control stays on ubuntu-latest.
+  for (const c of ["1163", "1165", "11640", "01164", " 1164", "", null]) {
+    assert.equal(evalWorkerRunsOn(expr, "ubuntu-22.04", c), "ubuntu-latest", JSON.stringify(c));
+  }
+  assert.match(yml, /worker_runner:\s*\n\s+description:[^\n]*control_issue is exactly 1164/);
+  assert.doesNotMatch(yml, /single-run|one qualification only/);
   // The post-install diagnostic's selector cannot pick the worker host, nor vice versa.
   assert.equal(evalWorkerRunsOn(expr, "post_install_runner"), "ubuntu-latest");
 });
