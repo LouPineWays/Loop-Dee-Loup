@@ -68,6 +68,14 @@ on:
         options:
           - ubuntu-latest
           - ubuntu-22.04
+      worker_runner:
+        description: "LAUNCH worker runner ONLY (issue #1163): ubuntu-latest (default, current behavior) or ubuntu-22.04 (temporary single-run worker-qualification host; GitHub retires it 2027-04-17; its host-default unprivileged-userns restriction is 0, accepted for this one qualification only). Applies only to a launch dispatch; it never changes trust, environment, claim, or sandbox gates, and never affects the diagnostic jobs. A comment-authorized launch always uses ubuntu-latest."
+        type: choice
+        required: false
+        default: ubuntu-latest
+        options:
+          - ubuntu-latest
+          - ubuntu-22.04
 
 permissions:
   contents: write
@@ -81,6 +89,10 @@ concurrency:
 
 jobs:
   authorize-and-claim:
+    # Runner (issue #1163): the worker_runner choice input selects only the exact value ubuntu-22.04;
+    # any other, absent, or issue_comment (no inputs) value falls back to ubuntu-latest, so no
+    # arbitrary runner label is reachable. This is the ONLY change to this job: the `if`, environment,
+    # permissions, and every later step are untouched.
     # Hygiene guard (Audit #1096), not a trust boundary: the unmodified workflow does not START for
     # a dispatch on a non-default ref. A modified branch copy can omit this `if`, so the secret's
     # protection is the `ldl-launcher` environment's default-branch deployment policy (see header).
@@ -94,7 +106,7 @@ jobs:
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request == null &&
        startsWith(github.event.comment.body, '/ldl launch ')))
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.worker_runner == 'ubuntu-22.04' && 'ubuntu-22.04' || 'ubuntu-latest' }}
     environment: ldl-launcher
     timeout-minutes: 350
     steps:
