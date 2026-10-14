@@ -205,7 +205,7 @@ function readBodyFile(path) {
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const controlIssue = args["control-issue"];
-  if (args["activate-execution"] !== undefined || args["base-body-file"] !== undefined) {
+  if (Object.hasOwn(args, "activate-execution") || Object.hasOwn(args, "base-body-file")) {
     console.error(
       "--activate-execution/--base-body-file are not supported on this CLI (activation needs the execution-packet proof). " +
         "Use: node tools/orchestration/activate-control-pair.mjs --control-issue <C> --execution-issue <E>",

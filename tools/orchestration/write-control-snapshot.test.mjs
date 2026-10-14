@@ -339,3 +339,13 @@ test("Audit #1153: CLI refuses the unsupported --activate-execution surface befo
   assert.equal(r.status, 1);
   assert.match(r.stderr, /activate-control-pair\.mjs/);
 });
+
+test("Audit #1153 Stage 1: CLI refuses valueless --activate-execution / --base-body-file by presence", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const script = new URL("./write-control-snapshot.mjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+  for (const flag of ["--activate-execution", "--base-body-file"]) {
+    const r = spawnSync(process.execPath, [script, "--control-issue", "1", "--body-file", "-", flag], { encoding: "utf8", input: "" });
+    assert.equal(r.status, 1, flag);
+    assert.match(r.stderr, /activate-control-pair\.mjs/, flag);
+  }
+});
