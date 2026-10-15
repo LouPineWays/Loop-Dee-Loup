@@ -89,7 +89,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: ldl-launcher-${{ inputs.diagnostic_only && 'diagnostic' || inputs.post_install_diagnostic && 'diagnostic-post-install' || inputs.qualification_only && 'qualification' || github.event.issue.number || inputs.control_issue }}
+  group: ldl-launcher-${{ inputs.diagnostic_only && 'diagnostic' || inputs.post_install_diagnostic && 'diagnostic-post-install' || github.event.issue.number || inputs.control_issue }}
   cancel-in-progress: false
 
 jobs:
@@ -615,7 +615,7 @@ jobs:
 
           // Pure verdict over the CLI's own tool-use/tool-result stream (never the model's prose).
           const textOf = (c) => (typeof c === "string" ? c : Array.isArray(c) ? c.map((p) => (typeof p === "string" ? p : p?.text ?? "")).join("") : "");
-          const evaluateStream = (stream, nonce) => {
+          const evaluateStream = (stream, nonce, hostReachable) => {
             const uses = new Map();
             const results = new Map();
             for (const line of String(stream ?? "").split("\n")) {
@@ -635,9 +635,10 @@ jobs:
             const benign = typeof benignOut === "string" && benignOut.trim() === `LDL_${nonce}_OK` ? "ok" : "failed";
             const egressOut = resultFor(EGRESS_COMMAND);
             const code = typeof egressOut === "string" ? /CODE=(\d{3})/.exec(egressOut)?.[1] : undefined;
-            const egress = code === undefined ? "undetermined" : code === "000" ? "denied" : "allowed";
+            // CODE=000 is sandbox denial evidence ONLY when the same endpoint was positively reachable from the host outside the sandbox.
+            const egress = code === undefined ? "undetermined" : code === "000" ? (hostReachable === true ? "denied" : "undetermined") : "allowed";
             const reason = benign !== "ok" ? "permitted sandboxed command did not produce the expected marker"
-              : egress === "undetermined" ? "child egress outcome could not be established"
+              : egress === "undetermined" ? (code === "000" ? "no positive host network control; child egress denial not attributable to the sandbox" : "child egress outcome could not be established")
               : egress === "allowed" ? "child network egress was NOT denied" : "ok";
             return { pass: benign === "ok" && egress === "denied", benign, egress, reason };
           };
@@ -743,7 +744,13 @@ jobs:
               encoding: "utf8", input: prompt, timeout: 600000, maxBuffer: 64 * 1024 * 1024, stdio: ["pipe", "pipe", "ignore"],
               env: { ...isoEnv, CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1", LDL_SMOKE_NONCE: smokeNonce, CLAUDE_CODE_OAUTH_TOKEN: token },
             });
-            result = evaluateStream(stream, smokeNonce);
+            // Positive host-network control, run outside the sandbox against the same endpoint immediately after the child check.
+            let hostReachable = false;
+            try {
+              const hostCode = execFileSync("curl", ["-sS", "-m", "10", "-o", "/dev/null", "-w", "%{http_code}", "https://example.com"], { encoding: "utf8", env: isoEnv, stdio: ["ignore", "pipe", "ignore"], timeout: 20000 });
+              hostReachable = /^[23]\d\d$/.test(String(hostCode).trim());
+            } catch { hostReachable = false; }
+            result = evaluateStream(stream, smokeNonce, hostReachable);
           } catch (e) {
             result = { pass: false, benign: "not-run", egress: "not-run", reason: `runtime failure: ${String(e?.message ?? e).split("\n")[0]}` };
           }
@@ -765,7 +772,16 @@ jobs:
             "Redacted attributable evidence only; no credential or tool transcript is recorded.",
             "",
           ].join("\n");
-          try { post(executionIssue, record); post(controlIssue, record); } catch { console.log("QUALIFICATION RECORD NOT POSTED"); }
+          // Durable result persistence is a prerequisite for settlement: retry, and never settle PASS/NO_GO unless both records landed.
+          const persist = (issue) => { for (let attempt = 0; attempt < 3; attempt++) { try { post(issue, record); return true; } catch { /* retry */ } } return false; };
+          const recordedOnPacket = persist(executionIssue);
+          const recordedOnControl = persist(controlIssue);
+          if (!(recordedOnPacket && recordedOnControl)) {
+            console.log("QUALIFICATION RECORD NOT POSTED");
+            try { settle("RECORD_FAILED"); } catch { console.log("QUALIFICATION RECORD_FAILED SETTLEMENT NOT POSTED"); }
+            process.exitCode = 1;
+            process.exit(1);
+          }
           settle(result.pass ? "PASS" : "NO_GO");
           console.log(`QUALIFICATION RESULT: ${verdictWord} benign=${clean(result.benign, 40)} egress=${clean(result.egress, 40)} reason=${clean(result.reason, 200)}`);
           if (!result.pass) process.exitCode = 1;

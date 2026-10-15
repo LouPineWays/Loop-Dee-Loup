@@ -414,7 +414,7 @@ test("diagnostic route: job guards are mutually exclusive for every event/ref/in
 });
 
 test("diagnostic route: concurrency never shares the per-control-issue launch group", () => {
-  assert.match(yml, /group: ldl-launcher-\$\{\{ inputs\.diagnostic_only && 'diagnostic' \|\| inputs\.post_install_diagnostic && 'diagnostic-post-install' \|\| inputs\.qualification_only && 'qualification' \|\| github\.event\.issue\.number \|\| inputs\.control_issue \}\}/);
+  assert.match(yml, /group: ldl-launcher-\$\{\{ inputs\.diagnostic_only && 'diagnostic' \|\| inputs\.post_install_diagnostic && 'diagnostic-post-install' \|\| github\.event\.issue\.number \|\| inputs\.control_issue \}\}/);
 });
 
 // Mock-run the embedded diagnostic script with a stubbed execFileSync/readFileSync.
@@ -762,7 +762,7 @@ test("qualification route: no worker/dispatch/merge pathway, no fallback, no iso
   // Ordering: all checks and the claim precede the install/probe/claude; the record precedes the settle.
   assert.ok(i("phase: \"CLAIMED\"") < i("\"npm\", \"install\""));
   assert.ok(i("\"npm\", \"install\"") < i("iso(\"bwrap\", [\"--version\"]") && i("iso(\"bwrap\", [\"--version\"]") < i("execFileSync(\"claude\""));
-  assert.ok(i("post(executionIssue, record)") < i("settle(result.pass"));
+  assert.ok(i("persist(executionIssue)") < i("settle(result.pass"));
 });
 
 // Mock-run the embedded qualification script.
@@ -793,6 +793,7 @@ const runQual = async (o = {}) => {
     const line = [cmd, ...args].join(" ");
     if (cmd === "gh" && args[0] === "auth") return "";
     if (cmd === "gh" && args[0] === "api" && args.includes("-F")) {
+      if (o.failRecordPost && /Claude Qualification Result/.test(opts.input)) throw new Error("post failed");
       const id = nextId++;
       posts.push({ path: args[1], body: opts.input });
       if (args[1].endsWith("/issues/1164/comments")) {
@@ -807,6 +808,7 @@ const runQual = async (o = {}) => {
     if (cmd === "gh" && /actions\/runs/.test(args[1])) return JSON.stringify({ status: o.runStatus ?? "completed", conclusion: "failure" });
     if (cmd === "node" && args[0].includes("control-plane-bootstrap")) return JSON.stringify(verdict) + "\n";
     if (cmd === "node" && args[0] === "-e") return SMOKE;
+    if (cmd === "curl") { if (o.hostCurlThrows) throw new Error("host down"); return o.hostCurl ?? "200"; }
     if (cmd === "claude") { if (o.claudeThrows) throw new Error("claude exploded"); return o.stream ?? streamOf(); }
     if (o.failAt && line.includes(o.failAt)) throw new Error(`boom ${o.failAt}`);
     return "";
@@ -886,6 +888,8 @@ test("qualification mock: any non-PASS evidence is an honest NO-GO with a nonzer
   const cases = [
     [{ stream: streamOf({ egressOut: "CODE=200" }) }, /egress=allowed/],
     [{ stream: streamOf({ egressOut: "no marker at all" }) }, /egress=undetermined/],
+    [{ hostCurlThrows: true }, /egress=undetermined[\s\S]*no positive host network control/],
+    [{ hostCurl: "000" }, /egress=undetermined[\s\S]*no positive host network control/],
     [{ stream: streamOf({ benignOut: "LDL_wrong_OK" }) }, /benign=failed/],
     [{ stream: "" }, /benign=failed/],
     [{ stream: streamOf({ extra: [{ message: { content: [{ type: "tool_use", id: "t3", name: "Edit", input: { file_path: "x" } }] } }] }) }, /benign=unexpected-tool/],
@@ -906,6 +910,12 @@ test("qualification mock: any non-PASS evidence is an honest NO-GO with a nonzer
     assert.ok(!r.calls.some((c) => /launcher-run|merge/.test([c.cmd, ...c.args].join(" "))));
     assert.ok(!JSON.stringify([r.posts, r.logs]).includes("sk-secret"));
   }
+  // Record persistence is a prerequisite for settlement: never settle PASS/NO_GO without durable records.
+  const rf = await runQual({ failRecordPost: true });
+  assert.equal(rf.exit, 1);
+  assert.match(rf.out, /QUALIFICATION RECORD NOT POSTED/);
+  assert.match(rf.posts.at(-1).body, /Phase:\*\* DONE[\s\S]*Outcome:\*\* RECORD_FAILED/);
+  assert.ok(!rf.posts.some((p) => /Outcome:\*\* (PASS|NO_GO)/.test(p.body)));
   // A preflight failure never starts Claude with the credential.
   assert.equal((await runQual({ failAt: "--unshare-all" })).claude, undefined);
 });
