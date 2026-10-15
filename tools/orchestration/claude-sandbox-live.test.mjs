@@ -95,3 +95,11 @@ test("live (credential-free): sandbox escape request and unavailable backend fai
   assert.deepEqual(down.results, [], "no Bash command executes without a sandbox backend");
   assert.notEqual(down.code, 0);
 });
+
+test("live (credential-free): malformed --settings fails closed with no Bash execution", { skip: !live }, async () => {
+  for (const bad of ["{not json", '{"sandbox":{"enabled":false}}']) {
+    const r = await runClaude(["--settings", bad], twoCommands);
+    assert.deepEqual(r.results, [], `no Bash command executes with malformed settings ${bad}`);
+    assert.notEqual(r.code, 0, `the CLI exits nonzero for malformed settings ${bad}`);
+  }
+});
