@@ -76,6 +76,11 @@ on:
         options:
           - ubuntu-latest
           - ubuntu-22.04
+      qualification_only:
+        description: "ONE-SHOT Claude sandbox QUALIFICATION ONLY (issue #1175; default off). Runs a benign permitted sandboxed Claude tool call and a bounded child-egress denial check on the Ubuntu 22.04 host, then reports a redacted PASS/NO-GO. Valid only with control_issue exactly 1164, a READY single proof packet under it carrying the exact qualification grant, and at most once per packet. Never launches, claims a worker, edits, or merges anything; there is no fallback into worker dispatch."
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -84,7 +89,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: ldl-launcher-${{ inputs.diagnostic_only && 'diagnostic' || inputs.post_install_diagnostic && 'diagnostic-post-install' || github.event.issue.number || inputs.control_issue }}
+  group: ldl-launcher-${{ inputs.diagnostic_only && 'diagnostic' || inputs.post_install_diagnostic && 'diagnostic-post-install' || inputs.qualification_only && 'qualification' || github.event.issue.number || inputs.control_issue }}
   cancel-in-progress: false
 
 jobs:
@@ -104,6 +109,7 @@ jobs:
     if: >-
       inputs.diagnostic_only != true &&
       inputs.post_install_diagnostic != true &&
+      inputs.qualification_only != true &&
       ((github.event_name == 'workflow_dispatch' &&
        github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
       (github.event_name == 'issue_comment' &&
@@ -364,6 +370,7 @@ jobs:
       github.event_name == 'workflow_dispatch' &&
       inputs.diagnostic_only == true &&
       inputs.post_install_diagnostic != true &&
+      inputs.qualification_only != true &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     permissions: {}
@@ -420,6 +427,7 @@ jobs:
       github.event_name == 'workflow_dispatch' &&
       inputs.post_install_diagnostic == true &&
       inputs.diagnostic_only != true &&
+      inputs.qualification_only != true &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ${{ inputs.post_install_runner == 'ubuntu-22.04' && 'ubuntu-22.04' || 'ubuntu-latest' }}
     permissions: {}
@@ -536,3 +544,229 @@ jobs:
           console.log(`HOSTED POST-INSTALL ISOLATION DIAGNOSTIC result (credential-free, no worker; only ${PKGS.join("+")} may be installed): install=${install.slice(0, 600)}; policy_change=${policyChange.slice(0, 400)}; bwrap_probe=${probe}`.slice(0, 2000));
           if (refusal || !install.startsWith("ok") || changed.length) process.exitCode = 1;
           POSTDIAG
+
+  # One-shot Claude qualification entry point (issue #1175, founder-approved review-control grant).
+  # A DISTINCT, default-off route: it can never fall through to ordinary worker dispatch (it does not
+  # call launcher-run.mjs, resolveWorkerLaunch, or any dispatch/merge/PR path) and the launch job and
+  # both credential-free diagnostic jobs are guarded off whenever qualification_only is set. It runs on
+  # the fixed ubuntu-22.04 host the #1163 consent covers (no runner input, no arbitrary label), only for
+  # control_issue exactly 1164, only when the session-entry gate reports that control READY with one
+  # execution packet whose body carries the exact one-shot qualification grant, and at most once per
+  # packet (any prior claim carrying the packet's nonce, settled or not, refuses; the lowest claim id
+  # wins a race). The same `ldl-launcher` environment secret and default-branch policy apply, the OAuth
+  # token never reaches a gh/git/gate child, CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 stays on and the CLI's
+  # bubblewrap child isolation is untouched. Only two exact Bash rules are allowed; Edit/Write are
+  # disallowed. A missing secret refuses before any claim; every later failure is a recorded NO-GO.
+  claude-qualification:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.qualification_only == true &&
+      inputs.diagnostic_only != true &&
+      inputs.post_install_diagnostic != true &&
+      inputs.control_issue == '1164' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-22.04
+    environment: ldl-launcher
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      actions: read
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: One-shot Claude qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          EVENT_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          IS_FORK: ${{ github.event.repository.fork }}
+          INPUT_CONTROL_ISSUE: ${{ inputs.control_issue }}
+          INPUT_NONCE: ${{ inputs.nonce }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          LDL_QUAL_CLAUDE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          node --input-type=module <<'QUAL'
+          import { execFileSync } from "node:child_process";
+          import { verifyDispatchLaunchRequest, resolveDispatchExecution, hasWritePermission } from "./tools/orchestration/launch-authorization.mjs";
+          import { parseAttemptClaims, planClaim, renderClaimBody, formatAttemptId, parseAttemptId } from "./tools/orchestration/attempt-claim.mjs";
+
+          // Capture then scrub the credential so no gh/git/gate child inherits it; only the claude child gets it.
+          const token = process.env.LDL_QUAL_CLAUDE_OAUTH_TOKEN;
+          delete process.env.LDL_QUAL_CLAUDE_OAUTH_TOKEN;
+          const env = process.env;
+          const QUALIFICATION_CONTROL = 1164;
+          const CLI_PACKAGE = "@anthropic-ai/claude-code@2.1.285";
+          const BENIGN_COMMAND = "printf 'LDL_%s_OK' \"$LDL_SMOKE_NONCE\"";
+          const EGRESS_COMMAND = "curl -sS -m 5 -o /dev/null -w CODE=%{http_code} https://example.com";
+          const clean = (v, n = 200) => String(v ?? "").replaceAll(token ?? "\u0000", "[redacted]").replace(/[^A-Za-z0-9 _.:()=,\/#-]/g, "?").slice(0, n);
+          const gh = (...args) => execFileSync("gh", args, { encoding: "utf8" });
+          const api = (path) => JSON.parse(gh("api", path));
+          const refuse = (msg) => { console.log(`QUALIFICATION REFUSED: ${clean(msg)}`); process.exit(1); };
+
+          // Pure verdict over the CLI's own tool-use/tool-result stream (never the model's prose).
+          const textOf = (c) => (typeof c === "string" ? c : Array.isArray(c) ? c.map((p) => (typeof p === "string" ? p : p?.text ?? "")).join("") : "");
+          const evaluateStream = (stream, nonce) => {
+            const uses = new Map();
+            const results = new Map();
+            for (const line of String(stream ?? "").split("\n")) {
+              let msg;
+              try { msg = JSON.parse(line); } catch { continue; }
+              const parts = msg?.message?.content;
+              if (!Array.isArray(parts)) continue;
+              for (const p of parts) {
+                if (p?.type === "tool_use") uses.set(p.id, { name: p.name, command: p.input?.command });
+                if (p?.type === "tool_result") results.set(p.tool_use_id, textOf(p.content));
+              }
+            }
+            const offending = [...uses.values()].find((u) => u.name !== "Bash" || (u.command !== BENIGN_COMMAND && u.command !== EGRESS_COMMAND));
+            if (offending) return { pass: false, benign: "unexpected-tool", egress: "unexpected-tool", reason: "unexpected tool use in qualification stream" };
+            const resultFor = (cmd) => { const e = [...uses.entries()].filter(([, u]) => u.command === cmd); return e.length === 1 ? results.get(e[0][0]) : undefined; };
+            const benignOut = resultFor(BENIGN_COMMAND);
+            const benign = typeof benignOut === "string" && benignOut.trim() === `LDL_${nonce}_OK` ? "ok" : "failed";
+            const egressOut = resultFor(EGRESS_COMMAND);
+            const code = typeof egressOut === "string" ? /CODE=(\d{3})/.exec(egressOut)?.[1] : undefined;
+            const egress = code === undefined ? "undetermined" : code === "000" ? "denied" : "allowed";
+            const reason = benign !== "ok" ? "permitted sandboxed command did not produce the expected marker"
+              : egress === "undetermined" ? "child egress outcome could not be established"
+              : egress === "allowed" ? "child network egress was NOT denied" : "ok";
+            return { pass: benign === "ok" && egress === "denied", benign, egress, reason };
+          };
+
+          if (!token) refuse("no worker credential supplied (nothing claimed, no attempt consumed)");
+          if (env.EVENT_NAME !== "workflow_dispatch" || env.INPUT_CONTROL_ISSUE !== String(QUALIFICATION_CONTROL)) refuse("qualification is valid only for control #1164 via workflow_dispatch");
+          if ((env.INPUT_NONCE ?? "").trim() !== "") refuse("qualification takes no launch-authorization nonce");
+          const controlIssue = QUALIFICATION_CONTROL;
+
+          const permCache = new Map();
+          const permission = (login) => {
+            if (!permCache.has(login)) {
+              try { permCache.set(login, api(`repos/${env.REPO}/collaborators/${login}/permission`).permission); }
+              catch { permCache.set(login, "none"); }
+            }
+            return permCache.get(login);
+          };
+          const initiator = env.TRIGGERING_ACTOR || env.ACTOR;
+          const requestFor = (who) => verifyDispatchLaunchRequest({
+            name: env.EVENT_NAME, action: "dispatch", actor: who, actorPermission: permission(who),
+            isFork: env.IS_FORK !== "false", ref: env.EVENT_REF, defaultBranch: env.DEFAULT_BRANCH,
+            inputs: { control_issue: env.INPUT_CONTROL_ISSUE },
+          });
+          const request = requestFor(initiator);
+          if (!request.trusted) refuse(`untrusted dispatch: ${request.reason}`);
+          if (env.ACTOR !== initiator && !requestFor(env.ACTOR).trusted) refuse("untrusted dispatch: original dispatcher is not a current writer");
+
+          // The sole proof packet comes from the gate verdict, never from an input; only a READY control qualifies.
+          execFileSync("gh", ["auth", "setup-git"], { encoding: "utf8" });
+          let verdict;
+          try {
+            const gateOut = execFileSync("node", ["tools/orchestration/control-plane-bootstrap.mjs", "session-entry-gate", "--control-issue", String(controlIssue)],
+              { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"] });
+            verdict = JSON.parse(gateOut.trim().split("\n").pop());
+          } catch (e) { refuse(`gate unavailable: ${String(e.message).split("\n")[0]}`); }
+          const resolved = resolveDispatchExecution(verdict, { controlIssue, launchableStates: new Set(["READY_TO_DISPATCH"]) });
+          if (resolved.status !== "RESOLVED") refuse(`control not an active proof control: ${resolved.reason}`);
+          const executionIssue = resolved.executionIssue;
+
+          // The packet must be an open issue by a current writer carrying exactly one matching one-shot grant.
+          const packet = api(`repos/${env.REPO}/issues/${executionIssue}`);
+          if (packet.state !== "open" || packet.pull_request) refuse("proof packet is not an open issue");
+          if (!hasWritePermission(permission(packet.user?.login))) refuse("proof packet author lacks write permission");
+          const grants = [];
+          for (const m of String(packet.body ?? "").matchAll(/```json\s*\n([\s\S]*?)\n\s*```/g)) {
+            let obj;
+            try { obj = JSON.parse(m[1]); } catch { continue; }
+            if (obj && typeof obj === "object" && "claudeQualification" in obj) grants.push(obj.claudeQualification);
+          }
+          const g = grants[0];
+          if (grants.length !== 1 || !g || g.controlIssue !== controlIssue || g.executionIssue !== executionIssue || g.oneShot !== true || g.scope !== "claude-sandbox-child-egress-v1" || g.host !== "ubuntu-22.04") {
+            refuse("proof packet carries no single exact one-shot qualification grant");
+          }
+
+          const nonce = `qualification-${executionIssue}`;
+          const readComments = () => JSON.parse(gh("api", "--paginate", "--slurp", `repos/${env.REPO}/issues/${controlIssue}/comments?per_page=100`)).flat()
+            .map((c) => ({ id: c.id, body: c.body, author: c.user?.login, authorPermission: permission(c.user?.login) }));
+          const claims = parseAttemptClaims(readComments());
+          // At most once: ANY prior claim carrying this packet's nonce (settled or orphaned) refuses.
+          if (claims.some((c) => c.nonce === nonce)) refuse("this proof packet already has a qualification attempt (at most once)");
+          const liveness = {};
+          for (const c of claims) {
+            const id = parseAttemptId(c.attemptId);
+            if (!id) continue;
+            try {
+              const run = api(`repos/${env.REPO}/actions/runs/${id.runId}/attempts/${id.runAttempt}`);
+              liveness[c.attemptId] = { status: run.status, conclusion: run.conclusion };
+            } catch { /* unknown stays unknown -> fail closed */ }
+          }
+          const attemptId = formatAttemptId(env.RUN_ID, env.RUN_ATTEMPT);
+          const plan = planClaim(claims, liveness, { attemptId, nonce });
+          if (plan.action !== "CLAIM" && plan.action !== "RECONCILE_THEN_CLAIM") refuse(`${plan.action}: ${plan.reason}`);
+
+          const post = (issue, text) => execFileSync("gh", ["api", `repos/${env.REPO}/issues/${issue}/comments`, "-F", "body=@-"], { input: text, encoding: "utf8" });
+          const settle = (outcome) => post(controlIssue, renderClaimBody({
+            attemptId, nonce, claimedAt: new Date().toISOString(), runner: "github-actions", phase: "DONE", outcome: String(outcome).replace(/[^A-Z_]/g, ""),
+          }));
+          post(controlIssue, renderClaimBody({ attemptId, nonce, claimedAt: new Date().toISOString(), runner: "github-actions", phase: "CLAIMED" }));
+          console.log(`QUALIFICATION CLAIMED: attempt ${attemptId} for packet #${executionIssue} under control #${controlIssue}`);
+          // Concurrent presses: the lowest claim comment id for this nonce wins; a loser settles and stops.
+          const mine = parseAttemptClaims(readComments()).filter((c) => c.nonce === nonce);
+          const winner = mine.reduce((a, b) => (a.commentId <= b.commentId ? a : b));
+          if (winner.attemptId !== attemptId) { settle("RACE_LOST"); refuse("lost the qualification claim race"); }
+
+          let result = { pass: false, benign: "not-run", egress: "not-run", reason: "not-run" };
+          try {
+            execFileSync("sudo", ["npm", "install", "-g", CLI_PACKAGE], { encoding: "utf8", stdio: ["ignore", "ignore", "inherit"] });
+            // Qualification isolation preflight: same prerequisites and unchanged unprivileged probe as the
+            // worker path, in a credential-free child env; no sysctl, AppArmor, or scrub change is ever made.
+            const isoEnv = {};
+            for (const k of ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "DEBIAN_FRONTEND"]) if (process.env[k] !== undefined) isoEnv[k] = process.env[k];
+            const iso = (cmd, args, timeout) => execFileSync(cmd, args, { encoding: "utf8", env: isoEnv, stdio: ["ignore", "ignore", "inherit"], timeout });
+            iso("sudo", ["apt-get", "update", "-qq"], 180000);
+            iso("sudo", ["apt-get", "install", "-y", "-qq", "bubblewrap", "socat"], 300000);
+            iso("bwrap", ["--version"], 15000);
+            iso("socat", ["-V"], 15000);
+            iso("bwrap", ["--unshare-all", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "true"], 30000);
+            console.log("QUALIFICATION ISOLATION PREFLIGHT PASSED");
+            const smokeNonce = execFileSync("node", ["-e", "process.stdout.write(require('node:crypto').randomBytes(8).toString('hex'))"], { encoding: "utf8", env: isoEnv });
+            const argv = ["-p", "--permission-mode", "dontAsk", "--allowedTools", `Bash(${BENIGN_COMMAND})`, `Bash(${EGRESS_COMMAND})`, "--disallowedTools", "Edit Write MultiEdit NotebookEdit", "--max-turns", "6", "--output-format", "stream-json", "--verbose"];
+            const prompt = `Run exactly these two Bash commands, one at a time, in this order, each exactly as written, then reply DONE and nothing else.\n1. ${BENIGN_COMMAND}\n2. ${EGRESS_COMMAND}\n`;
+            const stream = execFileSync("claude", argv, {
+              encoding: "utf8", input: prompt, timeout: 600000, maxBuffer: 64 * 1024 * 1024, stdio: ["pipe", "pipe", "ignore"],
+              env: { ...isoEnv, CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1", LDL_SMOKE_NONCE: smokeNonce, CLAUDE_CODE_OAUTH_TOKEN: token },
+            });
+            result = evaluateStream(stream, smokeNonce);
+          } catch (e) {
+            result = { pass: false, benign: "not-run", egress: "not-run", reason: `runtime failure: ${String(e?.message ?? e).split("\n")[0]}` };
+          }
+          const verdictWord = result.pass ? "PASS" : "NO-GO";
+          const record = [
+            "## Claude Qualification Result (v1)",
+            "",
+            `- **Verdict:** ${verdictWord}`,
+            `- **Control issue:** #${controlIssue}`,
+            `- **Proof packet:** #${executionIssue}`,
+            `- **Attempt id:** ${attemptId}`,
+            `- **Initiator:** ${clean(initiator, 80)}`,
+            "- **Host:** ubuntu-22.04",
+            `- **Permitted sandboxed command:** ${clean(result.benign, 40)}`,
+            `- **Child network egress:** ${clean(result.egress, 40)}`,
+            `- **Reason:** ${clean(result.reason, 200)}`,
+            `- **Recorded at:** ${new Date().toISOString()}`,
+            "",
+            "Redacted attributable evidence only; no credential or tool transcript is recorded.",
+            "",
+          ].join("\n");
+          try { post(executionIssue, record); post(controlIssue, record); } catch { console.log("QUALIFICATION RECORD NOT POSTED"); }
+          settle(result.pass ? "PASS" : "NO_GO");
+          console.log(`QUALIFICATION RESULT: ${verdictWord} benign=${clean(result.benign, 40)} egress=${clean(result.egress, 40)} reason=${clean(result.reason, 200)}`);
+          if (!result.pass) process.exitCode = 1;
+          QUAL

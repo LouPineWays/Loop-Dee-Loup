@@ -24,7 +24,7 @@ test("dispatch form: control_issue is the only required input; nonce is optional
   const inputs = onBlock.slice(onBlock.indexOf("inputs:"));
   assert.match(inputs, /control_issue:\s*\n\s+description:[^\n]*\n\s+required: true/);
   assert.match(inputs, /nonce:\s*\n\s+description:[^\n]*\n\s+required: false/);
-  assert.deepEqual([...inputs.matchAll(/^ {6}(\w+):$/gm)].map((m) => m[1]), ["control_issue", "nonce", "diagnostic_only", "post_install_diagnostic", "post_install_runner", "worker_runner"]);
+  assert.deepEqual([...inputs.matchAll(/^ {6}(\w+):$/gm)].map((m) => m[1]), ["control_issue", "nonce", "diagnostic_only", "post_install_diagnostic", "post_install_runner", "worker_runner", "qualification_only"]);
   assert.match(inputs, /post_install_diagnostic:\s*\n\s+description:[^\n]*\n\s+type: boolean\n\s+required: false\n\s+default: false/);
   assert.match(inputs, /diagnostic_only:\s*\n\s+description:[^\n]*\n\s+type: boolean\n\s+required: false\n\s+default: false/);
   assert.match(inputs, /post_install_runner:\s*\n\s+description:[^\n]*\n\s+type: choice\n\s+required: false\n\s+default: ubuntu-latest\n\s+options:\n\s+- ubuntu-latest\n\s+- ubuntu-22\.04\n/);
@@ -46,7 +46,7 @@ test("non-default-ref dispatch guard is hygiene; secret is environment-scoped (A
   // Exactly one job; its `if` is evaluated before checkout or any step, so a dispatch selected on
   // a non-default ref never runs repository code or touches a credential.
   const jobs = yml.slice(yml.indexOf("\njobs:"));
-  assert.deepEqual([...jobs.matchAll(/^ {2}([\w-]+):\s*$/gm)].map((m) => m[1]), ["authorize-and-claim", "isolation-diagnostic", "post-install-isolation-diagnostic"]);
+  assert.deepEqual([...jobs.matchAll(/^ {2}([\w-]+):\s*$/gm)].map((m) => m[1]), ["authorize-and-claim", "isolation-diagnostic", "post-install-isolation-diagnostic", "claude-qualification"]);
   const job = jobs.slice(jobs.indexOf("authorize-and-claim:"), jobs.indexOf("\n  isolation-diagnostic:"));
   const guard = /\n {4}if: >-\n([\s\S]*?)\n {4}runs-on:/.exec(job);
   assert.ok(guard, "job-level if precedes runs-on and steps");
@@ -69,7 +69,7 @@ test("non-default-ref dispatch guard is hygiene; secret is environment-scoped (A
 
 test("event-derived values reach the script only through env; no secret echoed; least privilege kept", () => {
   // The only expression allowed after the first script is the allowlisted post-install runner ternary (issue #1150).
-  const script = yml.slice(yml.indexOf("node --input-type=module")).replace(/^ {4}runs-on: \$\{\{ inputs\.post_install_runner == 'ubuntu-22\.04' && 'ubuntu-22\.04' \|\| 'ubuntu-latest' \}\}$/m, "");
+  const script = yml.slice(yml.indexOf("node --input-type=module"), yml.indexOf("\n  # One-shot Claude qualification entry point")).replace(/^ {4}runs-on: \$\{\{ inputs\.post_install_runner == 'ubuntu-22\.04' && 'ubuntu-22\.04' \|\| 'ubuntu-latest' \}\}$/m, "");
   assert.doesNotMatch(script, /\$\{\{/);
   assert.doesNotMatch(script, /console\.log\([^)]*(workerToken|launchToken|OAUTH)/);
   assert.match(yml, /^permissions:\n {2}contents: write\n {2}pull-requests: write\n {2}issues: write\n {2}actions: read\n/m);
@@ -334,7 +334,8 @@ test("isolation diagnostics mocks: oversized earlier fields never starve the tra
 const jobsText = yml.slice(yml.indexOf("\njobs:"));
 const launchJob = jobsText.slice(jobsText.indexOf("  authorize-and-claim:"), jobsText.indexOf("\n  isolation-diagnostic:"));
 const diagJob = jobsText.slice(jobsText.indexOf("  isolation-diagnostic:"), jobsText.indexOf("\n  # Post-install diagnostic entry point"));
-const postJob = jobsText.slice(jobsText.indexOf("  post-install-isolation-diagnostic:"));
+const postJob = jobsText.slice(jobsText.indexOf("  post-install-isolation-diagnostic:"), jobsText.indexOf("\n  # One-shot Claude qualification entry point"));
+const qualJob = jobsText.slice(jobsText.indexOf("  claude-qualification:"));
 const diagScript = () => {
   const m = /<<'DIAG'\n([\s\S]*?)\n\s*DIAG\n/.exec(diagJob);
   assert.ok(m, "diagnostic script present");
@@ -351,6 +352,8 @@ const evalIf = (cond, ctx) => {
     .replace(/github\.event_name/g, "ctx.event")
     .replace(/github\.ref/g, "ctx.ref")
     .replace(/inputs\.post_install_diagnostic/g, "ctx.post")
+    .replace(/inputs\.qualification_only/g, "ctx.qual")
+    .replace(/inputs\.control_issue/g, "ctx.control")
     .replace(/inputs\.diagnostic_only/g, "ctx.diag");
   return new Function("ctx", `return Boolean(${js});`)(ctx);
 };
@@ -411,7 +414,7 @@ test("diagnostic route: job guards are mutually exclusive for every event/ref/in
 });
 
 test("diagnostic route: concurrency never shares the per-control-issue launch group", () => {
-  assert.match(yml, /group: ldl-launcher-\$\{\{ inputs\.diagnostic_only && 'diagnostic' \|\| inputs\.post_install_diagnostic && 'diagnostic-post-install' \|\| github\.event\.issue\.number \|\| inputs\.control_issue \}\}/);
+  assert.match(yml, /group: ldl-launcher-\$\{\{ inputs\.diagnostic_only && 'diagnostic' \|\| inputs\.post_install_diagnostic && 'diagnostic-post-install' \|\| inputs\.qualification_only && 'qualification' \|\| github\.event\.issue\.number \|\| inputs\.control_issue \}\}/);
 });
 
 // Mock-run the embedded diagnostic script with a stubbed execFileSync/readFileSync.
@@ -623,7 +626,7 @@ test("runner selector: only the post-install job selects a host; allowlist of ex
   assert.equal(runsOn(diagJob), "ubuntu-latest");
   assert.equal(yml.match(/post_install_runner/g).length, 3, "declared once, referenced in its comment, used once in runs-on");
   for (const job of [launchJob, diagJob]) assert.doesNotMatch(job, /post_install_runner/);
-  assert.equal([...yml.matchAll(/^\s+runs-on:/gm)].length, 3);
+  assert.equal([...yml.matchAll(/^\s+runs-on:/gm)].length, 4);
   assert.doesNotMatch(yml, /runs-on: \$\{\{ *inputs\.(?!(post_install_runner|worker_runner) == 'ubuntu-22\.04')/);
 });
 
@@ -704,3 +707,210 @@ test("runner selector: result line stays distinguishable from Actions success (p
   assert.match(postScript(), /bwrap_probe=\$\{probe\}/);
   assert.match(postScript(), /os=\$\{osRelease\}; kernel=/);
 });
+
+// ---- Issue #1175: default-off, one-shot Claude qualification-only route ----
+const qualScript = () => {
+  const m = /<<'QUAL'\n([\s\S]*?)\n\s*QUAL\n/.exec(qualJob);
+  assert.ok(m, "qualification script present");
+  return m[1].split("\n").map((l) => l.replace(/^ {10}/, "")).join("\n");
+};
+const qualCtx = { event: "workflow_dispatch", pr: null, body: "", ref: "refs/heads/main", default: "main", diag: false, post: false, qual: true, control: "1164" };
+
+test("qualification route: default off, distinct job, fixed 22.04 host, protected environment, least privilege", () => {
+  assert.match(onBlock, /qualification_only:\s*\n\s+description:[^\n]*\n\s+type: boolean\n\s+required: false\n\s+default: false/);
+  assert.match(qualJob, /\n {4}runs-on: ubuntu-22\.04\n/);
+  assert.match(qualJob, /\n {4}environment: ldl-launcher\n/);
+  assert.match(qualJob, /\n {4}permissions:\n {6}contents: read\n {6}issues: write\n {6}pull-requests: read\n {6}actions: read\n/);
+  assert.doesNotMatch(qualJob, /contents: write|pull-requests: write/);
+  assert.doesNotMatch(qualJob, /worker_runner|post_install_runner/);
+  assert.match(qualJob, /uses: actions\/checkout@v4\n\s+with:\n\s+persist-credentials: false/);
+  // Event-derived values reach the script only through env.
+  assert.doesNotMatch(qualScript(), /\$\{\{/);
+  assert.equal(qualJob.match(/secrets\.CLAUDE_CODE_OAUTH_TOKEN/g).length, 1);
+});
+
+test("qualification route: guards are mutually exclusive with launch and both diagnostics; only exact opt-in on control 1164 runs it", () => {
+  const events = [{ event: "workflow_dispatch", pr: null, body: "" }, { event: "issue_comment", pr: null, body: "/ldl launch 1164 x" }, { event: "push", pr: null, body: "" }];
+  for (const e of events) for (const ref of ["refs/heads/main", "refs/heads/feature"]) for (const dg of [true, false, null]) for (const pg of [true, false, null]) for (const qg of [true, false, null]) for (const control of ["1164", "1163", "11640", "01164", "", null]) {
+    const ctx = { ...e, ref, default: "main", diag: dg, post: pg, qual: qg, control };
+    const flags = [launchJob, diagJob, postJob, qualJob].map((j) => evalIf(diagCond(j), ctx));
+    assert.ok(flags.filter(Boolean).length <= 1, `exclusive: ${JSON.stringify(ctx)}`);
+    assert.equal(flags[3], e.event === "workflow_dispatch" && qg === true && dg !== true && pg !== true && control === "1164" && ref === "refs/heads/main", JSON.stringify(ctx));
+    // Any qualification request never reaches worker launch or either diagnostic.
+    if (qg === true) assert.deepEqual(flags.slice(0, 3), [false, false, false], JSON.stringify(ctx));
+  }
+  assert.equal(evalIf(diagCond(qualJob), qualCtx), true);
+  // Default-off: unselected requests keep ordinary launch exactly as before.
+  assert.equal(evalIf(diagCond(launchJob), { ...qualCtx, qual: false }), true);
+  assert.equal(evalIf(diagCond(launchJob), { ...qualCtx, qual: undefined }), true);
+});
+
+test("qualification route: no worker/dispatch/merge pathway, no fallback, no isolation downgrade", () => {
+  const code = qualScript().replace(/^\s*\/\/.*$/gm, "");
+  assert.doesNotMatch(code, /launcher-run|launcher-step|resolveWorkerLaunch|LDL_WORKER_COMMAND|dispatchFreshWorker|"merge"|"pr"|"git"/);
+  assert.doesNotMatch(code, /SUBPROCESS_ENV_SCRUB\s*[=:]\s*["']?0|sysctl|aa-complain|aa-disable|apparmor_parser|unconfined|share-net|writeFileSync|ANTHROPIC_API_KEY/);
+  assert.match(code, /CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"/);
+  assert.match(code, /"--permission-mode", "dontAsk"/);
+  assert.match(code, /"--disallowedTools", "Edit Write MultiEdit NotebookEdit"/);
+  assert.match(code, /"--allowedTools", `Bash\(\$\{BENIGN_COMMAND\}\)`, `Bash\(\$\{EGRESS_COMMAND\}\)`,/);
+  assert.match(code, /"--unshare-all", "--ro-bind", "\/", "\/", "--dev", "\/dev", "--proc", "\/proc", "true"/);
+  // The credential is scrubbed from process.env before any gh/git/gate child and reaches only the claude child.
+  const i = (s) => code.indexOf(s);
+  assert.ok(i("delete process.env.LDL_QUAL_CLAUDE_OAUTH_TOKEN") < i("session-entry-gate"));
+  assert.equal(code.match(/CLAUDE_CODE_OAUTH_TOKEN: token/g).length, 1);
+  assert.doesNotMatch(code, /console\.log\([^)]*\btoken\b/);
+  // Ordering: all checks and the claim precede the install/probe/claude; the record precedes the settle.
+  assert.ok(i("phase: \"CLAIMED\"") < i("\"npm\", \"install\""));
+  assert.ok(i("\"npm\", \"install\"") < i("iso(\"bwrap\", [\"--version\"]") && i("iso(\"bwrap\", [\"--version\"]") < i("execFileSync(\"claude\""));
+  assert.ok(i("post(executionIssue, record)") < i("settle(result.pass"));
+});
+
+// Mock-run the embedded qualification script.
+const BENIGN = "printf 'LDL_%s_OK' \"$LDL_SMOKE_NONCE\"";
+const EGRESS = "curl -sS -m 5 -o /dev/null -w CODE=%{http_code} https://example.com";
+const SMOKE = "abcd1234abcd1234";
+const streamOf = ({ benignOut = `LDL_${SMOKE}_OK`, egressOut = "CODE=000curl: (6) Could not resolve host", extra = [] } = {}) => [
+  { message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: BENIGN } }] } },
+  { message: { content: [{ type: "tool_result", tool_use_id: "t1", content: benignOut }] } },
+  { message: { content: [{ type: "tool_use", id: "t2", name: "Bash", input: { command: EGRESS } }] } },
+  { message: { content: [{ type: "tool_result", tool_use_id: "t2", content: [{ type: "text", text: egressOut }] }] } },
+  ...extra,
+].map((o) => JSON.stringify(o)).join("\n");
+const goodGrant = (o = {}) => "```json\n" + JSON.stringify({ claudeQualification: { controlIssue: 1164, executionIssue: 2000, oneShot: true, scope: "claude-sandbox-child-egress-v1", host: "ubuntu-22.04", ...o } }) + "\n```";
+
+const runQual = async (o = {}) => {
+  const { verifyDispatchLaunchRequest, resolveDispatchExecution, hasWritePermission } = await import("./launch-authorization.mjs");
+  const { parseAttemptClaims, planClaim, renderClaimBody, formatAttemptId, parseAttemptId } = await import("./attempt-claim.mjs");
+  const code = qualScript().replace(/^import .*$/gm, "");
+  const posts = [];
+  const logs = [];
+  const calls = [];
+  let nextId = 5000;
+  const comments = [...(o.comments ?? [])];
+  const verdict = o.verdict ?? { state: "READY_TO_DISPATCH", controlIssue: 1164, executionIssue: 2000 };
+  const execFileSync = (cmd, args, opts = {}) => {
+    calls.push({ cmd, args, env: opts.env });
+    const line = [cmd, ...args].join(" ");
+    if (cmd === "gh" && args[0] === "auth") return "";
+    if (cmd === "gh" && args[0] === "api" && args.includes("-F")) {
+      const id = nextId++;
+      posts.push({ path: args[1], body: opts.input });
+      if (args[1].endsWith("/issues/1164/comments")) {
+        comments.push({ id, body: opts.input, user: { login: "github-actions[bot]" } });
+        if (o.raceOnClaim && /CLAIMED/.test(opts.input)) comments.push({ id: 1, body: renderClaimBody({ attemptId: "901-1", nonce: "qualification-2000", claimedAt: "2026-01-01T00:00:00Z", runner: "github-actions", phase: "CLAIMED" }), user: { login: "github-actions[bot]" } });
+      }
+      return "";
+    }
+    if (cmd === "gh" && args.includes("--paginate")) return JSON.stringify([comments]);
+    if (cmd === "gh" && /collaborators\/(.+)\/permission/.test(args[1])) return JSON.stringify({ permission: (o.perms ?? {})[/collaborators\/(.+)\/permission/.exec(args[1])[1]] ?? "admin" });
+    if (cmd === "gh" && /issues\/2000$/.test(args[1])) return JSON.stringify({ state: "open", user: { login: "founder" }, body: o.packetBody ?? goodGrant(), ...(o.packet ?? {}) });
+    if (cmd === "gh" && /actions\/runs/.test(args[1])) return JSON.stringify({ status: o.runStatus ?? "completed", conclusion: "failure" });
+    if (cmd === "node" && args[0].includes("control-plane-bootstrap")) return JSON.stringify(verdict) + "\n";
+    if (cmd === "node" && args[0] === "-e") return SMOKE;
+    if (cmd === "claude") { if (o.claudeThrows) throw new Error("claude exploded"); return o.stream ?? streamOf(); }
+    if (o.failAt && line.includes(o.failAt)) throw new Error(`boom ${o.failAt}`);
+    return "";
+  };
+  const env = { EVENT_NAME: "workflow_dispatch", INPUT_CONTROL_ISSUE: "1164", INPUT_NONCE: "", ACTOR: "founder", TRIGGERING_ACTOR: "founder", EVENT_REF: "refs/heads/main", DEFAULT_BRANCH: "main", IS_FORK: "false", REPO: "o/r", RUN_ID: "900", RUN_ATTEMPT: "1", PATH: "/bin", HOME: "/h", GH_TOKEN: "ghs_secret", LDL_QUAL_CLAUDE_OAUTH_TOKEN: "sk-secret-oauth", ...(o.env ?? {}) };
+  if (o.noToken) delete env.LDL_QUAL_CLAUDE_OAUTH_TOKEN;
+  const proc = { env, exitCode: undefined, exit: (c) => { const e = new Error("EXIT"); e.code = c; throw e; } };
+  let exit = null;
+  try {
+    new Function("execFileSync", "process", "console", "verifyDispatchLaunchRequest", "resolveDispatchExecution", "hasWritePermission", "parseAttemptClaims", "planClaim", "renderClaimBody", "formatAttemptId", "parseAttemptId", code)(
+      execFileSync, proc, { log: (m) => logs.push(m) }, verifyDispatchLaunchRequest, resolveDispatchExecution, hasWritePermission, parseAttemptClaims, planClaim, renderClaimBody, formatAttemptId, parseAttemptId);
+  } catch (e) { if (e.message !== "EXIT") throw e; exit = e.code; }
+  return { posts, logs, calls, exit, exitCode: proc.exitCode, out: logs.join("\n"), claude: calls.find((c) => c.cmd === "claude") };
+};
+const refusedClean = (r, re) => { assert.equal(r.exit, 1); assert.match(r.out, re); assert.equal(r.claude, undefined); assert.equal(r.posts.length, 0, "no claim or record posted before authority is proven"); };
+
+test("qualification mock: PASS only with permitted marker AND denied child egress; records redacted attributable evidence and settles once", async () => {
+  const r = await runQual();
+  assert.equal(r.exit, null);
+  assert.equal(r.exitCode, undefined);
+  assert.match(r.out, /QUALIFICATION RESULT: PASS benign=ok egress=denied/);
+  assert.equal(r.posts.length, 4, "claim, record on packet, record on control, settle");
+  assert.match(r.posts[0].body, /Phase:\*\* CLAIMED/);
+  assert.match(r.posts[0].body, /Authorization nonce:\*\* qualification-2000/);
+  assert.match(r.posts[1].path, /issues\/2000\/comments/);
+  assert.match(r.posts[1].body, /Claude Qualification Result \(v1\)[\s\S]*Verdict:\*\* PASS[\s\S]*Proof packet:\*\* #2000[\s\S]*Child network egress:\*\* denied/);
+  assert.match(r.posts[3].body, /Phase:\*\* DONE[\s\S]*Outcome:\*\* PASS/);
+  // Credential isolation: only the claude child holds it; scrub stays on; no GitHub token or metered key reaches it.
+  assert.equal(r.claude.env.CLAUDE_CODE_OAUTH_TOKEN, "sk-secret-oauth");
+  assert.equal(r.claude.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, "1");
+  assert.equal(r.claude.env.GH_TOKEN, undefined);
+  assert.equal(r.claude.env.ANTHROPIC_API_KEY, undefined);
+  for (const c of r.calls.filter((x) => x.cmd !== "claude")) assert.ok(!c.env || !Object.values(c.env).some((v) => String(v).includes("sk-secret")));
+  assert.ok(!JSON.stringify([r.posts, r.logs]).includes("sk-secret"));
+  assert.ok(r.claude.args.includes("--disallowedTools"));
+});
+
+test("qualification mock: every refusal happens before any claim and before the credential is used", async () => {
+  refusedClean(await runQual({ noToken: true }), /no worker credential/);
+  refusedClean(await runQual({ env: { INPUT_CONTROL_ISSUE: "1163" } }), /valid only for control #1164/);
+  refusedClean(await runQual({ env: { EVENT_NAME: "issue_comment" } }), /valid only for control #1164/);
+  refusedClean(await runQual({ env: { INPUT_NONCE: "legacy-1" } }), /no launch-authorization nonce/);
+  refusedClean(await runQual({ env: { IS_FORK: "true" } }), /untrusted dispatch/);
+  refusedClean(await runQual({ env: { EVENT_REF: "refs/heads/feature" } }), /untrusted dispatch/);
+  refusedClean(await runQual({ perms: { founder: "read" } }), /untrusted dispatch/);
+  refusedClean(await runQual({ env: { TRIGGERING_ACTOR: "other" }, perms: { founder: "read", other: "admin" } }), /original dispatcher/);
+  // A closed historical control or any non-READY gate state never qualifies.
+  for (const state of ["BLOCKED", "NOT_READY", "NO_ACTION_YET", "READY_TO_DISPATCH_PLANNING", "AMBIGUOUS"]) refusedClean(await runQual({ verdict: { state, controlIssue: 1164, executionIssue: 2000 } }), /control not an active proof control/);
+  refusedClean(await runQual({ verdict: { state: "READY_TO_DISPATCH", controlIssue: 1163, executionIssue: 2000 } }), /different control issue/);
+  refusedClean(await runQual({ verdict: { state: "READY_TO_DISPATCH", controlIssue: 1164 } }), /no current execution issue/);
+});
+
+test("qualification mock: the proof packet must be open, writer-authored, and carry exactly one exact one-shot grant", async () => {
+  refusedClean(await runQual({ packet: { state: "closed" } }), /not an open issue/);
+  refusedClean(await runQual({ packet: { pull_request: {} } }), /not an open issue/);
+  refusedClean(await runQual({ perms: { outsider: "read" }, packet: { user: { login: "outsider" } } }), /author lacks write permission/);
+  for (const body of ["no grant here", goodGrant({ controlIssue: 1163 }), goodGrant({ executionIssue: 2001 }), goodGrant({ oneShot: false }), goodGrant({ scope: "other" }), goodGrant({ host: "ubuntu-latest" }), goodGrant() + "\n" + goodGrant(), "```json\n{not json\n```", "```json\n{\"executorSubstrate\":[]}\n```"]) {
+    refusedClean(await runQual({ packetBody: body }), /no single exact one-shot qualification grant/);
+  }
+});
+
+test("qualification mock: at most once per packet; replayed, orphaned, live and lost-race attempts never run Claude", async () => {
+  const claim = (id, attempt, phase, nonce, outcome) => ({ id, user: { login: "github-actions[bot]" }, body: renderClaimForTest(attempt, nonce, phase, outcome) });
+  refusedClean(await runQual({ comments: [claim(1, "800-1", "DONE", "qualification-2000", "PASS")] }), /already has a qualification attempt/);
+  refusedClean(await runQual({ comments: [claim(1, "800-1", "CLAIMED", "qualification-2000")] }), /already has a qualification attempt/);
+  // An ordinary live launch claim under the same control blocks (existing claim infrastructure).
+  refusedClean(await runQual({ comments: [claim(1, "123-1", "CLAIMED", "dispatch-123")], runStatus: "in_progress" }), /BLOCK: a live attempt/);
+  // Concurrent press: a lower-id claim for the same nonce wins; the loser settles and never runs Claude.
+  const raced = await runQual({ raceOnClaim: true });
+  assert.equal(raced.exit, 1);
+  assert.match(raced.out, /lost the qualification claim race/);
+  assert.equal(raced.claude, undefined);
+  assert.match(raced.posts.at(-1).body, /Phase:\*\* DONE[\s\S]*Outcome:\*\* RACE_LOST/);
+});
+
+test("qualification mock: any non-PASS evidence is an honest NO-GO with a nonzero exit, a recorded verdict and a settled claim", async () => {
+  const cases = [
+    [{ stream: streamOf({ egressOut: "CODE=200" }) }, /egress=allowed/],
+    [{ stream: streamOf({ egressOut: "no marker at all" }) }, /egress=undetermined/],
+    [{ stream: streamOf({ benignOut: "LDL_wrong_OK" }) }, /benign=failed/],
+    [{ stream: "" }, /benign=failed/],
+    [{ stream: streamOf({ extra: [{ message: { content: [{ type: "tool_use", id: "t3", name: "Edit", input: { file_path: "x" } }] } }] }) }, /benign=unexpected-tool/],
+    [{ stream: streamOf({ extra: [{ message: { content: [{ type: "tool_use", id: "t4", name: "Bash", input: { command: "git push" } }] } }] }) }, /unexpected-tool/],
+    [{ claudeThrows: true }, /runtime failure: claude exploded/],
+    [{ failAt: "npm install" }, /runtime failure/],
+    [{ failAt: "bubblewrap socat" }, /runtime failure/],
+    [{ failAt: "--unshare-all" }, /runtime failure/],
+  ];
+  for (const [opts, re] of cases) {
+    const r = await runQual(opts);
+    assert.equal(r.exitCode, 1, JSON.stringify(Object.keys(opts)));
+    assert.match(r.out, /QUALIFICATION RESULT: NO-GO/);
+    assert.match(r.out, re);
+    assert.match(r.posts.at(-1).body, /Phase:\*\* DONE[\s\S]*Outcome:\*\* NO_GO/);
+    assert.ok(r.posts.some((p) => /Verdict:\*\* NO-GO/.test(p.body)));
+    // No fallback: nothing resembling a worker launch, merge, or PR call happened.
+    assert.ok(!r.calls.some((c) => /launcher-run|merge/.test([c.cmd, ...c.args].join(" "))));
+    assert.ok(!JSON.stringify([r.posts, r.logs]).includes("sk-secret"));
+  }
+  // A preflight failure never starts Claude with the credential.
+  assert.equal((await runQual({ failAt: "--unshare-all" })).claude, undefined);
+});
+
+import { renderClaimBody as renderClaimBodyForTest } from "./attempt-claim.mjs";
+function renderClaimForTest(attemptId, nonce, phase, outcome) {
+  return renderClaimBodyForTest({ attemptId, nonce, claimedAt: "2026-01-01T00:00:00Z", runner: "github-actions", phase, outcome: outcome ?? null });
+}
