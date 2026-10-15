@@ -33,6 +33,13 @@
 //             Projection onto the thin control Issue and the reviewer trigger stay the existing
 //             finalize-audit-breakpoint.mjs (`--stale-audit-issue`) and trigger.mjs steps.
 //
+// Issue #1193 (live Audit #1190 -> #1191): `record --reconciliation <commentUrl>` additionally accepts a
+// fixed-format "Stage 2 Checklist Reconciliation" comment (RECONCILIATION_HEADING) naming
+// reviewer-FAILed checklist items whose inherited requirement is an audit-requirement error, with
+// authority comments recorded before the audit existed. `prepare` substitutes exactly those items and
+// shows old/new text verbatim; `verify`/the gate/the replacement check require the persisted checklist to
+// equal the recomputed one (proveChecklistReconciliation). No reviewer prose is parsed.
+//
 // Bounds (fail closed, never retry-until-CLEAN): an audit that is itself an evidence-recovery
 // re-audit is NOT_ELIGIBLE; so is any audit whose exact PR/work/merge lineage already holds an
 // evidence-recovery re-audit naming a different predecessor. Replacement NOT CLEAN therefore
@@ -40,7 +47,8 @@
 //
 // Usage:
 //   node tools/orchestration/evidence-correction.mjs verify  --audit-issue <A> [--repo <o/r>]
-//   node tools/orchestration/evidence-correction.mjs record  --audit-issue <A> --evidence <commentUrl>[,<commentUrl>...] [--repo <o/r>]
+//   node tools/orchestration/evidence-correction.mjs record  --audit-issue <A> --evidence <commentUrl>[,<commentUrl>...] [--reconciliation <commentUrl>] [--repo <o/r>]
+//             (issue #1193: --evidence may be omitted when --reconciliation is given)
 //   node tools/orchestration/evidence-correction.mjs prepare --audit-issue <A> [--repo <o/r>] [--dry-run true]
 //
 // Exit codes: 0 (state EVIDENCE_SATISFIED / EVIDENCE_RECORDED / REAUDIT_PREPARED /
@@ -53,7 +61,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { resolveRepoIdentity, findOpenExecutionLinkedPr, defaultGhOpenPrList } from "./ready-dispatch-gate.mjs";
 import { readGithubPr } from "./github-read.mjs";
-import { checkScopeBaseline, ScopeState, substituteScopeBase, defaultReadCommit } from "./scope-baseline.mjs";
+import { checkScopeBaseline, ScopeState, substituteScopeBase, defaultReadCommit, extractMergeScopeCommands } from "./scope-baseline.mjs";
 import {
   DEFAULT_BOT,
   defaultGhApi,
@@ -90,7 +98,12 @@ const normalizeEol = (t) => String(t ?? "").replace(/\r\n/g, "\n");
 
 // Pure. Composes the exact fixed-format result comment. Every field is machine-parsed back by
 // parseEvidenceCorrectionResult; nothing in it is free prose a parser must interpret.
-export function formatEvidenceCorrectionResult({ auditIssue, workIssue, pr, mergeCommit, findingUrl, evidenceUrls }) {
+// Issue #1193: the optional `reconciliationUrl` + `reconciledItems` pair records a verified checklist
+// reconciliation (a RECONCILIATION_HEADING comment) alongside, or instead of, evidence comments.
+export function formatEvidenceCorrectionResult({ auditIssue, workIssue, pr, mergeCommit, findingUrl, evidenceUrls, reconciliationUrl = null, reconciledItems = [] }) {
+  const reconciliation = reconciliationUrl
+    ? `- **Checklist reconciliation:** ${reconciliationUrl}\n- **Reconciled items:** ${[...reconciledItems].sort((a, b) => a - b).join(", ")}\n`
+    : "";
   return (
     `${RESULT_HEADING}\n\n` +
     `- **Audit issue:** #${auditIssue}\n` +
@@ -101,9 +114,8 @@ export function formatEvidenceCorrectionResult({ auditIssue, workIssue, pr, merg
     `- **Source changed:** none\n` +
     `- **Finding addressed:** ${findingUrl}\n` +
     `- **Disposition:** SATISFIED\n` +
-    `- **Evidence:**\n` +
-    evidenceUrls.map((u) => `  - ${u}`).join("\n") +
-    "\n"
+    reconciliation +
+    (evidenceUrls.length > 0 ? `- **Evidence:**\n` + evidenceUrls.map((u) => `  - ${u}`).join("\n") + "\n" : "")
   );
 }
 
@@ -125,19 +137,14 @@ const hostOf = (htmlUrl) => {
 };
 const sha256 = (t) => createHash("sha256").update(String(t ?? "")).digest("hex");
 
-// Pure. Parses a result comment. Returns { ok: true, fields } or { ok: false, errors, auditIssue }
-// where auditIssue (when recoverable) lets the caller tell "a malformed result for THIS audit"
-// apart from "a result for some other audit".
-export function parseEvidenceCorrectionResult(body, { host = DEFAULT_HOST } = {}) {
-  const COMMENT_URL = commentUrlPattern(host);
+// Pure. Shared strict fixed-format block parser (results and reconciliations). The canonical payload
+// is the heading plus the single contiguous block of field lines that follows it; the first blank line
+// ends it (issue #891: anything after is non-authoritative presentation metadata and is never parsed).
+// Duplicate labels, labels outside `allowedLabels`, and non-blank unrecognized lines fail closed.
+function parseLabeledBlock(body, heading, allowedLabels) {
   const text = normalizeEol(body).trim();
-  if (!text.startsWith(RESULT_HEADING)) return { ok: false, errors: ["missing result heading"], auditIssue: null };
-  // Issue #891: the canonical payload is the heading plus the single contiguous block of field lines
-  // that follows it (the writer never emits a blank line inside it). The first blank line after the
-  // fields ends the payload; anything after is non-authoritative presentation metadata appended by
-  // the posting surface (e.g. an attribution footer) and is never parsed, so it cannot add,
-  // override, or duplicate a canonical field. Non-blank text inside the block still fails closed.
-  const allLines = text.slice(RESULT_HEADING.length).split("\n");
+  if (!text.startsWith(heading)) return { errors: ["missing result heading"], labeled: null };
+  const allLines = text.slice(heading.length).split("\n");
   let start = 0;
   while (start < allLines.length && allLines[start].trim() === "") start++;
   let end = start;
@@ -151,6 +158,7 @@ export function parseEvidenceCorrectionResult(body, { host = DEFAULT_HOST } = {}
     if (top) {
       const label = top[1].trim();
       if (labeled.has(label)) errors.push(`duplicate field "${label}"`);
+      if (!allowedLabels.includes(label)) errors.push(`unknown field "${label}"`);
       current = { value: top[2].trim(), nested: [] };
       labeled.set(label, current);
       continue;
@@ -162,22 +170,42 @@ export function parseEvidenceCorrectionResult(body, { host = DEFAULT_HOST } = {}
     }
     if (line.trim() !== "") errors.push(`unrecognized line ${JSON.stringify(line.trim())}`);
   }
-  const issueRef = (label) => {
-    const raw = labeled.get(label)?.value ?? "";
-    const m = /^#(\d+)$/.exec(raw);
-    return m ? Number(m[1]) : null;
-  };
-  const auditIssue = issueRef("Audit issue");
+  return { errors, labeled };
+}
+
+const issueRefOf = (labeled, label) => {
+  const m = /^#(\d+)$/.exec(labeled.get(label)?.value ?? "");
+  return m ? Number(m[1]) : null;
+};
+
+const RESULT_LABELS = [
+  "Audit issue", "Work issue", "PR", "Exact merge commit", "Classification", "Source changed",
+  "Finding addressed", "Disposition", "Evidence", "Checklist reconciliation", "Reconciled items",
+];
+
+// Pure. Parses a result comment. Returns { ok: true, fields } or { ok: false, errors, auditIssue }
+// where auditIssue (when recoverable) lets the caller tell "a malformed result for THIS audit"
+// apart from "a result for some other audit".
+export function parseEvidenceCorrectionResult(body, { host = DEFAULT_HOST } = {}) {
+  const COMMENT_URL = commentUrlPattern(host);
+  const { errors, labeled } = parseLabeledBlock(body, RESULT_HEADING, RESULT_LABELS);
+  if (labeled === null) return { ok: false, errors, auditIssue: null };
+  const auditIssue = issueRefOf(labeled, "Audit issue");
+  const reconciliationUrl = labeled.get("Checklist reconciliation")?.value || null;
+  const reconciledRaw = labeled.get("Reconciled items")?.value ?? null;
+  const reconciledTokens = reconciledRaw === null ? [] : reconciledRaw.split(",").map((t) => t.trim());
   const fields = {
     auditIssue,
-    workIssue: issueRef("Work issue"),
-    pr: issueRef("PR"),
+    workIssue: issueRefOf(labeled, "Work issue"),
+    pr: issueRefOf(labeled, "PR"),
     mergeCommit: labeled.get("Exact merge commit")?.value ?? null,
     classification: labeled.get("Classification")?.value ?? null,
     sourceChanged: labeled.get("Source changed")?.value ?? null,
     findingUrl: labeled.get("Finding addressed")?.value ?? null,
     disposition: labeled.get("Disposition")?.value ?? null,
     evidenceUrls: [...(labeled.get("Evidence")?.nested ?? []), ...(labeled.get("Evidence")?.value ? [labeled.get("Evidence").value] : [])],
+    reconciliationUrl,
+    reconciledItems: reconciledTokens.every((t) => /^[1-9]\d{0,2}$/.test(t)) ? reconciledTokens.map(Number) : [],
   };
   for (const [key, label] of [
     ["auditIssue", "Audit issue"],
@@ -188,9 +216,137 @@ export function parseEvidenceCorrectionResult(body, { host = DEFAULT_HOST } = {}
   }
   if (!fields.mergeCommit || !FULL_SHA.test(fields.mergeCommit)) errors.push('field "Exact merge commit" is not a full 40-hex commit id');
   if (!fields.findingUrl || !COMMENT_URL.test(fields.findingUrl)) errors.push('field "Finding addressed" is not a GitHub issue-comment URL');
-  if (fields.evidenceUrls.length === 0) errors.push('field "Evidence" lists no comment URL');
+  if (fields.evidenceUrls.length === 0 && !reconciliationUrl) errors.push('field "Evidence" lists no comment URL');
   if (fields.evidenceUrls.some((u) => !COMMENT_URL.test(u))) errors.push('field "Evidence" contains a value that is not a GitHub issue-comment URL');
+  if ((reconciliationUrl === null) !== (reconciledRaw === null)) {
+    errors.push('fields "Checklist reconciliation" and "Reconciled items" must be present together');
+  } else if (reconciliationUrl !== null) {
+    if (!COMMENT_URL.test(reconciliationUrl)) errors.push('field "Checklist reconciliation" is not a GitHub issue-comment URL');
+    if (fields.reconciledItems.length === 0 || new Set(fields.reconciledItems).size !== fields.reconciledItems.length) {
+      errors.push('field "Reconciled items" is not a list of distinct positive item numbers');
+    }
+  }
   return errors.length === 0 ? { ok: true, fields } : { ok: false, errors, auditIssue };
+}
+
+// -- Issue #1193: checklist reconciliation comment ------------------------------------------------
+//
+// A Stage 2 NOT CLEAN can fail a checklist item because the *requirement* the audit inherited is
+// demonstrably inconsistent with the work Issue's original accepted requirements (live: Audit #1190 ->
+// #1191) while the audited source is correct. The correction worker classifies that semantically
+// (docs/bounded-review-cycle.md); this fixed-format comment is its durable, parseable record. Nothing
+// here interprets reviewer prose: the reviewer's FAIL only nominates candidate items.
+
+export const RECONCILIATION_HEADING = "## Stage 2 Checklist Reconciliation";
+const RECONCILIATION_LABELS = [
+  "Audit issue", "Work issue", "Finding addressed", "Classification", "Inconsistency", "Source defects", "Authority", "Replacement items",
+];
+
+// Pure. Composes the exact fixed-format reconciliation comment.
+export function formatChecklistReconciliation({ auditIssue, workIssue, findingUrl, authorityUrls, items }) {
+  return (
+    `${RECONCILIATION_HEADING}\n\n` +
+    `- **Audit issue:** #${auditIssue}\n` +
+    `- **Work issue:** #${workIssue}\n` +
+    `- **Finding addressed:** ${findingUrl}\n` +
+    `- **Classification:** AUDIT_REQUIREMENT_ERROR\n` +
+    `- **Inconsistency:** PROVEN\n` +
+    `- **Source defects:** none\n` +
+    `- **Authority:**\n` +
+    authorityUrls.map((u) => `  - ${u}`).join("\n") +
+    `\n- **Replacement items:**\n` +
+    items.map((i) => `  - ${i.number}: ${i.text}`).join("\n") +
+    "\n"
+  );
+}
+
+// Pure. Strict parse of a reconciliation comment. Returns { ok: true, fields } | { ok: false, errors }.
+export function parseChecklistReconciliation(body, { host = DEFAULT_HOST } = {}) {
+  const COMMENT_URL = commentUrlPattern(host);
+  const { errors, labeled } = parseLabeledBlock(body, RECONCILIATION_HEADING, RECONCILIATION_LABELS);
+  if (labeled === null) return { ok: false, errors };
+  const fields = {
+    auditIssue: issueRefOf(labeled, "Audit issue"),
+    workIssue: issueRefOf(labeled, "Work issue"),
+    findingUrl: labeled.get("Finding addressed")?.value ?? null,
+    classification: labeled.get("Classification")?.value ?? null,
+    inconsistency: labeled.get("Inconsistency")?.value ?? null,
+    sourceDefects: labeled.get("Source defects")?.value ?? null,
+    authorityUrls: labeled.get("Authority")?.nested ?? [],
+    items: new Map(),
+  };
+  if (fields.auditIssue === null) errors.push('field "Audit issue" missing or not a #<number> reference');
+  if (fields.workIssue === null) errors.push('field "Work issue" missing or not a #<number> reference');
+  if (!fields.findingUrl || !COMMENT_URL.test(fields.findingUrl)) errors.push('field "Finding addressed" is not a GitHub issue-comment URL');
+  if (fields.classification !== "AUDIT_REQUIREMENT_ERROR") errors.push("Classification is not AUDIT_REQUIREMENT_ERROR");
+  if (fields.inconsistency !== "PROVEN") errors.push("Inconsistency is not PROVEN (an uncertain or unproven inconsistency takes the source route)");
+  if (fields.sourceDefects !== "none") errors.push("Source defects is not none (a finding carrying a source defect takes the source route)");
+  if (fields.authorityUrls.length === 0) errors.push('field "Authority" cites no comment URL');
+  if (fields.authorityUrls.some((u) => !COMMENT_URL.test(u))) errors.push('field "Authority" contains a value that is not a GitHub issue-comment URL');
+  const itemLines = labeled.get("Replacement items")?.nested ?? [];
+  if (itemLines.length === 0) errors.push('field "Replacement items" lists no item');
+  for (const line of itemLines) {
+    const m = /^([1-9]\d{0,2}):\s+(\S.*)$/.exec(line);
+    if (!m) {
+      errors.push(`replacement item ${JSON.stringify(line)} is not "<number>: <non-empty text>"`);
+      continue;
+    }
+    if (fields.items.has(Number(m[1]))) errors.push(`duplicate replacement for item ${m[1]}`);
+    fields.items.set(Number(m[1]), m[2].trim());
+  }
+  return errors.length === 0 ? { ok: true, fields } : { ok: false, errors };
+}
+
+// Pure. Splits a Verification checklist field into its numbered items (consecutive 1..n, each starting
+// at column 0). Returns null when the numbering is not provably consecutive (fail closed).
+export function parseChecklistItems(checklist) {
+  const lines = normalizeEol(checklist).split("\n");
+  const starts = [];
+  lines.forEach((l, i) => {
+    const m = /^(\d{1,3})([.)])([ \t]+)(\S.*)$/.exec(l);
+    if (m) starts.push({ i, number: Number(m[1]), prefix: `${m[1]}${m[2]}${m[3]}`, text: m[4].trim() });
+  });
+  if (starts.length === 0 || starts.some((s, k) => s.number !== k + 1)) return null;
+  const preamble = lines.slice(0, starts[0].i);
+  const items = starts.map((s, k) => {
+    const stop = k + 1 < starts.length ? starts[k + 1].i : lines.length;
+    let last = stop - 1;
+    while (last > s.i && lines[last].trim() === "") last--;
+    return { number: s.number, prefix: s.prefix, text: s.text, rawLines: lines.slice(s.i, last + 1), tailLines: lines.slice(last + 1, stop) };
+  });
+  return { preamble, items };
+}
+
+// Pure. The checklist with exactly the items in `replacements` (Map number -> text) substituted and
+// every other byte unchanged. Returns null when the checklist cannot be parsed or a number is absent.
+export function reconcileChecklist(checklist, replacements) {
+  const parsed = parseChecklistItems(checklist);
+  if (parsed === null) return null;
+  for (const n of replacements.keys()) if (!parsed.items.some((i) => i.number === n)) return null;
+  const out = [...parsed.preamble];
+  for (const item of parsed.items) {
+    out.push(...(replacements.has(item.number) ? [`${item.prefix}${replacements.get(item.number)}`] : item.rawLines), ...item.tailLines);
+  }
+  return out.join("\n");
+}
+
+// Pure. Per-item results of the report's `## Verification` section (`<n>. PASS|FAIL|BLOCKED ...`) as a
+// Map number -> upper-case token; null when the section is absent or a number repeats.
+export function parseReportVerificationStatuses(reportText) {
+  const lines = normalizeEol(reportText).split("\n");
+  const start = lines.findIndex((l) => /^#{1,6}\s*\**\s*verification\b/i.test(l));
+  if (start === -1) return null;
+  const level = /^(#+)/.exec(lines[start])[1].length;
+  const out = new Map();
+  for (let i = start + 1; i < lines.length; i++) {
+    const h = /^(#+)\s/.exec(lines[i]);
+    if (h && h[1].length <= level) break;
+    const m = /^\s*(\d{1,3})[.)]\s+\**\s*(PASS|FAIL|BLOCKED)\b/i.exec(lines[i]);
+    if (!m) continue;
+    if (out.has(Number(m[1]))) return null;
+    out.set(Number(m[1]), m[2].toUpperCase());
+  }
+  return out.size > 0 ? out : null;
 }
 
 // Pure. Appends `extra` as new lines at the end of the `### <label>` block of an issue body.
@@ -216,7 +372,30 @@ export function appendToFormBlock(body, label, extra) {
 // disposition" field. The block carries both the evidence-recovery marker
 // (parseEvidenceRecoveryRef — bounds the lineage) and the established correction-chain phrase
 // (parseCorrectsAuditRef — lets close-audit retire this preserved predecessor on a backed CLEAN).
-export function composeReplacementAuditBody(predecessorBody, { predecessor, workIssue, mergeCommit, resultUrl, checklistCorrection = null }) {
+export function composeReplacementAuditBody(predecessorBody, { predecessor, workIssue, mergeCommit, resultUrl, checklistCorrection = null, checklistReconciliation = null }) {
+  if (checklistReconciliation) {
+    // Issue #1193: reconciled-checklist variant. Same lineage marker/phrases as the #883 clone; the only
+    // content changes are the named reviewer-FAILed checklist items, shown verbatim (old and new) to the
+    // independent reviewer in the provenance block.
+    const lines = checklistReconciliation.items.flatMap((i) => [
+      `- Item ${i.number} previous requirement (verbatim): ${i.previous}`,
+      `- Item ${i.number} reconciled requirement (verbatim): ${i.replacement}`,
+    ]);
+    const note =
+      `Evidence-recovery re-audit of audit issue #${predecessor} (issue #883, reconciled-checklist variant, issue #1193): the prior Stage 2 ` +
+      `NOT CLEAN verdict on issue #${predecessor} was satisfied without a source change since exact merge commit ${mergeCommit}; ` +
+      `the recorded correction is ${resultUrl} on work issue #${workIssue}, with the checklist reconciliation ${checklistReconciliation.url}. ` +
+      `Only the reviewer-failed Verification checklist items below were replaced because the inherited requirement was recorded as ` +
+      `inconsistent with the work Issue's original accepted requirements; every other checklist item is byte-identical. This is the single ` +
+      `permitted evidence-recovery re-audit for this exact PR/work/merge lineage and it must render its own independent verdict. ` +
+      `#${predecessor} and its report are preserved unchanged as historical evidence.\n` +
+      lines.join("\n");
+    const corrected = replaceChecklistField(predecessorBody, checklistReconciliation.correctedChecklist);
+    if (corrected === null) return null;
+    const withNote = appendToFormBlock(corrected, "Stage 1 inline review disposition", note);
+    if (withNote === null) return null;
+    return replaceVerdictField(withNote, "PENDING");
+  }
   if (checklistCorrection) {
     // Issue #1005: corrected-checklist variant. Same marker/phrases (lineage bound, supersession and
     // correction-chain retirement are unchanged); the only content change is the one proven-stale SHA
@@ -454,6 +633,90 @@ async function proveChecklistBaselineCorrection(io, { repo, pr, body, mergeCommi
   return { proven: true, staleBase, firstParent, correctedChecklist: corrected, files };
 }
 
+// -- Issue #1193: checklist reconciliation proof -----------------------------------------------------
+//
+// Re-derives, from GitHub state alone, whether a recorded reconciliation comment authorizes replacing
+// exactly the named reviewer-FAILed checklist items. A reviewer FAIL only nominates a candidate item;
+// authority comes from a controlling-account comment, strictly after the report, that attests (fixed
+// fields, never parsed prose) an audit-requirement error with no source defect and cites authority /
+// evidence comments on the work Issue that were recorded BEFORE the audit existed -- i.e. against the
+// original accepted requirements, which a reviewer finding (always later) can never be. Never throws.
+async function proveChecklistReconciliation(io, ctx) {
+  const no = (reason) => ({ proven: false, reason });
+  const { repo, url, declaredItems = null, notAfterMs = null, audit, body, workIssue, auditIssue, mergeCommit, reportUrl, reportMs, reportComment } = ctx;
+  const m = commentUrlPattern(audit.host).exec(String(url ?? ""));
+  if (!m || m[1].toLowerCase() !== repo.toLowerCase()) return no(`${url} is not an issue-comment URL in ${repo}`);
+  let comment;
+  try {
+    comment = await io.ghGet(`repos/${repo}/issues/comments/${m[3]}`);
+  } catch (err) {
+    return no(`${url} could not be read: ${err.message}`);
+  }
+  if (!comment || String(comment.id) !== m[3]) return no(`${url} did not resolve to that comment`);
+  const issueNumber = /\/issues\/(\d+)$/.exec(String(comment.issue_url ?? ""))?.[1];
+  if (issueNumber !== m[2] || String(workIssue) !== issueNumber) return no(`${url} is not on the authoritative work Issue #${workIssue}`);
+  if (comment.user?.login !== audit.author) return no(`${url} is not authored by the audit's controlling account ${JSON.stringify(audit.author)}`);
+  const createdMs = new Date(comment.created_at).getTime();
+  if (!(createdMs > reportMs)) return no("the reconciliation comment predates the NOT CLEAN report it answers");
+  if (notAfterMs !== null && !(createdMs < notAfterMs)) return no("the reconciliation comment is not earlier than the result comment that cites it");
+  const parsed = parseChecklistReconciliation(comment.body ?? "", { host: audit.host });
+  if (!parsed.ok) return no(`the reconciliation comment is malformed: ${parsed.errors.join("; ")}`);
+  const f = parsed.fields;
+  if (f.auditIssue !== Number(auditIssue) || f.workIssue !== workIssue || f.findingUrl !== reportUrl) {
+    return no("the reconciliation comment's audit/work/finding identity does not match the audit it names");
+  }
+  const numbers = [...f.items.keys()].sort((a, b) => a - b);
+  if (declaredItems !== null) {
+    const declared = [...declaredItems].sort((a, b) => a - b);
+    if (declared.length !== numbers.length || declared.some((n, i) => n !== numbers[i])) {
+      return no("the result's Reconciled items do not equal the reconciliation comment's replacement items");
+    }
+  }
+  const auditCreatedMs = new Date(audit.createdAt).getTime();
+  if (!Number.isFinite(auditCreatedMs)) return no("the audit Issue's creation time could not be determined");
+  for (const authority of f.authorityUrls) {
+    if (authority === url) return no("the reconciliation comment cannot cite itself as authority");
+    const problem = await verifyEvidenceComment(io, { repo, url: authority, trustedLogin: audit.author, beforeMs: auditCreatedMs, workIssue, host: audit.host });
+    if (problem) return no(`authority not verified: ${problem}`);
+  }
+  const checklist = parseVerificationChecklistRef(body);
+  const parsedItems = checklist ? parseChecklistItems(checklist) : null;
+  if (!parsedItems) return no("the audit's Verification checklist is not a consecutive numbered list");
+  const statuses = parseReportVerificationStatuses(reportComment?.body ?? "");
+  if (!statuses) return no("the NOT CLEAN report has no parseable per-item Verification results");
+  const items = [];
+  for (const n of numbers) {
+    const item = parsedItems.items.find((i) => i.number === n);
+    if (!item) return no(`checklist item ${n} does not exist (item count is fixed at ${parsedItems.items.length})`);
+    if (statuses.get(n) !== "FAIL") return no(`checklist item ${n} was not marked FAIL by the independent report; only reviewer-failed items are reconcilable`);
+    if (item.rawLines.length !== 1) return no(`checklist item ${n} spans several lines; only single-line items are reconcilable`);
+    const replacement = f.items.get(n);
+    if (replacement === item.text) return no(`replacement for item ${n} is identical to the existing requirement`);
+    items.push({ number: n, previous: item.text, replacement });
+  }
+  const correctedChecklist = reconcileChecklist(checklist, f.items);
+  if (correctedChecklist === null) return no("the reconciled checklist could not be composed");
+  // The change-scope baseline must still verify, and the reconciliation may not drop or weaken it.
+  const before = extractMergeScopeCommands(checklist, mergeCommit);
+  const after = extractMergeScopeCommands(correctedChecklist, mergeCommit);
+  if (before.length > 0 || after.length > 0) {
+    if (typeof io.readCommit !== "function") return no("topology readers unavailable");
+    let commit;
+    try {
+      commit = await io.readCommit({ repo, sha: mergeCommit });
+    } catch (err) {
+      return no(`could not read merge topology: ${err.message}`);
+    }
+    for (const [label, text] of [["original", checklist], ["reconciled", correctedChecklist]]) {
+      const scope = checkScopeBaseline({ checklist: text, mergeCommit, commit });
+      if (!scope.ok) return no(`the ${label} checklist's change-scope baseline does not verify (${scope.state})`);
+    }
+    const afterCommands = new Set(after.map((c) => c.command));
+    if (before.some((c) => !afterCommands.has(c.command))) return no("the reconciliation would drop or alter a mandatory change-scope command");
+  }
+  return { proven: true, url, createdMs, items, correctedChecklist };
+}
+
 // -- Evaluation ---------------------------------------------------------------------------------
 
 const refuse = (status, reason, extra = {}) => ({ status, reason, ...extra });
@@ -467,7 +730,9 @@ export function parseMergedPrNumber(body) {
 
 // Verifies one cited evidence comment against the trust/ordering rules. Returns null when valid,
 // else the reason it is not.
-async function verifyEvidenceComment(io, { repo, url, trustedLogin, afterMs, workIssue, host }) {
+// `afterMs` (evidence: created strictly after the NOT CLEAN report) and `beforeMs` (issue #1193
+// authority: created strictly before the audit existed) are each optional.
+async function verifyEvidenceComment(io, { repo, url, trustedLogin, afterMs = null, beforeMs = null, workIssue, host }) {
   const m = commentUrlPattern(host).exec(url);
   if (!m || m[1].toLowerCase() !== repo.toLowerCase()) return `${url} is not an issue-comment URL in ${repo}`;
   let comment;
@@ -483,7 +748,10 @@ async function verifyEvidenceComment(io, { repo, url, trustedLogin, afterMs, wor
   if (comment.user?.login !== trustedLogin) {
     return `${url} is authored by ${JSON.stringify(comment.user?.login ?? null)}, not the audit's controlling account ${JSON.stringify(trustedLogin)}`;
   }
-  if (!(new Date(comment.created_at).getTime() > afterMs)) return `${url} predates the NOT CLEAN report it is meant to answer`;
+  if (afterMs !== null && !(new Date(comment.created_at).getTime() > afterMs)) return `${url} predates the NOT CLEAN report it is meant to answer`;
+  if (beforeMs !== null && !(new Date(comment.created_at).getTime() < beforeMs)) {
+    return `${url} was not recorded before the audit existed, so it cannot evidence the ORIGINAL accepted requirements`;
+  }
   return null;
 }
 
@@ -634,12 +902,27 @@ export async function evaluateEvidenceCorrection({ repo, auditIssue }, io = defa
     if (problem) return refuse(Status.INCOMPLETE, `evidence not verified: ${problem}`, base);
   }
 
-  return finishSatisfied({ resultUrl: comment.html_url, resultAtMs: new Date(comment.created_at).getTime() });
+  const resultAtMs = new Date(comment.created_at).getTime();
+  if (f.reconciliationUrl) {
+    // Issue #1193: the result declares a checklist reconciliation. Re-derive it from the recorded
+    // reconciliation comment on every evaluation (record, verify, prepare, gate, replacement check).
+    const proof = await proveChecklistReconciliation(io, {
+      repo, url: f.reconciliationUrl, declaredItems: f.reconciledItems, notAfterMs: resultAtMs, audit, body, workIssue, auditIssue, mergeCommit, reportUrl, reportMs, reportComment,
+    });
+    if (!proof.proven) return refuse(Status.INCOMPLETE, `checklist reconciliation not verified: ${proof.reason}`, base);
+    return finishSatisfied({
+      resultUrl: comment.html_url,
+      resultAtMs,
+      checklistReconciliation: { url: proof.url, items: proof.items },
+      correctedChecklist: proof.correctedChecklist,
+    });
+  }
+  return finishSatisfied({ resultUrl: comment.html_url, resultAtMs });
 
   // Shared tail for both satisfied routes (recorded evidence result, or issue #1005 deterministic
   // checklist-baseline proof). The single re-audit must cite the satisfying artifact and postdate it.
-  function finishSatisfied({ resultUrl, resultAtMs, checklistCorrection = null, correctedChecklist = null }) {
-    const extra = checklistCorrection ? { checklistCorrection, correctedChecklist } : {};
+  function finishSatisfied({ resultUrl, resultAtMs, checklistCorrection = null, checklistReconciliation = null, correctedChecklist = null }) {
+    const extra = checklistCorrection ? { checklistCorrection, correctedChecklist } : checklistReconciliation ? { checklistReconciliation, correctedChecklist } : {};
     if (!replacement) return { status: Status.SATISFIED, reason: "evidence correction durably satisfied", resultUrl, replacement: null, ...extra, ...base };
 
     if (replacement.state !== "OPEN") {
@@ -653,8 +936,8 @@ export async function evaluateEvidenceCorrection({ repo, auditIssue }, io = defa
         { ...base, resultUrl, ...extra },
       );
     }
-    if (checklistCorrection) {
-      // The checklist-correction replacement must carry exactly the mechanically corrected checklist
+    if (checklistCorrection || checklistReconciliation) {
+      // The checklist-correction/-reconciliation replacement must carry exactly the recomputed checklist
       // and name the same PR; anything else is not the one authorized corrected successor.
       if (parseMergedPrNumber(replacement.body ?? "") !== pr) {
         return refuse(Status.AMBIGUOUS, `re-audit #${replacement.number}'s Merged PR field does not name PR #${pr}`, { ...base, resultUrl, ...extra });
@@ -698,14 +981,32 @@ export async function runVerify({ repo, auditIssue }, io = defaultIo) {
   return { exitCode: exitFor(result.status), state, ...result };
 }
 
-export async function runRecord({ repo, auditIssue, evidence }, io = defaultIo) {
+export async function runRecord({ repo, auditIssue, evidence, reconciliation = null }, io = defaultIo) {
   const urls = (evidence ?? []).map((u) => String(u).trim()).filter(Boolean);
+  const reconciliationUrl = reconciliation ? String(reconciliation).trim() : null;
   const before = await evaluateEvidenceCorrection({ repo, auditIssue }, io);
   if (before.status === Status.SATISFIED) return { exitCode: 0, state: "EVIDENCE_RECORDED", alreadyRecorded: true, ...before };
   if (before.status !== Status.NO_RESULT && before.status !== Status.INCOMPLETE) {
     return { exitCode: 2, state: `EVIDENCE_${before.status}`, ...before };
   }
-  if (urls.length === 0) return { exitCode: 2, state: "EVIDENCE_NOT_SATISFIED", ...before, reason: "no --evidence comment URL supplied" };
+  if (urls.length === 0 && !reconciliationUrl) return { exitCode: 2, state: "EVIDENCE_NOT_SATISFIED", ...before, reason: "no --evidence comment URL (or --reconciliation) supplied" };
+
+  // Issue #1193: re-derive the reconciliation (when supplied) from the unchanged audit body and report,
+  // before posting and again immediately before the POST. A bad reconciliation never becomes durable.
+  const proveReconciliation = async () => {
+    const audit = await readIssueRest(io, repo, auditIssue);
+    if (sha256(audit.body) !== before.auditBodyHash) return { proven: false, reason: "the audit body changed after the evidence correction was evaluated" };
+    const reportComment = (await io.ghApi(`repos/${repo}/issues/${auditIssue}/comments`)).find((c) => c.html_url === before.reportUrl);
+    if (!reportComment || sha256(reportComment.body ?? "") !== before.reportBodyHash) return { proven: false, reason: "the NOT CLEAN report changed after the evidence correction was evaluated" };
+    return proveChecklistReconciliation(io, {
+      repo, url: reconciliationUrl, audit, body: audit.body, workIssue: before.workIssue, auditIssue, mergeCommit: before.mergeCommit,
+      reportUrl: before.reportUrl, reportMs: new Date(reportComment.created_at).getTime(), reportComment,
+    });
+  };
+  const proof = reconciliationUrl ? await proveReconciliation() : null;
+  if (proof && !proof.proven) {
+    return { exitCode: 2, state: "EVIDENCE_NOT_SATISFIED", ...before, reason: `checklist reconciliation not verified: ${proof.reason}` };
+  }
 
   // Verify every cited comment BEFORE posting, so a bad citation never becomes durable.
   const reportMs = new Date(
@@ -722,6 +1023,8 @@ export async function runRecord({ repo, auditIssue, evidence }, io = defaultIo) 
     mergeCommit: before.mergeCommit,
     findingUrl: before.reportUrl,
     evidenceUrls: urls,
+    reconciliationUrl: proof ? proof.url : null,
+    reconciledItems: proof ? proof.items.map((i) => i.number) : [],
   });
   // Re-prove the complete authority and lineage immediately before the durable mutation: a posted
   // result cannot be retracted by the later (fail-closed) evaluation, so a stale decision must never
@@ -742,6 +1045,17 @@ export async function runRecord({ repo, auditIssue, evidence }, io = defaultIo) 
       auditIssue: Number(auditIssue),
       reason: `authority changed before the evidence-correction result could be posted (${fresh.status}: ${fresh.reason}); nothing was posted`,
     };
+  }
+  if (reconciliationUrl) {
+    const again = await proveReconciliation();
+    if (!again.proven || again.correctedChecklist !== proof.correctedChecklist) {
+      return {
+        exitCode: 2,
+        state: "EVIDENCE_AMBIGUOUS",
+        auditIssue: Number(auditIssue),
+        reason: `checklist reconciliation could not be re-proven immediately before posting (${again.reason ?? "its result changed"}); nothing was posted`,
+      };
+    }
   }
   const posted = await io.ghPost(`repos/${repo}/issues/${before.workIssue}/comments`, { body: commentBody });
   if (!String(posted?.html_url ?? "").toLowerCase().includes(`/${repo}/issues/${before.workIssue}#issuecomment-`.toLowerCase())) {
@@ -783,10 +1097,13 @@ export async function runPrepare({ repo, auditIssue, dryRun = false }, io = defa
     mergeCommit: evaluated.mergeCommit,
     resultUrl: evaluated.resultUrl,
     checklistCorrection: evaluated.checklistCorrection ?? null,
+    checklistReconciliation: evaluated.checklistReconciliation
+      ? { ...evaluated.checklistReconciliation, correctedChecklist: evaluated.correctedChecklist }
+      : null,
   });
   const validate = (candidateBody) => {
     if (!candidateBody) return "body could not be composed";
-    if (evaluated.checklistCorrection) {
+    if (evaluated.checklistCorrection || evaluated.checklistReconciliation) {
       if (parseVerificationChecklistRef(candidateBody) !== evaluated.correctedChecklist) return "replacement body's checklist is not exactly the corrected checklist";
       if (parseMergedPrNumber(candidateBody) !== evaluated.pr) return "replacement body's merged PR drifted";
     }
@@ -802,6 +1119,8 @@ export async function runPrepare({ repo, auditIssue, dryRun = false }, io = defa
   if (problem) return { exitCode: 2, state: "EVIDENCE_AMBIGUOUS", reason: problem, auditIssue: Number(auditIssue) };
   const title = evaluated.checklistCorrection
     ? `[Audit] Corrected-checklist re-audit of PR #${evaluated.pr} (${evaluated.mergeCommit}) after Audit #${auditIssue} NOT CLEAN`
+    : evaluated.checklistReconciliation
+    ? `[Audit] Reconciled-checklist re-audit of PR #${evaluated.pr} (${evaluated.mergeCommit}) after Audit #${auditIssue} NOT CLEAN`
     : `[Audit] Evidence-recovery re-audit of PR #${evaluated.pr} (${evaluated.mergeCommit}) after Audit #${auditIssue} NOT CLEAN`;
   if (dryRun) return { exitCode: 0, state: "REAUDIT_DRY_RUN", auditIssue: Number(auditIssue), title, body };
 
@@ -860,7 +1179,7 @@ async function main() {
   const args = parseCliArgs(rest);
   const auditIssue = Number(String(args["audit-issue"] ?? "").replace(/^#/, ""));
   if (!["verify", "record", "prepare"].includes(subcommand) || !isPositiveInteger(auditIssue)) {
-    console.error("Usage: evidence-correction.mjs <verify|record|prepare> --audit-issue <N> [--repo owner/repo] [--evidence <urls>] [--dry-run true]");
+    console.error("Usage: evidence-correction.mjs <verify|record|prepare> --audit-issue <N> [--repo owner/repo] [--evidence <urls>] [--reconciliation <commentUrl>] [--dry-run true]");
     process.exit(1);
     return;
   }
@@ -877,7 +1196,7 @@ async function main() {
   let result;
   try {
     if (subcommand === "verify") result = await runVerify({ repo, auditIssue });
-    else if (subcommand === "record") result = await runRecord({ repo, auditIssue, evidence: String(args.evidence ?? "").split(",") });
+    else if (subcommand === "record") result = await runRecord({ repo, auditIssue, evidence: String(args.evidence ?? "").split(","), reconciliation: args.reconciliation ?? null });
     else result = await runPrepare({ repo, auditIssue, dryRun: args["dry-run"] === "true" });
   } catch (err) {
     console.error(`evidence-correction.mjs ${subcommand} failed: ${err.message}`);
