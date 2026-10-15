@@ -381,8 +381,51 @@ export const CLAUDE_WORKER_ALLOWED_TOOLS = ["Read", "Glob", "Grep", "Edit", "Wri
 // approved by other settings. CLAUDE_CODE_SUBPROCESS_ENV_SCRUB asks the CLI to strip credentials
 // from the environment of the Bash-tool subprocesses it spawns.
 export const CLAUDE_WORKER_EXTRA_ENV = { CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1" };
+// Issue #1184: scrubbing the Bash-tool environment is not network isolation (the #1180 qualification
+// reached https://example.com from the child). The pinned CLI honours a `--settings` JSON `sandbox`
+// block, which outranks project/user settings: `enabled` turns the bubblewrap Bash sandbox on,
+// `failIfUnavailable` makes a missing/broken backend refuse to run the command instead of running it
+// unconfined, `allowUnsandboxedCommands: false` removes the model's `dangerouslyDisableSandbox` escape,
+// `autoAllowBashIfSandboxed: false` keeps the allowlist as the only approval path, and
+// `network.allowedDomains` is the complete child egress allowlist (empty = deny every host). This one
+// contract is shared by the smoke check, the built-in worker, and the workflow's qualification route
+// (which inlines the identical empty-allowlist JSON; ldl-launcher-workflow.test.mjs pins the equality).
+export const CLAUDE_SMOKE_SANDBOX_DOMAINS = Object.freeze([]);
+// The worker's git/gh/npm Bash rules need exactly these hosts; everything else is denied.
+export const CLAUDE_WORKER_SANDBOX_DOMAINS = Object.freeze(["github.com", "api.github.com", "registry.npmjs.org"]);
+const SANDBOX_DOMAIN_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+export function claudeSandboxSettings(allowedDomains = CLAUDE_SMOKE_SANDBOX_DOMAINS) {
+  return { sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: false, network: { allowedDomains: [...allowedDomains] } } };
+}
+// Strict structural check, so absent/disabled/weakened/malformed sandbox configuration is refused.
+export function validateClaudeSandboxSettings(settings) {
+  const keys = (o) => Object.keys(o ?? {}).sort().join(",");
+  const sb = settings?.sandbox;
+  if (keys(settings) !== "sandbox" || !sb || typeof sb !== "object") throw new Error("sandbox settings missing or malformed");
+  if (keys(sb) !== "allowUnsandboxedCommands,autoAllowBashIfSandboxed,enabled,failIfUnavailable,network") throw new Error("sandbox settings carry missing or unexpected keys");
+  if (sb.enabled !== true) throw new Error("sandbox is not explicitly enabled");
+  if (sb.failIfUnavailable !== true) throw new Error("sandbox does not fail closed when unavailable");
+  if (sb.allowUnsandboxedCommands !== false) throw new Error("unsandboxed fallback is not refused");
+  if (sb.autoAllowBashIfSandboxed !== false) throw new Error("sandbox auto-approval is not off");
+  const d = sb.network?.allowedDomains;
+  if (keys(sb.network) !== "allowedDomains" || !Array.isArray(d) || d.some((x) => typeof x !== "string" || !SANDBOX_DOMAIN_RE.test(x))) throw new Error("sandbox network allowlist missing or malformed");
+  return settings;
+}
+export function claudeSandboxArgs(allowedDomains = CLAUDE_SMOKE_SANDBOX_DOMAINS) {
+  return ["--settings", JSON.stringify(validateClaudeSandboxSettings(claudeSandboxSettings(allowedDomains)))];
+}
+// Re-derive the sandbox from the argv itself: exactly one `--settings`, valid JSON, valid contract.
+export function assertSandboxedArgv(argv) {
+  const at = argv.flatMap((a, i) => (a === "--settings" ? [i] : []));
+  if (at.length !== 1 || typeof argv[at[0] + 1] !== "string") throw new Error("claude argv lacks exactly one sandbox --settings");
+  let parsed;
+  try { parsed = JSON.parse(argv[at[0] + 1]); } catch { throw new Error("claude sandbox --settings is not valid JSON"); }
+  validateClaudeSandboxSettings(parsed);
+  return argv;
+}
 export function claudeWorkerArgv() {
-  return ["claude", "-p", "--permission-mode", "dontAsk", "--allowedTools", ...CLAUDE_WORKER_ALLOWED_TOOLS];
+  // --settings precedes the variadic --allowedTools so the rule list cannot swallow it.
+  return assertSandboxedArgv(["claude", "-p", "--permission-mode", "dontAsk", ...claudeSandboxArgs(CLAUDE_WORKER_SANDBOX_DOMAINS), "--allowedTools", ...CLAUDE_WORKER_ALLOWED_TOOLS]);
 }
 // The poll lower bound must move past reviewer items already seen: a bot acknowledgement
 // ("Starting #N.") matches the poller but the gate correctly stays NO_ACTION_YET, so re-polling
@@ -415,13 +458,14 @@ export function withoutMeteredKey(env = {}) {
   delete out.ANTHROPIC_API_KEY;
   return out;
 }
-// Authenticated smoke check through the SAME scrubbed Claude/Bash path the real worker uses (issue
-// #1108 Stage 1): CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set and one harmless Bash call (printf only)
-// must execute, so a Claude-specific sandbox failure surfaces here, before the worker, as a dropped
-// credential (WAITING fallback). No mutating tool is allowed: deny-by-default, Edit/Write disallowed.
+// Authenticated smoke check through the SAME scrubbed, sandboxed Claude/Bash path the real worker uses
+// (issue #1108 Stage 1, #1184): CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set, the fail-closed sandbox is
+// enabled, and one harmless Bash call (printf only) must execute, so a Claude-specific sandbox failure
+// (unavailable backend, bad configuration) surfaces here, before the worker, as a dropped credential
+// (WAITING fallback). No mutating tool is allowed: deny-by-default, Edit/Write disallowed.
 export const smokeBashCommand = () => `printf 'LDL_%s_OK' "$${SMOKE_NONCE_ENV}"`;
 export function claudeSmokeArgv() {
-  return ["claude", "-p", "--permission-mode", "dontAsk", "--allowedTools", "Read", "Bash(printf:*)", "--disallowedTools", "Edit Write MultiEdit NotebookEdit", "--max-turns", "4"];
+  return assertSandboxedArgv(["claude", "-p", "--permission-mode", "dontAsk", ...claudeSandboxArgs(CLAUDE_SMOKE_SANDBOX_DOMAINS), "--allowedTools", "Read", "Bash(printf:*)", "--disallowedTools", "Edit Write MultiEdit NotebookEdit", "--max-turns", "4"]);
 }
 // Pure-ish: returns { qualified, reason }. run(argv, { input, env }) -> stdout (injectable).
 export function qualifyClaudeWorker({ token, run, env = {}, nonce = newSmokeNonce() }) {
@@ -446,7 +490,9 @@ export function resolveWorkerLaunch({ token, customCommand, run, env = {}, nonce
   if (customCommand) return { workerEnv: {}, note: "custom LDL_WORKER_COMMAND configured: OAuth credential withheld" };
   const q = qualifyClaudeWorker({ token, env, run, ...(nonce ? { nonce } : {}) });
   if (!q.qualified) return { workerEnv: {}, note: `worker NOT qualified: ${q.reason}` };
-  return { command: JSON.stringify(claudeWorkerArgv()), workerEnv: { CLAUDE_CODE_OAUTH_TOKEN: token, ...CLAUDE_WORKER_EXTRA_ENV }, note: "worker qualified (scrubbed Bash smoke check passed)" };
+  let argv;
+  try { argv = claudeWorkerArgv(); } catch (e) { return { workerEnv: {}, note: `worker NOT qualified: ${e.message}` }; }
+  return { command: JSON.stringify(argv), workerEnv: { CLAUDE_CODE_OAUTH_TOKEN: token, ...CLAUDE_WORKER_EXTRA_ENV }, note: "worker qualified (scrubbed Bash smoke check passed)" };
 }
 
 // Dispatch ONE fresh bounded worker by reference. The prompt is rendered by the existing

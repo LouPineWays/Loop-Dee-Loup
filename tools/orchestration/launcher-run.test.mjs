@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseNextCommand, buildDeps, qualifyClaudeWorker, claudeWorkerArgv, claudeSmokeArgv, smokeMarker, newSmokeNonce, smokeBashCommand, SMOKE_NONCE_ENV, resolveWorkerLaunch, advancePollBound, withoutMeteredKey, CLAUDE_WORKER_ALLOWED_TOOLS } from "./launcher-run.mjs";
+import { parseNextCommand, buildDeps, qualifyClaudeWorker, claudeWorkerArgv, claudeSmokeArgv, smokeMarker, newSmokeNonce, smokeBashCommand, SMOKE_NONCE_ENV, resolveWorkerLaunch, advancePollBound, withoutMeteredKey, CLAUDE_WORKER_ALLOWED_TOOLS, claudeSandboxSettings, claudeSandboxArgs, validateClaudeSandboxSettings, assertSandboxedArgv, CLAUDE_WORKER_SANDBOX_DOMAINS } from "./launcher-run.mjs";
 import { runLauncherStep, Outcome } from "./launcher-step.mjs";
 const SO = (n) => smokeMarker(n);
 const N = "n0nce1";
@@ -304,4 +304,55 @@ test("smoke nonce is per-run unpredictable and the prompt cannot carry the expec
   assert.ok(seen.input.includes(smokeBashCommand()));
   // a response guessed from a different nonce is rejected
   assert.equal(qualifyClaudeWorker({ nonce: N, token: "t", run: () => smokeMarker("other") }).qualified, false);
+});
+
+// ---- Issue #1184: explicit, fail-closed Claude Bash child sandbox on the smoke and worker paths ----
+const sandboxOf = (argv) => JSON.parse(argv[argv.indexOf("--settings") + 1]).sandbox;
+test("sandbox contract: smoke and worker argv carry one explicit fail-closed sandbox before the variadic allow list", () => {
+  for (const [argv, domains] of [[claudeSmokeArgv(), []], [claudeWorkerArgv(), [...CLAUDE_WORKER_SANDBOX_DOMAINS]]]) {
+    assert.equal(argv.filter((a) => a === "--settings").length, 1);
+    assert.ok(argv.indexOf("--settings") < argv.indexOf("--allowedTools"), "--settings cannot be swallowed by the variadic --allowedTools");
+    assert.deepEqual(sandboxOf(argv), { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: false, network: { allowedDomains: domains } });
+    assert.equal(argv[argv.indexOf("--permission-mode") + 1], "dontAsk");
+    assert.doesNotThrow(() => assertSandboxedArgv(argv));
+  }
+  assert.deepEqual(sandboxOf(claudeSmokeArgv()).network.allowedDomains, [], "smoke path denies every child host");
+  assert.ok(!CLAUDE_WORKER_SANDBOX_DOMAINS.some((d) => /example\.com|\*/.test(d)), "worker allowlist is exact GitHub/npm hosts only");
+});
+
+test("sandbox contract: absent, disabled, weakened or malformed sandbox configuration is refused", () => {
+  const good = claudeSandboxSettings();
+  const bad = (mut) => { const c = structuredClone(good); mut(c.sandbox); return c; };
+  for (const [name, cfg] of Object.entries({
+    absent: {}, notObject: { sandbox: "on" }, disabled: bad((s) => { s.enabled = false; }), enabledString: bad((s) => { s.enabled = "true"; }),
+    noFailClosed: bad((s) => { s.failIfUnavailable = false; }), fallbackAllowed: bad((s) => { s.allowUnsandboxedCommands = true; }),
+    autoAllow: bad((s) => { s.autoAllowBashIfSandboxed = true; }), missingKey: bad((s) => { delete s.failIfUnavailable; }),
+    extraKey: bad((s) => { s.excludedCommands = ["curl"]; }), noNetwork: bad((s) => { delete s.network; }),
+    wildcard: bad((s) => { s.network.allowedDomains = ["*"]; }), url: bad((s) => { s.network.allowedDomains = ["https://example.com"]; }),
+    extraNet: bad((s) => { s.network.allowLocalBinding = true; }), topExtra: { ...good, permissions: {} },
+  })) assert.throws(() => validateClaudeSandboxSettings(cfg), undefined, name);
+  assert.throws(() => claudeSandboxArgs(["*.example.com"]));
+  const argv = claudeWorkerArgv();
+  const i = argv.indexOf("--settings");
+  assert.throws(() => assertSandboxedArgv(argv.filter((_, k) => k !== i && k !== i + 1)), /exactly one/);
+  assert.throws(() => assertSandboxedArgv([...argv, "--settings", argv[i + 1]]), /exactly one/);
+  assert.throws(() => assertSandboxedArgv(argv.map((a, k) => (k === i + 1 ? "{not json" : a))), /not valid JSON/);
+  assert.throws(() => assertSandboxedArgv(argv.map((a, k) => (k === i + 1 ? JSON.stringify(bad((s) => { s.enabled = false; })) : a))));
+});
+
+test("sandbox contract: scrub, tool restrictions and credential routing are unchanged beside the sandbox", () => {
+  const smoke = claudeSmokeArgv();
+  assert.deepEqual(smoke.slice(smoke.indexOf("--allowedTools")), ["--allowedTools", "Read", "Bash(printf:*)", "--disallowedTools", "Edit Write MultiEdit NotebookEdit", "--max-turns", "4"]);
+  const w = claudeWorkerArgv();
+  assert.deepEqual(w.slice(w.indexOf("--allowedTools") + 1), CLAUDE_WORKER_ALLOWED_TOOLS);
+  const built = resolveWorkerLaunch({ nonce: N, token: "tok", run: () => smokeMarker(N) });
+  assert.equal(built.workerEnv.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, "1");
+  assert.deepEqual(sandboxOf(JSON.parse(built.command)), sandboxOf(claudeWorkerArgv()));
+  // A sandbox-unavailable CLI makes the smoke Bash call fail: not qualified, credential withheld, never an unsandboxed retry.
+  const calls = [];
+  const r = resolveWorkerLaunch({ nonce: N, token: "tok", run: (a) => { calls.push(a); const e = new Error("sandbox unavailable"); e.status = 1; throw e; } });
+  assert.equal(r.command, undefined);
+  assert.equal(r.workerEnv.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  assert.equal(calls.length, 1);
+  assert.ok(calls.every((a) => assertSandboxedArgv(a)));
 });
