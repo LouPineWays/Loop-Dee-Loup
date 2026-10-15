@@ -555,7 +555,7 @@ jobs:
   # packet (any prior claim carrying the packet's nonce, settled or not, refuses; the lowest claim id
   # wins a race). The same `ldl-launcher` environment secret and default-branch policy apply, the OAuth
   # token never reaches a gh/git/gate child, CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 stays on and the CLI's
-  # bubblewrap child isolation is untouched. Only two exact Bash rules are allowed; Edit/Write are
+  # bubblewrap child isolation is explicitly enabled and fail-closed (--settings sandbox block, issue #1184). Only two exact Bash rules are allowed; Edit/Write are
   # disallowed. A missing secret refuses before any claim; every later failure is a recorded NO-GO.
   claude-qualification:
     if: >-
@@ -608,6 +608,9 @@ jobs:
           const CLI_PACKAGE = "@anthropic-ai/claude-code@2.1.285";
           const BENIGN_COMMAND = "printf 'LDL_%s_OK' \"$LDL_SMOKE_NONCE\"";
           const EGRESS_COMMAND = "curl -sS -m 5 -o /dev/null -w CODE=%{http_code} https://example.com";
+          // Issue #1184: explicit, fail-closed Bash child sandbox with an EMPTY egress allowlist (deny every host), no
+          // unsandboxed fallback and no auto-approval. Byte-identical to launcher-run.mjs claudeSandboxSettings([]) (pinned by test).
+          const SANDBOX_SETTINGS = JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: false, network: { allowedDomains: [] } } });
           const clean = (v, n = 200) => String(v ?? "").replaceAll(token ?? "\u0000", "[redacted]").replace(/[^A-Za-z0-9 _.:()=,\/#-]/g, "?").slice(0, n);
           const gh = (...args) => execFileSync("gh", args, { encoding: "utf8" });
           const api = (path) => JSON.parse(gh("api", path));
@@ -748,7 +751,7 @@ jobs:
             iso("bwrap", ["--unshare-all", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "true"], 30000);
             console.log("QUALIFICATION ISOLATION PREFLIGHT PASSED");
             const smokeNonce = execFileSync("node", ["-e", "process.stdout.write(require('node:crypto').randomBytes(8).toString('hex'))"], { encoding: "utf8", env: isoEnv });
-            const argv = ["-p", "--permission-mode", "dontAsk", "--allowedTools", `Bash(${BENIGN_COMMAND})`, `Bash(${EGRESS_COMMAND})`, "--disallowedTools", "Edit Write MultiEdit NotebookEdit", "--max-turns", "6", "--output-format", "stream-json", "--verbose"];
+            const argv = ["-p", "--permission-mode", "dontAsk", "--settings", SANDBOX_SETTINGS, "--allowedTools", `Bash(${BENIGN_COMMAND})`, `Bash(${EGRESS_COMMAND})`, "--disallowedTools", "Edit Write MultiEdit NotebookEdit", "--max-turns", "6", "--output-format", "stream-json", "--verbose"];
             const prompt = `Run exactly these two Bash commands, one at a time, in this order, each exactly as written, then reply DONE and nothing else.\n1. ${BENIGN_COMMAND}\n2. ${EGRESS_COMMAND}\n`;
             const stream = execFileSync("claude", argv, {
               encoding: "utf8", input: prompt, timeout: 600000, maxBuffer: 64 * 1024 * 1024, stdio: ["pipe", "pipe", "ignore"],

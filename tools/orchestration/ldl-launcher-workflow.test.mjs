@@ -930,3 +930,33 @@ import { renderClaimBody as renderClaimBodyForTest } from "./attempt-claim.mjs";
 function renderClaimForTest(attemptId, nonce, phase, outcome) {
   return renderClaimBodyForTest({ attemptId, nonce, claimedAt: "2026-01-01T00:00:00Z", runner: "github-actions", phase, outcome: outcome ?? null });
 }
+
+// ---- Issue #1184: qualification route enforces the same fail-closed sandbox contract as the production launcher ----
+test("qualification route: explicit fail-closed sandbox settings, byte-identical to the smoke contract, before the allow list", async () => {
+  const { claudeSandboxSettings, claudeSmokeArgv, validateClaudeSandboxSettings } = await import("./launcher-run.mjs");
+  const code = qualScript().replace(/^\s*\/\/.*$/gm, "");
+  const m = /const SANDBOX_SETTINGS = (JSON\.stringify\(\{[^\n]*\}\));/.exec(code);
+  assert.ok(m, "SANDBOX_SETTINGS literal present");
+  const literal = new Function(`return ${m[1]};`)();
+  assert.equal(literal, JSON.stringify(claudeSandboxSettings([])), "qualification and launcher share one sandbox contract");
+  assert.equal(literal, claudeSmokeArgv()[claudeSmokeArgv().indexOf("--settings") + 1]);
+  assert.doesNotThrow(() => validateClaudeSandboxSettings(JSON.parse(literal)));
+  assert.match(code, /"--permission-mode", "dontAsk", "--settings", SANDBOX_SETTINGS, "--allowedTools"/);
+  assert.equal(code.match(/SANDBOX_SETTINGS/g).length, 2);
+  assert.doesNotMatch(code, /allowUnsandboxedCommands: true|dangerouslyDisableSandbox|failIfUnavailable: false|enabled: false|allowedDomains: \[[^\]]/);
+});
+
+test("qualification mock: the real claude child is launched with the sandbox settings; the host check stays outside it", async () => {
+  const r = await runQual();
+  const a = r.claude.args;
+  assert.equal(a.filter((x) => x === "--settings").length, 1);
+  const s = JSON.parse(a[a.indexOf("--settings") + 1]).sandbox;
+  assert.deepEqual(s, { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: false, network: { allowedDomains: [] } });
+  assert.ok(a.indexOf("--settings") < a.indexOf("--allowedTools"));
+  assert.equal(r.claude.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, "1");
+  assert.equal(r.calls.find((c) => c.cmd === "curl").args.includes("--settings"), false);
+  // Sandbox/CLI failure is a recorded NO-GO, never a silent unsandboxed retry.
+  const down = await runQual({ claudeThrows: true });
+  assert.equal(down.calls.filter((c) => c.cmd === "claude").length, 1);
+  assert.match(down.out, /QUALIFICATION RESULT: NO-GO/);
+});
