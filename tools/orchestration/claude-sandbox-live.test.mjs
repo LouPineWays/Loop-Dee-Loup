@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { claudeSandboxArgs, claudeSmokeArgv, claudeWorkerArgv } from "./launcher-run.mjs";
+import { assertSandboxedArgv, claudeSandboxArgs, claudeSmokeArgv, claudeWorkerArgv } from "./launcher-run.mjs";
 
 const live = process.env.LDL_LIVE_CLAUDE_SANDBOX_PROOF === "1";
 const BIN = process.env.LDL_CLAUDE_BIN || "claude";
@@ -59,8 +59,9 @@ const runClaude = async (settingsArgs, commands, { hideBwrap = false } = {}) => 
     const c = spawn(bin, args, { cwd: dir, env, stdio: ["pipe", "pipe", "ignore"] });
     let buf = "";
     c.stdout.on("data", (d) => { buf += d; });
-    const t = setTimeout(() => c.kill("SIGKILL"), 120000);
-    c.on("close", (code) => { clearTimeout(t); resolve({ code, buf }); });
+    let timedOut = false;
+    const t = setTimeout(() => { timedOut = true; c.kill("SIGKILL"); }, 120000);
+    c.on("close", (code, signal) => { clearTimeout(t); resolve({ code, signal, timedOut, buf }); });
     c.stdin.end("run the commands\n");
   });
   server.close();
@@ -93,5 +94,21 @@ test("live (credential-free): sandbox escape request and unavailable backend fai
   assert.equal(codeOf(esc.results[0]), "000", "dangerouslyDisableSandbox does not lift the sandbox");
   const down = await runClaude(settings, twoCommands, { hideBwrap: true });
   assert.deepEqual(down.results, [], "no Bash command executes without a sandbox backend");
-  assert.notEqual(down.code, 0);
+  assert.equal(down.timedOut, false, "the unavailable-backend run exited on its own");
+  assert.ok(Number.isInteger(down.code) && down.code !== 0, "the CLI exits with a numeric nonzero code");
+});
+
+test("live (credential-free): syntactically invalid --settings fails closed with no Bash execution", { skip: !live }, async () => {
+  const r = await runClaude(["--settings", "{not json"], twoCommands);
+  assert.equal(r.timedOut, false, "the CLI exited on its own rather than being killed on timeout");
+  assert.equal(r.signal, null, "the CLI was not terminated by a signal");
+  assert.ok(Number.isInteger(r.code) && r.code !== 0, "the CLI exits with a numeric nonzero code for invalid JSON");
+  assert.deepEqual(r.results, [], "no Bash command executes with invalid settings");
+});
+
+// `{"sandbox":{"enabled":false}}` is valid CLI settings (the sandbox is simply off), so the CLI would run Bash
+// unsandboxed; the fail-closed boundary for it is the launcher's own validation, not a CLI rejection.
+test("disabled-sandbox settings are rejected at the launcher boundary (not by the CLI)", () => {
+  const argv = ["claude", "-p", "--settings", '{"sandbox":{"enabled":false}}'];
+  assert.throws(() => assertSandboxedArgv(argv));
 });
