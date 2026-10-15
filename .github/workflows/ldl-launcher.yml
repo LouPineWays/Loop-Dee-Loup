@@ -618,16 +618,26 @@ jobs:
           const evaluateStream = (stream, nonce, hostReachable) => {
             const uses = new Map();
             const results = new Map();
+            let ambiguous = false;
             for (const line of String(stream ?? "").split("\n")) {
               let msg;
               try { msg = JSON.parse(line); } catch { continue; }
               const parts = msg?.message?.content;
               if (!Array.isArray(parts)) continue;
               for (const p of parts) {
-                if (p?.type === "tool_use") uses.set(p.id, { name: p.name, command: p.input?.command });
-                if (p?.type === "tool_result") results.set(p.tool_use_id, textOf(p.content));
+                if (p?.type === "tool_use") {
+                  // Ordered, unique evidence only: a missing or reused id is ambiguous, never silently overwritten.
+                  if (typeof p.id !== "string" || p.id === "" || uses.has(p.id) || results.has(p.id)) ambiguous = true;
+                  else uses.set(p.id, { name: p.name, command: p.input?.command });
+                }
+                if (p?.type === "tool_result") {
+                  // A result must follow exactly one earlier use and may appear only once for it (no orphan, early, duplicate or conflicting result).
+                  if (typeof p.tool_use_id !== "string" || !uses.has(p.tool_use_id) || results.has(p.tool_use_id)) ambiguous = true;
+                  else results.set(p.tool_use_id, textOf(p.content));
+                }
               }
             }
+            if (ambiguous) return { pass: false, benign: "ambiguous", egress: "ambiguous", reason: "ambiguous or replayed tool-use/tool-result stream (duplicate, orphan or out-of-order ids)" };
             const offending = [...uses.values()].find((u) => u.name !== "Bash" || (u.command !== BENIGN_COMMAND && u.command !== EGRESS_COMMAND));
             if (offending) return { pass: false, benign: "unexpected-tool", egress: "unexpected-tool", reason: "unexpected tool use in qualification stream" };
             const resultFor = (cmd) => { const e = [...uses.entries()].filter(([, u]) => u.command === cmd); return e.length === 1 ? results.get(e[0][0]) : undefined; };
