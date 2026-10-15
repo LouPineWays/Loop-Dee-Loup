@@ -3,7 +3,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { terminalizeNoGoPacket, selectNoGoResult, buildNoGoTerminalControlBody, packetHasQualificationRecord } from "./terminalize-nogo-packet.mjs";
+import { defaultReadComments, terminalizeNoGoPacket, selectNoGoResult, buildNoGoTerminalControlBody, packetHasQualificationRecord } from "./terminalize-nogo-packet.mjs";
 import { isTerminalControl, findNewPacketAuthority } from "./activate-control-pair.mjs";
 
 const CONTROL = `### State
@@ -107,6 +107,12 @@ for (const [name, over] of [
   ["no qualification record", { packetBody: PACKET.replace("claudeQualification", "other") }],
   ["not one-shot", { packetBody: PACKET.replace('"oneShot": true', '"oneShot": false') }],
   ["wrong parent loop", { packetBody: PACKET.replace("#1164", "#1100") }],
+  ["wrong scope", { packetBody: PACKET.replace("claude-sandbox-child-egress-v1", "weaker") }],
+  ["wrong host", { packetBody: PACKET.replace("ubuntu-22.04", "ubuntu-24.04") }],
+  ["conflicting extra record", { packetBody: PACKET + '\n```json\n{"claudeQualification":{"controlIssue":1164,"executionIssue":1180,"oneShot":true,"scope":"x","host":"y"}}\n```\n' }],
+  ["control advanced to REVIEW", { controlBody: CONTROL.replace("**Lifecycle:** READY", "**Lifecycle:** REVIEW") }],
+  ["control has a PR pointer", { controlBody: CONTROL.replace("**PR:** none", "**PR:** #1200") }],
+  ["control has a Stage 2 pointer", { controlBody: CONTROL.replace("**Stage 2:** none", "**Stage 2:** #1201") }],
   ["control points elsewhere", { controlBody: CONTROL.replace("#1180", "#1170") }],
 ]) {
   test(`refuses and mutates nothing: ${name}`, () => {
@@ -125,6 +131,36 @@ test("packet close failure leaves control unchanged and is resumable", () => {
   };
   assert.equal(run(h).exitCode, 1);
   assert.equal(h.state.body, CONTROL);
+});
+
+test("resumes this tool's own earlier terminal write (OPEN control, DONE with marker)", () => {
+  const h0 = harness();
+  run(h0);
+  const h = harness({ controlBody: h0.state.body, packetState: "CLOSED" });
+  assert.equal(run(h).state, "TERMINALIZED");
+});
+
+test("does not close a control that a successor activation changed after the snapshot write", () => {
+  const h = harness();
+  const base = h.impls.readIssueImpl;
+  let writes = 0;
+  h.impls.ghEditImpl = ({ body }) => {
+    writes++;
+    h.state.body = body.replace("**Lifecycle:** DONE", "**Lifecycle:** READY");
+  };
+  const r = run(h);
+  assert.equal(writes, 1);
+  assert.equal(r.exitCode, 2);
+  assert.equal(h.log.some((x) => x[0] === "close" && x[1] === 1164), false);
+  void base;
+});
+
+test("comment pagination reads to exhaustion and fails closed at the safety bound", () => {
+  const full = JSON.stringify(Array.from({ length: 100 }, (_, i) => ({ id: i })));
+  let calls = 0;
+  const finite = (_c, args) => (++calls <= 3 ? full : JSON.stringify([{ id: 1 }]));
+  assert.equal(defaultReadComments({ repo: "o/r", number: 1, execFileImpl: finite }).length, 301);
+  assert.throws(() => defaultReadComments({ repo: "o/r", number: 1, execFileImpl: () => full }), /pagination bound reached/);
 });
 
 test("pure helpers", () => {

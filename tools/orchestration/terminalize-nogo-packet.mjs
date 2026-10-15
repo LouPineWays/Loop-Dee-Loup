@@ -62,19 +62,31 @@ export function parseQualificationResult(body) {
   };
 }
 
-// Pure. True when the packet body carries the exact one-shot `claudeQualification` record for this pair.
+// Pure. True only when the packet body carries exactly ONE `claudeQualification` record and it is the
+// canonical grant the workflow itself requires (.github/workflows/ldl-launcher.yml claude-qualification):
+// this pair, oneShot true, scope claude-sandbox-child-egress-v1, host ubuntu-22.04. A weaker, wrong-scope
+// or additional conflicting record never qualifies.
 export function packetHasQualificationRecord(packetBody, { controlIssue, executionIssue }) {
-  for (const m of String(packetBody ?? "").matchAll(/```json\s*\n([\s\S]*?)\n```/g)) {
+  const grants = [];
+  for (const m of String(packetBody ?? "").matchAll(/```json\s*\n([\s\S]*?)\n\s*```/g)) {
     let record;
     try {
       record = JSON.parse(m[1]);
     } catch {
       continue;
     }
-    const q = record?.claudeQualification;
-    if (q && q.oneShot === true && Number(q.controlIssue) === controlIssue && Number(q.executionIssue) === executionIssue) return true;
+    if (record && typeof record === "object" && "claudeQualification" in record) grants.push(record.claudeQualification);
   }
-  return false;
+  const [g] = grants;
+  return (
+    grants.length === 1 &&
+    !!g &&
+    Number(g.controlIssue) === controlIssue &&
+    Number(g.executionIssue) === executionIssue &&
+    g.oneShot === true &&
+    g.scope === "claude-sandbox-child-egress-v1" &&
+    g.host === "ubuntu-22.04"
+  );
 }
 
 // Pure. Selects the single trustworthy NO-GO result from the packet's comments, or explains the refusal.
@@ -91,6 +103,24 @@ export function selectNoGoResult(comments, { controlIssue, executionIssue }) {
   if (r.verdict !== "NO-GO") return { ok: false, reason: `qualification verdict is ${JSON.stringify(r.verdict)}, not NO-GO; only a consumed NO-GO is terminalized here` };
   if (!r.attemptId) return { ok: false, reason: "qualification result carries no attempt id" };
   return { ok: true, result: r, url: c.html_url ?? null };
+}
+
+const TERMINAL_MARKER = "tools/orchestration/terminalize-nogo-packet.mjs";
+
+// Pure. The control may be retired only while it still sits at the pre-dispatch qualification state
+// (Lifecycle READY, no PR / Stage 1 / Stage 2 pointers), or when resuming this tool's own earlier
+// terminal write (Lifecycle DONE carrying this tool's Terminal result marker). A control that advanced
+// (REVIEW, AUDIT, ...) or carries downstream pointers is never rewritten.
+export function controlIsRetirable(body) {
+  const lifecycle = (bulletValue(body, "Lifecycle") ?? "").trim();
+  const downstreamClear = ["PR", "Stage 1", "Stage 2"].every((l) => {
+    const v = bulletValue(body, l);
+    return v === null || /^none\b/i.test(v.trim());
+  });
+  if (!downstreamClear) return { ok: false, reason: "control carries a PR / Stage 1 / Stage 2 pointer; it has advanced beyond qualification" };
+  if (/^READY\b/i.test(lifecycle)) return { ok: true, resume: false };
+  if (/^DONE\b/i.test(lifecycle) && String(bulletValue(body, "Terminal result") ?? "").includes(TERMINAL_MARKER)) return { ok: true, resume: true };
+  return { ok: false, reason: `control Lifecycle is ${JSON.stringify(lifecycle || null)}, not the pre-dispatch READY qualification state` };
 }
 
 // Pure. Composes the terminal control body. The Execution pointer is kept (it names the now-closed
@@ -119,9 +149,10 @@ function packetComment({ controlIssue, attemptId, url }) {
   );
 }
 
-function defaultReadComments({ repo, number, execFileImpl = execFileSync }) {
+export function defaultReadComments({ repo, number, execFileImpl = execFileSync }) {
   const all = [];
-  for (let page = 1; page < 50; page++) {
+  for (let page = 1; ; page++) {
+    if (page > 200) throw new Error(`comment pagination bound reached for ${repo}#${number}; refusing to judge on incomplete evidence`);
     const raw = execFileImpl("gh", ["api", `repos/${repo}/issues/${number}/comments?per_page=100&page=${page}`], { encoding: "utf8", maxBuffer: 20 * 1024 * 1024 });
     const batch = JSON.parse(raw);
     if (!Array.isArray(batch)) throw new Error(`malformed comments response for ${repo}#${number}`);
@@ -160,6 +191,8 @@ export function terminalizeNoGoPacket(
   if (!pointer.ok || pointer.issue !== e) errors.push(`control Execution pointer does not name exactly #${e}`);
   const parent = parentLoopIdentifiesControl(packet.body, c);
   if (!parent.ok) errors.push(parent.reason);
+  const retirable = controlIsRetirable(control.body);
+  if (!retirable.ok) errors.push(retirable.reason);
   if (!packetHasQualificationRecord(packet.body, { controlIssue: c, executionIssue: e })) errors.push(`packet #${e} carries no exact one-shot claudeQualification record for control #${c}`);
   const selected = selectNoGoResult(comments, { controlIssue: c, executionIssue: e });
   if (!selected.ok) errors.push(selected.reason);
@@ -186,8 +219,17 @@ export function terminalizeNoGoPacket(
   if (snapshot.exitCode === 2) return { exitCode: 2, state: "REJECTED", controlIssue: c, executionIssue: e, errors: snapshot.errors, message: snapshot.message };
   if (snapshot.exitCode !== 0) return { exitCode: 1, message: snapshot.message };
 
+  // A successor activation may legitimately treat the temporary OPEN/DONE control as terminal. Re-read
+  // immediately before closing and refuse unless the control is still exactly the terminal snapshot just
+  // written, so a newly activated successor control is never closed underneath its own READY snapshot.
   try {
-    if (control.state !== "CLOSED") closeImpl({ repo, issue: c });
+    if (control.state !== "CLOSED") {
+      const live = readIssueImpl({ repo, number: c, fields: ["body", "state"] });
+      if (live.state !== "OPEN" || String(live.body ?? "").trim() !== proposedBody.trim()) {
+        return { exitCode: 2, state: "REJECTED", controlIssue: c, executionIssue: e, errors: ["control changed after the terminal snapshot was written"], message: `Not closing ${repo}#${c}: it no longer matches the terminal snapshot just written (a successor may have been activated). Left open; inspect before rerunning.` };
+      }
+      closeImpl({ repo, issue: c });
+    }
   } catch (err) {
     return { exitCode: 1, message: `terminal snapshot written for #${c} but close failed: ${err.message}; rerun to resume.` };
   }
