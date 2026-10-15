@@ -894,6 +894,12 @@ test("qualification mock: any non-PASS evidence is an honest NO-GO with a nonzer
     [{ stream: "" }, /benign=failed/],
     [{ stream: streamOf({ extra: [{ message: { content: [{ type: "tool_use", id: "t3", name: "Edit", input: { file_path: "x" } }] } }] }) }, /benign=unexpected-tool/],
     [{ stream: streamOf({ extra: [{ message: { content: [{ type: "tool_use", id: "t4", name: "Bash", input: { command: "git push" } }] } }] }) }, /unexpected-tool/],
+    // Issue #1175 Audit #1177: ambiguous/replayed stream evidence is NO-GO, never a surviving-last-write PASS.
+    [{ stream: streamOf({ extra: [{ message: { content: [{ type: "tool_result", tool_use_id: "t2", content: "CODE=000" }] } }] }) }, /egress=ambiguous/],
+    [{ stream: JSON.stringify({ message: { content: [{ type: "tool_result", tool_use_id: "t2", content: "CODE=200" }] } }) + "\n" + streamOf() }, /ambiguous/],
+    [{ stream: streamOf({ extra: [{ message: { content: [{ type: "tool_use", id: "t2", name: "Edit", input: { file_path: "x" } }] } }] }) }, /ambiguous/],
+    [{ stream: streamOf({ extra: [{ message: { content: [{ type: "tool_result", tool_use_id: "ghost", content: "x" }] } }] }) }, /ambiguous/],
+    [{ stream: streamOf({ extra: [{ message: { content: [{ type: "tool_use", name: "Bash", input: { command: BENIGN } }] } }] }) }, /ambiguous/],
     [{ claudeThrows: true }, /runtime failure: claude exploded/],
     [{ failAt: "npm install" }, /runtime failure/],
     [{ failAt: "bubblewrap socat" }, /runtime failure/],
