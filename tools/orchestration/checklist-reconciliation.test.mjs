@@ -558,3 +558,41 @@ test("a result without reconciliation keeps the #883 behavior: checklist cloned 
   const none = await runRecord({ repo: REPO, auditIssue: AUDIT, evidence: [] }, makeIo(makeWorld()));
   assert.equal(none.exitCode, 2);
 });
+
+// -- Stage 1 correction (PR #1194 review, issue #1193) ------------------------------------------
+
+test("stage1: evidence-free reconciliation must name every FAIL item", async () => {
+  const world = makeWorld(); // report FAILs items 1 and 2; reconciliation names only item 1
+  addReconciliation(world);
+  await refusedWithoutPosting(world, /must name every FAIL item/, { evidence: [] });
+});
+
+test("stage1: an authority comment edited after the audit was created is rejected", async () => {
+  const world = makeWorld();
+  world.comments[WORK][0].updated_at = ts(30); // created before the audit, restated afterward
+  addReconciliation(world);
+  await refusedWithoutPosting(world, /was not recorded before the audit existed/);
+});
+
+test("stage1: canonical glyph-marker verification results are parsed", () => {
+  const text = "## Verification\n1. ❌ failed\n2. ✅ passed\n3. ✔️ passed\n4. ✗ failed\n";
+  assert.deepEqual([...parseReportVerificationStatuses(text)], [[1, "FAIL"], [2, "PASS"], [3, "PASS"], [4, "FAIL"]]);
+});
+
+test("stage1: a reconciliation comment in the same second as its result is ordered by comment id", async () => {
+  const world = makeWorld();
+  addReconciliation(world, {}, { created: ts(20) });
+  const ok = await record(world);
+  assert.equal(ok.state, "EVIDENCE_RECORDED", JSON.stringify(ok));
+  const result = world.comments[WORK].find((c) => c.id >= 5000);
+  result.created_at = ts(20); // same second as the reconciliation (id 102 < result id)
+  assert.equal((await evaluate(world)).status, Status.SATISFIED);
+});
+
+test("stage1: a replacement stripped of reconciliation provenance is AMBIGUOUS", async () => {
+  const { world, number } = await preparedWorld();
+  world.issues[number].body = world.issues[number].body.replace(/- Item 1 previous requirement \(verbatim\):[^\n]*\n/, "");
+  const r = await evaluate(world);
+  assert.equal(r.status, Status.AMBIGUOUS);
+  assert.match(r.reason, /lacks the reconciliation URL or the verbatim/);
+});

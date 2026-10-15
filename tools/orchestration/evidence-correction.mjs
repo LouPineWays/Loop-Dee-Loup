@@ -341,10 +341,11 @@ export function parseReportVerificationStatuses(reportText) {
   for (let i = start + 1; i < lines.length; i++) {
     const h = /^(#+)\s/.exec(lines[i]);
     if (h && h[1].length <= level) break;
-    const m = /^\s*(\d{1,3})[.)]\s+\**\s*(PASS|FAIL|BLOCKED)\b/i.exec(lines[i]);
+    // Word tokens (PASS/FAIL/BLOCKED) and the canonical stage2-report glyph markers ("1. ❌ ...").
+    const m = /^\s*(\d{1,3})[.)]\s+\**\s*(?:(PASS|FAIL|BLOCKED)\b|(✅|✔️|✔|☑️|☑)|(❌|✗|✘))/i.exec(lines[i]);
     if (!m) continue;
     if (out.has(Number(m[1]))) return null;
-    out.set(Number(m[1]), m[2].toUpperCase());
+    out.set(Number(m[1]), m[2] ? m[2].toUpperCase() : m[3] ? "PASS" : "FAIL");
   }
   return out.size > 0 ? out : null;
 }
@@ -643,7 +644,7 @@ async function proveChecklistBaselineCorrection(io, { repo, pr, body, mergeCommi
 // original accepted requirements, which a reviewer finding (always later) can never be. Never throws.
 async function proveChecklistReconciliation(io, ctx) {
   const no = (reason) => ({ proven: false, reason });
-  const { repo, url, declaredItems = null, notAfterMs = null, audit, body, workIssue, auditIssue, mergeCommit, reportUrl, reportMs, reportComment } = ctx;
+  const { repo, url, declaredItems = null, notAfterMs = null, notAfterId = null, requireAllFailed = false, audit, body, workIssue, auditIssue, mergeCommit, reportUrl, reportMs, reportComment } = ctx;
   const m = commentUrlPattern(audit.host).exec(String(url ?? ""));
   if (!m || m[1].toLowerCase() !== repo.toLowerCase()) return no(`${url} is not an issue-comment URL in ${repo}`);
   let comment;
@@ -658,7 +659,10 @@ async function proveChecklistReconciliation(io, ctx) {
   if (comment.user?.login !== audit.author) return no(`${url} is not authored by the audit's controlling account ${JSON.stringify(audit.author)}`);
   const createdMs = new Date(comment.created_at).getTime();
   if (!(createdMs > reportMs)) return no("the reconciliation comment predates the NOT CLEAN report it answers");
-  if (notAfterMs !== null && !(createdMs < notAfterMs)) return no("the reconciliation comment is not earlier than the result comment that cites it");
+  // GitHub timestamps have one-second resolution: equal seconds are ordered by the monotonic comment id.
+  if (notAfterMs !== null && !(createdMs < notAfterMs || (createdMs === notAfterMs && notAfterId !== null && Number(comment.id) < Number(notAfterId)))) {
+    return no("the reconciliation comment is not earlier than the result comment that cites it");
+  }
   const parsed = parseChecklistReconciliation(comment.body ?? "", { host: audit.host });
   if (!parsed.ok) return no(`the reconciliation comment is malformed: ${parsed.errors.join("; ")}`);
   const f = parsed.fields;
@@ -684,6 +688,13 @@ async function proveChecklistReconciliation(io, ctx) {
   if (!parsedItems) return no("the audit's Verification checklist is not a consecutive numbered list");
   const statuses = parseReportVerificationStatuses(reportComment?.body ?? "");
   if (!statuses) return no("the NOT CLEAN report has no parseable per-item Verification results");
+  if (requireAllFailed) {
+    // Evidence-free satisfaction is only valid when the reconciliation answers EVERY reviewer-failed item.
+    const failed = [...statuses].filter(([, st]) => st === "FAIL").map(([n]) => n).sort((a, b) => a - b);
+    if (failed.length !== numbers.length || failed.some((n, i) => n !== numbers[i])) {
+      return no(`no evidence was supplied, so the reconciliation must name every FAIL item (failed: ${failed.join(", ")}; reconciled: ${numbers.join(", ")})`);
+    }
+  }
   const items = [];
   for (const n of numbers) {
     const item = parsedItems.items.find((i) => i.number === n);
@@ -749,8 +760,8 @@ async function verifyEvidenceComment(io, { repo, url, trustedLogin, afterMs = nu
     return `${url} is authored by ${JSON.stringify(comment.user?.login ?? null)}, not the audit's controlling account ${JSON.stringify(trustedLogin)}`;
   }
   if (afterMs !== null && !(new Date(comment.created_at).getTime() > afterMs)) return `${url} predates the NOT CLEAN report it is meant to answer`;
-  if (beforeMs !== null && !(new Date(comment.created_at).getTime() < beforeMs)) {
-    return `${url} was not recorded before the audit existed, so it cannot evidence the ORIGINAL accepted requirements`;
+  if (beforeMs !== null && !(new Date(comment.created_at).getTime() < beforeMs && new Date(comment.updated_at ?? comment.created_at).getTime() < beforeMs)) {
+    return `${url} was not recorded before the audit existed (created or last edited), so it cannot evidence the ORIGINAL accepted requirements`;
   }
   return null;
 }
@@ -907,7 +918,7 @@ export async function evaluateEvidenceCorrection({ repo, auditIssue }, io = defa
     // Issue #1193: the result declares a checklist reconciliation. Re-derive it from the recorded
     // reconciliation comment on every evaluation (record, verify, prepare, gate, replacement check).
     const proof = await proveChecklistReconciliation(io, {
-      repo, url: f.reconciliationUrl, declaredItems: f.reconciledItems, notAfterMs: resultAtMs, audit, body, workIssue, auditIssue, mergeCommit, reportUrl, reportMs, reportComment,
+      repo, url: f.reconciliationUrl, declaredItems: f.reconciledItems, notAfterMs: resultAtMs, notAfterId: comment.id, requireAllFailed: f.evidenceUrls.length === 0, audit, body, workIssue, auditIssue, mergeCommit, reportUrl, reportMs, reportComment,
     });
     if (!proof.proven) return refuse(Status.INCOMPLETE, `checklist reconciliation not verified: ${proof.reason}`, base);
     return finishSatisfied({
@@ -941,6 +952,23 @@ export async function evaluateEvidenceCorrection({ repo, auditIssue }, io = defa
       // and name the same PR; anything else is not the one authorized corrected successor.
       if (parseMergedPrNumber(replacement.body ?? "") !== pr) {
         return refuse(Status.AMBIGUOUS, `re-audit #${replacement.number}'s Merged PR field does not name PR #${pr}`, { ...base, resultUrl, ...extra });
+      }
+      if (checklistReconciliation) {
+        const rb = normalizeEol(replacement.body ?? "");
+        const missing =
+          !rb.includes(checklistReconciliation.url) ||
+          checklistReconciliation.items.some(
+            (i) =>
+              !rb.includes(`- Item ${i.number} previous requirement (verbatim): ${i.previous}`) ||
+              !rb.includes(`- Item ${i.number} reconciled requirement (verbatim): ${i.replacement}`),
+          );
+        if (missing) {
+          return refuse(
+            Status.AMBIGUOUS,
+            `re-audit #${replacement.number} lacks the reconciliation URL or the verbatim previous/reconciled requirement provenance`,
+            { ...base, resultUrl, ...extra },
+          );
+        }
       }
       if (parseVerificationChecklistRef(replacement.body ?? "") !== correctedChecklist) {
         return refuse(
@@ -999,7 +1027,7 @@ export async function runRecord({ repo, auditIssue, evidence, reconciliation = n
     const reportComment = (await io.ghApi(`repos/${repo}/issues/${auditIssue}/comments`)).find((c) => c.html_url === before.reportUrl);
     if (!reportComment || sha256(reportComment.body ?? "") !== before.reportBodyHash) return { proven: false, reason: "the NOT CLEAN report changed after the evidence correction was evaluated" };
     return proveChecklistReconciliation(io, {
-      repo, url: reconciliationUrl, audit, body: audit.body, workIssue: before.workIssue, auditIssue, mergeCommit: before.mergeCommit,
+      repo, url: reconciliationUrl, requireAllFailed: urls.length === 0, audit, body: audit.body, workIssue: before.workIssue, auditIssue, mergeCommit: before.mergeCommit,
       reportUrl: before.reportUrl, reportMs: new Date(reportComment.created_at).getTime(), reportComment,
     });
   };
