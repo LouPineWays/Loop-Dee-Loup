@@ -832,6 +832,16 @@ export const HARD_MODULE_DEPENDENCIES = [
   // Issue #1047 Stage 1 finding (P2): ready-dispatch-gate.mjs dynamically imports
   // computeDispatchReady from prepare-dispatch-manifest.mjs for BLOCKED-unit recovery.
   { dest: "tools/orchestration/ready-dispatch-gate.mjs", dependsOnDest: "tools/orchestration/prepare-dispatch-manifest.mjs" },
+  // Issue #1198 Stage 1 finding (P2): the consumed-qualification guard hard-imports the workflow's
+  // own claim parser and bullet reader; the terminalizer hard-imports the same modules plus the gate.
+  { dest: "tools/orchestration/ready-dispatch-gate.mjs", dependsOnDest: "tools/orchestration/attempt-claim.mjs" },
+  { dest: "tools/orchestration/ready-dispatch-gate.mjs", dependsOnDest: "tools/orchestration/launch-authorization.mjs" },
+  { dest: "tools/orchestration/retire-consumed-qualification.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
+  { dest: "tools/orchestration/retire-consumed-qualification.mjs", dependsOnDest: "tools/orchestration/attempt-claim.mjs" },
+  { dest: "tools/orchestration/retire-consumed-qualification.mjs", dependsOnDest: "tools/orchestration/launch-authorization.mjs" },
+  { dest: "tools/orchestration/retire-consumed-qualification.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/retire-consumed-qualification.mjs", dependsOnDest: "tools/orchestration/write-control-snapshot.mjs" },
+  { dest: "tools/orchestration/retire-consumed-qualification.mjs", dependsOnDest: "tools/review-watch/lifecycle-gate.mjs" },
 ];
 
 // Pure. Given one install/update run's final toInstall/toSkip classification, returns one

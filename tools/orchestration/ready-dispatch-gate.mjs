@@ -190,6 +190,10 @@
 import { enforceControlPlaneFreshness } from "./control-plane-freshness.mjs";
 import { execFileSync } from "node:child_process";
 import { readGithubIssue, readGithubPr } from "./github-read.mjs";
+// Issue #1198: consumed one-shot qualification guard reuses the workflow's own claim parser and
+// bullet reader (neither imports this file, so no cycle) rather than a second competing grammar.
+import { parseAttemptClaims, LAUNCH_ATTEMPT_HEADING, SETTLED_PHASES } from "./attempt-claim.mjs";
+import { parseBoldBullets } from "./launch-authorization.mjs";
 // Deliberate, documented exception to this file's usual practice of not importing
 // tools/review-watch internals (issue #407 unit 407-B, Shared Contract item 8) — the same
 // exception next-review-transition-gate.mjs's own module comment already documents for its
@@ -1288,6 +1292,208 @@ export function evaluateReadyDispatchGate(body, controlIssueNumber = null) {
   }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Issue #1198 (control #1197): consumed one-shot qualification dispatch guard.
+//
+// A one-shot `claudeQualification` proof packet (`.github/workflows/ldl-launcher.yml`'s
+// `claude-qualification` job) is consumed by ONE workflow attempt: a trusted `Launch Attempt (v1)`
+// claim with nonce `qualification-<packet>` on the control thread, then a redacted `Claude
+// Qualification Result (v1)` on both threads. Nothing in the READY path used to notice that: the
+// thin control kept `Lifecycle: READY` / `Route: implementation worker` after a NO-GO, so a fresh
+// gate still returned READY_TO_DISPATCH for the consumed packet (the #1164/#1180 incident).
+//
+// This section is pure detection, shared verbatim with `retire-consumed-qualification.mjs` so the
+// dispatch guard and the terminalizer can never disagree about what "consumed" means. Evidence
+// trust mirrors the workflow: only comments authored by `github-actions[bot]` count as claims or
+// results, so an untrusted look-alike can neither consume nor retire a packet.
+// ---------------------------------------------------------------------------------------------
+export const QUALIFICATION_NONCE_PREFIX = "qualification-";
+export const QUALIFICATION_RESULT_HEADING = "## Claude Qualification Result (v1)";
+export const QUALIFICATION_SCOPE = "claude-sandbox-child-egress-v1";
+export const QUALIFICATION_HOST = "ubuntu-22.04";
+const QUALIFICATION_TRUSTED_AUTHOR = "github-actions[bot]";
+
+// Pure. Same fence reader the workflow uses: every ```json fence that parses to an object carrying
+// a `claudeQualification` key contributes that value; unparseable fences are skipped.
+export function extractQualificationGrants(packetBody) {
+  const grants = [];
+  for (const m of String(packetBody ?? "").matchAll(/```json\s*\n([\s\S]*?)\n\s*```/g)) {
+    let obj;
+    try {
+      obj = JSON.parse(m[1]);
+    } catch {
+      continue;
+    }
+    if (obj && typeof obj === "object" && !Array.isArray(obj) && "claudeQualification" in obj) grants.push(obj.claudeQualification);
+  }
+  return grants;
+}
+
+// Pure. Is this execution packet a one-shot qualification proof packet for (control, packet)?
+//   { kind: "none" }                       no grant names this packet: ordinary work.
+//   { kind: "qualification", grant }       exactly one exact one-shot grant for this pair.
+//   { kind: "ambiguous", reason }          the packet claims to be a qualification (a grant names
+//                                          it) but the grant is duplicated, malformed, or does not
+//                                          match this pair/scope/host: never ordinary work.
+// A grant that does not name exactly this pair is malformed and classifies as ambiguous.
+export function classifyQualificationPacket(packetBody, { controlIssue, executionIssue }) {
+  // Any claudeQualification grant carried by this packet is this packet's own qualification claim.
+  // A grant naming a different/mistyped packet is malformed (never "another packet's record"), so it
+  // classifies as ambiguous rather than letting the packet pass as ordinary work.
+  const named = extractQualificationGrants(packetBody);
+  if (named.length === 0) return { kind: "none" };
+  if (named.length !== 1) {
+    return { kind: "ambiguous", reason: `packet #${executionIssue} carries ${named.length} claudeQualification grants (exactly one is required)` };
+  }
+  const g = named[0];
+  if (!g || typeof g !== "object" || g.controlIssue !== Number(controlIssue) || g.executionIssue !== Number(executionIssue)) {
+    return { kind: "ambiguous", reason: `packet #${executionIssue}'s claudeQualification grant does not name exactly control #${controlIssue} and packet #${executionIssue}` };
+  }
+  if (g.oneShot !== true || g.scope !== QUALIFICATION_SCOPE || g.host !== QUALIFICATION_HOST) {
+    return { kind: "ambiguous", reason: `packet #${executionIssue}'s claudeQualification grant is not an exact one-shot ${QUALIFICATION_SCOPE} grant for ${QUALIFICATION_HOST}` };
+  }
+  return { kind: "qualification", grant: g };
+}
+
+function parseIssueNumberField(value) {
+  const m = /^#?(\d+)$/.exec(String(value ?? "").trim());
+  return m ? Number(m[1]) : null;
+}
+
+// Pure. Normalizes GitHub REST comments ({ id, body, user }) to the shape attempt-claim.mjs reads.
+// Only the Actions bot is trusted; a human author is never granted claim authority from here.
+export function normalizeQualificationComments(restComments) {
+  return (Array.isArray(restComments) ? restComments : []).map((c) => ({
+    id: c?.id,
+    body: String(c?.body ?? ""),
+    author: c?.user?.login ?? null,
+    authorPermission: "none",
+    trusted: c?.user?.login === QUALIFICATION_TRUSTED_AUTHOR && c?.user?.type === "Bot",
+  }));
+}
+
+// Pure. Collects the trusted consumption evidence for (control, packet) from both threads.
+//   claims     trusted `Launch Attempt (v1)` comments on the control thread with this packet's
+//              nonce (latest phase per attempt id, as parseAttemptClaims defines it).
+//   results    trusted `Claude Qualification Result (v1)` comments that name exactly this pair,
+//              with the thread they were found on.
+//   conflicts  trusted result comments on the PACKET thread that do not name this pair (a result
+//              for a different packet/control cannot legitimately live there).
+export function collectQualificationEvidence({ controlComments, packetComments, controlIssue, executionIssue }) {
+  const nonce = `${QUALIFICATION_NONCE_PREFIX}${executionIssue}`;
+  const control = normalizeQualificationComments(controlComments);
+  const packet = normalizeQualificationComments(packetComments);
+  // parseAttemptClaims trusts `author === github-actions[bot]`; drop non-Bot look-alikes first.
+  const claims = parseAttemptClaims(control.filter((c) => c.trusted)).filter((c) => c.nonce === nonce);
+  // parseAttemptClaims keeps only the latest comment per attempt id, which would hide a
+  // contradiction (e.g. a settled PASS then a settled NO_GO). Re-scan the physical trusted
+  // comments and report any attempt whose settled records disagree.
+  const settledOutcomes = new Map();
+  for (const c of control) {
+    if (!c.trusted) continue;
+    const first = c.body.split(/\r?\n/).find((l) => l.trim() !== "")?.trim();
+    if (first !== LAUNCH_ATTEMPT_HEADING) continue;
+    const f = parseBoldBullets(c.body);
+    if (f.get("Authorization nonce") !== nonce) continue;
+    if (!SETTLED_PHASES.has((f.get("Phase") ?? "").toUpperCase())) continue;
+    const id = f.get("Attempt id");
+    if (!id) continue;
+    if (!settledOutcomes.has(id)) settledOutcomes.set(id, new Set());
+    settledOutcomes.get(id).add(`${(f.get("Phase") ?? "").toUpperCase()}/${f.get("Outcome") ?? ""}`);
+  }
+  const claimConflicts = [...settledOutcomes.entries()].filter(([, v]) => v.size > 1).map(([attemptId, v]) => ({ attemptId, settled: [...v] }));
+  const results = [];
+  const conflicts = [];
+  for (const [where, list] of [["control", control], ["packet", packet]]) {
+    for (const c of list) {
+      if (!c.trusted) continue;
+      const first = c.body.split(/\r?\n/).find((l) => l.trim() !== "")?.trim();
+      if (first !== QUALIFICATION_RESULT_HEADING) continue;
+      const f = parseBoldBullets(c.body);
+      const rc = parseIssueNumberField(f.get("Control issue"));
+      const rp = parseIssueNumberField(f.get("Proof packet"));
+      const entry = {
+        where,
+        commentId: c.id,
+        verdict: (f.get("Verdict") ?? "").trim().toUpperCase(),
+        attemptId: f.get("Attempt id") ?? null,
+        host: f.get("Host") ?? null,
+        controlIssue: rc,
+        proofPacket: rp,
+      };
+      if (rc === Number(controlIssue) && rp === Number(executionIssue)) results.push(entry);
+      else if (where === "packet") conflicts.push(entry);
+    }
+  }
+  return { claims, results, conflicts, claimConflicts };
+}
+
+// Pure. True when any trusted durable evidence shows the packet's one-shot attempt was claimed,
+// resulted, or is in conflict.
+export function qualificationEvidenceExists(evidence) {
+  return evidence.claims.length > 0 || evidence.results.length > 0 || evidence.conflicts.length > 0 || (evidence.claimConflicts?.length ?? 0) > 0;
+}
+
+export function defaultListIssueComments({ repo, number }, { runImpl = execFileSync } = {}) {
+  const raw = runImpl("gh", ["api", "--paginate", "--slurp", `repos/${repo}/issues/${number}/comments?per_page=100`], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`GitHub REST comments response for ${repo}#${number} is not valid JSON: ${err.message}`);
+  }
+  if (!Array.isArray(parsed)) throw new Error(`GitHub REST comments response for ${repo}#${number} is not an array`);
+  // --slurp yields an array of pages; tolerate an already-flat array of comments too.
+  return parsed.flat();
+}
+
+// Async. The dispatch-point decision for a plain `Lifecycle: READY` control. Returns
+//   { action: "PROCEED" }                          ordinary work or an UNCONSUMED qualification
+//   { action: "REFUSE", reasons, evidence?, kind } a consumed one-shot qualification
+//   { action: "ERROR", message }                   evidence could not be read (fail closed)
+// Control-plane only: the signal is the trusted claim/result on the CONTROL thread (the workflow
+// always writes the claim there). The thick execution packet body is never read here; the packet
+// thread's comments are listed only once control-side consumption evidence already exists, to
+// report conflicting records.
+export async function evaluateQualificationDispatchGuard(
+  { repo, controlIssue, executionIssue },
+  { listCommentsImpl = defaultListIssueComments } = {},
+) {
+  let controlComments;
+  try {
+    controlComments = await listCommentsImpl({ repo, number: controlIssue });
+  } catch (err) {
+    return { action: "ERROR", message: `could not read one-shot qualification evidence for ${repo}#${controlIssue}: ${err.message}` };
+  }
+  const signal = collectQualificationEvidence({ controlComments, packetComments: [], controlIssue, executionIssue });
+  if (!qualificationEvidenceExists(signal)) return { action: "PROCEED" };
+  let packetComments;
+  try {
+    packetComments = await listCommentsImpl({ repo, number: executionIssue });
+  } catch (err) {
+    return { action: "ERROR", message: `could not read one-shot qualification evidence for ${repo}#${executionIssue}: ${err.message}` };
+  }
+  const evidence = collectQualificationEvidence({ controlComments, packetComments, controlIssue, executionIssue });
+  const attempts = [...new Set([...evidence.claims.map((c) => c.attemptId), ...evidence.results.map((r) => r.attemptId)].filter(Boolean))];
+  const verdicts = [...new Set(evidence.results.map((r) => r.verdict).filter(Boolean))];
+  return {
+    action: "REFUSE",
+    kind: "CONSUMED_QUALIFICATION",
+    reasons: [
+      `execution packet #${executionIssue} is a one-shot qualification proof whose attempt is already consumed ` +
+        `(attempt ${attempts.join(", ") || "unidentified"}; recorded result ${verdicts.join(", ") || "none recorded"}; ` +
+        `${evidence.claims.length} claim(s), ${evidence.results.length} result(s)${evidence.conflicts.length ? `, ${evidence.conflicts.length} conflicting result(s)` : ""}) — ` +
+        `a claimed proof is never new dispatch authorization; do not dispatch, retry, or redispatch it as an ordinary implementation worker. ` +
+        `Retire it with tools/orchestration/retire-consumed-qualification.mjs`,
+    ],
+    attempts,
+    verdicts,
+  };
+}
+
 // Pure. Parses a `git remote get-url origin` value into an "owner/repo" slug. Accepts the
 // two shapes a GitHub (or GitHub Enterprise) remote actually takes — the scp-like SSH form
 // (`git@host:owner/repo.git`) and any URL-with-scheme form (`https://host/owner/repo.git`,
@@ -2084,6 +2290,8 @@ async function checkReadyDispatchCore(
     ghPrListImpl = defaultGhPrList,
     // Issue #1008: Stage 1 evidence read for the READY partial-PR-checkpoint recovery check.
     stage1GateRunImpl = defaultStage1GateRun,
+    // Issue #1198: comment listing for the consumed one-shot qualification dispatch guard.
+    listCommentsImpl = defaultListIssueComments,
     // Issue #498 unit 498-B: left un-defaulted here (rather than defaulting straight to
     // `defaultRunPrepareDispatchManifestImpl`) so the effective default below can thread this
     // invocation's own `parseExecutionPlanImpl` through to `probeReplanRequired`'s dry-run
@@ -2630,6 +2838,31 @@ async function checkReadyDispatchCore(
       repo: resolvedRepo,
       executionIssue: result.executionIssue,
       ...(result.route !== undefined ? { route: result.route } : {}),
+    };
+  }
+
+  // Issue #1198 (control #1197): a one-shot qualification proof packet whose attempt is already
+  // consumed is never an ordinary implementation-worker dispatch,
+  // even while the thin control still advertises READY. Evaluated before any PR reconciliation:
+  // a qualification packet has no PR, and the stop must not depend on PR listing. An UNCONSUMED
+  // qualification packet and all ordinary packets fall through unchanged.
+  const qualificationGuard = await evaluateQualificationDispatchGuard(
+    { repo: resolvedRepo, controlIssue: Number(controlIssue), executionIssue: result.executionIssue },
+    { listCommentsImpl },
+  );
+  if (qualificationGuard.action === "ERROR") {
+    return { exitCode: 1, message: `Operational failure evaluating the one-shot qualification dispatch guard while evaluating READY: ${qualificationGuard.message}` };
+  }
+  if (qualificationGuard.action === "REFUSE") {
+    return {
+      exitCode: 4,
+      state: "BLOCKED",
+      controlIssue: Number(controlIssue),
+      repo: resolvedRepo,
+      executionIssue: result.executionIssue,
+      reasons: qualificationGuard.reasons,
+      blockerReconciliationEligible: false,
+      qualificationGuard: qualificationGuard.kind,
     };
   }
 
