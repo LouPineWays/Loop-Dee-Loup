@@ -50,7 +50,7 @@ import { parseAuthority, EXECUTOR_COMPONENTS } from "./executor-substrate-author
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 
 const DEFAULT_ROUTE = "implementation worker";
-const NOT_ACTIVE_WORDS = /\b(INACTIVE|REVOKED|SUPERSEDED|WITHDRAWN)\b/i;
+const NOT_ACTIVE_WORDS = /\b(INACTIVE|REVOKED|SUPERSEDED|WITHDRAWN|PROPOSED|UNAPPROVED|NOT[\s-]+(?:YET[\s-]+)?ACTIVE|NON[\s-]*ACTIVE)\b/i;
 
 // Pure. Finds a mechanically valid ACTIVE grant section in the thick Issue body.
 // Returns { ok: true, components } or { ok: false, reason }.
