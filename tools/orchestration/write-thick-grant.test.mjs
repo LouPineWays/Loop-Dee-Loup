@@ -494,3 +494,32 @@ test("permission lookup failure is an operational error, not a refusal", () => {
   assert.equal(r.exitCode, 1);
   assert.equal(h.writes.length, 0);
 });
+
+test("amend binds worker_unit_dispatch to its parent execution Issue only", () => {
+  const unit = (parentExecutionIssue) => ({ origin: "worker_unit_dispatch", unitCommentUrl: "https://github.com/o/r/issues/20#issuecomment-1", parentExecutionIssue, sharedContractUrl: "https://github.com/o/r/issues/20#issuecomment-2" });
+  assert.equal(amend(amendHarness(), { authorityEnvelope: unit(20) }).state, "AMENDED");
+  const h = amendHarness();
+  assert.equal(amend(h, { authorityEnvelope: unit(21) }).state, "NO_EXECUTION_AUTHORITY");
+  assert.equal(h.writes.length, 0);
+});
+
+test("amend corroborates the trigger against durable control state (lifecycle, state, recorded route)", () => {
+  const cases = [
+    ["- **Lifecycle:** BLOCKED\n- **Execution:** #20\n", "OPEN"],
+    ["- **Execution:** #20\n", "OPEN"],
+    ["- **Lifecycle:** READY\n- **Route:** implementation worker\n- **Execution:** #20\n", "OPEN"],
+  ];
+  for (const [control] of cases) {
+    const h = amendHarness();
+    h.store[10].body = control;
+    const r = amend(h);
+    assert.equal(r.state, "NO_EXECUTION_AUTHORITY", control);
+    assert.equal(h.writes.length, 0);
+  }
+  const closed = amendHarness();
+  closed.store[10].state = "CLOSED";
+  assert.equal(amend(closed).state, "NO_EXECUTION_AUTHORITY");
+  const ok = amendHarness();
+  ok.store[10].body = "- **Lifecycle:** EXECUTING\n- **Route:** direct\n- **Execution:** #20\n";
+  assert.equal(amend(ok).state, "AMENDED");
+});

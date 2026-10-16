@@ -36,7 +36,7 @@ import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
 import { readGithubIssue } from "./github-read.mjs";
-import { resolveRepoIdentity, readExecutionBulletField, parseExecutionPointer } from "./ready-dispatch-gate.mjs";
+import { resolveRepoIdentity, readExecutionBulletField, parseExecutionPointer, parseControlBullet, isKnownLifecycleValue, isBlockingLifecycleValue, isNoneSentinel } from "./ready-dispatch-gate.mjs";
 import { classifyExecutionAuthority } from "./execution-authority-gate.mjs";
 import { parseAuthority, classifyPath, normalizePath, EXECUTOR_SUBSTRATE } from "./executor-substrate-authority.mjs";
 import { findActiveGrantWitness, isCanonicalActiveHeading, parentLoopIdentifiesControl } from "./activate-control-pair.mjs";
@@ -374,6 +374,9 @@ export function classifyAmendAuthority(trigger, controlIssue, executionIssue) {
     return { ok: false, reason: `authorized ${trigger.origin} does not name exactly control #${c} / execution #${e}` };
   }
   if (trigger.origin === "correction_dispatch" && trigger.controlIssue === c) return { ok: true };
+  // A genuinely dispatched plan unit carries only the parent execution Issue; the caller separately
+  // verifies that control C currently points to E, so binding parentExecutionIssue === E is safe.
+  if (trigger.origin === "worker_unit_dispatch" && trigger.parentExecutionIssue === e) return { ok: true };
   return { ok: false, reason: `origin "${trigger.origin}" cannot be bound to control #${c} / execution #${e}` };
 }
 
@@ -414,6 +417,22 @@ export function checkAmendThickGrant(
     const field = readExecutionBulletField(control.issue.body ?? "");
     const pointer = field.conflict || !field.value ? { ok: false } : parseExecutionPointer(field.value);
     if (!pointer.ok || pointer.issue !== e) return refuse("NOT_SOLE_EXECUTION", `control ${repo}#${c} does not name #${e} as its sole Execution pointer; nothing was written.`);
+    // The trigger is caller-supplied and shape-validated only, so corroborate it against durable control
+    // state: the control must be OPEN in a live, non-blocking Lifecycle, and a control_plane_dispatch route
+    // must equal the Route the control durably records (when one is settled). A fabricated envelope that
+    // does not match the control's own recorded state never authorizes the write.
+    const body = control.issue.body ?? "";
+    const lifecycle = parseControlBullet(body, "Lifecycle");
+    const lifecycleWord = lifecycle ? lifecycle.split(/\s+/)[0].replace(/[^A-Za-z_]/g, "") : "";
+    if (control.issue.state !== "OPEN" || !isKnownLifecycleValue(lifecycleWord) || isBlockingLifecycleValue(lifecycleWord)) {
+      return refuse("NO_EXECUTION_AUTHORITY", `control ${repo}#${c} is not OPEN in a live, non-blocking Lifecycle, so no current dispatch is corroborated; nothing was written.`);
+    }
+    if (authorityEnvelope?.origin === "control_plane_dispatch") {
+      const recorded = parseControlBullet(body, "Route");
+      if (recorded && !isNoneSentinel(recorded) && recorded.trim().toLowerCase() !== String(authorityEnvelope.route).trim().toLowerCase()) {
+        return refuse("NO_EXECUTION_AUTHORITY", `dispatch route does not match the Route recorded on control ${repo}#${c}; nothing was written.`);
+      }
+    }
     return null;
   };
   const verifyApproval = () => {
