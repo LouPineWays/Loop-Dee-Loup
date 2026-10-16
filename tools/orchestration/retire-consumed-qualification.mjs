@@ -566,7 +566,12 @@ export async function checkRetireConsumedQualification(args, impls = {}) {
   if (pending.includes("control-record-comment")) {
     try {
       await i.commentImpl({ repo, issue: controlIssue, body: controlRecordComment({ controlIssue, executionIssue, attemptId, verdict }) });
-      completed.push("control-record-comment");
+      const listed = await i.listCommentsImpl({ repo, number: controlIssue });
+      if (recordState(listed, controlRecordComment({ controlIssue, executionIssue, attemptId, verdict }), { executionIssue, attemptId }) === "present") {
+        completed.push("control-record-comment");
+      } else {
+        controlRecordWarning = "the control record comment did not read back; re-running will post it";
+      }
     } catch (err) {
       controlRecordWarning = `could not post the control record comment: ${err.message}; re-running will post it`;
     }

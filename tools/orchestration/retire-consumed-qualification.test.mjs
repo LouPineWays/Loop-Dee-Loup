@@ -281,6 +281,29 @@ test("a failed control-record comment after both closes is a warning, never an u
   assert.equal(w.comments[C].filter((c) => c.body.startsWith(RETIREMENT_RECORD_HEADING)).length, 1);
 });
 
+test("a control-record comment that resolves without persisting is not reported completed (warning, then resumes)", async () => {
+  const w = world();
+  const realComment = w.impls.commentImpl;
+  let drop = true;
+  w.impls.commentImpl = (args) => {
+    if (drop && args.issue === C) {
+      w.log.push(["comment", C]);
+      return;
+    }
+    return realComment(args);
+  };
+  const r = await run(w);
+  assert.equal(r.exitCode, 0);
+  assert.equal(r.state, "RETIRED");
+  assert.ok(!r.completed.includes("control-record-comment"));
+  assert.match(r.warning, /did not read back/);
+  assert.equal(w.comments[C].filter((c) => c.body.startsWith(RETIREMENT_RECORD_HEADING)).length, 0);
+  drop = false;
+  const again = await run(w);
+  assert.equal(again.exitCode, 0);
+  assert.equal(w.comments[C].filter((c) => c.body.startsWith(RETIREMENT_RECORD_HEADING)).length, 1);
+});
+
 test("a silently non-persisting write fails the independent readback: PARTIAL, nothing else mutated", async () => {
   const w = world({ fail: { silentEdit: true } });
   const r = await run(w);
