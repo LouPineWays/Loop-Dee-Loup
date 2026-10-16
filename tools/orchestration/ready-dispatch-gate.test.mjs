@@ -20,7 +20,7 @@ import {
   describeExecutionConflict,
   evaluateReadyDispatchGate,
   classifyAuditIssue,
-  checkReadyDispatch,
+  checkReadyDispatch as checkReadyDispatchReal,
   verifyRoutedDispatchManifest,
   parseOwnerRepoFromRemoteUrl,
   resolveRepoIdentity,
@@ -43,6 +43,13 @@ import {
   evaluateQualificationDispatchGuard,
 } from "./ready-dispatch-gate.mjs";
 import { getActionEnvelope } from "./action-envelope.mjs";
+
+// Issue #1198: the consumed-qualification guard lists issue comments via `gh api`, which is
+// unauthenticated in CI. Default it to "no comments" so tests never reach the network; tests that
+// exercise the guard pass their own listCommentsImpl.
+function checkReadyDispatch(args, deps = {}) {
+  return checkReadyDispatchReal(args, { listCommentsImpl: async () => [], ...deps });
+}
 
 // Issue #311's real body (control Issue for execution Issue #310) — a genuine
 // READY-and-satisfied control Issue.
@@ -3912,7 +3919,7 @@ test("classifyQualificationPacket / collectQualificationEvidence: pure unit beha
 test("qualification guard: evaluateQualificationDispatchGuard returns PROCEED for ordinary work", async () => {
   const out = await evaluateQualificationDispatchGuard(
     { repo: Q_REPO, controlIssue: 1, executionIssue: 2 },
-    { ghIssueViewImpl: async () => ({ body: "plain", state: "OPEN" }) },
+    { listCommentsImpl: async () => [] },
   );
   assert.deepEqual(out, { action: "PROCEED" });
 });
