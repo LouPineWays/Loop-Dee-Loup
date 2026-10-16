@@ -3288,6 +3288,15 @@ export function isKnownAttributionDecoration(requested, returned) {
   return got === expected || got === `${expected}\n`;
 }
 
+// Issue #1215: byte-exact variant (no EOL normalization) for writers whose readback guarantee is
+// byte-exactness; the requested bytes, including CR/LF, must be preserved verbatim before the block.
+export function isKnownAttributionDecorationExact(requested, returned) {
+  const req = requested ?? "";
+  if (req.replace(/\n+$/, "").endsWith(CLAUDE_CODE_ATTRIBUTION_LINE)) return false;
+  const expected = `${req}\n\n${CLAUDE_CODE_ATTRIBUTION_LINE}`;
+  return returned === expected || returned === `${expected}\n`;
+}
+
 export function ghRestEditIssueBody({ repo, auditIssue, body, allowKnownAttribution = false }, runImpl = execFileSync) {
   const res = ghRestJson("PATCH", `repos/${repo}/issues/${auditIssue}`, { body }, runImpl);
   assertRestIssueIdentity(res, { repo, auditIssue, what: "issue update" });
