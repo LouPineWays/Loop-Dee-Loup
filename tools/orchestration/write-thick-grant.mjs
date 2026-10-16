@@ -26,7 +26,7 @@ import { readGithubIssue } from "./github-read.mjs";
 import { resolveRepoIdentity, readExecutionBulletField, parseExecutionPointer } from "./ready-dispatch-gate.mjs";
 import { parseAuthority } from "./executor-substrate-authority.mjs";
 import { findActiveGrantWitness } from "./activate-control-pair.mjs";
-import { ghRestEditIssueBody, isKnownAttributionDecoration } from "../review-watch/lifecycle-gate.mjs";
+import { ghRestEditIssueBody, isKnownAttributionDecorationExact } from "../review-watch/lifecycle-gate.mjs";
 
 const HEADING = /^#{1,6}\s+/;
 const NOT_ACTIVE_WORDS = /\b(INACTIVE|REVOKED|SUPERSEDED|WITHDRAWN)\b/i;
@@ -110,7 +110,7 @@ export function checkWriteThickGrant(
   const live = execution.issue.body ?? "";
 
   // Idempotent retry: already promoted (no PROPOSED section left, ACTIVE witness valid, same bytes).
-  if (!/^#{1,6}\s+.*\bPROPOSED\b/m.test(live) && findActiveGrantWitness(live).ok && (live === proposedBody || isKnownAttributionDecoration(proposedBody, live))) {
+  if (!/^#{1,6}\s+.*\bPROPOSED\b/m.test(live) && findActiveGrantWitness(live).ok && (live === proposedBody || isKnownAttributionDecorationExact(proposedBody, live))) {
     return { exitCode: 0, state: "ALREADY_ACTIVE", controlIssue: c, executionIssue: e, repo: repo ?? null };
   }
 
@@ -158,7 +158,7 @@ export function checkWriteThickGrant(
   } catch (err) {
     return fail(`wrote ${repo}#${e} but the independent readback failed: ${err.message}`, "READBACK_FAILED");
   }
-  const same = (back.body ?? "") === proposedBody || isKnownAttributionDecoration(proposedBody, back.body ?? "");
+  const same = (back.body ?? "") === proposedBody || isKnownAttributionDecorationExact(proposedBody, back.body ?? "");
   if (!same || !findActiveGrantWitness(back.body ?? "").ok) {
     return fail(`wrote ${repo}#${e} but the persisted body did not read back as the promoted ACTIVE grant; do not report the grant active`, "READBACK_MISMATCH");
   }

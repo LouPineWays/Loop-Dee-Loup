@@ -184,6 +184,18 @@ test("idempotent retry accepts the known attribution decoration", () => {
   assert.equal(h.writes.length, 1);
 });
 
+test("readback rejects CRLF-to-LF conversion even when the known attribution footer is appended (#1215)", () => {
+  const next = live(ACTIVE).replace(/\n/g, "\r\n");
+  const h = harness({ exec: live(PROPOSED).replace(/\n/g, "\r\n") });
+  h.deps.ghEditImpl = ({ executionIssue, body }) => {
+    h.writes.push(body);
+    h.store[executionIssue].body = body.replace(/\r\n/g, "\n") + "\n\n" + ATTRIBUTION;
+  };
+  const r = run(h, next);
+  assert.equal(r.state, "READBACK_MISMATCH");
+  assert.notEqual(r.exitCode, 0);
+});
+
 test("refuses a concurrent trailing-whitespace change between validation reads (byte-exact stale base)", () => {
   const h = harness({ exec: live(PROPOSED) });
   let reads20 = 0;
