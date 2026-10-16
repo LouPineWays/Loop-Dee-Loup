@@ -1685,3 +1685,22 @@ test("run: refuses atomically, writing nothing, when an unmanaged parse-executio
   assert.ok(!existsSync(join(dest, ".ldl", "manifest.json")), "no manifest must be written when the operation is refused");
   assert.ok(!existsSync(join(dest, "tools", "orchestration", "prepare-dispatch-manifest.mjs")), "no importer may be installed");
 });
+
+test("HARD_MODULE_DEPENDENCIES: covers the #1198 consumed-qualification guard and terminalizer imports and flags preserved unmanaged modules", () => {
+  const edges = [
+    ["tools/orchestration/ready-dispatch-gate.mjs", "tools/orchestration/attempt-claim.mjs"],
+    ["tools/orchestration/ready-dispatch-gate.mjs", "tools/orchestration/launch-authorization.mjs"],
+    ["tools/orchestration/retire-consumed-qualification.mjs", "tools/orchestration/ready-dispatch-gate.mjs"],
+    ["tools/orchestration/retire-consumed-qualification.mjs", "tools/orchestration/attempt-claim.mjs"],
+    ["tools/orchestration/retire-consumed-qualification.mjs", "tools/orchestration/launch-authorization.mjs"],
+  ];
+  for (const [dest, dep] of edges) {
+    assert.ok(HARD_MODULE_DEPENDENCIES.some((e) => e.dest === dest && e.dependsOnDest === dep), `${dest} -> ${dep}`);
+    const collisions = findHardDependencyCollisions({
+      toInstall: [{ destRel: dest, content: Buffer.from("x") }],
+      toSkip: [{ dest: dep, reason: "unmanaged" }],
+    });
+    assert.equal(collisions.length, 1);
+    assert.equal(collisions[0].dest, dep);
+  }
+});

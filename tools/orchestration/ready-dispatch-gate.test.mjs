@@ -576,7 +576,7 @@ test("checkReadyDispatch: rejects a self-referential Execution pointer end to en
   assert.equal(result.state, "NOT_READY");
 });
 
-test("checkReadyDispatch: reads the control Issue exactly once, plus one execution-packet read (issue #1198 qualification guard) and exactly one narrow execution-linked PR lookup before authorizing READY_TO_DISPATCH (issue #456 unit 456-B)", async () => {
+test("checkReadyDispatch: reads the control Issue exactly once, never the thick execution packet (issue #1198 qualification guard stays control-plane), and exactly one narrow execution-linked PR lookup before authorizing READY_TO_DISPATCH (issue #456 unit 456-B)", async () => {
   let controlReads = 0;
   let packetReads = 0;
   let prListCalls = 0;
@@ -589,11 +589,13 @@ test("checkReadyDispatch: reads the control Issue exactly once, plus one executi
           controlReads++;
           return { body: ISSUE_311_BODY, state: "OPEN" };
         }
-        assert.equal(number, 310);
         packetReads++;
-        return { body: "An ordinary execution packet.", state: "OPEN" };
+        return assert.fail("the thick execution packet must not be read for ordinary READY dispatch");
       },
-      listCommentsImpl: async () => assert.fail("an ordinary packet must not trigger any comment listing"),
+      listCommentsImpl: async ({ number }) => {
+        assert.equal(number, 311, "only the control thread is listed for an ordinary packet");
+        return [];
+      },
       ghPrListImpl: async ({ repo, executionIssue }) => {
         prListCalls++;
         assert.equal(repo, "LouPineWays/Loop-Dee-Loup");
@@ -603,7 +605,7 @@ test("checkReadyDispatch: reads the control Issue exactly once, plus one executi
     },
   );
   assert.equal(controlReads, 1);
-  assert.equal(packetReads, 1);
+  assert.equal(packetReads, 0);
   assert.equal(prListCalls, 1);
   assert.equal(result.exitCode, 0);
   assert.equal(result.state, "READY_TO_DISPATCH");
@@ -995,6 +997,7 @@ test("checkReadyDispatch: a consumer repository's derived identity is used as-is
         sawRepo = repo;
         return { body: ISSUE_311_BODY, state: "OPEN" };
       },
+      listCommentsImpl: async () => [],
       ghPrListImpl: async () => [],
     },
   );
@@ -3769,7 +3772,6 @@ test("qualification guard: consumed NO-GO packet under a stale READY control is 
 test("qualification guard: a lone trusted result or a lone claim each prove consumption", async () => {
   for (const [controlComments, packetComments] of [
     [[qClaim({ id: 1, phase: "CLAIMED", outcome: null })], []],
-    [[], [qResult({ id: 2 })]],
     [[qResult({ id: 3 })], []],
   ]) {
     const { r } = await qGate({ packetBody: qPacketBody(), controlComments, packetComments });
@@ -3812,61 +3814,43 @@ test("qualification guard: evidence for a DIFFERENT packet/nonce does not consum
   assert.equal(r.state, "READY_TO_DISPATCH");
 });
 
-test("qualification guard: a trusted result naming another pair on the PACKET thread is a conflict and refuses", async () => {
-  const { r } = await qGate({ packetBody: qPacketBody(), packetComments: [qResult({ id: 1, packet: 1163 })] });
+test("qualification guard: once control-side evidence exists, a trusted result naming another pair on the PACKET thread is reported as a conflict", async () => {
+  const { r } = await qGate({ packetBody: qPacketBody(), controlComments: [qClaim({ id: 2 })], packetComments: [qResult({ id: 1, packet: 1163 })] });
   assert.equal(r.state, "BLOCKED");
   assert.equal(r.qualificationGuard, "CONSUMED_QUALIFICATION");
   assert.match(r.reasons.join(" "), /conflicting/);
 });
 
-test("qualification guard: ambiguous grants (duplicate, wrong control, wrong scope/host, not one-shot) refuse safely", async () => {
-  for (const packetBody of [
-    qPacketBody([qGrant(), qGrant()]),
-    qPacketBody([qGrant({ controlIssue: 9999 })]),
-    qPacketBody([qGrant({ scope: "other" })]),
-    qPacketBody([qGrant({ host: "ubuntu-24.04" })]),
-    qPacketBody([qGrant({ oneShot: false })]),
-  ]) {
-    const { r } = await qGate({ packetBody });
-    assert.equal(r.state, "BLOCKED", packetBody);
-    assert.equal(r.qualificationGuard, "AMBIGUOUS_QUALIFICATION_PACKET");
-    assert.equal(r.actionEnvelope.mode, "none");
+test("qualification guard: grant shape is irrelevant to the control-plane guard — consumption evidence alone refuses, and malformed grants never read the packet", async () => {
+  for (const packetBody of [qPacketBody([qGrant(), qGrant()]), qPacketBody([qGrant({ controlIssue: 9999 })]), qPacketBody([qGrant({ oneShot: false })])]) {
+    const { r, reads } = await qGate({ packetBody, controlComments: [qClaim({ id: 1 })] });
+    assert.equal(r.state, "BLOCKED");
+    assert.equal(r.qualificationGuard, "CONSUMED_QUALIFICATION");
+    assert.deepEqual(reads, [Q_CONTROL]);
   }
 });
 
-test("qualification guard: ordinary packets (no grant, or a grant naming a different packet) are unaffected and never list comments", async () => {
+test("qualification guard: ordinary packets are unaffected, never read, and only the control thread is listed", async () => {
   for (const packetBody of ["An ordinary packet.", qPacketBody([qGrant({ executionIssue: 1163 })]), "```json\n{not json\n```\n"]) {
     let listed = 0;
     const r = await checkReadyDispatch(
       { repo: Q_REPO, controlIssue: Q_CONTROL },
       {
-        ghIssueViewImpl: async ({ number }) => (number === Q_CONTROL ? { body: Q_CONTROL_BODY, state: "OPEN" } : { body: packetBody, state: "OPEN" }),
-        listCommentsImpl: async () => { listed++; return []; },
+        ghIssueViewImpl: async ({ number }) => (number === Q_CONTROL ? { body: Q_CONTROL_BODY, state: "OPEN" } : assert.fail("packet body must not be read")),
+        listCommentsImpl: async ({ number }) => { listed++; assert.equal(number, Q_CONTROL); return []; },
         ghPrListImpl: async () => [],
       },
     );
     assert.equal(r.state, "READY_TO_DISPATCH");
-    assert.equal(listed, 0);
+    assert.equal(listed, 1);
   }
 });
 
-test("qualification guard: unreadable packet or evidence is an operational failure (exit 1), never a dispatch", async () => {
-  const rPacket = await checkReadyDispatch(
-    { repo: Q_REPO, controlIssue: Q_CONTROL },
-    {
-      ghIssueViewImpl: async ({ number }) => {
-        if (number === Q_CONTROL) return { body: Q_CONTROL_BODY, state: "OPEN" };
-        throw new Error("boom");
-      },
-      ghPrListImpl: async () => [],
-    },
-  );
-  assert.equal(rPacket.exitCode, 1);
-  assert.equal(rPacket.state, undefined);
+test("qualification guard: unreadable evidence is an operational failure (exit 1), never a dispatch", async () => {
   const rEvidence = await checkReadyDispatch(
     { repo: Q_REPO, controlIssue: Q_CONTROL },
     {
-      ghIssueViewImpl: async ({ number }) => (number === Q_CONTROL ? { body: Q_CONTROL_BODY, state: "OPEN" } : { body: qPacketBody(), state: "OPEN" }),
+      ghIssueViewImpl: async () => ({ body: Q_CONTROL_BODY, state: "OPEN" }),
       listCommentsImpl: async () => { throw new Error("comments unavailable"); },
       ghPrListImpl: async () => [],
     },
@@ -3903,6 +3887,15 @@ test("qualification guard: only a plain READY control is guarded — a retired (
 test("classifyQualificationPacket / collectQualificationEvidence: pure unit behavior", () => {
   assert.equal(classifyQualificationPacket("x", { controlIssue: 1, executionIssue: 2 }).kind, "none");
   assert.equal(classifyQualificationPacket(qPacketBody(), { controlIssue: Q_CONTROL, executionIssue: Q_PACKET }).kind, "qualification");
+  // Stage 1 correction: a grant naming a different/mistyped packet is malformed, never "none".
+  assert.equal(classifyQualificationPacket(qPacketBody([qGrant({ executionIssue: 1163 })]), { controlIssue: Q_CONTROL, executionIssue: Q_PACKET }).kind, "ambiguous");
+  const contradictory = collectQualificationEvidence({
+    controlComments: [qClaim({ id: 1, outcome: "PASS" }), qClaim({ id: 2, outcome: "NO_GO" })],
+    packetComments: [],
+    controlIssue: Q_CONTROL,
+    executionIssue: Q_PACKET,
+  });
+  assert.equal(contradictory.claimConflicts.length, 1);
   const ev = collectQualificationEvidence({
     controlComments: [qClaim({ id: 1, phase: "CLAIMED", outcome: null }), qClaim({ id: 2 }), qResult({ id: 3 })],
     packetComments: [qResult({ id: 4 })],

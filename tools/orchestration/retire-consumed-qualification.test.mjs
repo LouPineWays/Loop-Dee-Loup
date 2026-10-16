@@ -360,6 +360,11 @@ const REJECTIONS = [
   ["packet already closed without marker", (w) => (w.issues[P].state = "CLOSED"), /only an OPEN packet/],
   ["packet is a pull request", (w) => (w.meta = { ...w.meta, isPullRequest: true }), /pull request/],
   ["packet author is not a writer", (w) => { w.meta = { author: "rando", association: "NONE", isPullRequest: false }; w.permission = "read"; }, /not a repository writer/],
+  ["control carries an active Blocker", (w) => (w.issues[C].body = CONTROL_BODY.replace("### Current blocker\n\nnone", "### Current blocker\n\nwaiting on #1500")), /active Blocker/],
+  ["control carries an unresolved Founder decision", (w) => (w.issues[C].body = CONTROL_BODY.replace("**Founder decision:** none", "**Founder decision:** pick a host")), /unresolved Founder decision/],
+  ["contradictory settled claims for one attempt", (w) => w.comments[C].push(claim(9, { outcome: "PASS" })), /contradictory settled claim/],
+  ["grant naming a different packet is malformed, not absent", (w) => (w.issues[P].body = packetBody([{ ...GRANT, executionIssue: 1163 }])), /does not name exactly/],
+  ["a conflicting packet retirement record already exists", (w) => w.comments[P].push({ id: 50, user: bot, body: [RETIREMENT_RECORD_HEADING, "", "- **Verdict:** PASS", `- **Control issue:** #${C}`, `- **Proof packet:** #${P}`, `- **Attempt id:** ${ATTEMPT}`, "- **Retired by:** tools/orchestration/retire-consumed-qualification.mjs", ""].join("\n") }), /conflicts with the canonical NO-GO record/],
   ["Actions run still in progress", (w) => (w.run = { status: "in_progress", conclusion: null }), /not completed/],
 ];
 
@@ -435,4 +440,22 @@ test("parentLoopReferences: unique refs in the Parent loop section only", () => 
 test("readRetirementMarker ignores the stale CLEAN terminal result and absent fields", () => {
   assert.equal(readRetirementMarker(CONTROL_BODY), null);
   assert.equal(readRetirementMarker(""), null);
+});
+
+test("close-control revalidates at the mutation boundary: a control reactivated for a successor is never closed", async () => {
+  const w = world();
+  const baseClose = w.impls.closeImpl;
+  w.impls.closeImpl = (a) => {
+    baseClose(a);
+    if (a.issue === P) {
+      // A separately authorized successor activation lands after the packet close.
+      w.issues[C].body = CONTROL_BODY.replace(`#${P}`, "#1300");
+    }
+  };
+  const r = await run(w);
+  assert.equal(r.exitCode, 1);
+  assert.equal(r.state, "PARTIAL");
+  assert.equal(r.failedStep, "close-control");
+  assert.equal(w.issues[C].state, "OPEN");
+  assert.ok(!w.log.some(([k, n]) => k === "close" && n === C));
 });

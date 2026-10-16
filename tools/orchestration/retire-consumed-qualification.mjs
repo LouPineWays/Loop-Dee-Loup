@@ -200,12 +200,22 @@ function controlRecordComment({ controlIssue, executionIssue, attemptId, verdict
   ].join("\n");
 }
 
-function hasRecordComment(rawComments, { executionIssue, attemptId }) {
-  return (Array.isArray(rawComments) ? rawComments : []).some((c) => {
-    if (firstLine(c?.body) !== RETIREMENT_RECORD_HEADING) return false;
+// Classifies the retirement records of ONE thread against the exact expected body:
+//   "present"  a record naming this packet+attempt equals the expected body (idempotent resume)
+//   "conflict" any record naming this packet+attempt differs from it (contradictory durable state)
+//   "absent"   no record names this packet+attempt
+function recordState(rawComments, expectedBody, { executionIssue, attemptId }) {
+  let matched = 0;
+  let exact = 0;
+  for (const c of Array.isArray(rawComments) ? rawComments : []) {
+    if (firstLine(c?.body) !== RETIREMENT_RECORD_HEADING) continue;
     const f = parseBoldBullets(c.body);
-    return f.get("Proof packet") === `#${executionIssue}` && f.get("Attempt id") === attemptId;
-  });
+    if (f.get("Proof packet") !== `#${executionIssue}` || f.get("Attempt id") !== attemptId) continue;
+    matched++;
+    if (normalize(c.body) === normalize(expectedBody) || isKnownAttributionDecoration(expectedBody, c.body ?? "")) exact++;
+  }
+  if (matched === 0) return "absent";
+  return exact === 1 && matched === 1 ? "present" : "conflict";
 }
 
 // ---- verification (read-only) -----------------------------------------------------------------
@@ -246,6 +256,15 @@ async function verify({ repo, controlIssue, executionIssue }, g, impls) {
     const v = parseControlBullet(cBody, label);
     if (v !== null && !isNoneSentinel(v)) errors.push(`control #${controlIssue} "${label}" is ${JSON.stringify(v)}, not none — an in-flight review lifecycle is never retired as a consumed qualification`);
   }
+  // A terminalization must never erase an active blocker or unresolved founder decision.
+  const blocker = parseControlBullet(cBody, "Blocker") ?? firstHeadingLine(cBody, "Current blocker");
+  if (blocker !== null && blocker !== undefined && !isNoneSentinel(blocker)) {
+    errors.push(`control #${controlIssue} carries an active Blocker (${JSON.stringify(blocker)}); resolve it before retiring`);
+  }
+  const founder = parseControlBullet(cBody, "Founder decision");
+  if (founder !== null && founder !== undefined && !isNoneSentinel(founder)) {
+    errors.push(`control #${controlIssue} carries an unresolved Founder decision (${JSON.stringify(founder)}); resolve it before retiring`);
+  }
   if (cState !== "OPEN" && !(cState === "CLOSED" && marker)) {
     errors.push(`control #${controlIssue} is ${cState}${cState === "CLOSED" ? " without this tool's terminal marker" : ""}; refusing to retire it`);
   }
@@ -285,6 +304,9 @@ async function verify({ repo, controlIssue, executionIssue }, g, impls) {
     const outcome = raw ? parseBoldBullets(raw.body).get("Outcome") : null;
     if (outcome !== "NO_GO") errors.push(`claim ${claim.attemptId} settled outcome is ${JSON.stringify(outcome ?? null)}, not NO_GO`);
   }
+  if ((evidence.claimConflicts ?? []).length > 0) {
+    errors.push(`contradictory settled claim records for attempt(s) ${evidence.claimConflicts.map((c) => c.attemptId).join(", ")}: ${evidence.claimConflicts.map((c) => c.settled.join(" vs ")).join("; ")}`);
+  }
   const onControl = evidence.results.filter((r) => r.where === "control");
   const onPacket = evidence.results.filter((r) => r.where === "packet");
   if (onControl.length !== 1) errors.push(`expected exactly one matching Claude Qualification Result on control #${controlIssue}, found ${onControl.length}`);
@@ -301,6 +323,17 @@ async function verify({ repo, controlIssue, executionIssue }, g, impls) {
   }
   if (marker && attemptId && (marker.packet !== executionIssue || marker.attemptId !== attemptId)) {
     errors.push(`control #${controlIssue}'s terminal marker names packet #${marker.packet} attempt ${marker.attemptId}, not packet #${executionIssue} attempt ${attemptId}`);
+  }
+
+  // -- existing retirement records must equal the expected canonical record --
+  if (attemptId) {
+    const rec = { controlIssue, executionIssue, attemptId, verdict: "NO-GO" };
+    if (recordState(g.packetComments, packetRecordComment(rec), { executionIssue, attemptId }) === "conflict") {
+      errors.push(`packet #${executionIssue} carries a retirement record that conflicts with the canonical NO-GO record`);
+    }
+    if (recordState(g.controlComments, controlRecordComment(rec), { executionIssue, attemptId }) === "conflict") {
+      errors.push(`control #${controlIssue} carries a retirement record that conflicts with the canonical NO-GO record`);
+    }
   }
 
   // -- authoritative run liveness (a live or unreadable run never retires) --
@@ -324,6 +357,13 @@ function evaluateLifecycle(body) {
   const bullet = parseControlBullet(body, "Lifecycle");
   const raw = bullet ?? headingState(body);
   return raw === null || raw === undefined ? null : String(raw).toUpperCase();
+}
+
+function firstHeadingLine(body, name) {
+  const block = parseHeadingBlock(body ?? "", name);
+  if (block === null || block === undefined) return null;
+  const line = String(block).split(/\r?\n/).map((l) => l.trim()).find((l) => l !== "");
+  return line === undefined || line === "_No response_" ? null : line;
 }
 
 function headingState(body) {
@@ -403,8 +443,8 @@ export async function checkRetireConsumedQualification(args, impls = {}) {
   const { attemptId, marker } = v.facts;
   const verdict = "NO-GO";
   const bodyDone = Boolean(marker);
-  const packetRecorded = hasRecordComment(g.packetComments, { executionIssue, attemptId });
-  const controlRecorded = hasRecordComment(g.controlComments, { executionIssue, attemptId });
+  const packetRecorded = recordState(g.packetComments, packetRecordComment({ controlIssue, executionIssue, attemptId, verdict }), { executionIssue, attemptId }) === "present";
+  const controlRecorded = recordState(g.controlComments, controlRecordComment({ controlIssue, executionIssue, attemptId, verdict }), { executionIssue, attemptId }) === "present";
   const pending = [];
   if (!bodyDone) pending.push("write-control-snapshot");
   if (!packetRecorded) pending.push("packet-record-comment");
@@ -479,7 +519,7 @@ export async function checkRetireConsumedQualification(args, impls = {}) {
     try {
       await i.commentImpl({ repo, issue: executionIssue, body: packetRecordComment({ controlIssue, executionIssue, attemptId, verdict }) });
       const listed = await i.listCommentsImpl({ repo, number: executionIssue });
-      if (!hasRecordComment(listed, { executionIssue, attemptId })) return partial("packet-record-comment", "The packet retirement record did not read back.");
+      if (recordState(listed, packetRecordComment({ controlIssue, executionIssue, attemptId, verdict }), { executionIssue, attemptId }) !== "present") return partial("packet-record-comment", "The packet retirement record did not read back.");
     } catch (err) {
       return partial("packet-record-comment", `Posting the packet retirement record failed: ${err.message}.`);
     }
@@ -501,6 +541,14 @@ export async function checkRetireConsumedQualification(args, impls = {}) {
   // 4. close the control, verify CLOSED and that the terminal body survived.
   if (pending.includes("close-control")) {
     try {
+      // Revalidate at the mutation boundary: a separately authorized successor activation may have
+      // legitimately reopened this control (READY + new pointer) since verification.
+      const pre = await i.readIssueImpl({ repo, number: controlIssue });
+      const pm = readRetirementMarker(pre.body);
+      const pp = readExecutionPointer(pre.body ?? "");
+      if (!pm || pm.packet !== executionIssue || pm.attemptId !== attemptId || evaluateLifecycle(pre.body) !== "DONE" || pp.kind !== "issue" || pp.issue !== executionIssue) {
+        return partial("close-control", `Control #${controlIssue} no longer reads as this tool's terminal DONE control for packet #${executionIssue}; refusing to close it.`);
+      }
       await i.closeImpl({ repo, issue: controlIssue });
       const back = await i.readIssueImpl({ repo, number: controlIssue });
       const m = readRetirementMarker(back.body);
