@@ -123,11 +123,15 @@ function walk(dir, out = []) {
 //   write-control-snapshot.mjs -- THE approved thin-control writer (validateControlSnapshot first).
 //   lifecycle-gate.mjs         -- rewrites a Stage 2 *Audit* Issue's own `### Verdict` field; an
 //                                 audit record, not parser-sensitive thin-control state.
-// Exactly these two. control-body-write-guard.mjs is deliberately NOT exempt (Audit #801 finding
+//   write-thick-grant.mjs      -- promotes one PROPOSED executor-substrate grant heading to ACTIVE in a
+//                                 thick execution Issue (issue #1215); a single-line heading change with
+//                                 stale-base refusal and independent readback, not thin-control state.
+// Exactly these three. control-body-write-guard.mjs is deliberately NOT exempt (Audit #801 finding
 // 2): it is scanned like every other production file, with only inert text excluded below.
 const BODY_WRITE_ALLOWLIST = new Set([
   "orchestration/write-control-snapshot.mjs",
   "review-watch/lifecycle-gate.mjs",
+  "orchestration/write-thick-grant.mjs",
 ]);
 
 const RAW_BODY_WRITE_PATTERNS = [
@@ -171,7 +175,7 @@ function findRawBodyWriteOffenders(rel, source) {
 }
 
 test("bypass guard: no production orchestration file persists an Issue body outside the approved allowlist", () => {
-  assert.equal(BODY_WRITE_ALLOWLIST.size, 2);
+  assert.equal(BODY_WRITE_ALLOWLIST.size, 3);
   assert.ok(!BODY_WRITE_ALLOWLIST.has(GUARD_REL));
   const offenders = [];
   for (const file of walk(TOOLS_DIR)) {
