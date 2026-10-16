@@ -718,6 +718,12 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/verify-audit-ready.mjs", dependsOnDest: "tools/review-watch/lifecycle-gate.mjs" },
   { dest: "tools/orchestration/verify-audit-ready.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
   { dest: "tools/orchestration/format-dispatch-prompt.mjs", dependsOnDest: "tools/orchestration/verify-audit-ready.mjs" },
+  // Issue #1215 Stage 1 correction (P2): write-thick-grant.mjs hard-imports named exports from each of these.
+  { dest: "tools/orchestration/write-thick-grant.mjs", dependsOnDest: "tools/orchestration/github-read.mjs" },
+  { dest: "tools/orchestration/write-thick-grant.mjs", dependsOnDest: "tools/orchestration/ready-dispatch-gate.mjs" },
+  { dest: "tools/orchestration/write-thick-grant.mjs", dependsOnDest: "tools/orchestration/executor-substrate-authority.mjs" },
+  { dest: "tools/orchestration/write-thick-grant.mjs", dependsOnDest: "tools/orchestration/activate-control-pair.mjs" },
+  { dest: "tools/orchestration/write-thick-grant.mjs", dependsOnDest: "tools/review-watch/lifecycle-gate.mjs" },
   // Issue #1008 Stage 1 correction (P2): ready-dispatch-gate.mjs hard-imports `run` from
   // stage1-gate.mjs for the READY partial-PR-checkpoint recovery.
   { dest: "tools/orchestration/ready-dispatch-gate.mjs", dependsOnDest: "tools/review-watch/stage1-gate.mjs" },

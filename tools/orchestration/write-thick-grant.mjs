@@ -80,6 +80,9 @@ export function checkWriteThickGrant(
   }
   const c = Number(controlIssue);
   const e = Number(executionIssue);
+  if (c === e) {
+    return refuse("SELF_EXECUTION", `control and execution Issue are both #${c}; a control can never be its own execution Issue; nothing was written.`);
+  }
 
   const readOne = (number) => {
     try {
@@ -90,13 +93,18 @@ export function checkWriteThickGrant(
     }
   };
 
-  const control = readOne(c);
-  if (control.refusal || control.failure) return control.refusal ?? control.failure;
-  const field = readExecutionBulletField(control.issue.body ?? "");
-  const pointer = field.conflict || !field.value ? { ok: false } : parseExecutionPointer(field.value);
-  if (!pointer.ok || pointer.issue !== e) {
-    return refuse("NOT_SOLE_EXECUTION", `control ${repo}#${c} does not name #${e} as its sole Execution pointer; nothing was written.`);
-  }
+  const checkControlPointer = () => {
+    const control = readOne(c);
+    if (control.refusal || control.failure) return control.refusal ?? control.failure;
+    const field = readExecutionBulletField(control.issue.body ?? "");
+    const pointer = field.conflict || !field.value ? { ok: false } : parseExecutionPointer(field.value);
+    if (!pointer.ok || pointer.issue !== e) {
+      return refuse("NOT_SOLE_EXECUTION", `control ${repo}#${c} does not name #${e} as its sole Execution pointer; nothing was written.`);
+    }
+    return null;
+  };
+  const pointerRefusal = checkControlPointer();
+  if (pointerRefusal) return pointerRefusal;
 
   const execution = readOne(e);
   if (execution.refusal || execution.failure) return execution.refusal ?? execution.failure;
@@ -106,7 +114,7 @@ export function checkWriteThickGrant(
   const live = execution.issue.body ?? "";
 
   // Idempotent retry: already promoted (no PROPOSED section left, ACTIVE witness valid, same bytes).
-  if (!/^#{1,6}\s+.*\bPROPOSED\b/m.test(live) && findActiveGrantWitness(live).ok && normalizeBody(live) === normalizeBody(proposedBody)) {
+  if (!/^#{1,6}\s+.*\bPROPOSED\b/m.test(live) && findActiveGrantWitness(live).ok && (normalizeBody(live) === normalizeBody(proposedBody) || isKnownAttributionDecoration(proposedBody, live))) {
     return { exitCode: 0, state: "ALREADY_ACTIVE", controlIssue: c, executionIssue: e, repo: repo ?? null };
   }
 
@@ -134,6 +142,8 @@ export function checkWriteThickGrant(
   }
 
   // Tight stale window: re-read immediately before the write.
+  const pointerAgain = checkControlPointer();
+  if (pointerAgain) return pointerAgain;
   const again = readOne(e);
   if (again.refusal || again.failure) return again.refusal ?? again.failure;
   if (again.issue.state !== "OPEN" || normalizeBody(again.issue.body) !== normalizeBody(live)) {
