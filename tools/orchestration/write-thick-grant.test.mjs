@@ -1,0 +1,149 @@
+// Tests for tools/orchestration/write-thick-grant.mjs — issue #1215.
+// Run with: node --test tools/orchestration/write-thick-grant.test.mjs
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import { checkWriteThickGrant } from "./write-thick-grant.mjs";
+import { findActiveGrantWitness } from "./activate-control-pair.mjs";
+
+const JSON_BLOCK = `\`\`\`json
+{
+  "executorSubstrate": [
+    { "component": "routing-policy", "paths": ["tools/orchestration/x.mjs"], "intendedChange": "c", "verification": "v" }
+  ]
+}
+\`\`\``;
+const PRE = "### Outcome\r\nsome text\r\n\r\n";
+const POST = "\r\n\r\n### Tail\r\nmore";
+const live = (h) => `${PRE}${h}\n${JSON_BLOCK}${POST}`;
+const PROPOSED = "### PROPOSED executor-substrate grant (awaiting founder)";
+const ACTIVE = "### ACTIVE executor-substrate grant — approved https://github.com/o/r/issues/1#c";
+const CONTROL = "- **Lifecycle:** READY\n- **Execution:** #20\n";
+
+function harness({ control = CONTROL, exec, state = "OPEN", pr = false, mutate = (b) => b } = {}) {
+  const store = { 10: { body: control, state: "OPEN" }, 20: { body: exec, state } };
+  const writes = [];
+  return {
+    writes,
+    store,
+    deps: {
+      readIssueImpl: ({ number }) => {
+        if (pr && number === 20) throw new Error("GitHub REST response is a pull request, not an Issue");
+        return { ...store[number] };
+      },
+      ghEditImpl: ({ executionIssue, body }) => {
+        writes.push(body);
+        store[executionIssue].body = mutate(body);
+      },
+    },
+  };
+}
+const run = (h, proposedBody, extra = {}) =>
+  checkWriteThickGrant({ repo: "o/r", controlIssue: 10, executionIssue: 20, proposedBody, ...extra }, h.deps);
+
+test("promotes PROPOSED to ACTIVE, preserving all other bytes and passing findActiveGrantWitness", () => {
+  const base = live(PROPOSED);
+  const next = live(ACTIVE);
+  const h = harness({ exec: base });
+  const r = run(h, next, { founderApprovalRef: "https://github.com/o/r/issues/1#c" });
+  assert.equal(r.exitCode, 0);
+  assert.equal(r.state, "WRITTEN");
+  assert.equal(h.writes.length, 1);
+  assert.equal(h.writes[0], next);
+  assert.ok(findActiveGrantWitness(h.store[20].body).ok);
+  assert.equal(h.store[20].body.split(JSON_BLOCK).length, 2);
+});
+
+test("idempotent re-run on already-ACTIVE writes nothing", () => {
+  const next = live(ACTIVE);
+  const h = harness({ exec: next });
+  const r = run(h, next);
+  assert.equal(r.exitCode, 0);
+  assert.equal(r.state, "ALREADY_ACTIVE");
+  assert.equal(h.writes.length, 0);
+});
+
+test("refuses stale base (other bytes differ)", () => {
+  const h = harness({ exec: live(PROPOSED) });
+  const r = run(h, live(ACTIVE).replace("some text", "other text"));
+  assert.equal(r.exitCode, 2);
+  assert.equal(r.state, "STALE_BASE");
+  assert.equal(h.writes.length, 0);
+});
+
+test("refuses when JSON is altered in the proposal", () => {
+  const h = harness({ exec: live(PROPOSED) });
+  const r = run(h, live(ACTIVE).replace("routing-policy", "authority-guards"));
+  assert.equal(r.exitCode, 2);
+  assert.equal(h.writes.length, 0);
+});
+
+test("refuses closed execution Issue", () => {
+  const h = harness({ exec: live(PROPOSED), state: "CLOSED" });
+  assert.equal(run(h, live(ACTIVE)).state, "NOT_OPEN");
+  assert.equal(h.writes.length, 0);
+});
+
+test("refuses a pull request", () => {
+  const h = harness({ exec: live(PROPOSED), pr: true });
+  const r = run(h, live(ACTIVE));
+  assert.equal(r.state, "NOT_AN_ISSUE");
+  assert.equal(h.writes.length, 0);
+});
+
+test("refuses when control's Execution pointer is not the sole named execution Issue", () => {
+  for (const control of ["- **Execution:** #21\n", "- **Execution:** #20, #21\n", "- **Lifecycle:** READY\n"]) {
+    const h = harness({ control, exec: live(PROPOSED) });
+    const r = run(h, live(ACTIVE));
+    assert.equal(r.state, "NOT_SOLE_EXECUTION", control);
+    assert.equal(h.writes.length, 0);
+  }
+});
+
+test("refuses zero or multiple PROPOSED sections", () => {
+  const none = harness({ exec: `${PRE}### Other\n${JSON_BLOCK}${POST}` });
+  assert.equal(run(none, live(ACTIVE)).state, "NO_PROPOSED");
+  const two = harness({ exec: `${live(PROPOSED)}\n${PROPOSED} again\n${JSON_BLOCK}` });
+  assert.equal(run(two, live(ACTIVE)).state, "MULTIPLE_PROPOSED");
+  assert.equal(none.writes.length + two.writes.length, 0);
+});
+
+test("refuses invalid or missing JSON in the PROPOSED section", () => {
+  const bad = harness({ exec: `${PRE}${PROPOSED}\n\`\`\`json\n{not json\n\`\`\`${POST}` });
+  assert.equal(run(bad, live(ACTIVE)).exitCode, 2);
+  const unknown = harness({ exec: live(PROPOSED).replace("routing-policy", "no-such-component") });
+  assert.equal(run(unknown, live(ACTIVE).replace("routing-policy", "no-such-component")).exitCode, 2);
+  assert.equal(bad.writes.length + unknown.writes.length, 0);
+});
+
+test("refuses a bad replacement heading and a missing approval-ref citation", () => {
+  const h = harness({ exec: live(PROPOSED) });
+  assert.equal(run(h, live("### REVOKED executor-substrate grant")).state, "BAD_HEADING");
+  assert.equal(run(h, live("### executor-substrate grant")).state, "BAD_HEADING");
+  assert.equal(run(h, live(ACTIVE), { founderApprovalRef: "https://github.com/o/r/issues/9#zz" }).state, "APPROVAL_REF_MISSING");
+  assert.equal(run(h, live(ACTIVE), { founderApprovalRef: "not-a-url" }).state, "BAD_APPROVAL_REF");
+  assert.equal(h.writes.length, 0);
+});
+
+test("readback mismatch fails (exit 1)", () => {
+  const h = harness({ exec: live(PROPOSED), mutate: (b) => b.replace("some text", "tampered") });
+  const r = run(h, live(ACTIVE));
+  assert.equal(r.exitCode, 1);
+  assert.equal(r.state, "READBACK_MISMATCH");
+});
+
+test("write failure is operational exit 1", () => {
+  const h = harness({ exec: live(PROPOSED) });
+  h.deps.ghEditImpl = () => {
+    throw new Error("boom");
+  };
+  const r = run(h, live(ACTIVE));
+  assert.equal(r.exitCode, 1);
+  assert.equal(r.state, "WRITE_FAILED");
+});
+
+test("missing args exit 1", () => {
+  assert.equal(checkWriteThickGrant({ repo: "o/r", executionIssue: 20, proposedBody: "x" }).exitCode, 1);
+  assert.equal(checkWriteThickGrant({ repo: "o/r", controlIssue: 10, proposedBody: "x" }).exitCode, 1);
+  assert.equal(checkWriteThickGrant({ repo: "o/r", controlIssue: 10, executionIssue: 20 }).exitCode, 1);
+});
