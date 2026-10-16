@@ -50,7 +50,14 @@ import { parseAuthority, EXECUTOR_COMPONENTS } from "./executor-substrate-author
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
 
 const DEFAULT_ROUTE = "implementation worker";
-const NOT_ACTIVE_WORDS = /\b(INACTIVE|REVOKED|SUPERSEDED|WITHDRAWN)\b/i;
+// Fail-closed grammar (#1225): a heading is an ACTIVE witness only when its text begins with the word
+// ACTIVE (after heading hashes and markdown emphasis) AND carries no negation/non-current status word
+// anywhere. Anything else is refused rather than enumerating only some negated forms.
+const NOT_ACTIVE_WORDS = /\b(INACTIVE|NON[\s-]*ACTIVE|NOT|NO|NEVER|NONE|WITHOUT|REVOKED|REVOKE|RESCINDED|RESCIND|SUPERSEDED|WITHDRAWN|EXPIRED|CANCELL?ED|DENIED|REJECTED|PROPOSED|UNAPPROVED|PENDING|DRAFT|FORMER|FORMERLY|LAPSED|SUSPENDED|VOID|VOIDED|INVALID|DISABLED)\b|n['’]t\b/i;
+export function isCanonicalActiveHeading(heading) {
+  const text = String(heading ?? "").replace(/^#{1,6}\s+/, "").replace(/^[\s*_`~]+/, "");
+  return /^ACTIVE\b/.test(text) && !NOT_ACTIVE_WORDS.test(text);
+}
 
 // Pure. Finds a mechanically valid ACTIVE grant section in the thick Issue body.
 // Returns { ok: true, components } or { ok: false, reason }.
@@ -60,7 +67,7 @@ export function findActiveGrantWitness(executionBody) {
   const problems = [];
   for (const start of headingIdx) {
     const heading = lines[start];
-    if (!/\bACTIVE\b/.test(heading) || NOT_ACTIVE_WORDS.test(heading)) continue;
+    if (!isCanonicalActiveHeading(heading)) continue;
     const next = headingIdx.find((i) => i > start) ?? lines.length;
     const section = lines.slice(start + 1, next).join("\n");
     const fence = section.match(/```json\s*\n([\s\S]*?)\n```/);
@@ -183,7 +190,7 @@ export function findNewPacketAuthority(executionBody, { controlIssue, executionI
   const headingIdx = lines.map((l, i) => (/^#{1,6}\s+/.test(l) ? i : -1)).filter((i) => i >= 0);
   for (const start of headingIdx) {
     const heading = lines[start];
-    if (!/\bACTIVE\b/.test(heading) || NOT_ACTIVE_WORDS.test(heading) || !/new[- ]packet|new[- ]work/i.test(heading)) continue;
+    if (!isCanonicalActiveHeading(heading) || !/new[- ]packet|new[- ]work/i.test(heading)) continue;
     const next = headingIdx.find((i) => i > start) ?? lines.length;
     const fence = lines.slice(start + 1, next).join("\n").match(/```json\s*\n([\s\S]*?)\n```/);
     if (!fence) continue;

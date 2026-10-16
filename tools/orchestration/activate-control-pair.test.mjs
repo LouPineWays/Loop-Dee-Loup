@@ -124,6 +124,15 @@ test("(a) #1149 literal shape + ACTIVE exact grant -> READY snapshot, readback, 
   assert.equal(controlAdvertisesPendingState(body), false);
 });
 
+test("witness: PROPOSED / NOT ACTIVE / negated-status headings are never an ACTIVE witness (#1225)", () => {
+  for (const h of ["PROPOSED executor-substrate grant — NOT ACTIVE", "PROPOSED ACTIVE grant", "NOT ACTIVE grant", "NON-ACTIVE grant", "Not yet active grant", "UNAPPROVED ACTIVE grant", "NEVER ACTIVE grant", "NOT CURRENTLY ACTIVE grant", "ACTIVE grant — approval rescinded", "ACTIVE grant (not approved)", "Previously ACTIVE grant"]) {
+    assert.equal(findActiveGrantWitness(`### ${h}
+${jsonBlock(GRANT_JSON)}`).ok, false, h);
+  }
+  assert.equal(findActiveGrantWitness(`### ACTIVE executor-substrate grant — founder-approved
+${jsonBlock(GRANT_JSON)}`).ok, true);
+});
+
 test("(b) grant absent / INACTIVE / mismatched -> BLOCKED, control untouched, gate not run", () => {
   for (const exec of ["no grant here", INACTIVE_ONLY_THICK, BAD_COMPONENT_THICK]) {
     const w = makeWorld({ exec });
