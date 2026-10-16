@@ -43,6 +43,8 @@ test("evaluateCiFailedCorrectionCommits: requires an advanced head and a pushed 
   assert.equal(evaluateCiFailedCorrectionCommits([...base, { sha: "b", message: "[ci-failed-correction] fix #7250" }], o).ok, false); // wrong issue
   assert.equal(evaluateCiFailedCorrectionCommits([{ sha: "z", message: "[ci-failed-correction] #725" }], o).ok, false); // reviewed head gone
   assert.equal(evaluateCiFailedCorrectionCommits([{ sha: "b", message: "[ci-failed-correction] #725" }, { sha: "aaa", message: "r" }], o).ok, false); // marker predates head
+  assert.equal(evaluateCiFailedCorrectionCommits([...base, { sha: "b", message: "[ci-failed-correction] fix other/repo#725" }], o).ok, false); // qualified ref
+  assert.equal(evaluateCiFailedCorrectionCommits([...base, { sha: "b", message: "[ci-failed-correction] fix #725abc" }], o).ok, false); // partial ref
   assert.equal(evaluateCiFailedCorrectionCommits(null, o).ok, false);
   assert.equal(evaluateCiFailedCorrectionCommits([...base, { sha: "b", message: "Address #725 [ci-failed-correction] fix" }], o).ok, true);
 });
@@ -172,4 +174,20 @@ test("hook process: SubagentStop with an unverifiable postcondition blocks; with
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("decideCiFailedPreRelease: bound ci-failed worker's --release-binding is denied until the marker verifies (PR #1205 P1)", async () => {
+  const { decideCiFailedPreRelease } = await import("./action-envelope-hook.mjs");
+  const completion = { pr: 763, controlIssue: 726, executionIssue: 725, reviewedHead: "r", kind: "ci-failed", blocks: 0, workerAgentId: "w1" };
+  const call = { toolName: "Bash", command: "node tools/orchestration/pr-head-checkout-preflight.mjs --release-binding abc", agentId: "w1" };
+  const bad = () => ({ ok: false, detail: "no marker" });
+  const good = () => ({ ok: true });
+  const denied = decideCiFailedPreRelease({ correctionCompletion: completion }, call, { verifyImpl: bad });
+  assert.equal(denied.permissionDecision, "deny");
+  assert.match(denied.permissionDecisionReason, /\[ci-failed-correction\]/);
+  assert.equal(decideCiFailedPreRelease({ correctionCompletion: completion }, call, { verifyImpl: good }).permissionDecision, "allow");
+  assert.equal(decideCiFailedPreRelease({ correctionCompletion: completion }, { ...call, agentId: "other" }, { verifyImpl: bad }).applies, false);
+  assert.equal(decideCiFailedPreRelease({ correctionCompletion: completion }, { ...call, command: "ls" }, { verifyImpl: bad }).applies, false);
+  assert.equal(decideCiFailedPreRelease({ correctionCompletion: { ...completion, kind: undefined } }, call, { verifyImpl: bad }).applies, false);
+  assert.equal(decideCiFailedPreRelease(null, call, { verifyImpl: bad }).applies, false);
 });

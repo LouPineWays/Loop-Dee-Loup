@@ -852,7 +852,9 @@ export function evaluateCiFailedCorrectionCommits(commits, { reviewedHead, execu
   if (idx < 0) return { ok: false, detail: "the gated failed-CI head is no longer in the PR history" };
   const added = commits.slice(idx + 1);
   if (added.length === 0) return { ok: false, detail: "the PR head has not advanced from the failed-CI head" };
-  const issueRef = new RegExp(`#${executionIssue}(?!\\d)`);
+  // Same whole-token, non-qualified semantics as the canonical verifyCorrectionProvenance matcher
+  // (rejects `other/repo#725` and `#725abc`).
+  const issueRef = new RegExp(`(^|[^\\w/])#${executionIssue}(?!\\w)`);
   const marked = added.some((c) => typeof c?.message === "string" && c.message.includes(marker) && issueRef.test(c.message));
   return marked
     ? { ok: true }
@@ -874,6 +876,37 @@ export function defaultVerifyCiFailedCorrection(completion, { execFileImpl = exe
   } catch (err) {
     return { ok: false, detail: String(err?.message || err).split(/\r?\n/)[0] };
   }
+}
+
+// Issue #1202 Stage 1 correction (PR #1205 P1): the SubagentStop check alone runs after the generated
+// "Push, then --release-binding" order may already have removed the pushed, clean checkout, leaving
+// no usable checkout to add a missing marker commit. So the bound ci-failed worker's own
+// `--release-binding` Bash call is denied until the marker postcondition verifies.
+export function decideCiFailedPreRelease(marker, toolCall = {}, { verifyImpl = defaultVerifyCiFailedCorrection } = {}) {
+  const completion = marker?.correctionCompletion;
+  if (
+    !completion ||
+    completion.kind !== "ci-failed" ||
+    typeof completion.workerAgentId !== "string" ||
+    !completion.workerAgentId ||
+    completion.workerAgentId !== toolCall.agentId ||
+    toolCall.toolName !== "Bash" ||
+    typeof toolCall.command !== "string" ||
+    !/--release-binding\b/.test(toolCall.command)
+  ) {
+    return { applies: false };
+  }
+  const result = verifyImpl(completion);
+  if (result.ok) return { applies: true, permissionDecision: "allow" };
+  const detail = result.detail ? ` (${result.detail})` : "";
+  return {
+    applies: true,
+    permissionDecision: "deny",
+    permissionDecisionReason:
+      `CORRECTION_BREAKPOINT_UNVERIFIED ${completion.pr}: the ci-failed repair is not yet durably recorded on PR #${completion.pr}${detail}. ` +
+      `Blocked before the checkout is released. Push a non-force commit whose message names #${completion.executionIssue} and includes ` +
+      "[ci-failed-correction] (an --allow-empty commit is fine if the repair is already pushed), then retry --release-binding.",
+  };
 }
 
 // Pure-ish (verify injected). SubagentStop decision for a controller session whose marker carries
@@ -1116,6 +1149,34 @@ async function main() {
               hookEventName: "PreToolUse",
               permissionDecision: "deny",
               permissionDecisionReason: prePush.permissionDecisionReason,
+            },
+          }),
+        );
+        process.exit(0);
+        return;
+      }
+      // Issue #1202 (PR #1205 P1): verify the ci-failed marker before the checkout may be released.
+      let preRelease = { applies: false };
+      try {
+        preRelease = decideCiFailedPreRelease(marker, {
+          toolName: payload.tool_name,
+          command: payload.tool_input?.command,
+          agentId: typeof payload.agent_id === "string" ? payload.agent_id : undefined,
+        });
+      } catch (err) {
+        preRelease = {
+          applies: true,
+          permissionDecision: "deny",
+          permissionDecisionReason: `ci-failed pre-release guard failed closed: ${err?.message ?? err}.`,
+        };
+      }
+      if (preRelease.applies && preRelease.permissionDecision === "deny") {
+        process.stdout.write(
+          JSON.stringify({
+            hookSpecificOutput: {
+              hookEventName: "PreToolUse",
+              permissionDecision: "deny",
+              permissionDecisionReason: preRelease.permissionDecisionReason,
             },
           }),
         );
