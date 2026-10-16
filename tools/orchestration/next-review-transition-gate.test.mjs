@@ -25,7 +25,11 @@ import {
   reconcileExistingStage2AuditIssue,
   verifyCorrectionProvenance,
   reduceCompareCommits,
+  countCiFailedCorrections,
+  CI_FAILED_CORRECTION_MARKER,
+  MAX_CI_FAILED_CORRECTIONS,
 } from "./next-review-transition-gate.mjs";
+import { getActionEnvelope, getCorrectionContinuation } from "./action-envelope.mjs";
 
 // Issue #1129 (control #953): every merge-authorizing pre-merge verdict now also requires passing
 // required-CI evidence bound to the exact current head. The legacy tests below were written before
@@ -4928,4 +4932,150 @@ test("#1129 runNextReviewTransitionGate: a throwing CI check fails closed; CI is
   });
   assert.equal(called, false);
   assert.equal(pending.state, "NO_ACTION_YET");
+});
+
+// -- Issue #1202 (control #1201; live #1197/#1198/PR #1199): exact-head CI_FAILED -> bounded correction ---
+// A trustworthy exit-code-2 CI_FAILED bound to the exact current head, under live control/execution/PR
+// identity and with at most MAX_CI_FAILED_CORRECTIONS prior ci-failed corrections, routes to the existing
+// STAGE1_CORRECTION_REQUIRED verdict (correctionReason "ci-failed"). Everything else stays non-mutating.
+
+const CIF_HEAD = "d2d6291ff20e98c2ecf74a14a1ea38c58a1aa552";
+const cifCtx = { repo: "o/r", pr: 1199, head: CIF_HEAD, issue: 1198, controlIssue: 1197 };
+const cifFailed = (head = CIF_HEAD) => ({
+  exitCode: 2,
+  state: "CI_FAILED",
+  head,
+  blocking: [{ name: "verify", kind: "check_run", state: "failed" }],
+  message: `required CI failed at head ${head}: verify`,
+});
+
+test("#1202 resolvePreMergeVerdict: exact-head CI_FAILED with live identity -> STAGE1_CORRECTION_REQUIRED ci-failed on every merge-authorizing branch, never a merge verdict", () => {
+  for (const [name, make] of Object.entries(mergeBranches)) {
+    const { inputs } = make(CIF_HEAD);
+    const v = rawResolvePreMergeVerdict({ ...inputs, ci: cifFailed(), ciFailedCorrections: 0 }, cifCtx);
+    assert.equal(v.state, "STAGE1_CORRECTION_REQUIRED", name);
+    assert.equal(v.correctionReason, "ci-failed", name);
+    assert.equal(v.stopAfter, true);
+    assert.equal(v.pr, 1199);
+    assert.equal(v.issue, 1198);
+    assert.equal(v.controlIssue, 1197);
+    assert.equal(v.ciFailure.head, CIF_HEAD);
+    assert.equal(v.ciFailure.blocking[0].name, "verify");
+  }
+});
+
+test("#1202 resolvePreMergeVerdict: missing/stale/head-moved/untrusted CI or identity stays AMBIGUOUS (no correction) on every branch", () => {
+  const stale = "dcbfe19591931eac29038deac510acfcfc76b0df";
+  const cases = {
+    "head-moved": { ci: cifFailed(stale), ctx: cifCtx },
+    "no exitCode": { ci: { state: "CI_FAILED", head: CIF_HEAD }, ctx: cifCtx },
+    "wrong exitCode": { ci: { ...cifFailed(), exitCode: 1 }, ctx: cifCtx },
+    "no head on ci": { ci: { ...cifFailed(), head: undefined }, ctx: cifCtx },
+    "short context head": { ci: cifFailed(), ctx: { ...cifCtx, head: CIF_HEAD.slice(0, 12) } },
+    "no control issue (wrong packet / direct reference)": { ci: cifFailed(), ctx: { ...cifCtx, controlIssue: undefined } },
+    "no execution issue": { ci: cifFailed(), ctx: { ...cifCtx, issue: "none" } },
+    "absent ci": { ci: null, ctx: cifCtx },
+  };
+  for (const [name, make] of Object.entries(mergeBranches)) {
+    const { inputs } = make(CIF_HEAD);
+    for (const [label, c] of Object.entries(cases)) {
+      const v = rawResolvePreMergeVerdict({ ...inputs, ci: c.ci, ciFailedCorrections: 0 }, c.ctx);
+      assert.equal(v.state, "AMBIGUOUS", `${name}/${label}`);
+      assert.equal(v.correctionReason, undefined, `${name}/${label}`);
+    }
+  }
+});
+
+test("#1202 resolvePreMergeVerdict: unknown retry history or an exhausted retry bound fails closed (AMBIGUOUS, founder-visible)", () => {
+  const { inputs } = mergeBranches.ordinary(CIF_HEAD);
+  for (const ciFailedCorrections of [undefined, null, -1, 1.5, "0", MAX_CI_FAILED_CORRECTIONS, MAX_CI_FAILED_CORRECTIONS + 1]) {
+    const v = rawResolvePreMergeVerdict({ ...inputs, ci: cifFailed(), ...(ciFailedCorrections === undefined ? {} : { ciFailedCorrections }) }, cifCtx);
+    assert.equal(v.state, "AMBIGUOUS", String(ciFailedCorrections));
+    assert.match(v.reason, /no correction dispatched/);
+  }
+  const exhausted = rawResolvePreMergeVerdict({ ...inputs, ci: cifFailed(), ciFailedCorrections: MAX_CI_FAILED_CORRECTIONS }, cifCtx);
+  assert.match(exhausted.reason, /retry bound/);
+});
+
+test("#1202 resolvePreMergeVerdict: pending CI stays NO_ACTION_YET and healthy CI keeps the existing merge route", () => {
+  const { inputs } = mergeBranches.ordinary(CIF_HEAD);
+  const pending = rawResolvePreMergeVerdict({ ...inputs, ci: { exitCode: 2, state: "CI_PENDING", head: CIF_HEAD, message: "pending" }, ciFailedCorrections: 0 }, cifCtx);
+  assert.equal(pending.state, "NO_ACTION_YET");
+  const healthy = rawResolvePreMergeVerdict({ ...inputs, ci: ciPass(CIF_HEAD), ciFailedCorrections: 0 }, cifCtx);
+  assert.equal(healthy.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+});
+
+test("#1202 countCiFailedCorrections counts only commits carrying the marker; non-arrays are unverifiable", () => {
+  assert.equal(countCiFailedCorrections([{ message: "a" }, { message: `fix #1198 ${CI_FAILED_CORRECTION_MARKER}` }, {}, null]), 1);
+  assert.equal(countCiFailedCorrections([]), 0);
+  assert.equal(countCiFailedCorrections(null), null);
+});
+
+test("#1202 ci-failed verdict envelope: bounded reserve -> dispatch only, with a reservation-first continuation; never merge or Stage 2 actions", () => {
+  const { inputs } = mergeBranches.ordinary(CIF_HEAD);
+  const v = rawResolvePreMergeVerdict({ ...inputs, ci: cifFailed(), ciFailedCorrections: 0 }, cifCtx);
+  const env = getActionEnvelope(v.state, v);
+  assert.equal(env.mode, "bounded");
+  assert.deepEqual(env.authorizedActions, ["reserve-correction-checkout", "dispatch-correction-worker"]);
+  const cont = getCorrectionContinuation(v.state, v);
+  assert.match(cont.steps[0], /pr-head-checkout-preflight\.mjs --reserve-from-gate/);
+});
+
+function cifControlImpls(ci, commits, overrides = {}) {
+  return {
+    ghIssueViewImpl: async () => ({ body: CONTROL_BODY_PRE_MERGE, state: "OPEN" }),
+    stage1RunImpl: async () => stage1("RESPONSE_RECEIVED"),
+    checkMergeConflictImpl: async () => ({ exitCode: 0, mergeable: "MERGEABLE" }),
+    checkMergeReadyImpl: async () => ({ exitCode: 0, state: "MERGE_READY" }),
+    checkRequiredCiImpl: async () => ci,
+    readPrCommitsImpl: async () => commits,
+    ...overrides,
+  };
+}
+
+test("#1202 runNextReviewTransitionGate (control mode): CI_FAILED with no prior ci-failed correction -> bounded correction verdict, not merge", async () => {
+  const result = await rawRunNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322", head: CIF_HEAD },
+    cifControlImpls(cifFailed(), [{ message: "initial" }]),
+  );
+  assert.equal(result.state, "STAGE1_CORRECTION_REQUIRED");
+  assert.equal(result.correctionReason, "ci-failed");
+});
+
+test("#1202 runNextReviewTransitionGate (control mode): a prior ci-failed correction commit or an unreadable commit list fails closed; healthy CI never reads the commit list", async () => {
+  const repeated = await rawRunNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322", head: CIF_HEAD },
+    cifControlImpls(cifFailed(), [{ message: `fix ${CI_FAILED_CORRECTION_MARKER}` }]),
+  );
+  assert.equal(repeated.state, "AMBIGUOUS");
+  assert.match(repeated.reason, /retry bound/);
+  const unreadable = await rawRunNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322", head: CIF_HEAD },
+    cifControlImpls(cifFailed(), null, {
+      readPrCommitsImpl: async () => {
+        throw new Error("HTTP 500");
+      },
+    }),
+  );
+  assert.equal(unreadable.state, "AMBIGUOUS");
+  let commitReads = 0;
+  const healthy = await rawRunNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322", head: CIF_HEAD },
+    cifControlImpls(ciPass(CIF_HEAD), [], {
+      readPrCommitsImpl: async () => {
+        commitReads++;
+        return [];
+      },
+    }),
+  );
+  assert.equal(healthy.state, "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2");
+  assert.equal(commitReads, 0);
+});
+
+test("#1202 runNextReviewTransitionGate (control mode): a CI head that is not the gated head never reaches a correction", async () => {
+  const result = await rawRunNextReviewTransitionGate(
+    { repo: "o/r", controlIssue: "322", head: CIF_HEAD },
+    cifControlImpls(cifFailed("dcbfe19591931eac29038deac510acfcfc76b0df"), []),
+  );
+  assert.equal(result.state, "AMBIGUOUS");
 });

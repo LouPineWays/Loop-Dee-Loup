@@ -414,9 +414,9 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
     throw new Error("formatStage1CorrectionWorkerDispatchPrompt requires controlIssue to be a positive integer when present");
   }
   const reason = correctionReason ?? "findings";
-  if (reason !== "findings" && reason !== "closing-reference") {
+  if (reason !== "findings" && reason !== "closing-reference" && reason !== "ci-failed") {
     throw new Error(
-      'formatStage1CorrectionWorkerDispatchPrompt requires correctionReason to be "findings", "closing-reference", or absent',
+      'formatStage1CorrectionWorkerDispatchPrompt requires correctionReason to be "findings", "closing-reference", "ci-failed", or absent',
     );
   }
   const executionLine = hasExecutionIssue ? ` Execution Issue: #${issue}.` : "";
@@ -463,6 +463,24 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
   }
   assertCheckoutBinding(checkoutBinding);
   const { path, token, scriptPath } = checkoutBinding;
+  if (reason === "ci-failed") {
+    // Issue #1202 (control #1201; live #1197/#1198/PR #1199): required exact-head CI failed on an
+    // authorized PR. Same pre-spawn checkout binding as the findings path, but a source-repair-only
+    // instruction: no findings finalizer (there are no findings to satisfy), no CI suppression, no
+    // merge or review bypass. The commit marker is the durable retry history the gate's bound reads
+    // (next-review-transition-gate.mjs CI_FAILED_CORRECTION_MARKER).
+    const nameIssue = hasExecutionIssue ? ` name #${issue} and` : "";
+    return (
+      `Stage 1 correction worker dispatch.${executionLine} PR: #${pr}.${controlLine}
+
+` +
+      renderPreBoundCheckoutClause({ path, token, scriptPath, pr }) +
+      `CI-failed correction: read PR #${pr}'s failing required-CI logs from GitHub; fix the root cause in ` +
+      `source only (no CI suppression, skips, reruns, or test secrets). Every commit message must${nameIssue} ` +
+      `include [ci-failed-correction]. Push, await exact-head CI, then request Stage 1 at the new head via ` +
+      `tools/review-watch/trigger.mjs and --release-binding ${token}. No merge, review bypass, or Stage 2.`
+    );
+  }
   // Issue #924 (the #908/#907/PR #923 escape): the finalizer's canonical provenance verifier
   // accepts a correction commit only when its message names the execution Issue. A correction
   // that omitted it was pushed, could never be finalized, and stranded the control at

@@ -20,6 +20,7 @@ import {
   renderConflictRecoverySuccessorClause,
   assertReferenceOnly,
 } from "./format-dispatch-prompt.mjs";
+import { CI_FAILED_CORRECTION_MARKER } from "./next-review-transition-gate.mjs";
 
 // Issue #703: the pre-spawn checkout binding `pr-head-checkout-preflight.mjs --reserve-from-gate`
 // adds to a findings-bearing STAGE1_CORRECTION_REQUIRED verdict. `scriptPath` (Stage 1 finding P1
@@ -1555,4 +1556,56 @@ test("#1070: successor dispatch prompt requires the canonical standalone Superse
   const src = fs.readFileSync(new URL("./format-dispatch-prompt.mjs", import.meta.url), "utf8");
   assert.match(src, /standalone line "Supersedes #\$\{pr\}\."/);
   assert.match(src, /as its own separate line, "Supersedes #\$\{pr\}\."/);
+});
+
+// -- Issue #1202 (control #1201; live #1197/#1198/PR #1199): ci-failed Stage 1 correction variant ----------
+test('formatStage1CorrectionWorkerDispatchPrompt "ci-failed": reference-only source-repair prompt on the pre-bound checkout, no finalizer, no merge or review bypass', () => {
+  const prompt = formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 1197, issue: 1198, pr: 1199, correctionReason: "ci-failed", checkoutBinding: BINDING });
+  assert.match(prompt, /^Stage 1 correction worker dispatch\./);
+  assert.match(prompt, /#1198/);
+  assert.match(prompt, /#1199/);
+  assert.match(prompt, /#1197/);
+  assert.ok(prompt.includes(`Pre-bound checkout: ${BINDING.path}.`));
+  assert.ok(prompt.includes(`node "${BINDING.scriptPath}" --verify-binding ${BINDING.token} --pr 1199`));
+  assert.match(prompt, /failing required-CI logs/);
+  assert.match(prompt, /no CI suppression/);
+  assert.match(prompt, /\[ci-failed-correction\]/);
+  assert.match(prompt, /name #1198/);
+  assert.match(prompt, /exact-head CI/);
+  assert.match(prompt, new RegExp(`--release-binding ${BINDING.token}`));
+  assert.match(prompt, /No merge, review bypass, or Stage 2/);
+  assert.ok(!/finalize-correction-breakpoint/.test(prompt));
+  // The ci-failed marker must match the gate's retry-history marker exactly.
+  assert.ok(prompt.includes(CI_FAILED_CORRECTION_MARKER));
+  // Reference-only: the fixed text (excluding machine-generated binding path/script) stays within the threshold.
+  assertReferenceOnly(prompt, 700 + BINDING.path.length + BINDING.scriptPath.length);
+});
+
+test('formatStage1CorrectionWorkerDispatchPrompt "ci-failed" fails closed without a pre-spawn checkoutBinding and for an unrecognized reason', () => {
+  assert.throws(
+    () => formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 1197, issue: 1198, pr: 1199, correctionReason: "ci-failed" }),
+    /requires a pre-spawn checkoutBinding/,
+  );
+  assert.throws(
+    () => formatStage1CorrectionWorkerDispatchPrompt({ controlIssue: 1197, issue: 1198, pr: 1199, correctionReason: "ci-flaky", checkoutBinding: BINDING }),
+    /"ci-failed"/,
+  );
+});
+
+test("CLI: piped STAGE1_CORRECTION_REQUIRED correctionReason ci-failed selects the ci-failed variant within the reference-only budget", async () => {
+  const result = await runCli({
+    state: "STAGE1_CORRECTION_REQUIRED",
+    stopAfter: true,
+    repo: "o/r",
+    pr: 1199,
+    head: "d2d6291ff20e98c2ecf74a14a1ea38c58a1aa552",
+    issue: 1198,
+    controlIssue: 1197,
+    correctionReason: "ci-failed",
+    ciFailure: { head: "d2d6291ff20e98c2ecf74a14a1ea38c58a1aa552", message: "required CI failed", blocking: [{ name: "verify" }] },
+    checkoutBinding: BINDING,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /CI-failed correction/);
+  assert.ok(!result.stdout.includes("d2d6291ff20e98c2ecf74a14a1ea38c58a1aa552"));
 });

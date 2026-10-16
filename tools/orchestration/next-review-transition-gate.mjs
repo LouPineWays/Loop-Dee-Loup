@@ -524,7 +524,7 @@ function hasFindingsStage1Response(stage1) {
 // pending -> NO_ACTION_YET (wait and re-invoke); failed/missing/head-moved/unverifiable/absent ->
 // AMBIGUOUS (fail-closed founder-visible stop). A `ci` that is absent is never success -- the
 // caller omitting the evidence cannot authorize merge.
-function ciBlockVerdict(ci, context, { stage1, mergeReady }) {
+function ciBlockVerdict(ci, context, { stage1, mergeReady, ciFailedCorrections = null }) {
   const base = { stopAfter: true, ...context, stage1, mergeReady };
   if (!hasTrustworthyExitCode(ci)) {
     return {
@@ -553,6 +553,9 @@ function ciBlockVerdict(ci, context, { stage1, mergeReady }) {
   if (ci.exitCode === 2 && ci.state === "CI_PENDING") {
     return { state: "NO_ACTION_YET", ...base, ci, reason: ci.message ?? `required CI is pending at head ${context.head}` };
   }
+  if (ci.exitCode === 2 && ci.state === "CI_FAILED") {
+    return ciFailedVerdict(ci, context, base, ciFailedCorrections);
+  }
   return {
     state: "AMBIGUOUS",
     ...base,
@@ -561,7 +564,57 @@ function ciBlockVerdict(ci, context, { stage1, mergeReady }) {
   };
 }
 
-function ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeReady, ci }) {
+// Commit-message marker the `ci-failed` correction worker prompt (format-dispatch-prompt.mjs) requires on
+// every correction commit; counting it on the PR is the durable retry history this bound reads.
+export const CI_FAILED_CORRECTION_MARKER = "[ci-failed-correction]";
+// Bounded retries: one ci-failed correction per PR. A repeated CI_FAILED after it fails closed.
+export const MAX_CI_FAILED_CORRECTIONS = 1;
+
+export function countCiFailedCorrections(commits) {
+  if (!Array.isArray(commits)) return null;
+  return commits.filter((c) => typeof c?.message === "string" && c.message.includes(CI_FAILED_CORRECTION_MARKER)).length;
+}
+
+// Issue #1202 (control #1201; live #1197/#1198/PR #1199): a trustworthy exit-code-2 CI_FAILED result bound to
+// the exact current head, under live control/execution/PR identity, routes to the existing bounded
+// STAGE1_CORRECTION_REQUIRED verdict (correctionReason "ci-failed") instead of a founder-visible AMBIGUOUS stop.
+// Anything weaker (head moved, no control/packet/PR identity, unknown or exhausted retry history) stays a
+// non-mutating AMBIGUOUS. Never authorizes merge.
+function ciFailedVerdict(ci, context, base, ciFailedCorrections) {
+  const fail = (why) => ({
+    state: "AMBIGUOUS",
+    ...base,
+    ci,
+    reason: `required CI is not satisfied at head ${context.head}: ${ci.state} ${ci.message ?? ""}`.trim() + ` -- ${why}; no correction dispatched (fail closed)`,
+  });
+  const head = typeof context.head === "string" ? context.head.toLowerCase() : "";
+  if (!/^[0-9a-f]{40}$/.test(head) || typeof ci.head !== "string" || ci.head.toLowerCase() !== head) {
+    return fail("CI_FAILED evidence is not bound to the exact current 40-character head");
+  }
+  const pos = (v) => Number.isInteger(v) && v > 0;
+  if (!pos(context.controlIssue) || !pos(context.issue) || !pos(context.pr)) {
+    return fail("no live control Issue / execution Issue / PR identity authorizes a correction");
+  }
+  if (!Number.isInteger(ciFailedCorrections) || ciFailedCorrections < 0) {
+    return fail("prior ci-failed correction history could not be verified");
+  }
+  if (ciFailedCorrections >= MAX_CI_FAILED_CORRECTIONS) {
+    return fail(`ci-failed correction retry bound (${MAX_CI_FAILED_CORRECTIONS}) exhausted; founder-visible stop`);
+  }
+  return {
+    state: "STAGE1_CORRECTION_REQUIRED",
+    stopAfter: true,
+    ...context,
+    correctionReason: "ci-failed",
+    ciFailure: {
+      head: ci.head,
+      message: ci.message,
+      blocking: Array.isArray(ci.blocking) ? ci.blocking.slice(0, 10) : [],
+    },
+  };
+}
+
+function ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeReady, ci, ciFailedCorrections }) {
   if (mergeConflict) {
     if (!hasTrustworthyExitCode(mergeConflict) || mergeConflict.exitCode === 1) {
       return {
@@ -602,7 +655,7 @@ function ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeRe
       };
     }
   }
-  return ciBlockVerdict(ci, context, { stage1, mergeReady }) ?? {
+  return ciBlockVerdict(ci, context, { stage1, mergeReady, ciFailedCorrections }) ?? {
     state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
     stopAfter: true,
     ...context,
@@ -610,7 +663,7 @@ function ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeRe
 }
 
 export function resolvePreMergeVerdict(
-  { stage1, mergeReady, stage1Disposition = null, correctionDelta = null, mergeConflict = null, unfinalizedCorrection = null, ci = null },
+  { stage1, mergeReady, stage1Disposition = null, correctionDelta = null, mergeConflict = null, unfinalizedCorrection = null, ci = null, ciFailedCorrections = null },
   context = {},
 ) {
   if (!hasTrustworthyExitCode(stage1) || !hasTrustworthyExitCode(mergeReady)) {
@@ -730,7 +783,7 @@ export function resolvePreMergeVerdict(
       // Issue #1129: the only remaining blocker is required CI (failed/pending/missing/unreadable/
       // moved head) -- a non-merge verdict, never the generic fall-through below.
       if (isMergeReadyState(mergeReady.state)) {
-        const ciBlocked = ciBlockVerdict(ci, context, { stage1, mergeReady });
+        const ciBlocked = ciBlockVerdict(ci, context, { stage1, mergeReady, ciFailedCorrections });
         if (ciBlocked) return ciBlocked;
       }
       // Any other composed outcome for an otherwise-satisfied correction delta (an
@@ -834,7 +887,7 @@ export function resolvePreMergeVerdict(
   if (stage1.state === "EXEMPT") {
     if (isMergeReadyState(mergeReady.state)) {
       return (
-        ciBlockVerdict(ci, context, { stage1, mergeReady }) ?? {
+        ciBlockVerdict(ci, context, { stage1, mergeReady, ciFailedCorrections }) ?? {
           state: "STAGE1_SATISFIED_MERGE_AND_TRIGGER_STAGE2",
           stopAfter: true,
           ...context,
@@ -861,7 +914,7 @@ export function resolvePreMergeVerdict(
     // automated-sync classifier at all.
     if (hasFindingsStage1Response(stage1)) {
       if (stage1DispositionSatisfiedAtHead && isMergeReadyState(mergeReady.state)) {
-        return ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeReady, ci });
+        return ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeReady, ci, ciFailedCorrections });
       }
       // The one genuinely findings-bearing path: #611's #438/PR #610 regression.
       // finalize-correction-breakpoint.mjs remains mandatory here.
@@ -869,7 +922,7 @@ export function resolvePreMergeVerdict(
     }
     if (isCleanStage1Response(stage1)) {
       if (isMergeReadyState(mergeReady.state)) {
-        return ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeReady, ci });
+        return ordinarySatisfiedMergeVerdict(context, mergeConflict, { stage1, mergeReady, ci, ciFailedCorrections });
       }
       // Stage 1 review finding on PR #613 (P1): a clean-pass response has no findings either --
       // same closing-reference-only reasoning as the EXEMPT branch above.
@@ -1447,6 +1500,7 @@ async function resolvePreMerge(
     readCorrectionCommitsImpl = defaultReadCorrectionCommits,
     readTargetCommitsImpl = defaultReadTargetBranchCommits,
     checkRequiredCiImpl = checkRequiredCi,
+    readPrCommitsImpl = defaultReadPrCommits,
   },
 ) {
   let stage1;
@@ -1595,9 +1649,21 @@ async function resolvePreMerge(
     }
   }
 
+  // Issue #1202: retry history is read only for a CI_FAILED result (the only evidence that can reach the
+  // ci-failed correction route). A read failure leaves it null, which ciFailedVerdict treats as
+  // unverifiable -> AMBIGUOUS.
+  let ciFailedCorrections = null;
+  if (ci && ci.exitCode === 2 && ci.state === "CI_FAILED") {
+    try {
+      ciFailedCorrections = countCiFailedCorrections(await readPrCommitsImpl({ repo, pr }));
+    } catch {
+      ciFailedCorrections = null;
+    }
+  }
+
   const context = { repo, pr, head, issue, ...(controlIssue != null ? { controlIssue } : {}) };
   const verdict = resolvePreMergeVerdict(
-    { stage1, mergeReady, stage1Disposition, correctionDelta, mergeConflict, unfinalizedCorrection, ci },
+    { stage1, mergeReady, stage1Disposition, correctionDelta, mergeConflict, unfinalizedCorrection, ci, ciFailedCorrections },
     context,
   );
   return { exitCode: exitCodeFor(verdict.state), ...verdict };
@@ -2681,7 +2747,7 @@ async function resolveStalePointerCorrectionRecovery(
 // the head itself, only once the Execution reference has already checked out.
 async function resolvePreMergeFromControlBody(
   { repo, body, prIssue, controlIssueNumber, head, ghPrHeadImpl },
-  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl, checkRequiredCiImpl },
+  { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl, checkRequiredCiImpl, readPrCommitsImpl },
 ) {
   const executionField = readExecutionBulletField(body);
   const executionRef = executionField.conflict
@@ -2712,7 +2778,7 @@ async function resolvePreMergeFromControlBody(
   const stage1Disposition = parseControlBullet(body, "Stage 1");
   return resolvePreMerge(
     { repo, pr: prIssue, head: resolvedHead, issue: executionRef.issue, stage1Disposition, controlIssue: controlIssueNumber },
-    { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl, checkRequiredCiImpl },
+    { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl, checkRequiredCiImpl, readPrCommitsImpl },
   );
 }
 
@@ -2748,6 +2814,18 @@ export function defaultReadCorrectionCommits({ repo, base, head }) {
 // Pure (Stage 2 Audit #839 finding 1). Flattens every paginated compare page and proves the
 // enumeration is complete: the compare API's `total_commits` must equal the commits collected,
 // otherwise the evidence is truncated and this throws so the caller fails closed to AMBIGUOUS.
+// Issue #1202: the PR's own commit list (retry history for the ci-failed correction bound). The pulls
+// commits API caps at 250 commits, so a list that reaches the cap is unverifiable and throws.
+export function defaultReadPrCommits({ repo, pr }) {
+  const raw = execFileSync("gh", ["api", `repos/${repo}/pulls/${pr}/commits?per_page=100`, "--paginate", "--slurp"], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  const commits = JSON.parse(raw).flat().map((c) => ({ sha: c.sha, message: c.commit?.message }));
+  if (commits.length >= 250) throw new Error("PR commit enumeration may be truncated at the API cap");
+  return commits;
+}
+
 export function reduceCompareCommits(pages) {
   const list = Array.isArray(pages) ? pages : [pages];
   const commits = [];
@@ -2949,6 +3027,7 @@ async function runNextReviewTransitionGateCore(
     reconcileStage2CorrectionPrImpl = reconcileStage2CorrectionPr,
     reconcileExistingStage2AuditIssueImpl = reconcileExistingStage2AuditIssue,
     checkRequiredCiImpl = checkRequiredCi,
+    readPrCommitsImpl = defaultReadPrCommits,
     evaluateEvidenceCorrectionImpl = evaluateEvidenceCorrection,
     evaluateUnusableRecoveryImpl = evaluateUnusableRecovery,
   } = {},
@@ -3004,7 +3083,7 @@ async function runNextReviewTransitionGateCore(
         stage1Disposition: args.stage1Disposition ?? null,
         controlIssue: null,
       },
-      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, checkRequiredCiImpl },
+      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, checkRequiredCiImpl, readPrCommitsImpl },
     );
   }
 
@@ -3116,7 +3195,7 @@ async function runNextReviewTransitionGateCore(
       const head = args.head || prState.headRefOid;
       return resolvePreMergeFromControlBody(
         { repo, body, prIssue: prRef.issue, controlIssueNumber, head, ghPrHeadImpl },
-        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl, checkRequiredCiImpl },
+        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl, checkRequiredCiImpl, readPrCommitsImpl },
       );
     }
     // CLOSED without merging (or any other state gh might report): a genuinely contradictory
@@ -3152,7 +3231,7 @@ async function runNextReviewTransitionGateCore(
     if (args.head) {
       return resolvePreMergeFromControlBody(
         { repo, body, prIssue: prRef.issue, controlIssueNumber, head: args.head, ghPrHeadImpl },
-        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl, checkRequiredCiImpl },
+        { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl, checkRequiredCiImpl, readPrCommitsImpl },
       );
     }
     // No settled "Stage 2" reference exists here (the auditRef.kind === "issue" branch above
@@ -3400,7 +3479,7 @@ async function runNextReviewTransitionGateCore(
     const head = prState.headRefOid;
     return resolvePreMergeFromControlBody(
       { repo, body, prIssue: prRef.issue, controlIssueNumber, head, ghPrHeadImpl },
-      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl, checkRequiredCiImpl },
+      { stage1RunImpl, checkMergeReadyImpl, checkCorrectionDeltaImpl, compareImpl, checkMergeConflictImpl, listStage1TriggerHeadsImpl, readCorrectionCommitsImpl, readTargetCommitsImpl, checkRequiredCiImpl, readPrCommitsImpl },
     );
   }
 
