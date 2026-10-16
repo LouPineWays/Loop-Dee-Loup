@@ -217,3 +217,256 @@ test("readback differing only by trailing whitespace is a READBACK_MISMATCH", ()
   assert.equal(r.exitCode, 1);
   assert.equal(r.state, "READBACK_MISMATCH");
 });
+
+// ---- #1223: post-ACTIVE amendment ------------------------------------------------------------------
+import { hasDuplicateJsonKeys, checkAmendThickGrant, effectiveActiveGrants, parseApprovalComment, composeAmendedBody, APPROVAL_HEADING } from "./write-thick-grant.mjs";
+
+const REF = "https://github.com/o/r/issues/20#issuecomment-555";
+const NEW_ENTRIES = [
+  { component: "review-control", paths: ["tools/review-watch/x.mjs"], intendedChange: "rc", verification: "rv" },
+  { component: "operating-contract", paths: ["AGENTS.md"], intendedChange: "oc", verification: "ov" },
+];
+const approvalBody = (entries = NEW_ENTRIES, c = 10, e = 20) =>
+  `${APPROVAL_HEADING}\n\n- Control issue: #${c}\n- Execution issue: #${e}\n\n\`\`\`json\n${JSON.stringify({ executorSubstrate: entries }, null, 2)}\n\`\`\`\n`;
+const PARENT = "### Parent loop\n#10\n\n";
+const ACTIVE_EXEC = (eol = "\n") => (PARENT + live(ACTIVE)).replace(/\r?\n/g, eol);
+
+function amendHarness({ exec = ACTIVE_EXEC(), approval = approvalBody(), login = "founder", permission = "admin", userType = "User", commentIssue = 20, mutate = (b) => b } = {}) {
+  const h = harness({ exec, mutate });
+  h.deps.readCommentImpl = () => ({ id: 555, body: approval, login, userType, issueNumber: commentIssue });
+  h.deps.permissionImpl = () => permission;
+  return h;
+}
+const amend = (h, extra = {}) => checkAmendThickGrant({ repo: "o/r", controlIssue: 10, executionIssue: 20, founderApprovalRef: REF, authorityEnvelope: { controlIssue: 10, executionIssue: 20 }, ...extra }, h.deps);
+
+test("amend appends approved grants, preserves existing grant and every other byte, verifies full set", () => {
+  for (const eol of ["\n", "\r\n"]) {
+    const base = ACTIVE_EXEC(eol);
+    const h = amendHarness({ exec: base });
+    const r = amend(h);
+    assert.equal(r.exitCode, 0, JSON.stringify(r));
+    assert.equal(r.state, "AMENDED");
+    assert.deepEqual(r.components, ["routing-policy", "review-control", "operating-contract"]);
+    const eff = effectiveActiveGrants(h.store[20].body);
+    assert.ok(eff.ok);
+    assert.deepEqual(eff.entries[0], { component: "routing-policy", paths: ["tools/orchestration/x.mjs"], intendedChange: "c", verification: "v" });
+    assert.deepEqual(eff.entries.slice(1), NEW_ENTRIES);
+    assert.deepEqual(findActiveGrantWitness(h.store[20].body).components, eff.components);
+    const written = h.writes[0];
+    const fenceAt = base.indexOf("```json");
+    assert.equal(written.slice(0, fenceAt), base.slice(0, fenceAt));
+    const tail = base.slice(base.lastIndexOf(eol + "```"));
+    assert.ok(written.endsWith(tail));
+    assert.equal(h.writes.length, 1);
+    if (eol === "\r\n") assert.ok(!/(^|[^\r])\n/.test(written), "CRLF preserved");
+  }
+});
+
+test("amend is idempotent on retry", () => {
+  const h = amendHarness();
+  assert.equal(amend(h).state, "AMENDED");
+  const again = amend(h);
+  assert.equal(again.exitCode, 0);
+  assert.equal(again.state, "ALREADY_AMENDED");
+  assert.equal(h.writes.length, 1);
+});
+
+test("amend refuses untrusted comment: non-admin, bot, wrong issue, wrong format, wrong pair, other repo", () => {
+  const cases = [
+    [{ permission: "write" }, "UNTRUSTED_APPROVAL"],
+    [{ userType: "Bot" }, "UNTRUSTED_APPROVAL"],
+    [{ approval: "approve it please" }, "BAD_APPROVAL"],
+    [{ approval: approvalBody(NEW_ENTRIES, 10, 21) }, "BAD_APPROVAL"],
+    [{ approval: approvalBody([{ ...NEW_ENTRIES[0], component: "executor_substrate" }]) }, "BAD_APPROVAL"],
+    [{ commentIssue: 99 }, "UNTRUSTED_APPROVAL"],
+  ];
+  for (const [opts, state] of cases) {
+    const h = amendHarness(opts);
+    const r = amend(h);
+    assert.equal(r.exitCode, 2, JSON.stringify(opts));
+    assert.equal(r.state, state, JSON.stringify(opts));
+    assert.equal(h.writes.length, 0);
+  }
+  const h = amendHarness();
+  assert.equal(amend(h, { founderApprovalRef: "https://github.com/o/r/issues/99#issuecomment-555" }).state, "BAD_APPROVAL_REF");
+  assert.equal(amend(h, { founderApprovalRef: "https://github.com/x/y/issues/20#issuecomment-555" }).state, "BAD_APPROVAL_REF");
+  assert.equal(amend(h, { founderApprovalRef: "not-a-url" }).state, "BAD_APPROVAL_REF");
+  assert.equal(h.writes.length, 0);
+});
+
+test("amend refuses incorrect or unbounded paths and missing paths envelope", () => {
+  const bad = [
+    { ...NEW_ENTRIES[0], paths: ["AGENTS.md"] },
+    { ...NEW_ENTRIES[0], paths: ["tools/review-watch/**"] },
+    { ...NEW_ENTRIES[0], paths: undefined },
+    { ...NEW_ENTRIES[0], paths: ["../escape.mjs"] },
+  ];
+  for (const entry of bad) {
+    const h = amendHarness({ approval: approvalBody([entry]) });
+    assert.equal(amend(h).state, "BAD_APPROVAL", JSON.stringify(entry));
+    assert.equal(h.writes.length, 0);
+  }
+});
+
+test("amend refuses missing, revoked, ambiguous or conflicting ACTIVE state", () => {
+  const none = amendHarness({ exec: PARENT + live(PROPOSED) });
+  assert.equal(amend(none).state, "NO_ACTIVE");
+  const revoked = amendHarness({ exec: PARENT + live("### REVOKED executor-substrate grant") });
+  assert.equal(amend(revoked).state, "NO_ACTIVE");
+  const two = amendHarness({ exec: `${PARENT}${live(ACTIVE)}\n\n${ACTIVE} second\n${JSON_BLOCK}` });
+  assert.equal(amend(two).state, "AMBIGUOUS_ACTIVE");
+  const dupLine = JSON_BLOCK.split("\n").find((l) => l.includes("routing-policy"));
+  const dup = amendHarness({ exec: ACTIVE_EXEC().replace(dupLine, `${dupLine},\n${dupLine}`) });
+  assert.equal(amend(dup).state, "AMBIGUOUS_ACTIVE");
+  const conflict = amendHarness({ approval: approvalBody([{ component: "routing-policy", paths: ["tools/orchestration/ready-dispatch-gate.mjs"], intendedChange: "widened", verification: "v" }]) });
+  assert.equal(amend(conflict).state, "CONFLICTING_GRANT");
+  for (const h of [none, revoked, two, dup, conflict]) assert.equal(h.writes.length, 0);
+});
+
+test("amend refuses closed execution, wrong control pointer and changed parent", () => {
+  const trust = { readCommentImpl: () => ({ id: 555, body: approvalBody(), login: "f", userType: "User", issueNumber: 20 }), permissionImpl: () => "admin" };
+  const closed = harness({ exec: ACTIVE_EXEC(), state: "CLOSED" });
+  Object.assign(closed.deps, trust);
+  assert.equal(amend(closed).state, "NOT_OPEN");
+  const wrong = harness({ control: "- **Execution:** #21\n", exec: ACTIVE_EXEC() });
+  Object.assign(wrong.deps, trust);
+  assert.equal(amend(wrong).state, "NOT_SOLE_EXECUTION");
+  const h = amendHarness();
+  const read = h.deps.readIssueImpl;
+  let controlReads = 0;
+  h.deps.readIssueImpl = (a) => (a.number === 10 && ++controlReads === 2 ? { body: "- **Execution:** #21\n", state: "OPEN" } : read(a));
+  assert.equal(amend(h).state, "NOT_SOLE_EXECUTION");
+  assert.equal(closed.writes.length + wrong.writes.length + h.writes.length, 0);
+});
+
+test("amend refuses a stale base changed between validation reads", () => {
+  const h = amendHarness();
+  let n = 0;
+  const base = h.deps.readIssueImpl;
+  h.deps.readIssueImpl = (a) => {
+    const r = base(a);
+    return a.number === 20 && ++n === 2 ? { ...r, body: `${r.body}   ` } : r;
+  };
+  assert.equal(amend(h).state, "STALE_BASE");
+  assert.equal(h.writes.length, 0);
+});
+
+test("amend readback mismatch, CRLF-to-LF and write failure fail with exit 1", () => {
+  const mism = amendHarness({ mutate: (b) => b.replace("some text", "tampered") });
+  assert.equal(amend(mism).state, "READBACK_MISMATCH");
+  const crlf = amendHarness({ exec: ACTIVE_EXEC("\r\n"), mutate: (b) => b.replace(/\r\n/g, "\n") });
+  const r = amend(crlf);
+  assert.equal(r.exitCode, 1);
+  assert.equal(r.state, "READBACK_MISMATCH");
+  const lost = amendHarness({ mutate: (b) => b.replace("operating-contract", "routing-policy") });
+  assert.equal(amend(lost).state, "READBACK_MISMATCH");
+  const failing = amendHarness();
+  failing.deps.ghEditImpl = () => {
+    throw new Error("boom");
+  };
+  const f = amend(failing);
+  assert.equal(f.exitCode, 1);
+  assert.equal(f.state, "WRITE_FAILED");
+});
+
+test("amend accepts only the known attribution decoration on readback", () => {
+  const h = amendHarness({ mutate: (b) => b + "\n\n" + ATTRIBUTION });
+  assert.equal(amend(h).state, "AMENDED");
+});
+
+test("amend leaves unrelated trailing PROPOSED sections untouched", () => {
+  const extra = `\n\n${PROPOSED} other\n\`\`\`json\n{"executorSubstrate":[]}\n\`\`\`\n`;
+  const exec = ACTIVE_EXEC() + extra;
+  const h = amendHarness({ exec });
+  assert.equal(amend(h).state, "AMENDED");
+  assert.ok(h.writes[0].endsWith(extra));
+});
+
+test("original PROPOSED to ACTIVE promotion is unchanged; compose/parse reject unsupported input", () => {
+  const h = harness({ exec: live(PROPOSED) });
+  assert.equal(run(h, live(ACTIVE)).state, "WRITTEN");
+  assert.equal(composeAmendedBody("### ACTIVE x\nno fence here", NEW_ENTRIES).state, "UNSUPPORTED_LAYOUT");
+  assert.equal(parseApprovalComment("x", { controlIssue: 1, executionIssue: 2 }).ok, false);
+});
+
+test("amend refuses without a dispatched execution-authority envelope for this exact pair", () => {
+  for (const authorityEnvelope of [null, undefined, { controlIssue: 10, executionIssue: 21 }, { controlIssue: 11, executionIssue: 20 }]) {
+    const h = amendHarness();
+    const r = amend(h, { authorityEnvelope });
+    assert.equal(r.state, "NO_EXECUTION_AUTHORITY");
+    assert.equal(r.exitCode, 2);
+    assert.equal(h.writes.length, 0);
+  }
+});
+
+test("amend refuses a changed approval between the initial and pre-write reads", () => {
+  const h = amendHarness();
+  let n = 0;
+  h.deps.readCommentImpl = () => ({ id: 555, body: approvalBody(++n === 1 ? NEW_ENTRIES : [NEW_ENTRIES[0]]), login: "f", userType: "User", issueNumber: 20 });
+  assert.equal(amend(h).state, "STALE_APPROVAL");
+  assert.equal(h.writes.length, 0);
+});
+
+test("amend refuses approval JSON that repeats an object key", () => {
+  const body = `${APPROVAL_HEADING}\n\n- Control issue: #10\n- Execution issue: #20\n\n\`\`\`json\n{"executorSubstrate": [${JSON.stringify(NEW_ENTRIES[0])}], "executorSubstrate": [${JSON.stringify(NEW_ENTRIES[1])}]}\n\`\`\`\n`;
+  const h = amendHarness({ approval: body });
+  assert.equal(amend(h).state, "BAD_APPROVAL");
+  assert.equal(h.writes.length, 0);
+  assert.ok(hasDuplicateJsonKeys('{"a":{"b":1,"b":2}}'));
+  assert.ok(!hasDuplicateJsonKeys('{"a":{"b":1},"c":{"b":2},"d":["x",{"b":1}]}'));
+});
+
+test("amend refuses a missing or mismatched Parent loop binding, initially and before the write", () => {
+  for (const exec of [live(ACTIVE), "### Parent loop\n#11\n\n" + live(ACTIVE)]) {
+    const h = amendHarness({ exec });
+    assert.equal(amend(h).state, "PARENT_MISMATCH");
+    assert.equal(h.writes.length, 0);
+  }
+  const h = amendHarness();
+  const read = h.deps.readIssueImpl;
+  let n = 0;
+  h.deps.readIssueImpl = (a) => {
+    const r = read(a);
+    return a.number === 20 && ++n === 2 ? { ...r, body: r.body.replace("#10", "#11") } : r;
+  };
+  assert.equal(amend(h).state, "STALE_BASE");
+});
+
+test("amend refuses non-canonical exact paths", () => {
+  for (const path of ["./AGENTS.md", " AGENTS.md ", "tools\\orchestration\\x.mjs"]) {
+    const h = amendHarness({ approval: approvalBody([{ component: "operating-contract", paths: [path], intendedChange: "i", verification: "v" }]) });
+    assert.equal(amend(h).state, "BAD_APPROVAL", path);
+  }
+});
+
+test("amend reports a closed execution Issue on readback as failure", () => {
+  const h = amendHarness();
+  const edit = h.deps.ghEditImpl;
+  h.deps.ghEditImpl = (a) => {
+    edit(a);
+    h.store[20].state = "CLOSED";
+  };
+  const r = amend(h);
+  assert.equal(r.exitCode, 1);
+  assert.equal(r.state, "READBACK_MISMATCH");
+});
+
+test("amend preserves mixed line endings in the existing grant bytes", () => {
+  const base = ACTIVE_EXEC("\n").replace('"executorSubstrate": [\n', '"executorSubstrate": [\r\n');
+  assert.ok(base.includes("[\r\n"));
+  const h = amendHarness({ exec: base });
+  const r = amend(h);
+  assert.equal(r.state, "AMENDED", JSON.stringify(r));
+  const closeAt = base.indexOf("\n  ]\n}");
+  assert.equal(h.writes[0].slice(0, closeAt), base.slice(0, closeAt));
+});
+
+test("permission lookup failure is an operational error, not a refusal", () => {
+  const h = amendHarness();
+  h.deps.permissionImpl = () => {
+    throw new Error("rate limited");
+  };
+  const r = amend(h);
+  assert.equal(r.exitCode, 1);
+  assert.equal(h.writes.length, 0);
+});
