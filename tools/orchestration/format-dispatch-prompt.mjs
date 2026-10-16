@@ -477,8 +477,8 @@ export function formatStage1CorrectionWorkerDispatchPrompt({ controlIssue = null
       renderPreBoundCheckoutClause({ path, token, scriptPath, pr }) +
       `CI-failed correction: read PR #${pr}'s failing required-CI logs from GitHub; fix the root cause in ` +
       `source only (no CI suppression, skips, reruns, or test secrets). Every commit message must${nameIssue} ` +
-      `include [ci-failed-correction]. Push, await exact-head CI, then request Stage 1 at the new head via ` +
-      `tools/review-watch/trigger.mjs and --release-binding ${token}. No merge, review bypass, or Stage 2.`
+      `include [ci-failed-correction]. Push, then --release-binding ${token}. Do not re-trigger ` +
+      `review (no second Stage 1 round) or record a findings disposition. No merge, review bypass, or Stage 2.`
     );
   }
   // Issue #924 (the #908/#907/PR #923 escape): the finalizer's canonical provenance verifier

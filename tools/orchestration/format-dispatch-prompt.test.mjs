@@ -1571,7 +1571,8 @@ test('formatStage1CorrectionWorkerDispatchPrompt "ci-failed": reference-only sou
   assert.match(prompt, /no CI suppression/);
   assert.match(prompt, /\[ci-failed-correction\]/);
   assert.match(prompt, /name #1198/);
-  assert.match(prompt, /exact-head CI/);
+  assert.match(prompt, /Do not re-trigger review \(no second Stage 1 round\)/);
+  assert.ok(!/trigger\.mjs/.test(prompt));
   assert.match(prompt, new RegExp(`--release-binding ${BINDING.token}`));
   assert.match(prompt, /No merge, review bypass, or Stage 2/);
   assert.ok(!/finalize-correction-breakpoint/.test(prompt));

@@ -24,6 +24,11 @@ const CORRECTION_VERDICT = {
   actionEnvelope: { mode: "bounded", authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"] },
 };
 
+test("correctionCompletionField: ci-failed CI-only repair gets no findings postcondition (issue #1202)", async () => {
+  const { correctionCompletionField } = await import("./action-envelope-hook.mjs");
+  assert.deepEqual(correctionCompletionField({ ...CORRECTION_VERDICT, correctionReason: "ci-failed" }), {});
+});
+
 test("correctionCompletionField: findings verdict with full identity gets a postcondition; closing-reference / no-control get none", async () => {
   const { correctionCompletionField } = await import("./action-envelope-hook.mjs");
   assert.deepEqual(correctionCompletionField(CORRECTION_VERDICT), {

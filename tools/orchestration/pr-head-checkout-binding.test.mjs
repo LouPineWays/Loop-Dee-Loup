@@ -548,6 +548,21 @@ test("reserveFromGate: a failed reservation becomes CHECKOUT_BINDING_UNVERIFIED 
   assert.deepEqual(out.output.actionEnvelope.authorizedActions, []);
 });
 
+test("reserveFromGate: a ci-failed verdict pins the reservation to the gated failed-CI head and fails closed if the PR advanced or no head is carried (issue #1202)", async (t) => {
+  const fx = makeFixture(t);
+  const live = (await fx.ghPrViewImpl()).headRefOid;
+  const gate = { state: "STAGE1_CORRECTION_REQUIRED", stopAfter: true, pr: PR, issue: 689, controlIssue: 514, correctionReason: "ci-failed", head: live };
+  const ok = await reserveFromGate(gate, { repo: "o/r", cwd: fx.primary }, { ghPrViewImpl: fx.ghPrViewImpl, readIssueImpl: noIntent, tokenImpl: () => "tokci1" });
+  assert.equal(ok.exitCode, 0);
+  assert.ok(ok.output.checkoutBinding);
+  const moved = await reserveFromGate({ ...gate, head: "e".repeat(40) }, { repo: "o/r", cwd: fx.primary }, { ghPrViewImpl: fx.ghPrViewImpl, readIssueImpl: noIntent, tokenImpl: () => "tokci2" });
+  assert.equal(moved.exitCode, 2);
+  assert.equal(moved.output.verdict, "STALE_HEAD_MISMATCH");
+  const noHead = await reserveFromGate({ ...gate, head: undefined }, { repo: "o/r", cwd: fx.primary }, { ghPrViewImpl: fx.ghPrViewImpl, readIssueImpl: noIntent, tokenImpl: () => "tokci3" });
+  assert.equal(noHead.exitCode, 2);
+  assert.equal(noHead.output.verdict, "STALE_HEAD_MISMATCH");
+});
+
 // Stage 1 review finding on PR #719 (issue #665's own correction): both accepted findings as one
 // dispatch-boundary invariant. P1 -- the conflict-recovery worker mutates source exactly like a
 // findings correction worker, so it needs the same pre-spawn exclusive reservation. P2 -- that
