@@ -125,7 +125,7 @@ test("(a) #1149 literal shape + ACTIVE exact grant -> READY snapshot, readback, 
 });
 
 test("witness: PROPOSED / NOT ACTIVE / negated-status headings are never an ACTIVE witness (#1225)", () => {
-  for (const h of ["PROPOSED executor-substrate grant — NOT ACTIVE", "PROPOSED ACTIVE grant", "NOT ACTIVE grant", "NON-ACTIVE grant", "Not yet active grant", "UNAPPROVED ACTIVE grant"]) {
+  for (const h of ["PROPOSED executor-substrate grant — NOT ACTIVE", "PROPOSED ACTIVE grant", "NOT ACTIVE grant", "NON-ACTIVE grant", "Not yet active grant", "UNAPPROVED ACTIVE grant", "NEVER ACTIVE grant", "NOT CURRENTLY ACTIVE grant", "ACTIVE grant — approval rescinded", "ACTIVE grant (not approved)", "Previously ACTIVE grant"]) {
     assert.equal(findActiveGrantWitness(`### ${h}
 ${jsonBlock(GRANT_JSON)}`).ok, false, h);
   }
