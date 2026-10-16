@@ -237,7 +237,7 @@ function amendHarness({ exec = ACTIVE_EXEC(), approval = approvalBody(), login =
   h.deps.permissionImpl = () => permission;
   return h;
 }
-const amend = (h, extra = {}) => checkAmendThickGrant({ repo: "o/r", controlIssue: 10, executionIssue: 20, founderApprovalRef: REF, authorityEnvelope: { controlIssue: 10, executionIssue: 20 }, ...extra }, h.deps);
+const amend = (h, extra = {}) => checkAmendThickGrant({ repo: "o/r", controlIssue: 10, executionIssue: 20, founderApprovalRef: REF, authorityEnvelope: { origin: "control_plane_dispatch", controlIssue: 10, executionIssue: 20, route: "direct" }, ...extra }, h.deps);
 
 test("amend appends approved grants, preserves existing grant and every other byte, verifies full set", () => {
   for (const eol of ["\n", "\r\n"]) {
@@ -390,12 +390,36 @@ test("original PROPOSED to ACTIVE promotion is unchanged; compose/parse reject u
 });
 
 test("amend refuses without a dispatched execution-authority envelope for this exact pair", () => {
-  for (const authorityEnvelope of [null, undefined, { controlIssue: 10, executionIssue: 21 }, { controlIssue: 11, executionIssue: 20 }]) {
+  const D = { controlIssue: 10, executionIssue: 20, route: "direct" };
+  for (const authorityEnvelope of [
+    null,
+    undefined,
+    { controlIssue: 10, executionIssue: 20 },
+    { origin: "comment", ...D },
+    { origin: "task_start_from_comment", ...D },
+    { origin: "codex_review", ...D },
+    { origin: "founder_direct", founderInstruction: "amend" },
+    { origin: "control_plane_dispatch", controlIssue: 10, executionIssue: 20 },
+    { origin: "control_plane_dispatch", ...D, executionIssue: 21 },
+    { origin: "control_plane_dispatch", ...D, controlIssue: 11 },
+    { origin: "control_plane_dispatch", ...D, controlIssue: "10" },
+    { origin: "correction_dispatch", controlIssue: 11, pr: 5 },
+  ]) {
     const h = amendHarness();
     const r = amend(h, { authorityEnvelope });
     assert.equal(r.state, "NO_EXECUTION_AUTHORITY");
     assert.equal(r.exitCode, 2);
     assert.equal(h.writes.length, 0);
+  }
+});
+
+test("amend accepts planning, integration and control-bound correction dispatch triggers", () => {
+  for (const authorityEnvelope of [
+    { origin: "planning_dispatch", controlIssue: 10, executionIssue: 20 },
+    { origin: "integration_dispatch", controlIssue: 10, executionIssue: 20 },
+    { origin: "correction_dispatch", controlIssue: 10, auditIssue: 5 },
+  ]) {
+    assert.equal(amend(amendHarness(), { authorityEnvelope }).state, "AMENDED");
   }
 });
 
