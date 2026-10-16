@@ -24,9 +24,54 @@ const CORRECTION_VERDICT = {
   actionEnvelope: { mode: "bounded", authorizedActions: ["reserve-correction-checkout", "dispatch-correction-worker"] },
 };
 
-test("correctionCompletionField: ci-failed CI-only repair gets no findings postcondition (issue #1202)", async () => {
+test("correctionCompletionField: ci-failed gets a marker-verifying (kind ci-failed) postcondition, not the findings finalizer (issue #1202, Audit #1204)", async () => {
   const { correctionCompletionField } = await import("./action-envelope-hook.mjs");
-  assert.deepEqual(correctionCompletionField({ ...CORRECTION_VERDICT, correctionReason: "ci-failed" }), {});
+  assert.deepEqual(correctionCompletionField({ ...CORRECTION_VERDICT, correctionReason: "ci-failed" }), {
+    correctionCompletion: { pr: 763, controlIssue: 726, executionIssue: 725, reviewedHead: CORRECTION_VERDICT.head, kind: "ci-failed", blocks: 0 },
+  });
+  assert.deepEqual(correctionCompletionField({ ...CORRECTION_VERDICT, correctionReason: "ci-failed", head: "" }), {});
+  assert.deepEqual(correctionCompletionField({ ...CORRECTION_VERDICT, correctionReason: "ci-failed", pr: undefined }), {});
+});
+
+test("evaluateCiFailedCorrectionCommits: requires an advanced head and a pushed commit naming the execution Issue with the marker (Audit #1204 P1)", async () => {
+  const { evaluateCiFailedCorrectionCommits } = await import("./action-envelope-hook.mjs");
+  const o = { reviewedHead: "aaa", executionIssue: 725 };
+  const base = [{ sha: "x", message: "old" }, { sha: "aaa", message: "reviewed" }];
+  assert.equal(evaluateCiFailedCorrectionCommits(base, o).ok, false); // not advanced
+  assert.equal(evaluateCiFailedCorrectionCommits([...base, { sha: "b", message: "fix it for #725" }], o).ok, false); // no marker
+  assert.equal(evaluateCiFailedCorrectionCommits([...base, { sha: "b", message: "[ci-failed-correction] fix" }], o).ok, false); // no issue
+  assert.equal(evaluateCiFailedCorrectionCommits([...base, { sha: "b", message: "[ci-failed-correction] fix #7250" }], o).ok, false); // wrong issue
+  assert.equal(evaluateCiFailedCorrectionCommits([{ sha: "z", message: "[ci-failed-correction] #725" }], o).ok, false); // reviewed head gone
+  assert.equal(evaluateCiFailedCorrectionCommits([{ sha: "b", message: "[ci-failed-correction] #725" }, { sha: "aaa", message: "r" }], o).ok, false); // marker predates head
+  assert.equal(evaluateCiFailedCorrectionCommits(null, o).ok, false);
+  assert.equal(evaluateCiFailedCorrectionCommits([...base, { sha: "b", message: "Address #725 [ci-failed-correction] fix" }], o).ok, true);
+});
+
+test("defaultVerifyCiFailedCorrection: reads PR commits via gh; read failure or 250-cap fails closed", async () => {
+  const { defaultVerifyCiFailedCorrection } = await import("./action-envelope-hook.mjs");
+  const c = { pr: 9, executionIssue: 725, reviewedHead: "aaa" };
+  const page = (msgs) => JSON.stringify([[{ sha: "aaa", commit: { message: "r" } }, ...msgs.map((m, i) => ({ sha: `n${i}`, commit: { message: m } }))]]);
+  assert.equal(defaultVerifyCiFailedCorrection(c, { execFileImpl: () => page(["Address #725 [ci-failed-correction]"]) }).ok, true);
+  assert.equal(defaultVerifyCiFailedCorrection(c, { execFileImpl: () => page(["Address #725"]) }).ok, false);
+  assert.equal(defaultVerifyCiFailedCorrection(c, { execFileImpl: () => { throw new Error("gh down"); } }).ok, false);
+  assert.equal(defaultVerifyCiFailedCorrection(c, { execFileImpl: () => page(Array(250).fill("m")) }).ok, false);
+});
+
+test("decideSubagentStop: ci-failed worker that pushed without the marker is blocked (then fail-closed stop), never allowed; marker present -> allow", async () => {
+  const { decideSubagentStop, MAX_CORRECTION_STOP_BLOCKS } = await import("./action-envelope-hook.mjs");
+  const completion = { pr: 763, controlIssue: 726, executionIssue: 725, reviewedHead: "r", kind: "ci-failed", blocks: 0, workerAgentId: "w1" };
+  const noFindingsVerify = () => assert.fail("findings verifier must not run for ci-failed");
+  const bad = () => ({ ok: false, detail: "no marker" });
+  const first = decideSubagentStop({ correctionCompletion: completion }, { verifyImpl: noFindingsVerify, ciFailedVerifyImpl: bad, agentId: "w1" });
+  assert.equal(first.action, "block");
+  assert.match(first.reason, /\[ci-failed-correction\]/);
+  assert.doesNotMatch(first.reason, /finalize-correction-breakpoint/);
+  const spent = decideSubagentStop({ correctionCompletion: { ...completion, blocks: MAX_CORRECTION_STOP_BLOCKS } }, { verifyImpl: noFindingsVerify, ciFailedVerifyImpl: bad, agentId: "w1" });
+  assert.equal(spent.action, "stop");
+  assert.deepEqual(
+    decideSubagentStop({ correctionCompletion: completion }, { verifyImpl: noFindingsVerify, ciFailedVerifyImpl: () => ({ ok: true }), agentId: "w1" }),
+    { action: "allow", verified: true },
+  );
 });
 
 test("correctionCompletionField: findings verdict with full identity gets a postcondition; closing-reference / no-control get none", async () => {

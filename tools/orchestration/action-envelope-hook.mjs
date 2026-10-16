@@ -544,7 +544,6 @@ export function correctionCompletionField(verdict) {
     verdict.correctionReason === "closing-reference" ||
     // Issue #1202: a CI-only repair has no findings to satisfy, so the findings-correction
     // postcondition (verify-correction-completion.mjs) can never pass for it.
-    verdict.correctionReason === "ci-failed" ||
     !pos(verdict.pr) ||
     !pos(verdict.controlIssue) ||
     !pos(verdict.issue) ||
@@ -559,6 +558,10 @@ export function correctionCompletionField(verdict) {
       controlIssue: verdict.controlIssue,
       executionIssue: verdict.issue,
       reviewedHead: verdict.head,
+      // Issue #1202 Stage 2 correction (Audit #1204): a ci-failed repair has no findings disposition to
+      // finalize, but its one-retry bound depends on a worker-authored commit marker, so it gets its own
+      // marker-verifying postcondition instead of the findings finalizer.
+      ...(verdict.correctionReason === "ci-failed" ? { kind: "ci-failed" } : {}),
       blocks: 0,
     },
   };
@@ -837,11 +840,50 @@ export function defaultVerifyCorrectionCompletion(completion, { execFileImpl = e
   }
 }
 
+// Issue #1202 Stage 2 correction (Audit #1204 P1): the ci-failed retry bound counts
+// `[ci-failed-correction]` commits on the PR (next-review-transition-gate.mjs), so a worker that pushed a
+// repair without that marker would let re-entry authorize another correction indefinitely. Pure over the
+// PR commit list (oldest first): the gated failed-CI head must still be in the history (no rewrite), at
+// least one commit must follow it, and at least one of those must carry both the marker and the execution
+// Issue provenance.
+export function evaluateCiFailedCorrectionCommits(commits, { reviewedHead, executionIssue, marker = "[ci-failed-correction]" } = {}) {
+  if (!Array.isArray(commits)) return { ok: false, detail: "PR commit history could not be read" };
+  const idx = commits.findIndex((c) => typeof c?.sha === "string" && c.sha.toLowerCase() === String(reviewedHead).toLowerCase());
+  if (idx < 0) return { ok: false, detail: "the gated failed-CI head is no longer in the PR history" };
+  const added = commits.slice(idx + 1);
+  if (added.length === 0) return { ok: false, detail: "the PR head has not advanced from the failed-CI head" };
+  const issueRef = new RegExp(`#${executionIssue}(?!\\d)`);
+  const marked = added.some((c) => typeof c?.message === "string" && c.message.includes(marker) && issueRef.test(c.message));
+  return marked
+    ? { ok: true }
+    : { ok: false, detail: `no pushed correction commit names #${executionIssue} and carries ${marker}` };
+}
+
+// Reads the live PR commit list (250-commit cap or any read failure is unverifiable -> fail closed).
+export function defaultVerifyCiFailedCorrection(completion, { execFileImpl = execFileSync } = {}) {
+  try {
+    const raw = execFileImpl("gh", ["api", `repos/{owner}/{repo}/pulls/${completion.pr}/commits?per_page=100`, "--paginate", "--slurp"], {
+      encoding: "utf8",
+      timeout: 120000,
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const commits = JSON.parse(raw).flat().map((c) => ({ sha: c.sha, message: c.commit?.message }));
+    if (commits.length >= 250) return { ok: false, detail: "PR commit enumeration may be truncated" };
+    return evaluateCiFailedCorrectionCommits(commits, completion);
+  } catch (err) {
+    return { ok: false, detail: String(err?.message || err).split(/\r?\n/)[0] };
+  }
+}
+
 // Pure-ish (verify injected). SubagentStop decision for a controller session whose marker carries
 // a correctionCompletion postcondition: { action: "allow" } when none applies or it verifies;
 // { action: "block", reason } while the worker may still be told to finalize; { action: "stop",
 // reason } once MAX_CORRECTION_STOP_BLOCKS blocks were spent and it is still unverified.
-export function decideSubagentStop(marker, { verifyImpl = defaultVerifyCorrectionCompletion, agentId } = {}) {
+export function decideSubagentStop(
+  marker,
+  { verifyImpl = defaultVerifyCorrectionCompletion, ciFailedVerifyImpl = defaultVerifyCiFailedCorrection, agentId } = {},
+) {
   const completion = marker?.correctionCompletion;
   if (!completion) return { action: "allow" };
   // Issue #764 Stage 1 correction: only the bound correction worker is subject to (and spends the
@@ -854,11 +896,23 @@ export function decideSubagentStop(marker, { verifyImpl = defaultVerifyCorrectio
   ) {
     return { action: "allow", notOwner: true };
   }
-  const result = verifyImpl(completion);
+  const ciFailed = completion.kind === "ci-failed";
+  const result = ciFailed ? ciFailedVerifyImpl(completion) : verifyImpl(completion);
   if (result.ok) return { action: "allow", verified: true };
   const blocks = typeof completion.blocks === "number" ? completion.blocks : 0;
   const detail = result.detail ? ` (${result.detail})` : "";
   if (blocks < MAX_CORRECTION_STOP_BLOCKS) {
+    if (ciFailed) {
+      return {
+        action: "block",
+        blocks: blocks + 1,
+        reason:
+          `CORRECTION_BREAKPOINT_UNVERIFIED ${completion.pr}: the ci-failed repair is not durably recorded on PR #${completion.pr}${detail}. ` +
+          `Do not stop or report success. Push the source repair so a pushed commit names #${completion.executionIssue} and ` +
+          "includes [ci-failed-correction] (if already pushed without it, push one more non-force commit, e.g. an allow-empty commit, carrying both), " +
+          "then --release-binding; never force-push or rerun CI.",
+      };
+    }
     return {
       action: "block",
       blocks: blocks + 1,
