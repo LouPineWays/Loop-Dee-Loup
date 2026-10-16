@@ -219,7 +219,7 @@ test("readback differing only by trailing whitespace is a READBACK_MISMATCH", ()
 });
 
 // ---- #1223: post-ACTIVE amendment ------------------------------------------------------------------
-import { checkAmendThickGrant, effectiveActiveGrants, parseApprovalComment, composeAmendedBody, APPROVAL_HEADING } from "./write-thick-grant.mjs";
+import { hasDuplicateJsonKeys, checkAmendThickGrant, effectiveActiveGrants, parseApprovalComment, composeAmendedBody, APPROVAL_HEADING } from "./write-thick-grant.mjs";
 
 const REF = "https://github.com/o/r/issues/20#issuecomment-555";
 const NEW_ENTRIES = [
@@ -228,7 +228,8 @@ const NEW_ENTRIES = [
 ];
 const approvalBody = (entries = NEW_ENTRIES, c = 10, e = 20) =>
   `${APPROVAL_HEADING}\n\n- Control issue: #${c}\n- Execution issue: #${e}\n\n\`\`\`json\n${JSON.stringify({ executorSubstrate: entries }, null, 2)}\n\`\`\`\n`;
-const ACTIVE_EXEC = (eol = "\n") => live(ACTIVE).replace(/\r?\n/g, eol);
+const PARENT = "### Parent loop\n#10\n\n";
+const ACTIVE_EXEC = (eol = "\n") => (PARENT + live(ACTIVE)).replace(/\r?\n/g, eol);
 
 function amendHarness({ exec = ACTIVE_EXEC(), approval = approvalBody(), login = "founder", permission = "admin", userType = "User", commentIssue = 20, mutate = (b) => b } = {}) {
   const h = harness({ exec, mutate });
@@ -236,7 +237,7 @@ function amendHarness({ exec = ACTIVE_EXEC(), approval = approvalBody(), login =
   h.deps.permissionImpl = () => permission;
   return h;
 }
-const amend = (h, extra = {}) => checkAmendThickGrant({ repo: "o/r", controlIssue: 10, executionIssue: 20, founderApprovalRef: REF, ...extra }, h.deps);
+const amend = (h, extra = {}) => checkAmendThickGrant({ repo: "o/r", controlIssue: 10, executionIssue: 20, founderApprovalRef: REF, authorityEnvelope: { controlIssue: 10, executionIssue: 20 }, ...extra }, h.deps);
 
 test("amend appends approved grants, preserves existing grant and every other byte, verifies full set", () => {
   for (const eol of ["\n", "\r\n"]) {
@@ -308,11 +309,11 @@ test("amend refuses incorrect or unbounded paths and missing paths envelope", ()
 });
 
 test("amend refuses missing, revoked, ambiguous or conflicting ACTIVE state", () => {
-  const none = amendHarness({ exec: live(PROPOSED) });
+  const none = amendHarness({ exec: PARENT + live(PROPOSED) });
   assert.equal(amend(none).state, "NO_ACTIVE");
-  const revoked = amendHarness({ exec: live("### REVOKED executor-substrate grant") });
+  const revoked = amendHarness({ exec: PARENT + live("### REVOKED executor-substrate grant") });
   assert.equal(amend(revoked).state, "NO_ACTIVE");
-  const two = amendHarness({ exec: `${live(ACTIVE)}\n\n${ACTIVE} second\n${JSON_BLOCK}` });
+  const two = amendHarness({ exec: `${PARENT}${live(ACTIVE)}\n\n${ACTIVE} second\n${JSON_BLOCK}` });
   assert.equal(amend(two).state, "AMBIGUOUS_ACTIVE");
   const dupLine = JSON_BLOCK.split("\n").find((l) => l.includes("routing-policy"));
   const dup = amendHarness({ exec: ACTIVE_EXEC().replace(dupLine, `${dupLine},\n${dupLine}`) });
@@ -386,4 +387,86 @@ test("original PROPOSED to ACTIVE promotion is unchanged; compose/parse reject u
   assert.equal(run(h, live(ACTIVE)).state, "WRITTEN");
   assert.equal(composeAmendedBody("### ACTIVE x\nno fence here", NEW_ENTRIES).state, "UNSUPPORTED_LAYOUT");
   assert.equal(parseApprovalComment("x", { controlIssue: 1, executionIssue: 2 }).ok, false);
+});
+
+test("amend refuses without a dispatched execution-authority envelope for this exact pair", () => {
+  for (const authorityEnvelope of [null, undefined, { controlIssue: 10, executionIssue: 21 }, { controlIssue: 11, executionIssue: 20 }]) {
+    const h = amendHarness();
+    const r = amend(h, { authorityEnvelope });
+    assert.equal(r.state, "NO_EXECUTION_AUTHORITY");
+    assert.equal(r.exitCode, 2);
+    assert.equal(h.writes.length, 0);
+  }
+});
+
+test("amend refuses a changed approval between the initial and pre-write reads", () => {
+  const h = amendHarness();
+  let n = 0;
+  h.deps.readCommentImpl = () => ({ id: 555, body: approvalBody(++n === 1 ? NEW_ENTRIES : [NEW_ENTRIES[0]]), login: "f", userType: "User", issueNumber: 20 });
+  assert.equal(amend(h).state, "STALE_APPROVAL");
+  assert.equal(h.writes.length, 0);
+});
+
+test("amend refuses approval JSON that repeats an object key", () => {
+  const body = `${APPROVAL_HEADING}\n\n- Control issue: #10\n- Execution issue: #20\n\n\`\`\`json\n{"executorSubstrate": [${JSON.stringify(NEW_ENTRIES[0])}], "executorSubstrate": [${JSON.stringify(NEW_ENTRIES[1])}]}\n\`\`\`\n`;
+  const h = amendHarness({ approval: body });
+  assert.equal(amend(h).state, "BAD_APPROVAL");
+  assert.equal(h.writes.length, 0);
+  assert.ok(hasDuplicateJsonKeys('{"a":{"b":1,"b":2}}'));
+  assert.ok(!hasDuplicateJsonKeys('{"a":{"b":1},"c":{"b":2},"d":["x",{"b":1}]}'));
+});
+
+test("amend refuses a missing or mismatched Parent loop binding, initially and before the write", () => {
+  for (const exec of [live(ACTIVE), "### Parent loop\n#11\n\n" + live(ACTIVE)]) {
+    const h = amendHarness({ exec });
+    assert.equal(amend(h).state, "PARENT_MISMATCH");
+    assert.equal(h.writes.length, 0);
+  }
+  const h = amendHarness();
+  const read = h.deps.readIssueImpl;
+  let n = 0;
+  h.deps.readIssueImpl = (a) => {
+    const r = read(a);
+    return a.number === 20 && ++n === 2 ? { ...r, body: r.body.replace("#10", "#11") } : r;
+  };
+  assert.equal(amend(h).state, "STALE_BASE");
+});
+
+test("amend refuses non-canonical exact paths", () => {
+  for (const path of ["./AGENTS.md", " AGENTS.md ", "tools\\orchestration\\x.mjs"]) {
+    const h = amendHarness({ approval: approvalBody([{ component: "operating-contract", paths: [path], intendedChange: "i", verification: "v" }]) });
+    assert.equal(amend(h).state, "BAD_APPROVAL", path);
+  }
+});
+
+test("amend reports a closed execution Issue on readback as failure", () => {
+  const h = amendHarness();
+  const edit = h.deps.ghEditImpl;
+  h.deps.ghEditImpl = (a) => {
+    edit(a);
+    h.store[20].state = "CLOSED";
+  };
+  const r = amend(h);
+  assert.equal(r.exitCode, 1);
+  assert.equal(r.state, "READBACK_MISMATCH");
+});
+
+test("amend preserves mixed line endings in the existing grant bytes", () => {
+  const base = ACTIVE_EXEC("\n").replace('"executorSubstrate": [\n', '"executorSubstrate": [\r\n');
+  assert.ok(base.includes("[\r\n"));
+  const h = amendHarness({ exec: base });
+  const r = amend(h);
+  assert.equal(r.state, "AMENDED", JSON.stringify(r));
+  const closeAt = base.indexOf("\n  ]\n}");
+  assert.equal(h.writes[0].slice(0, closeAt), base.slice(0, closeAt));
+});
+
+test("permission lookup failure is an operational error, not a refusal", () => {
+  const h = amendHarness();
+  h.deps.permissionImpl = () => {
+    throw new Error("rate limited");
+  };
+  const r = amend(h);
+  assert.equal(r.exitCode, 1);
+  assert.equal(h.writes.length, 0);
 });

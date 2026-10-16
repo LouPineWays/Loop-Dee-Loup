@@ -25,7 +25,7 @@
 //
 // Usage:
 //   node tools/orchestration/write-thick-grant.mjs --control-issue C --execution-issue E --body-file F [--founder-approval-ref URL]
-//   node tools/orchestration/write-thick-grant.mjs --amend --control-issue C --execution-issue E --founder-approval-ref URL
+//   node tools/orchestration/write-thick-grant.mjs --amend --control-issue C --execution-issue E --founder-approval-ref URL --dispatch-authority C/E
 //
 // Exit codes: 0 WRITTEN (verified) / ALREADY_ACTIVE; 1 operational failure (args, read, write, readback);
 // 2 REFUSED (durable body left unchanged).
@@ -37,8 +37,8 @@ import { execFileSync } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
 import { readGithubIssue } from "./github-read.mjs";
 import { resolveRepoIdentity, readExecutionBulletField, parseExecutionPointer } from "./ready-dispatch-gate.mjs";
-import { parseAuthority, classifyPath, EXECUTOR_SUBSTRATE } from "./executor-substrate-authority.mjs";
-import { findActiveGrantWitness, isCanonicalActiveHeading } from "./activate-control-pair.mjs";
+import { parseAuthority, classifyPath, normalizePath, EXECUTOR_SUBSTRATE } from "./executor-substrate-authority.mjs";
+import { findActiveGrantWitness, isCanonicalActiveHeading, parentLoopIdentifiesControl } from "./activate-control-pair.mjs";
 import { ghRestEditIssueBody, isKnownAttributionDecorationExact } from "../review-watch/lifecycle-gate.mjs";
 
 const HEADING = /^#{1,6}\s+/;
@@ -207,6 +207,57 @@ export function effectiveActiveGrants(body) {
   return { ok: true, components: [...grants.keys()], entries };
 }
 
+// Pure. True when any JSON object in `text` repeats a key (JSON.parse would silently keep the last).
+export function hasDuplicateJsonKeys(text) {
+  const s = String(text);
+  let i = 0;
+  const ws = () => { while (i < s.length && /\s/.test(s[i])) i++; };
+  const str = () => {
+    const start = i++;
+    while (i < s.length && s[i] !== '"') i += s[i] === "\\" ? 2 : 1;
+    i++;
+    return JSON.parse(s.slice(start, i));
+  };
+  const value = () => {
+    ws();
+    if (s[i] === "{") {
+      i++;
+      const seen = new Set();
+      ws();
+      if (s[i] === "}") { i++; return false; }
+      for (;;) {
+        ws();
+        const k = str();
+        if (seen.has(k)) return true;
+        seen.add(k);
+        ws();
+        i++; // colon
+        if (value()) return true;
+        ws();
+        if (s[i++] === "}") return false;
+      }
+    }
+    if (s[i] === "[") {
+      i++;
+      ws();
+      if (s[i] === "]") { i++; return false; }
+      for (;;) {
+        if (value()) return true;
+        ws();
+        if (s[i++] === "]") return false;
+      }
+    }
+    if (s[i] === '"') { str(); return false; }
+    while (i < s.length && !/[,\]}\s]/.test(s[i])) i++;
+    return false;
+  };
+  try {
+    return value();
+  } catch {
+    return false;
+  }
+}
+
 // Pure. Parses the fixed-format founder approval comment body.
 export function parseApprovalComment(body, { controlIssue, executionIssue }) {
   const text = String(body ?? "").replace(/\r\n/g, "\n");
@@ -219,6 +270,7 @@ export function parseApprovalComment(body, { controlIssue, executionIssue }) {
   }
   const fences = [...text.matchAll(/```json\s*\n([\s\S]*?)\n```/g)];
   if (fences.length !== 1) return { ok: false, reason: "approval comment must carry exactly one fenced JSON authority record" };
+  if (hasDuplicateJsonKeys(fences[0][1])) return { ok: false, reason: "approval JSON repeats an object key; the record is ambiguous" };
   let record;
   try {
     record = JSON.parse(fences[0][1]);
@@ -236,6 +288,9 @@ export function parseApprovalComment(body, { controlIssue, executionIssue }) {
   for (const g of entries) {
     if (!Array.isArray(g.paths)) return { ok: false, reason: `grant for ${g.component} must state a bounded paths envelope` };
     for (const path of g.paths) {
+      if (typeof path !== "string" || normalizePath(path) !== path) {
+        return { ok: false, reason: `path ${JSON.stringify(path)} is not in canonical normalized form` };
+      }
       const c = classifyPath(path);
       if (c.class !== EXECUTOR_SUBSTRATE || c.component !== g.component || /[*?]/.test(path)) {
         return { ok: false, reason: `path ${JSON.stringify(path)} is not an exact path owned by component ${g.component}` };
@@ -261,11 +316,8 @@ export function defaultReadComment({ repo, commentId }, runImpl) {
   };
 }
 export function defaultPermissionFor({ repo, login }, runImpl) {
-  try {
-    return ghJson([`repos/${repo}/collaborators/${login}/permission`], runImpl)?.permission ?? "none";
-  } catch {
-    return "none";
-  }
+  // A lookup failure propagates: it is an operational error, never a durable "not admin" refusal.
+  return ghJson([`repos/${repo}/collaborators/${login}/permission`], runImpl)?.permission ?? "none";
 }
 
 // Pure. Splices `newEntries` into the single ACTIVE section's fenced JSON array, preserving every
@@ -297,23 +349,29 @@ export function composeAmendedBody(live, newEntries) {
   let raw = live.slice(start, offsets[close] - 1);
   const tailCR = raw.endsWith("\r") ? "\r" : "";
   if (tailCR) raw = raw.slice(0, -1);
-  const jsonText = raw.replace(/\r\n/g, "\n");
+  const jsonText = raw;
   const m = /\]\s*\}\s*$/.exec(jsonText);
   if (!m) return { ok: false, state: "UNSUPPORTED_LAYOUT", reason: "ACTIVE grant JSON does not end with the executorSubstrate array and its object" };
   const trimmed = jsonText.slice(0, m.index).replace(/\s+$/, "");
   const gap = jsonText.slice(trimmed.length, m.index);
-  const items = newEntries.map((e) => JSON.stringify(e, null, 2).split("\n").map((l) => "    " + l).join("\n"));
-  const amended = `${trimmed},\n${items.join(",\n")}${gap}${m[0]}`;
-  const body = live.slice(0, start) + amended.replace(/\n/g, eol) + tailCR + live.slice(offsets[close] - 1);
+  const items = newEntries.map((e) => JSON.stringify(e, null, 2).split("\n").map((l) => "    " + l).join(eol));
+  const amended = `${trimmed},${eol}${items.join(`,${eol}`)}${gap}${m[0]}`;
+  const body = live.slice(0, start) + amended + tailCR + live.slice(offsets[close] - 1);
   return { ok: true, body };
 }
 
 export function checkAmendThickGrant(
-  { repo, controlIssue, executionIssue, founderApprovalRef },
+  { repo, controlIssue, executionIssue, founderApprovalRef, authorityEnvelope },
   { readIssueImpl = readGithubIssue, ghEditImpl = defaultGhEditThickIssue, readCommentImpl = defaultReadComment, permissionImpl = defaultPermissionFor, runImpl } = {},
 ) {
   if (!controlIssue) return fail("Missing required arg: --control-issue is required.");
   if (!executionIssue) return fail("Missing required arg: --execution-issue is required.");
+  // Execution-authority boundary (AGENTS.md): an approval comment only informs an already-authorized
+  // worker. The caller must supply the dispatched {controlIssue, executionIssue} envelope, which must
+  // name exactly this pair; a comment alone never authorizes the write.
+  if (!authorityEnvelope || Number(authorityEnvelope.controlIssue) !== Number(controlIssue) || Number(authorityEnvelope.executionIssue) !== Number(executionIssue)) {
+    return refuse("NO_EXECUTION_AUTHORITY", "no dispatched execution-authority envelope naming exactly this control/execution pair was supplied (--dispatch-authority C/E); an approval comment alone never authorizes the write; nothing was written.");
+  }
   const urlMatch = typeof founderApprovalRef === "string" ? COMMENT_URL.exec(founderApprovalRef) : null;
   if (!urlMatch) return refuse("BAD_APPROVAL_REF", "--founder-approval-ref must be an https://github.com/<owner>/<repo>/issues/<N>#issuecomment-<id> URL; nothing was written.");
   const c = Number(controlIssue);
@@ -351,8 +409,8 @@ export function checkAmendThickGrant(
     let permission;
     try {
       permission = permissionImpl({ repo, login: comment.login }, runImpl);
-    } catch {
-      permission = "none";
+    } catch (err) {
+      return { failure: fail(`permission lookup for approval author failed: ${err.message}`) };
     }
     if (permission !== "admin") return { refusal: refuse("UNTRUSTED_APPROVAL", `approval comment author ${JSON.stringify(comment.login)} does not hold repository admin permission; nothing was written.`) };
     const parsed = parseApprovalComment(comment.body, { controlIssue: c, executionIssue: e });
@@ -369,6 +427,8 @@ export function checkAmendThickGrant(
   if (execution.refusal || execution.failure) return execution.refusal ?? execution.failure;
   if (execution.issue.state !== "OPEN") return refuse("NOT_OPEN", `execution ${repo}#${e} is ${execution.issue.state}, not OPEN; nothing was written.`);
   const live = execution.issue.body ?? "";
+  const parent = parentLoopIdentifiesControl(live, c);
+  if (!parent.ok) return refuse("PARENT_MISMATCH", `${parent.reason}; nothing was written.`);
 
   const current = effectiveActiveGrants(live);
   if (!current.ok) return refuse(current.ambiguous ? "AMBIGUOUS_ACTIVE" : "NO_ACTIVE", `${current.reason}; nothing was written.`);
@@ -400,9 +460,12 @@ export function checkAmendThickGrant(
   if (pointerAgain) return pointerAgain;
   const approvalAgain = verifyApproval();
   if (approvalAgain.refusal || approvalAgain.failure) return approvalAgain.refusal ?? approvalAgain.failure;
+  if (!isDeepStrictEqual(approvalAgain.entries, approval.entries)) return refuse("STALE_APPROVAL", "approval comment changed during validation; nothing was written.");
   const again = readOne(e);
   if (again.refusal || again.failure) return again.refusal ?? again.failure;
   if (again.issue.state !== "OPEN" || (again.issue.body ?? "") !== live) return refuse("STALE_BASE", "execution body changed during validation; nothing was written.");
+  const parentAgain = parentLoopIdentifiesControl(again.issue.body ?? "", c);
+  if (!parentAgain.ok) return refuse("PARENT_MISMATCH", `${parentAgain.reason}; nothing was written.`);
 
   try {
     ghEditImpl({ repo, executionIssue: e, body: composed.body }, runImpl);
@@ -417,7 +480,7 @@ export function checkAmendThickGrant(
   }
   const backBody = back.body ?? "";
   const same = backBody === composed.body || isKnownAttributionDecorationExact(composed.body, backBody);
-  if (!same || !verifyEffective(backBody)) {
+  if (back.state !== "OPEN" || !same || !verifyEffective(backBody)) {
     return fail(`wrote ${repo}#${e} but the persisted body did not read back as the complete amended ACTIVE grant set; do not report the grant active`, "READBACK_MISMATCH");
   }
   return { exitCode: 0, state: "AMENDED", verified: true, added: toAdd.map((g) => g.component), components: expected.map((g) => g.component), controlIssue: c, executionIssue: e, repo: repo ?? null };
@@ -434,7 +497,7 @@ function parseArgs(argv) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  for (const k of args.amend ? ["control-issue", "execution-issue", "founder-approval-ref"] : ["control-issue", "execution-issue", "body-file"]) {
+  for (const k of args.amend ? ["control-issue", "execution-issue", "founder-approval-ref", "dispatch-authority"] : ["control-issue", "execution-issue", "body-file"]) {
     if (!args[k]) {
       console.error(`Missing required arg: --${k} is required.`);
       process.exit(1);
@@ -457,6 +520,10 @@ function main() {
       controlIssue: args["control-issue"],
       executionIssue: args["execution-issue"],
       founderApprovalRef: args["founder-approval-ref"],
+      authorityEnvelope: (() => {
+        const m = /^(\d+)\/(\d+)$/.exec(args["dispatch-authority"] ?? "");
+        return m ? { controlIssue: Number(m[1]), executionIssue: Number(m[2]) } : null;
+      })(),
     });
     if (result.exitCode !== 0) {
       console.error(result.message);
