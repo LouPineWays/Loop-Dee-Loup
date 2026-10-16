@@ -183,3 +183,25 @@ test("idempotent retry accepts the known attribution decoration", () => {
   assert.equal(retry.state, "ALREADY_ACTIVE");
   assert.equal(h.writes.length, 1);
 });
+
+test("refuses a concurrent trailing-whitespace change between validation reads (byte-exact stale base)", () => {
+  const h = harness({ exec: live(PROPOSED) });
+  let reads20 = 0;
+  const base = h.deps.readIssueImpl;
+  h.deps.readIssueImpl = (a) => {
+    const r = base(a);
+    if (a.number === 20 && ++reads20 === 2) return { ...r, body: `${r.body}   ` };
+    return r;
+  };
+  const r = run(h, live(ACTIVE));
+  assert.equal(r.exitCode, 2);
+  assert.equal(r.state, "STALE_BASE");
+  assert.equal(h.writes.length, 0);
+});
+
+test("readback differing only by trailing whitespace is a READBACK_MISMATCH", () => {
+  const h = harness({ exec: live(PROPOSED), mutate: (b) => `${b}  ` });
+  const r = run(h, live(ACTIVE));
+  assert.equal(r.exitCode, 1);
+  assert.equal(r.state, "READBACK_MISMATCH");
+});
