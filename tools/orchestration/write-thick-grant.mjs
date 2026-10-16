@@ -25,7 +25,7 @@
 //
 // Usage:
 //   node tools/orchestration/write-thick-grant.mjs --control-issue C --execution-issue E --body-file F [--founder-approval-ref URL]
-//   node tools/orchestration/write-thick-grant.mjs --amend --control-issue C --execution-issue E --founder-approval-ref URL --dispatch-authority C/E
+//   node tools/orchestration/write-thick-grant.mjs --amend --control-issue C --execution-issue E --founder-approval-ref URL --dispatch-authority '<trigger JSON>'
 //
 // Exit codes: 0 WRITTEN (verified) / ALREADY_ACTIVE; 1 operational failure (args, read, write, readback);
 // 2 REFUSED (durable body left unchanged).
@@ -36,7 +36,8 @@ import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
 import { readGithubIssue } from "./github-read.mjs";
-import { resolveRepoIdentity, readExecutionBulletField, parseExecutionPointer } from "./ready-dispatch-gate.mjs";
+import { resolveRepoIdentity, readExecutionBulletField, parseExecutionPointer, parseControlBullet, isKnownLifecycleValue, isBlockingLifecycleValue, isNoneSentinel } from "./ready-dispatch-gate.mjs";
+import { classifyExecutionAuthority } from "./execution-authority-gate.mjs";
 import { parseAuthority, classifyPath, normalizePath, EXECUTOR_SUBSTRATE } from "./executor-substrate-authority.mjs";
 import { findActiveGrantWitness, isCanonicalActiveHeading, parentLoopIdentifiesControl } from "./activate-control-pair.mjs";
 import { ghRestEditIssueBody, isKnownAttributionDecorationExact } from "../review-watch/lifecycle-gate.mjs";
@@ -360,6 +361,25 @@ export function composeAmendedBody(live, newEntries) {
   return { ok: true, body };
 }
 
+// Pure. Classifies the structured dispatch trigger through classifyExecutionAuthority (route required for
+// control_plane_dispatch) and binds the classified result to the requested pair. Only dispatch origins that
+// carry the control Issue (and, where the formatter carries it, the execution Issue) can bind.
+export function classifyAmendAuthority(trigger, controlIssue, executionIssue) {
+  const verdict = classifyExecutionAuthority(trigger);
+  if (!verdict.authorized) return { ok: false, reason: `no authorized execution-authority trigger: ${verdict.reason}` };
+  const c = Number(controlIssue);
+  const e = Number(executionIssue);
+  if (["control_plane_dispatch", "planning_dispatch", "integration_dispatch"].includes(trigger.origin)) {
+    if (trigger.controlIssue === c && trigger.executionIssue === e) return { ok: true };
+    return { ok: false, reason: `authorized ${trigger.origin} does not name exactly control #${c} / execution #${e}` };
+  }
+  if (trigger.origin === "correction_dispatch" && trigger.controlIssue === c) return { ok: true };
+  // A genuinely dispatched plan unit carries only the parent execution Issue; the caller separately
+  // verifies that control C currently points to E, so binding parentExecutionIssue === E is safe.
+  if (trigger.origin === "worker_unit_dispatch" && trigger.parentExecutionIssue === e) return { ok: true };
+  return { ok: false, reason: `origin "${trigger.origin}" cannot be bound to control #${c} / execution #${e}` };
+}
+
 export function checkAmendThickGrant(
   { repo, controlIssue, executionIssue, founderApprovalRef, authorityEnvelope },
   { readIssueImpl = readGithubIssue, ghEditImpl = defaultGhEditThickIssue, readCommentImpl = defaultReadComment, permissionImpl = defaultPermissionFor, runImpl } = {},
@@ -367,10 +387,12 @@ export function checkAmendThickGrant(
   if (!controlIssue) return fail("Missing required arg: --control-issue is required.");
   if (!executionIssue) return fail("Missing required arg: --execution-issue is required.");
   // Execution-authority boundary (AGENTS.md): an approval comment only informs an already-authorized
-  // worker. The caller must supply the dispatched {controlIssue, executionIssue} envelope, which must
-  // name exactly this pair; a comment alone never authorizes the write.
-  if (!authorityEnvelope || Number(authorityEnvelope.controlIssue) !== Number(controlIssue) || Number(authorityEnvelope.executionIssue) !== Number(executionIssue)) {
-    return refuse("NO_EXECUTION_AUTHORITY", "no dispatched execution-authority envelope naming exactly this control/execution pair was supplied (--dispatch-authority C/E); an approval comment alone never authorizes the write; nothing was written.");
+  // worker. The caller must supply a structured trigger that classifyExecutionAuthority authorizes AND
+  // that binds exactly this control/execution pair; a hand-typed pair, a comment-shaped trigger, or an
+  // origin carrying no pair (founder_direct, worker_unit_dispatch) never authorizes the write.
+  const authority = classifyAmendAuthority(authorityEnvelope, controlIssue, executionIssue);
+  if (!authority.ok) {
+    return refuse("NO_EXECUTION_AUTHORITY", `${authority.reason}; an approval comment alone never authorizes the write; nothing was written.`);
   }
   const urlMatch = typeof founderApprovalRef === "string" ? COMMENT_URL.exec(founderApprovalRef) : null;
   if (!urlMatch) return refuse("BAD_APPROVAL_REF", "--founder-approval-ref must be an https://github.com/<owner>/<repo>/issues/<N>#issuecomment-<id> URL; nothing was written.");
@@ -395,6 +417,22 @@ export function checkAmendThickGrant(
     const field = readExecutionBulletField(control.issue.body ?? "");
     const pointer = field.conflict || !field.value ? { ok: false } : parseExecutionPointer(field.value);
     if (!pointer.ok || pointer.issue !== e) return refuse("NOT_SOLE_EXECUTION", `control ${repo}#${c} does not name #${e} as its sole Execution pointer; nothing was written.`);
+    // The trigger is caller-supplied and shape-validated only, so corroborate it against durable control
+    // state: the control must be OPEN in a live, non-blocking Lifecycle, and a control_plane_dispatch route
+    // must equal the Route the control durably records (when one is settled). A fabricated envelope that
+    // does not match the control's own recorded state never authorizes the write.
+    const body = control.issue.body ?? "";
+    const lifecycle = parseControlBullet(body, "Lifecycle");
+    const lifecycleWord = lifecycle ? lifecycle.split(/\s+/)[0].replace(/[^A-Za-z_]/g, "") : "";
+    if (control.issue.state !== "OPEN" || !isKnownLifecycleValue(lifecycleWord) || isBlockingLifecycleValue(lifecycleWord)) {
+      return refuse("NO_EXECUTION_AUTHORITY", `control ${repo}#${c} is not OPEN in a live, non-blocking Lifecycle, so no current dispatch is corroborated; nothing was written.`);
+    }
+    if (authorityEnvelope?.origin === "control_plane_dispatch") {
+      const recorded = parseControlBullet(body, "Route");
+      if (recorded && !isNoneSentinel(recorded) && recorded.trim().toLowerCase() !== String(authorityEnvelope.route).trim().toLowerCase()) {
+        return refuse("NO_EXECUTION_AUTHORITY", `dispatch route does not match the Route recorded on control ${repo}#${c}; nothing was written.`);
+      }
+    }
     return null;
   };
   const verifyApproval = () => {
@@ -521,8 +559,11 @@ function main() {
       executionIssue: args["execution-issue"],
       founderApprovalRef: args["founder-approval-ref"],
       authorityEnvelope: (() => {
-        const m = /^(\d+)\/(\d+)$/.exec(args["dispatch-authority"] ?? "");
-        return m ? { controlIssue: Number(m[1]), executionIssue: Number(m[2]) } : null;
+        try {
+          return JSON.parse(args["dispatch-authority"]);
+        } catch {
+          return null;
+        }
       })(),
     });
     if (result.exitCode !== 0) {
