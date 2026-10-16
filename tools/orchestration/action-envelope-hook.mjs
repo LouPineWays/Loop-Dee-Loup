@@ -542,6 +542,9 @@ export function correctionCompletionField(verdict) {
   if (
     verdict?.state !== "STAGE1_CORRECTION_REQUIRED" ||
     verdict.correctionReason === "closing-reference" ||
+    // Issue #1202: a CI-only repair has no findings to satisfy, so the findings-correction
+    // postcondition (verify-correction-completion.mjs) can never pass for it.
+    verdict.correctionReason === "ci-failed" ||
     !pos(verdict.pr) ||
     !pos(verdict.controlIssue) ||
     !pos(verdict.issue) ||

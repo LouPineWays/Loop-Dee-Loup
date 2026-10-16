@@ -1014,15 +1014,19 @@ export async function reserveFromGate(gate, { repo, cwd } = {}, deps = {}) {
   if (!gate || (!isFindingsCorrection && !isConflictRecovery)) {
     return { exitCode: 0, output: gate };
   }
-  const expectedHead = isOrdinaryConflict ? gate.reviewedHead : isConflictRecovery ? gate.correctedHead : null;
+  const isCiFailed = isFindingsCorrection && gate.correctionReason === "ci-failed";
+  const expectedHead = isOrdinaryConflict ? gate.reviewedHead : isConflictRecovery ? gate.correctedHead : isCiFailed ? gate.head : null;
   if (isFindingsCorrection) {
     const readIssueImpl = deps.readIssueImpl ?? ((a) => readGithubIssue(a));
     const blocked = await checkKnownScopeAuthority(gate, { repo, readIssueImpl });
     if (blocked) return blocked;
   }
   // An ordinary-satisfied conflict verdict without a provable reviewed head must never reserve unpinned.
+  // Issue #1202: likewise a ci-failed verdict must pin to the exact failed-CI head it was gated at.
   const result =
-    isOrdinaryConflict && !/^[0-9a-f]{40}$/i.test(String(gate.reviewedHead ?? ""))
+    isCiFailed && !/^[0-9a-f]{40}$/i.test(String(gate.head ?? ""))
+      ? { exitCode: 2, verdict: "STALE_HEAD_MISMATCH", reason: "ci-failed verdict carries no 40-character head to pin the reservation to" }
+      : isOrdinaryConflict && !/^[0-9a-f]{40}$/i.test(String(gate.reviewedHead ?? ""))
       ? { exitCode: 2, verdict: "STALE_HEAD_MISMATCH", reason: "STAGE1_SATISFIED_MERGE_CONFLICT verdict carries no 40-character reviewedHead to pin the reservation to" }
       : await reserve({ repo, pr: gate.pr, cwd, expectedHead }, deps);
   if (result.exitCode !== 0) {
