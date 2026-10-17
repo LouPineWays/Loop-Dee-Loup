@@ -62,9 +62,9 @@ import {
 } from "./ready-dispatch-gate.mjs";
 import { validateControlSnapshot } from "./control-field-validator.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
-import { activateControlPair, controlAdvertisesPendingState, parentLoopIdentifiesControl } from "./activate-control-pair.mjs";
+import { activateControlPair, controlAdvertisesPendingState, parentLoopIdentifiesControl, pendingMatchesGrant } from "./activate-control-pair.mjs";
 import { parseAuthority } from "./executor-substrate-authority.mjs";
-import { isKnownAttributionDecoration } from "../review-watch/lifecycle-gate.mjs";
+import { isKnownAttributionDecoration, parseWorkIssueRef } from "../review-watch/lifecycle-gate.mjs";
 
 const DEFAULT_ROUTE = "implementation worker";
 const MID_CYCLE_OR_TERMINAL = new Set(["EXECUTING", "VERIFYING", "REVIEW", "AUDIT", "CORRECTION", "EXECUTION_COMPLETE", "ROUTED", "DONE", "DECOMPOSED", "READY_FOR_PLAN", "PLAN_READY", "BLOCKED", "BLOCKED_FAILURE", "BLOCKED_EXTERNAL"]);
@@ -193,7 +193,7 @@ export function classifyChildren(issues, { repo, sourceIssue, expectedTitle, bou
     const namesSource = refs !== null && refs.some((r) => r.number === Number(sourceIssue) && r.repo === String(repo).toLowerCase());
     const marked = body.toLowerCase().includes(marker);
     const sameTitle = expectedTitle && String(issue.title ?? "").trim().toLowerCase() === expectedTitle.toLowerCase();
-    const auditNamesSource = isAuditShapedBody(body) && new RegExp(`(?<![\\w/])#${sourceIssue}\\b`).test(body);
+    const auditNamesSource = isAuditShapedBody(body) && auditNamesIssue(body, sourceIssue);
     const open = String(issue.state ?? "").toUpperCase() === "OPEN";
     if (boundExecution !== null && Number(issue.number) === Number(boundExecution)) continue;
     if (exactParent && marked && open) attributable.push(issue.number);
@@ -219,17 +219,25 @@ export function classifyChildren(issues, { repo, sourceIssue, expectedTitle, bou
       if (seen.has(Number(issue.number)) || Number(issue.number) === Number(sourceIssue) || candidates.includes(Number(issue.number))) continue;
       const body = String(issue.body ?? "");
       if (!isAuditShapedBody(body)) continue;
-      const hit = candidates.filter((c) => new RegExp(`(?<![\\w/])#${c}\\b`).test(body));
+      const hit = candidates.filter((c) => auditNamesIssue(body, c));
       if (hit.length > 0) conflicts.push({ number: issue.number, why: `audit-shaped, names execution packet ${hit.map((c) => "#" + c).join(", ")}` });
     }
   }
   return { attributable, conflicts };
 }
 
+// Pure. True when an audit-shaped body names the Issue: a bare `#N` reference anywhere in the body, or the
+// canonical structured `Work issue` field (any form `parseWorkIssueRef` accepts: `#N`, a full Issue URL, or an
+// unprefixed number) resolving to that Issue.
+function auditNamesIssue(body, issueNumber) {
+  const n = Number(issueNumber);
+  return new RegExp(`(?<![\\w/])#${n}\\b`).test(body) || parseWorkIssueRef(body) === n;
+}
+
 // Pure. Source priority -> { priority: "Now"/"Soon"/"Later"/"Wishes"|null, conflict: null }.
 // The structured `Priority horizon` section is authoritative (the priority:* label is only an
 // asynchronous projection of it, so a disagreeing label is stale); the label is a fallback used
-// only when no structured horizon exists. `conflict` stays (always null) for result-shape stability.
+// only when no horizon section is written at all. `conflict` stays (always null) for result-shape stability.
 export function derivePriority({ labels = [], sections }) {
   const cap = (w) => w[0].toUpperCase() + w.slice(1).toLowerCase();
   const fromLabel = labels.map((l) => String(l).match(/^priority:(now|soon|later|wishes)$/i)).find(Boolean);
@@ -237,7 +245,8 @@ export function derivePriority({ labels = [], sections }) {
   const m = horizon && horizon.trim().match(/^(now|soon|later|wishes)\b/i);
   const label = fromLabel ? cap(fromLabel[1]) : null;
   const structured = m ? cap(m[1]) : null;
-  return { priority: structured ?? label, conflict: null };
+  // A present-but-unparseable (blank/unrecognized) horizon section is still authoritative: never fall back to the label.
+  return { priority: horizon !== null ? structured : label, conflict: null };
 }
 
 const stripIdeaPrefix = (title) => String(title ?? "").replace(/^\s*\[(?:idea|loop|slice)\]\s*/i, "").trim();
@@ -411,6 +420,8 @@ export function isCanonicalPendingGrant({ controlBody, thickBody, activationReas
   }
   const { grants, problems } = parseAuthority(record);
   if (problems.length > 0 || grants.size === 0) return false;
+  // Every pending representation (decision, interrupt, blocker, current blocker) must be about this grant.
+  if (!pendingMatchesGrant(controlBody, [...grants.keys()]).ok) return false;
   const decision = parseControlBullet(controlBody, "Founder decision") ?? "";
   if (!/executor-substrate component grant/i.test(decision)) return false;
   const named = decision.match(/\(([^)]*)\)/);

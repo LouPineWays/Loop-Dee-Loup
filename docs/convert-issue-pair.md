@@ -32,10 +32,12 @@ The report ends in exactly one of these states (this table lists every state the
 | `BOUND_NOT_ACTIVATED` | Only with `--bind-only`: bound and verified, not activated. | Run the `nextAction` activation command. |
 | `DRY_RUN` | Only with `--dry-run`: the plan is printed; nothing was created or changed. | Re-run without `--dry-run` to convert. |
 | `PARTIAL_THICK_CREATED`, `CREATE_FAILED`, `STALE_SOURCE`, `BIND_READBACK_FAILED`, `BIND_READBACK_MISMATCH`, `READ_FAILED`, `NO_REPO` | An interruption or read failure left a partial state or proved nothing; the report names it. | Re-run the same command. It is idempotent. |
-| `NOT_AUTHORIZED`, `BAD_SOURCE`, `BAD_GRANT_PROPOSAL`, `NOT_AN_ISSUE`, `UNSUPPORTED_CLASS`, `UNSUPPORTED_COMPLETED`, `UNSUPPORTED_IN_FLIGHT`, `AMBIGUOUS_CHILDREN`, `WRONG_PARENT`, `ROUTE_CHANGE_UNAUTHORIZED` | Refused with a diagnosis (exit code 2); nothing was changed. | Read `message`; fix the named cause. |
+| `NOT_AUTHORIZED`, `BAD_SOURCE`, `BAD_GRANT_PROPOSAL`, `NOT_AN_ISSUE`, `UNSUPPORTED_CLASS`, `UNSUPPORTED_COMPLETED`, `UNSUPPORTED_IN_FLIGHT`, `WRONG_PARENT`, `ROUTE_CHANGE_UNAUTHORIZED` | Refused with a diagnosis (exit code 2); nothing was changed. | Read `message`; fix the named cause. |
+| `AMBIGUOUS_CHILDREN` | Refused (exit code 2). Usually nothing was changed, but if the competing child appeared after the thick Issue was created, that new thick Issue is left behind unbound and the source is not bound. | Read `message`; resolve the competing child, close any stray thick Issue it names, and re-run. |
 
 A `priority:*` label never blocks conversion: the structured `### Priority horizon` section is
-authoritative and the label is used only when no horizon is written.
+authoritative and the label is used only when no `### Priority horizon` section is written at all; a present but blank or unrecognized
+section is still authoritative and yields no priority rather than falling back to the label.
 
 ## What it creates and changes
 

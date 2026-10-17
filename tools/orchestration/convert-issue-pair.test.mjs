@@ -510,6 +510,28 @@ test("pending grant requires a canonical record, matching components and a missi
   const otherControl = composeControlBody({ sourceIssue: 10, sourceTitle: "[Idea] t", sourceBody: INTAKE, executionIssue: 11, pendingGrantComponents: ["review-watch"] });
   assert.equal(isCanonicalPendingGrant({ controlBody: otherControl, thickBody: thick, activationReason: reason }), false);
   assert.equal(isCanonicalPendingGrant({ controlBody: control, thickBody: thick.replace(grantSection, ""), activationReason: reason }), false);
+  // An independent non-grant blocker alongside the grant decision means approving the grant alone cannot unblock.
+  const withBlocker = control.replace(/### Current blocker\s+None/, "### Current blocker\n\nAwaiting pricing choice");
+  assert.notEqual(withBlocker, control);
+  assert.equal(isCanonicalPendingGrant({ controlBody: withBlocker, thickBody: thick, activationReason: reason }), false);
+});
+
+test("an audit's structured Work issue in URL or unprefixed form blocks binding", () => {
+  for (const ref of ["https://github.com/o/r/issues/11", "11"]) {
+    const w = makeWorld();
+    w.failures.writeThrows = true;
+    assert.equal(run(w).exitCode, 1);
+    w.failures.writeThrows = false;
+    w.issues.set(77, { number: 77, title: "[Audit] x", body: AUDIT_FOR(11).replace("#11", ref), state: "OPEN", labels: [], isPr: false });
+    const r = run(w, { bindOnly: true });
+    assert.equal(r.state, "AMBIGUOUS_CHILDREN", ref + JSON.stringify(r));
+  }
+});
+
+test("a present but unparseable priority horizon never falls back to the label", () => {
+  const sec = (t) => splitSections(t.split("|").join(String.fromCharCode(10)));
+  assert.equal(derivePriority({ labels: ["priority:soon"], sections: sec("### Priority horizon||someday maybe|") }).priority, null);
+  assert.equal(derivePriority({ labels: ["priority:soon"], sections: sec("### Priority horizon|||### Other||x|") }).priority, null);
 });
 
 test("CLI parsing rejects unknown options, stray tokens, repeats and missing values", () => {
