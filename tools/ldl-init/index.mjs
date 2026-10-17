@@ -730,6 +730,9 @@ export const HARD_MODULE_DEPENDENCIES = [
   // managed writer fails at load time.
   { dest: "tools/orchestration/write-thick-grant.mjs", dependsOnDest: "tools/orchestration/execution-authority-gate.mjs" },
   { dest: "tools/orchestration/write-thick-grant.mjs", dependsOnDest: "tools/orchestration/next-review-transition-gate.mjs" },
+  // Issue #1222 Audit #1236 correction (P1): the writer executes control-plane-bootstrap.mjs as the dispatch trust root
+  // and accepts its JSON verdict; a preserved unmanaged copy could fabricate the dispatch-authority verdict.
+  { dest: "tools/orchestration/write-thick-grant.mjs", dependsOnDest: "tools/orchestration/control-plane-bootstrap.mjs" },
   // Issue #1008 Stage 1 correction (P2): ready-dispatch-gate.mjs hard-imports `run` from
   // stage1-gate.mjs for the READY partial-PR-checkpoint recovery.
   { dest: "tools/orchestration/ready-dispatch-gate.mjs", dependsOnDest: "tools/review-watch/stage1-gate.mjs" },
