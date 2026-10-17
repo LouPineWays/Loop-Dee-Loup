@@ -37,7 +37,7 @@
 // Tests: node --test tools/orchestration/write-thick-grant.test.mjs
 
 import { readFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
@@ -383,6 +383,7 @@ export function deriveAmendAuthority(verdict, controlIssue, executionIssue) {
     if (verdict.state === "READY_TO_DISPATCH") envelope = { origin: "control_plane_dispatch", controlIssue: c, executionIssue: e, route: verdict.route };
     else if (verdict.state === "READY_TO_DISPATCH_PLANNING") envelope = { origin: "planning_dispatch", controlIssue: c, executionIssue: e };
     else if (verdict.state === "READY_TO_DISPATCH_INTEGRATION") envelope = { origin: "integration_dispatch", controlIssue: c, executionIssue: e };
+    else if (verdict.state === "READY_TO_DISPATCH_UNITS") envelope = { origin: "worker_unit_dispatch", parentExecutionIssue: e, unitCommentUrl: verdict.manifestUrl, sharedContractUrl: verdict.manifestUrl };
   }
   if (!envelope && verdict.controlIssue === c) {
     if (verdict.state === "STAGE2_CORRECTION_REQUIRED" && verdict.workIssue === e) envelope = { origin: "correction_dispatch", controlIssue: c, auditIssue: verdict.auditIssue };
@@ -394,26 +395,23 @@ export function deriveAmendAuthority(verdict, controlIssue, executionIssue) {
   return { ok: true, envelope };
 }
 
-// Default resolver: evaluates the control-plane gates in a child process (so the sync writer stays sync
-// and the gates' verdict side-channel files are never touched) and returns the final verdict. A control
-// whose ready verdict chains to the post-PR transition gate is resolved through that gate, exactly as
-// session-entry-gate.mjs composes them.
-const RESOLVE_DISPATCH_SCRIPT = `
-const [repo, controlIssue] = process.argv.slice(1);
-const { checkReadyDispatch } = await import("./ready-dispatch-gate.mjs");
-let v = await checkReadyDispatch({ repo, controlIssue });
-if (v.state === "NOT_READY" && v.actionEnvelope?.mode === "chain") {
-  const { runNextReviewTransitionGate } = await import("./next-review-transition-gate.mjs");
-  v = await runNextReviewTransitionGate({ repo, controlIssue });
-}
-console.log(JSON.stringify(v));
-`;
-
+// Default resolver: obtains the verdict through the freshness-enforcing authoritative runner
+// (control-plane-bootstrap.mjs -> session-entry-gate, issue #877), never by importing checkout-local
+// gate code, so a stale or locally modified checkout cannot mint a dispatch verdict the default-branch
+// control plane would reject. The router composes ready-dispatch-gate and the post-PR transition gate
+// exactly as a session does. Any operational failure (non-zero exit, unparseable output, or a result
+// that carries no verdict state) THROWS, so callers treat it as retryable, never as a refusal.
 export function defaultResolveDispatchVerdict({ repo, controlIssue }, runImpl = execFileSync) {
   const dir = dirname(fileURLToPath(import.meta.url));
-  const out = runImpl(process.execPath, ["--input-type=module", "-e", RESOLVE_DISPATCH_SCRIPT, String(repo ?? ""), String(controlIssue)], { encoding: "utf8", cwd: dir, maxBuffer: 64 * 1024 * 1024 });
-  const lines = String(out).trim().split("\n");
-  return JSON.parse(lines[lines.length - 1]);
+  const args = [join(dir, "control-plane-bootstrap.mjs"), "session-entry-gate", "--control-issue", String(controlIssue)];
+  if (repo) args.push("--repo", String(repo));
+  const out = runImpl(process.execPath, args, { encoding: "utf8", cwd: dir, maxBuffer: 64 * 1024 * 1024 });
+  const lines = String(out).trim().split(/\r?\n/);
+  const verdict = JSON.parse(lines[lines.length - 1]);
+  if (!verdict || typeof verdict !== "object" || typeof verdict.state !== "string") {
+    throw new Error("the authoritative control-plane runner returned no verdict state");
+  }
+  return verdict;
 }
 
 export function checkAmendThickGrant(
@@ -426,16 +424,26 @@ export function checkAmendThickGrant(
   // worker. Authority is re-derived here from live GitHub state: the control-plane gates must currently
   // resolve control C to a dispatch verdict naming exactly execution E. Nothing the caller supplies is
   // trusted, so a shape-valid envelope copied from public control state authorizes nothing.
-  let verdict;
-  try {
-    verdict = resolveDispatchImpl({ repo, controlIssue: Number(controlIssue) }, runImpl);
-  } catch (err) {
-    return fail(`could not resolve the current dispatch from the control-plane gates: ${err.message}`);
-  }
-  const authority = deriveAmendAuthority(verdict, controlIssue, executionIssue);
-  if (!authority.ok) {
-    return refuse("NO_EXECUTION_AUTHORITY", `${authority.reason}; an approval comment alone never authorizes the write; nothing was written.`);
-  }
+  // Returns { failure } for an operational error (retryable, exit 1), { refusal } for a durable
+  // authority refusal (exit 2), or null when the gates currently authorize this dispatch.
+  const resolveAuthority = () => {
+    let verdict;
+    try {
+      verdict = resolveDispatchImpl({ repo, controlIssue: Number(controlIssue) }, runImpl);
+    } catch (err) {
+      return { failure: fail(`could not resolve the current dispatch from the control-plane gates: ${err.message}`) };
+    }
+    if (verdict && typeof verdict === "object" && verdict.exitCode === 1 && typeof verdict.state !== "string") {
+      return { failure: fail(`could not resolve the current dispatch from the control-plane gates: ${verdict.message ?? "operational failure"}`) };
+    }
+    const authority = deriveAmendAuthority(verdict, controlIssue, executionIssue);
+    if (!authority.ok) {
+      return { refusal: refuse("NO_EXECUTION_AUTHORITY", `${authority.reason}; an approval comment alone never authorizes the write; nothing was written.`) };
+    }
+    return null;
+  };
+  const authorityResult = resolveAuthority();
+  if (authorityResult) return authorityResult.failure ?? authorityResult.refusal;
   const urlMatch = typeof founderApprovalRef === "string" ? COMMENT_URL.exec(founderApprovalRef) : null;
   if (!urlMatch) return refuse("BAD_APPROVAL_REF", "--founder-approval-ref must be an https://github.com/<owner>/<repo>/issues/<N>#issuecomment-<id> URL; nothing was written.");
   const c = Number(controlIssue);
@@ -520,6 +528,8 @@ export function checkAmendThickGrant(
   if (!verifyEffective(composed.body)) return refuse("COMPOSE_MISMATCH", "composed body would not verify as the exact existing grants plus the approved entries; nothing was written.");
 
   // Tight stale window: re-verify pointer, approval and live bytes immediately before the write.
+  const authorityAgain = resolveAuthority();
+  if (authorityAgain) return authorityAgain.failure ?? authorityAgain.refusal;
   const pointerAgain = checkControlPointer();
   if (pointerAgain) return pointerAgain;
   const approvalAgain = verifyApproval();

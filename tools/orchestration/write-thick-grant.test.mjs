@@ -529,3 +529,43 @@ test("permission lookup failure is an operational error, not a refusal", () => {
   assert.equal(h.writes.length, 0);
 });
 
+
+test("amend accepts a unit-dispatch verdict for this pair (#1235 P2)", () => {
+  const url = "https://github.com/o/r/issues/20#issuecomment-9";
+  const h = amendHarness();
+  const r = amend(h, { verdict: { state: "READY_TO_DISPATCH_UNITS", controlIssue: 10, executionIssue: 20, manifestUrl: url } });
+  assert.equal(r.state, "AMENDED", JSON.stringify(r));
+  const h2 = amendHarness();
+  assert.equal(amend(h2, { verdict: { state: "READY_TO_DISPATCH_UNITS", controlIssue: 10, executionIssue: 21, manifestUrl: url } }).state, "NO_EXECUTION_AUTHORITY");
+});
+
+test("amend propagates an operational gate failure as exit 1, not an authority refusal (#1235 P2)", () => {
+  const h = amendHarness();
+  const r = amend(h, { verdict: { exitCode: 1, message: "gh read failed" } });
+  assert.equal(r.exitCode, 1);
+  assert.notEqual(r.state, "NO_EXECUTION_AUTHORITY");
+  assert.equal(h.writes.length, 0);
+});
+
+test("amend re-derives dispatch authority immediately before the write (#1235 P1)", () => {
+  const h = amendHarness();
+  let calls = 0;
+  h.deps.resolveDispatchImpl = () => (++calls === 1 ? DISPATCH : { state: "BLOCKED", controlIssue: 10 });
+  const r = checkAmendThickGrant({ repo: "o/r", controlIssue: 10, executionIssue: 20, founderApprovalRef: REF }, h.deps);
+  assert.equal(r.state, "NO_EXECUTION_AUTHORITY");
+  assert.equal(calls, 2);
+  assert.equal(h.writes.length, 0);
+});
+
+test("default resolver runs the authoritative bootstrap runner and throws on stateless output (#1235 P1)", async () => {
+  const { defaultResolveDispatchVerdict } = await import("./write-thick-grant.mjs");
+  let seen;
+  const v = defaultResolveDispatchVerdict({ repo: "o/r", controlIssue: 10 }, (cmd, args) => {
+    seen = args;
+    return `noise\n${JSON.stringify(DISPATCH)}\n`;
+  });
+  assert.equal(v.state, "READY_TO_DISPATCH");
+  assert.ok(seen[0].endsWith("control-plane-bootstrap.mjs"));
+  assert.deepEqual(seen.slice(1, 4), ["session-entry-gate", "--control-issue", "10"]);
+  assert.throws(() => defaultResolveDispatchVerdict({ controlIssue: 10 }, () => "{}"));
+});
