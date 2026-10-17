@@ -391,7 +391,7 @@ test("composeControlBody leaves the control valid for the canonical writer and t
 
 // ---- Stage 1 correction (#1244) ----------------------------------------------------------------
 
-import { derivePriority, parseArgs } from "./convert-issue-pair.mjs";
+import { derivePriority, parseArgs, isCanonicalPendingGrant } from "./convert-issue-pair.mjs";
 
 test("a recovered packet translated from an older source body is refused, not bound", () => {
   const w = makeWorld();
@@ -461,13 +461,55 @@ test("a non-grant blocker on a bound pair is not reported as a pending grant", (
   assert.equal(r.exitCode === 0 && r.executable, false);
 });
 
-test("priority: structured horizon wins when consistent; a label/horizon contradiction is refused", () => {
-  assert.deepEqual(derivePriority({ labels: ["priority:soon"], sections: splitSections("### Priority horizon\n\nNow\n") }).conflict !== null, true);
+test("priority: the structured horizon wins over a stale label, which is only a fallback", () => {
+  const stale = derivePriority({ labels: ["priority:soon"], sections: splitSections("### Priority horizon\n\nNow\n") });
+  assert.deepEqual(stale, { priority: "Now", conflict: null });
   assert.equal(derivePriority({ labels: [], sections: splitSections("### Priority horizon\n\nLater\n") }).priority, "Later");
+  assert.equal(derivePriority({ labels: ["priority:soon"], sections: splitSections("### Other\n\nx\n") }).priority, "Soon");
   const w = makeWorld({ source: { number: 10, title: "[Idea] Convert one Issue", body: INTAKE, labels: ["priority:soon"] } });
   const r = run(w);
-  assert.equal(r.state, "PRIORITY_CONFLICT");
-  assert.equal(w.calls.edits.length, 0);
+  assert.equal(r.state, "CONVERTED_READY", JSON.stringify(r));
+  assert.match(w.get(10).body, /- \*\*Priority:\*\* Now/);
+});
+
+const AUDIT_FOR = (work) => `This issue is a read-only control boundary.\n\n### Merged PR\n\n#50\n\n### Work issue\n\n#${work}\n\n### Exact merge commit\n\nabc\n\n### Verification checklist\n\n1. x\n\n### Findings\n\nPending\n\n### Verdict\n\nPENDING\n`;
+
+test("an audit naming a recovered attributable packet (not the source) blocks binding", () => {
+  const w = makeWorld();
+  w.failures.writeThrows = true;
+  assert.equal(run(w).exitCode, 1);
+  w.failures.writeThrows = false;
+  w.issues.set(77, { number: 77, title: "[Audit] x", body: AUDIT_FOR(11), state: "OPEN", labels: [], isPr: false });
+  const r = run(w, { bindOnly: true });
+  assert.equal(r.state, "AMBIGUOUS_CHILDREN", JSON.stringify(r));
+  assert.match(r.message, /#77/);
+  assert.ok(!w.get(10).body.includes("Execution:"));
+});
+
+test("an audit naming the bound packet blocks re-entry and reactivation", () => {
+  const w = makeWorld();
+  assert.equal(run(w, { bindOnly: true }).state, "BOUND_NOT_ACTIVATED");
+  w.issues.set(77, { number: 77, title: "[Audit] x", body: AUDIT_FOR(11), state: "OPEN", labels: [], isPr: false });
+  const before = w.calls.edits.length;
+  const r = run(w);
+  assert.equal(r.state, "AMBIGUOUS_CHILDREN", JSON.stringify(r));
+  assert.equal(w.calls.edits.length, before);
+});
+
+test("pending grant requires a canonical record, matching components and a missing-ACTIVE-grant activation", () => {
+  const grantSection = renderProposedGrant(GRANT).section;
+  const thick = composeThickBody({ repo: REPO, sourceIssue: 10, sourceTitle: "[Idea] t", sourceBody: INTAKE, grantSection });
+  const control = composeControlBody({ sourceIssue: 10, sourceTitle: "[Idea] t", sourceBody: INTAKE, executionIssue: 11, pendingGrantComponents: ["orchestration-lifecycle"] });
+  const reason = "execution Issue body carries no ACTIVE grant section";
+  assert.equal(isCanonicalPendingGrant({ controlBody: control, thickBody: thick, activationReason: reason }), true);
+  assert.equal(isCanonicalPendingGrant({ controlBody: control, thickBody: thick, activationReason: "competing packet #5 is OPEN" }), false);
+  const tampered = thick.replace(/"intendedChange": "add x"/, '"intendedChange": ""');
+  assert.equal(isCanonicalPendingGrant({ controlBody: control, thickBody: tampered, activationReason: reason }), false);
+  const broken = thick.replace(/\{[\s\S]*?\n\}\n/, "{ not json\n");
+  assert.equal(isCanonicalPendingGrant({ controlBody: control, thickBody: broken, activationReason: reason }), false);
+  const otherControl = composeControlBody({ sourceIssue: 10, sourceTitle: "[Idea] t", sourceBody: INTAKE, executionIssue: 11, pendingGrantComponents: ["review-watch"] });
+  assert.equal(isCanonicalPendingGrant({ controlBody: otherControl, thickBody: thick, activationReason: reason }), false);
+  assert.equal(isCanonicalPendingGrant({ controlBody: control, thickBody: thick.replace(grantSection, ""), activationReason: reason }), false);
 });
 
 test("CLI parsing rejects unknown options, stray tokens, repeats and missing values", () => {
