@@ -388,3 +388,91 @@ test("composeControlBody leaves the control valid for the canonical writer and t
   const kids = classifyChildren([{ number: 11, title: "x", body: thick, state: "OPEN" }], { repo: REPO, sourceIssue: 10, expectedTitle: "none" });
   assert.deepEqual(kids.attributable, [11]);
 });
+
+// ---- Stage 1 correction (#1244) ----------------------------------------------------------------
+
+import { derivePriority, parseArgs } from "./convert-issue-pair.mjs";
+
+test("a recovered packet translated from an older source body is refused, not bound", () => {
+  const w = makeWorld();
+  const original = w.deps.createIssue;
+  w.deps.createIssue = (a) => {
+    const out = original(a);
+    w.get(10).body = w.get(10).body.replace("one operation, two linked Issues", "one operation, three steps");
+    return out;
+  };
+  assert.equal(run(w).state, "STALE_SOURCE");
+  w.deps.createIssue = original;
+  const again = run(w);
+  assert.equal(again.exitCode, 1, JSON.stringify(again));
+  assert.equal(again.state, "PARTIAL_THICK_CREATED");
+  assert.equal(w.calls.edits.length, 0);
+});
+
+test("a recovered packet that already has a linked PR is refused and nothing is bound", () => {
+  const w = makeWorld();
+  w.failures.writeThrows = true;
+  assert.equal(run(w).exitCode, 1);
+  w.failures.writeThrows = false;
+  w.deps.listLinkedPrs = ({ issue }) => (issue === 11 ? [{ number: 90 }] : []);
+  const r = run(w, { bindOnly: true });
+  assert.equal(r.state, "UNSUPPORTED_IN_FLIGHT");
+  assert.ok(!w.get(10).body.includes("Execution:"));
+});
+
+test("a competing child that appears after creation fails closed before binding", () => {
+  const w = makeWorld();
+  const original = w.deps.createIssue;
+  w.deps.createIssue = (a) => {
+    const out = original(a);
+    w.issues.set(99, { number: 99, title: "[Slice] Convert one Issue", body: "x", state: "OPEN", labels: [], isPr: false });
+    return out;
+  };
+  const r = run(w);
+  assert.equal(r.state, "AMBIGUOUS_CHILDREN");
+  assert.equal(w.calls.edits.length, 0);
+});
+
+test("planning and blocked lifecycle states are refused as in-flight", () => {
+  for (const state of ["READY_FOR_PLAN", "PLAN_READY", "BLOCKED", "BLOCKED_FAILURE", "BLOCKED_EXTERNAL"]) {
+    const body = `### State\n\n${state}\n\n### Current state\n\n- **Execution:** #11\n- **Route:** implementation worker\n- **PR:** none\n`;
+    const w = makeWorld({ source: { number: 10, title: "[Loop] x", body } });
+    const r = run(w);
+    assert.equal(r.state, "UNSUPPORTED_IN_FLIGHT", `${state}: ${JSON.stringify(r)}`);
+    assert.equal(w.calls.edits.length, 0);
+  }
+});
+
+test("re-entry preserves the bound route; an explicit different route is refused", () => {
+  const w = makeWorld();
+  assert.equal(run(w, { bindOnly: true, route: "review worker" }).state, "BOUND_NOT_ACTIVATED");
+  const r = run(w);
+  assert.equal(r.state, "CONVERTED_READY", JSON.stringify(r));
+  assert.ok(/\*\*Route:\*\* review worker/.test(w.get(10).body), "settled route preserved");
+  assert.equal(run(w, { route: "implementation worker" }).state, "ROUTE_CHANGE_UNAUTHORIZED");
+});
+
+test("a non-grant blocker on a bound pair is not reported as a pending grant", () => {
+  const w = makeWorld();
+  assert.equal(run(w, { bindOnly: true }).state, "BOUND_NOT_ACTIVATED");
+  w.get(10).body = w.get(10).body.replace("- **Founder decision:** none", "- **Founder decision:** Pick a pricing model.");
+  const r = run(w);
+  assert.notEqual(r.state, "CONVERTED_PENDING_GRANT", JSON.stringify(r));
+  assert.equal(r.exitCode === 0 && r.executable, false);
+});
+
+test("priority: structured horizon wins when consistent; a label/horizon contradiction is refused", () => {
+  assert.deepEqual(derivePriority({ labels: ["priority:soon"], sections: splitSections("### Priority horizon\n\nNow\n") }).conflict !== null, true);
+  assert.equal(derivePriority({ labels: [], sections: splitSections("### Priority horizon\n\nLater\n") }).priority, "Later");
+  const w = makeWorld({ source: { number: 10, title: "[Idea] Convert one Issue", body: INTAKE, labels: ["priority:soon"] } });
+  const r = run(w);
+  assert.equal(r.state, "PRIORITY_CONFLICT");
+  assert.equal(w.calls.edits.length, 0);
+});
+
+test("CLI parsing rejects unknown options, stray tokens, repeats and missing values", () => {
+  assert.deepEqual(parseArgs(["--source-issue", "5", "--founder-authorized", "--dry-run"]), { "source-issue": "5", "founder-authorized": true, "dry-run": true });
+  for (const bad of [["--dryrun"], ["--source-issue"], ["--source-issue", "--dry-run"], ["5"], ["--dry-run", "--dry-run"]]) {
+    assert.throws(() => parseArgs(bad), bad.join(" "));
+  }
+});

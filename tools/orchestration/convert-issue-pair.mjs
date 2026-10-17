@@ -67,7 +67,7 @@ import { parseAuthority } from "./executor-substrate-authority.mjs";
 import { isKnownAttributionDecoration } from "../review-watch/lifecycle-gate.mjs";
 
 const DEFAULT_ROUTE = "implementation worker";
-const MID_CYCLE_OR_TERMINAL = new Set(["EXECUTING", "VERIFYING", "REVIEW", "AUDIT", "CORRECTION", "EXECUTION_COMPLETE", "ROUTED", "DONE", "DECOMPOSED"]);
+const MID_CYCLE_OR_TERMINAL = new Set(["EXECUTING", "VERIFYING", "REVIEW", "AUDIT", "CORRECTION", "EXECUTION_COMPLETE", "ROUTED", "DONE", "DECOMPOSED", "READY_FOR_PLAN", "PLAN_READY", "BLOCKED", "BLOCKED_FAILURE", "BLOCKED_EXTERNAL"]);
 const RESERVED_BULLETS = ["execution", "execution issue", "route", "lifecycle", "pr", "stage 1", "stage 2", "blocker", "founder decision"];
 const CONTROL_HEADINGS = ["State", "Current state", "Current blocker", "Founder interrupt"];
 const PACKET_HEADINGS = ["Parent loop", "Observable outcome"];
@@ -212,13 +212,21 @@ export function classifyChildren(issues, { repo, sourceIssue, expectedTitle, bou
   return { attributable, conflicts };
 }
 
-// Pure. Source priority label / horizon -> "Now"/"Soon"/"Later"/"Wishes" or null.
+// Pure. Source priority -> { priority: "Now"/"Soon"/"Later"/"Wishes"|null, conflict: string|null }.
+// The structured `Priority horizon` section is authoritative (the label is an asynchronous
+// projection of it); when both exist and disagree the evidence is contradictory and the caller
+// must refuse rather than pick the possibly stale label.
 export function derivePriority({ labels = [], sections }) {
+  const cap = (w) => w[0].toUpperCase() + w.slice(1).toLowerCase();
   const fromLabel = labels.map((l) => String(l).match(/^priority:(now|soon|later|wishes)$/i)).find(Boolean);
-  if (fromLabel) return fromLabel[1][0].toUpperCase() + fromLabel[1].slice(1).toLowerCase();
   const horizon = sectionByName(sections, "Priority horizon");
   const m = horizon && horizon.trim().match(/^(now|soon|later|wishes)\b/i);
-  return m ? m[1][0].toUpperCase() + m[1].slice(1).toLowerCase() : null;
+  const label = fromLabel ? cap(fromLabel[1]) : null;
+  const structured = m ? cap(m[1]) : null;
+  if (label && structured && label !== structured) {
+    return { priority: null, conflict: `structured Priority horizon is ${structured} but the priority:* label says ${label}` };
+  }
+  return { priority: structured ?? label, conflict: null };
 }
 
 const stripIdeaPrefix = (title) => String(title ?? "").replace(/^\s*\[(?:idea|loop|slice)\]\s*/i, "").trim();
@@ -371,7 +379,7 @@ const defaultListLinkedPrs = ({ repo, issue }) => defaultGhPrList({ repo, execut
 // ---------------------------------------------------------------------------------------------
 
 export function convertIssuePair(
-  { repo, sourceIssue, founderAuthorized = false, proposedGrant = null, route = DEFAULT_ROUTE, bindOnly = false, dryRun = false },
+  { repo, sourceIssue, founderAuthorized = false, proposedGrant = null, route = null, bindOnly = false, dryRun = false },
   deps = {},
 ) {
   const {
@@ -444,6 +452,7 @@ export function convertIssuePair(
   let executionIssue;
   let created = false;
   let recovered = false;
+  let effectiveRoute = route ?? DEFAULT_ROUTE;
 
   if (cls.kind === "BOUND") {
     executionIssue = cls.executionIssue;
@@ -463,6 +472,12 @@ export function convertIssuePair(
     }
     const valid = validateControlSnapshot(source.body, { controlIssue: n });
     if (!valid.ok) return refuse("UNSUPPORTED_CLASS", `bound control ${repo}#${n} fails snapshot validation: ${valid.errors.join("; ")}. Left unchanged.`);
+    const boundRoute = parseControlBullet(source.body, "Route");
+    const bound = boundRoute && !isNoneSentinel(boundRoute) ? boundRoute.trim() : null;
+    if (route !== null && bound !== null && route.trim() !== bound) {
+      return refuse("ROUTE_CHANGE_UNAUTHORIZED", `${repo}#${n} is bound with settled route ${JSON.stringify(bound)}; --route ${JSON.stringify(route)} would rewrite it and no route change is authorized here. Left unchanged.`);
+    }
+    effectiveRoute = bound ?? route ?? DEFAULT_ROUTE;
     steps.push(`already bound to #${executionIssue}; re-verified`);
   } else {
     if (children.conflicts.length > 0 || children.attributable.length > 1) {
@@ -472,6 +487,15 @@ export function convertIssuePair(
     if (children.attributable.length === 1) {
       executionIssue = children.attributable[0];
       recovered = true;
+      let recoveredPrs;
+      try {
+        recoveredPrs = listLinkedPrs({ repo, issue: executionIssue });
+      } catch (err) {
+        return failure("READ_FAILED", `PR linkage check for recovered packet ${repo}#${executionIssue} failed: ${err.message}; nothing was created or changed.`);
+      }
+      if (recoveredPrs.length > 0) {
+        return refuse("UNSUPPORTED_IN_FLIGHT", `recovered packet ${repo}#${executionIssue} is linked to PR ${recoveredPrs.map((p) => "#" + p.number).join(", ")}; in-flight or completed review work is unsupported. ${repo}#${n} left unchanged.`);
+      }
       steps.push(`recovered uniquely attributable child #${executionIssue} (provenance marker + exact Parent loop)`);
     }
   }
@@ -515,9 +539,9 @@ export function convertIssuePair(
   } catch (err) {
     return failure("PARTIAL_THICK_CREATED", `thick Issue #${executionIssue} exists but its readback failed: ${err.message}. ${repo}#${n} is unbound; re-run the same command to recover.`, { sourceIssue: n, executionIssue });
   }
-  const thickOk = thickBack.state === "OPEN" && parentIs(thickBack.body, repo, n) && thickBack.body.toLowerCase().includes(markerFor(repo, n).toLowerCase()) && (cls.kind === "BOUND" || !created || norm(thickBack.body) === norm(thickBody) || isKnownAttributionDecoration(thickBody, thickBack.body));
+  const thickOk = thickBack.state === "OPEN" && parentIs(thickBack.body, repo, n) && thickBack.body.toLowerCase().includes(markerFor(repo, n).toLowerCase()) && (cls.kind === "BOUND" || norm(thickBack.body) === norm(thickBody) || isKnownAttributionDecoration(thickBody, thickBack.body));
   if (cls.kind !== "BOUND" && !thickOk) {
-    return failure("PARTIAL_THICK_CREATED", `thick Issue #${executionIssue} did not read back as the exact translated packet (OPEN, exact Parent loop, provenance marker). ${repo}#${n} is unbound; inspect #${executionIssue} before re-running.`, { sourceIssue: n, executionIssue });
+    return failure("PARTIAL_THICK_CREATED", `thick Issue #${executionIssue} did not read back as the exact packet translated from the current source (OPEN, exact Parent loop, provenance marker, current translation; a recovered packet translated from an older source body is refused, not bound). ${repo}#${n} is unbound; inspect #${executionIssue} before re-running.`, { sourceIssue: n, executionIssue });
   }
 
   // ---- 4. bind the sole Execution pointer through the canonical writer ------------------------------
@@ -535,13 +559,27 @@ export function convertIssuePair(
         { sourceIssue: n, executionIssue },
       );
     }
+    let recheck;
+    try {
+      recheck = classifyChildren(listIssues({ repo }), { repo, sourceIssue: n, expectedTitle, boundExecution: executionIssue });
+    } catch (err) {
+      return failure("PARTIAL_THICK_CREATED", `thick Issue #${executionIssue} exists but re-listing ${repo} Issues before binding failed: ${err.message}. ${repo}#${n} is unbound; re-run the same command.`, { sourceIssue: n, executionIssue });
+    }
+    if (recheck.conflicts.length > 0 || recheck.attributable.length > 0) {
+      const all = [...recheck.conflicts, ...recheck.attributable.map((x) => ({ number: x, why: "competing attributable child" }))];
+      return refuse("AMBIGUOUS_CHILDREN", `A competing child of ${repo}#${n} appeared besides #${executionIssue}: ${all.map((c) => `#${c.number} (${c.why})`).join("; ")}. Failing closed; ${repo}#${n} was not bound.`, { sourceIssue: n, executionIssue });
+    }
+    const pri = derivePriority({ labels: source.labels, sections: splitSections(source.body) });
+    if (pri.conflict) {
+      return refuse("PRIORITY_CONFLICT", `${pri.conflict}; refusing to guess which is current. Fix one, then re-run. ${repo}#${n} was not bound.`, { sourceIssue: n, executionIssue });
+    }
     const proposed = composeControlBody({
       sourceIssue: n,
       sourceTitle: source.title,
       sourceBody: source.body,
       executionIssue,
-      route,
-      priority: derivePriority({ labels: source.labels, sections: splitSections(source.body) }),
+      route: effectiveRoute,
+      priority: pri.priority,
       pendingGrantComponents: grantRender.components ?? null,
     });
     const written = writeSnapshot({ repo, controlIssue: n, proposedBody: proposed });
@@ -590,14 +628,19 @@ export function convertIssuePair(
   }
 
   // ---- 6. activation only through activate-control-pair.mjs + a fresh gate -----------------------------
-  const result = activate({ repo, controlIssue: n, executionIssue, route }, activateDeps);
+  const result = activate({ repo, controlIssue: n, executionIssue, route: effectiveRoute }, activateDeps);
   if (result.exitCode === 0 && (result.state === "ACTIVATED" || result.state === "ALREADY_ACTIVE") && result.gateState === "READY_TO_DISPATCH") {
     steps.push(`activation ${result.state}; fresh session-entry gate: READY_TO_DISPATCH for #${executionIssue}`);
     return { exitCode: 0, state: "CONVERTED_READY", executable: true, ...base, gateState: result.gateState, workOn: `#${n}`, message: `Converted. Run: work on #${n}` };
   }
   let pendingNow = false;
   try {
-    pendingNow = controlAdvertisesPendingState(readIssue({ repo, number: n, fields: ["body", "state"] }).body);
+    const cb = readIssue({ repo, number: n, fields: ["body", "state"] }).body;
+    const tb = readIssue({ repo, number: executionIssue, fields: ["body", "state"] }).body;
+    pendingNow =
+      controlAdvertisesPendingState(cb) &&
+      /^###\s+PROPOSED executor-substrate grant\b/m.test(String(tb)) &&
+      /executor-substrate component grant/i.test(parseControlBullet(cb, "Founder decision") ?? "");
   } catch {
     pendingNow = false;
   }
@@ -630,20 +673,39 @@ export function convertIssuePair(
 // CLI
 // ---------------------------------------------------------------------------------------------
 
-function parseArgs(argv) {
+const FLAG_OPTIONS = ["founder-authorized", "bind-only", "dry-run"];
+const VALUE_OPTIONS = ["source-issue", "proposed-grant-file", "route", "repo"];
+
+// Strict: an unknown option, a stray positional, a missing value or a repeated option is an error,
+// so a typo such as --dryrun can never turn an intended preview into a live conversion.
+export function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (!a.startsWith("--")) continue;
+    if (!a.startsWith("--")) throw new Error(`unexpected argument ${JSON.stringify(a)}`);
     const key = a.slice(2);
-    if (["founder-authorized", "bind-only", "dry-run"].includes(key)) args[key] = true;
-    else args[key] = argv[++i];
+    if (!FLAG_OPTIONS.includes(key) && !VALUE_OPTIONS.includes(key)) throw new Error(`unknown option ${JSON.stringify(a)}`);
+    if (key in args) throw new Error(`option ${JSON.stringify(a)} given more than once`);
+    if (FLAG_OPTIONS.includes(key)) args[key] = true;
+    else {
+      const v = argv[i + 1];
+      if (v === undefined || v.startsWith("--")) throw new Error(`option ${JSON.stringify(a)} requires a value`);
+      args[key] = v;
+      i++;
+    }
   }
   return args;
 }
 
 function main() {
-  const args = parseArgs(process.argv.slice(2));
+  let args;
+  try {
+    args = parseArgs(process.argv.slice(2));
+  } catch (err) {
+    console.error(`Invalid arguments: ${err.message}. Nothing was created or changed.`);
+    process.exit(2);
+    return;
+  }
   const identity = resolveRepoIdentity();
   if (!identity.ok) {
     console.error(`Could not determine the current repository identity: ${identity.reason}`);
@@ -670,7 +732,7 @@ function main() {
     sourceIssue: args["source-issue"],
     founderAuthorized: Boolean(args["founder-authorized"]),
     proposedGrant,
-    route: args.route ?? DEFAULT_ROUTE,
+    route: args.route ?? null,
     bindOnly: Boolean(args["bind-only"]),
     dryRun: Boolean(args["dry-run"]),
   });
