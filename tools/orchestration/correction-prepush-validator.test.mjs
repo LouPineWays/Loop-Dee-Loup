@@ -253,6 +253,39 @@ const marker = {
   correctionCompletion: { pr: 962, controlIssue: 951, executionIssue: 950, reviewedHead: "a".repeat(40), workerAgentId: "w1", blocks: 0 },
 };
 
+const FIND_EXEC_BYPASSES = [
+  "touch push; find $(printf push) -maxdepth 0 -exec git {} origin HEAD:b \;",
+  "find . -maxdepth 0 -exec git {} origin HEAD:b \;",
+  "find . -execdir git push origin HEAD:b \;",
+  "find . -exec git \"$S\" origin HEAD:b \;",
+  "find . -exec \"$X\" push origin HEAD:b \;",
+  "find . -exec env git {} origin HEAD:b \;",
+  "find . -ok sh -c 'git push' \;",
+  "touch push; find $(printf push) -maxdepth 0 -exec ionice git {} origin HEAD:b \;",
+  "find /tmp/g -maxdepth 0 -exec {} push origin HEAD:b \;",
+  "find push -exec sh -c 'git \"$1\" origin HEAD:b' sh {} \;",
+  "touch push; find push -exec nice --adjustment 5 git {} origin HEAD:b \;",
+  "find push -exec env --unset X git {} origin HEAD:b \;",
+  "find g -exec {} \"$S\" o \;",
+];
+
+test("find -exec git with a replacement/expansion subcommand fails closed (Audit #1085)", async () => {
+  for (const c of FIND_EXEC_BYPASSES) {
+    const r = classifyGitPushCommand(c, { baseCwd: "/x" });
+    assert.equal(r.push, true, c);
+    assert.notEqual(r.classifiable, true, c);
+  }
+  const out = await decideCorrectionPrePush(marker, { toolName: "Bash", agentId: "w1", cwd: "/x", command: FIND_EXEC_BYPASSES[0] }, { validateImpl: async () => ({ ok: true }) });
+  assert.equal(out.permissionDecision, "deny");
+  assert.match(out.permissionDecisionReason, /find -exec git/);
+});
+
+test("find -exec negative controls stay non-push", () => {
+  for (const c of ["find . -name '*.mjs' -exec ls {} \;", "find . -exec git status {} \;", "find . -exec git add {} +", "find . -name x", "find . -exec grep -l git {} \;", "echo find -exec git {}"]) {
+    assert.equal(classifyGitPushCommand(c, { baseCwd: "/x" }).push, false, c);
+  }
+});
+
 test("hook guard: only the bound worker's Bash push is evaluated", async () => {
   const validateImpl = async () => ({ ok: false, reason: "bad" });
   const call = (o) => decideCorrectionPrePush(marker, { toolName: "Bash", command: "git push", agentId: "w1", cwd: "/x", ...o }, { validateImpl });

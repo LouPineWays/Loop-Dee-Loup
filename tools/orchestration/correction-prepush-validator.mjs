@@ -169,6 +169,11 @@ export function splitShellSegments(command) {
         segments.push([backtickOpen ? SCOPE_CLOSE : SCOPE_OPEN]);
         backtickOpen = !backtickOpen;
       } else segments.push([ch === "(" ? SCOPE_OPEN : SCOPE_CLOSE]);
+    } else if (ch === "{" && command[i + 1] === "}") {
+      // `{}` is find's replacement marker, not a brace group: keep it as a literal token (Stage 1 #1086)
+      cur += "{}";
+      has = true;
+      i += 1;
     } else if (ch === "\n" || ch === ";" || ch === "&" || ch === "|" || ch === "{" || ch === "}") {
       pushSeg();
     } else if (ch === "$" && command[i + 1] === "(") {
@@ -383,6 +388,41 @@ function analyzeXargs(tokens, anyXargs = false) {
   return null;
 }
 
+// ---- find -exec analysis (Audit #1085) ----
+const FIND_EXEC_FLAGS = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+const FIND_EXEC_REASON = "`find -exec git` may run git's push subcommand (the subcommand or executable is supplied by `{}` or shell expansion) and could not be proven not to be `push`";
+// Plain file tools that never exec their arguments; any other non-git executable that is handed `git`, an
+// expansion, or a `{}` replacement may exec it (launchers with argument-taking options, `sh -c` programs,
+// unknown wrappers), so it is not unwrapped but failed closed (Stage 1 findings on PR #1086).
+const FIND_EXEC_SAFE = new Set(["ls", "rm", "cat", "stat", "file", "wc", "head", "tail", "du", "touch", "basename", "dirname", "readlink", "sha256sum", "sha1sum", "md5sum", "true", "false", "test", "chmod", "chown", ...INERT_LEADERS]);
+// Returns a fail-closed reason when a segment's find -exec/-execdir/-ok/-okdir payload may run `git push`.
+function analyzeFindExec(tokens) {
+  for (let k = 0; k < tokens.length; k += 1) {
+    if (!FIND_EXEC_FLAGS.has(tokens[k])) continue;
+    let end = k + 1;
+    while (end < tokens.length && tokens[end] !== ";" && tokens[end] !== "+") end += 1;
+    const payload = tokens.slice(k + 1, end);
+    // an empty payload, or an executable supplied by `{}`/expansion (a symlink to git), is unprovable
+    if (!payload.length) return FIND_EXEC_REASON;
+    const pd = (i) => dynLevel(tokens, k + 1 + i) > 0 || /[$`%!]/.test(payload[i]) || payload[i].includes("{}");
+    if (pd(0)) return FIND_EXEC_REASON;
+    const name = baseName(payload[0]);
+    if (name !== "git") {
+      if (FIND_EXEC_SAFE.has(name)) continue;
+      // any other executable (launcher, shell, interpreter, unknown) may exec what it is handed
+      if (payload.slice(1).some((t, i) => /\bgit\b/i.test(t) || pd(1 + i) || /[$`]/.test(t))) return FIND_EXEC_REASON;
+      continue;
+    }
+    let g = 1;
+    while (g < payload.length && payload[g].startsWith("-")) {
+      if (pd(g)) return FIND_EXEC_REASON;
+      g += GIT_GLOBAL_WITH_ARG.has(payload[g]) ? 2 : 1;
+    }
+    if (g >= payload.length || payload[g] === "push" || pd(g)) return FIND_EXEC_REASON;
+  }
+  return null;
+}
+
 // Classifies a Bash command. Returns:
 //   { push: false }                                    -- no `git push` intent
 //   { push: true, classifiable: true, pushes: [{ cwd, candidate }] }
@@ -393,7 +433,7 @@ export function classifyGitPushCommand(command, { baseCwd } = {}) {
   if (typeof command !== "string") return { push: false };
   // A literal `push` is not required: a shell variable can supply the subcommand (`S=push; git "$S" ...`).
   // `xargs` is analyzed even without a literal `push`: stdin or a replacement string can supply it.
-  if (!/\bpush\b/.test(command) && !/\bxargs\b/.test(command) && !(/\bgit\b/.test(command) && hasAnyExpansion(command))) return { push: false };
+  if (!/\bpush\b/.test(command) && !/\bxargs\b/.test(command) && !(/\bgit\b/.test(command) && (hasAnyExpansion(command) || command.includes("{}"))) && !(/\bfind\b/.test(command) && /-(exec|execdir|ok|okdir)\b/.test(command) && (hasAnyExpansion(command) || command.includes("{}")))) return { push: false };
   const segments = splitShellSegments(command);
   const pushes = [];
   let cwd = baseCwd;
@@ -469,6 +509,8 @@ export function classifyGitPushCommand(command, { baseCwd } = {}) {
     // `xargs` can run `git push` with the subcommand/executable supplied at run time (Audit #1077).
     const xr = analyzeXargs(tokens, /\bxargs\b/.test(command));
     if (xr) return { push: true, classifiable: false, reason: xr };
+    const fx = INERT_LEADERS.has(first) ? null : analyzeFindExec(tokens);
+    if (fx) return { push: true, classifiable: false, reason: fx };
     // A shell interpreter with no inline program reads it from stdin (`echo 'git "$S" ...' | S=push bash`),
     // so the payload is invisible to this segment; refuse when the command could carry a git push.
     if (STDIN_SHELLS.has(first) && !tokens.slice(1).some((t) => /^-[A-Za-z]*c$/i.test(t) || /^\/[ck]$/i.test(t) || /^-(command|encodedcommand)$/i.test(t) || (!t.startsWith("-") && !t.startsWith("/"))) &&
