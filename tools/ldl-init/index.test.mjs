@@ -629,7 +629,7 @@ test("findHardDependencyCollisions: flags a skipped blocker-grammar.mjs dependen
 
 // Issue #1222 Audit #1234 correction (P2): write-thick-grant.mjs hard-imports execution-authority-gate.mjs.
 test("findHardDependencyCollisions: flags a skipped execution-authority-gate.mjs / next-review-transition-gate.mjs dependency whose importer (write-thick-grant.mjs) is about to be (re)installed", () => {
-  for (const dep of ["execution-authority-gate.mjs", "next-review-transition-gate.mjs"]) {
+  for (const dep of ["execution-authority-gate.mjs", "next-review-transition-gate.mjs", "control-plane-bootstrap.mjs"]) {
     const toInstall = [{ destRel: "tools/orchestration/write-thick-grant.mjs", content: Buffer.from("x") }];
     const toSkip = [{ dest: `tools/orchestration/${dep}`, reason: "destination already exists and is not LDL-managed" }];
     const collisions = findHardDependencyCollisions({ toInstall, toSkip });
