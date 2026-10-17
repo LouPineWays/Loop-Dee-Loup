@@ -627,6 +627,25 @@ test("findHardDependencyCollisions: flags a skipped blocker-grammar.mjs dependen
   assert.match(collisions[0].reason, /reconcile-control-blocker\.mjs/);
 });
 
+// Issue #1222 Audit #1234 correction (P2): write-thick-grant.mjs hard-imports execution-authority-gate.mjs.
+test("findHardDependencyCollisions: flags a skipped execution-authority-gate.mjs / next-review-transition-gate.mjs dependency whose importer (write-thick-grant.mjs) is about to be (re)installed", () => {
+  for (const dep of ["execution-authority-gate.mjs", "next-review-transition-gate.mjs"]) {
+    const toInstall = [{ destRel: "tools/orchestration/write-thick-grant.mjs", content: Buffer.from("x") }];
+    const toSkip = [{ dest: `tools/orchestration/${dep}`, reason: "destination already exists and is not LDL-managed" }];
+    const collisions = findHardDependencyCollisions({ toInstall, toSkip });
+    assert.equal(collisions.length, 1, dep);
+    assert.equal(collisions[0].dest, `tools/orchestration/${dep}`);
+    assert.match(collisions[0].reason, /write-thick-grant\.mjs/);
+  }
+  assert.deepEqual(
+    findHardDependencyCollisions({
+      toInstall: [{ destRel: "tools/orchestration/other.mjs", content: Buffer.from("x") }],
+      toSkip: [{ dest: "tools/orchestration/execution-authority-gate.mjs", reason: "unmanaged" }],
+    }),
+    [],
+  );
+});
+
 // Issue #618 Stage 1 review finding (P2): the analogous collision coverage for
 // correct-unit-dependency.mjs's own hard imports, mirroring the dependency-grammar.mjs/
 // blocker-grammar.mjs coverage above. One representative edge (ready-dispatch-gate.mjs) is

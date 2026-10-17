@@ -237,7 +237,18 @@ function amendHarness({ exec = ACTIVE_EXEC(), approval = approvalBody(), login =
   h.deps.permissionImpl = () => permission;
   return h;
 }
-const amend = (h, extra = {}) => checkAmendThickGrant({ repo: "o/r", controlIssue: 10, executionIssue: 20, founderApprovalRef: REF, authorityEnvelope: { origin: "control_plane_dispatch", controlIssue: 10, executionIssue: 20, route: "direct" }, ...extra }, h.deps);
+const DISPATCH = { state: "READY_TO_DISPATCH", controlIssue: 10, executionIssue: 20, route: "direct" };
+// The writer derives dispatch authority itself from the control-plane gate verdict for control C; the
+// harness stands in for those gates (and records what it was asked), the caller supplies nothing.
+const amend = (h, { verdict = DISPATCH, ...extra } = {}) => {
+  h.deps.resolveDispatchImpl = (args) => {
+    h.resolved = (h.resolved ?? 0) + 1;
+    h.resolvedArgs = args;
+    if (verdict instanceof Error) throw verdict;
+    return verdict;
+  };
+  return checkAmendThickGrant({ repo: "o/r", controlIssue: 10, executionIssue: 20, founderApprovalRef: REF, ...extra }, h.deps);
+};
 
 test("amend appends approved grants, preserves existing grant and every other byte, verifies full set", () => {
   for (const eol of ["\n", "\r\n"]) {
@@ -389,38 +400,61 @@ test("original PROPOSED to ACTIVE promotion is unchanged; compose/parse reject u
   assert.equal(parseApprovalComment("x", { controlIssue: 1, executionIssue: 2 }).ok, false);
 });
 
-test("amend refuses without a dispatched execution-authority envelope for this exact pair", () => {
-  const D = { controlIssue: 10, executionIssue: 20, route: "direct" };
-  for (const authorityEnvelope of [
+test("amend refuses a shape-valid envelope copied from public control state (#1234 P1)", () => {
+  // The old --dispatch-authority JSON is gone: a caller-supplied envelope is never read, so an exact copy of
+  // the public control triple authorizes nothing when the gates do not currently resolve a dispatch.
+  const copied = { origin: "control_plane_dispatch", controlIssue: 10, executionIssue: 20, route: "direct" };
+  const h = amendHarness();
+  h.store[10].body = "- **Lifecycle:** EXECUTING\n- **Route:** direct\n- **Execution:** #20\n";
+  const r = amend(h, { verdict: { state: "NOT_READY", controlIssue: 10 }, authorityEnvelope: copied });
+  assert.equal(r.state, "NO_EXECUTION_AUTHORITY");
+  assert.equal(r.exitCode, 2);
+  assert.equal(h.writes.length, 0);
+  // Even a verdict carrying the right numbers is not authority unless its state authorizes a dispatch.
+  for (const state of ["NOT_READY", "BLOCKED", "AMBIGUOUS", "NO_ACTION_YET", "READY_TO_PROJECT_ROUTED", "STAGE2_CORRECTION_PR_NEEDS_FINALIZATION"]) {
+    const h2 = amendHarness();
+    assert.equal(amend(h2, { verdict: { ...DISPATCH, state, workIssue: 20, auditIssue: 5 } }).state, "NO_EXECUTION_AUTHORITY", state);
+    assert.equal(h2.writes.length, 0);
+  }
+});
+
+test("amend refuses a dispatch verdict for another pair or without a route", () => {
+  for (const verdict of [
     null,
-    undefined,
-    { controlIssue: 10, executionIssue: 20 },
-    { origin: "comment", ...D },
-    { origin: "task_start_from_comment", ...D },
-    { origin: "codex_review", ...D },
-    { origin: "founder_direct", founderInstruction: "amend" },
-    { origin: "control_plane_dispatch", controlIssue: 10, executionIssue: 20 },
-    { origin: "control_plane_dispatch", ...D, executionIssue: 21 },
-    { origin: "control_plane_dispatch", ...D, controlIssue: 11 },
-    { origin: "control_plane_dispatch", ...D, controlIssue: "10" },
-    { origin: "correction_dispatch", controlIssue: 11, pr: 5 },
+    {},
+    { ...DISPATCH, executionIssue: 21 },
+    { ...DISPATCH, controlIssue: 11 },
+    { ...DISPATCH, route: "" },
+    { state: "STAGE2_CORRECTION_REQUIRED", controlIssue: 10, workIssue: 21, auditIssue: 5 },
+    { state: "STAGE2_CORRECTION_REQUIRED", controlIssue: 11, workIssue: 20, auditIssue: 5 },
+    { state: "STAGE2_CORRECTION_REQUIRED", controlIssue: 10, workIssue: 20 },
   ]) {
     const h = amendHarness();
-    const r = amend(h, { authorityEnvelope });
-    assert.equal(r.state, "NO_EXECUTION_AUTHORITY");
-    assert.equal(r.exitCode, 2);
+    const r = amend(h, { verdict });
+    assert.equal(r.state, "NO_EXECUTION_AUTHORITY", JSON.stringify(verdict));
     assert.equal(h.writes.length, 0);
   }
 });
 
-test("amend accepts planning, integration and control-bound correction dispatch triggers", () => {
-  for (const authorityEnvelope of [
-    { origin: "planning_dispatch", controlIssue: 10, executionIssue: 20 },
-    { origin: "integration_dispatch", controlIssue: 10, executionIssue: 20 },
-    { origin: "correction_dispatch", controlIssue: 10, auditIssue: 5 },
+test("amend accepts verdicts that authorize a dispatch for exactly this pair", () => {
+  for (const verdict of [
+    DISPATCH,
+    { state: "READY_TO_DISPATCH_PLANNING", controlIssue: 10, executionIssue: 20 },
+    { state: "READY_TO_DISPATCH_INTEGRATION", controlIssue: 10, executionIssue: 20 },
+    { state: "STAGE2_CORRECTION_REQUIRED", controlIssue: 10, workIssue: 20, auditIssue: 5 },
+    { state: "STAGE1_CORRECTION_REQUIRED", controlIssue: 10, issue: 20, pr: 7 },
   ]) {
-    assert.equal(amend(amendHarness(), { authorityEnvelope }).state, "AMENDED");
+    const h = amendHarness();
+    assert.equal(amend(h, { verdict }).state, "AMENDED", verdict.state);
+    assert.equal(h.resolvedArgs.controlIssue, 10);
   }
+});
+
+test("amend reports a gate resolution failure as operational, writing nothing", () => {
+  const h = amendHarness();
+  const r = amend(h, { verdict: new Error("gh down") });
+  assert.equal(r.exitCode, 1);
+  assert.equal(h.writes.length, 0);
 });
 
 test("amend refuses a changed approval between the initial and pre-write reads", () => {
@@ -495,31 +529,43 @@ test("permission lookup failure is an operational error, not a refusal", () => {
   assert.equal(h.writes.length, 0);
 });
 
-test("amend binds worker_unit_dispatch to its parent execution Issue only", () => {
-  const unit = (parentExecutionIssue) => ({ origin: "worker_unit_dispatch", unitCommentUrl: "https://github.com/o/r/issues/20#issuecomment-1", parentExecutionIssue, sharedContractUrl: "https://github.com/o/r/issues/20#issuecomment-2" });
-  assert.equal(amend(amendHarness(), { authorityEnvelope: unit(20) }).state, "AMENDED");
+
+test("amend accepts a unit-dispatch verdict for this pair (#1235 P2)", () => {
+  const url = "https://github.com/o/r/issues/20#issuecomment-9";
   const h = amendHarness();
-  assert.equal(amend(h, { authorityEnvelope: unit(21) }).state, "NO_EXECUTION_AUTHORITY");
+  const r = amend(h, { verdict: { state: "READY_TO_DISPATCH_UNITS", controlIssue: 10, executionIssue: 20, manifestUrl: url } });
+  assert.equal(r.state, "AMENDED", JSON.stringify(r));
+  const h2 = amendHarness();
+  assert.equal(amend(h2, { verdict: { state: "READY_TO_DISPATCH_UNITS", controlIssue: 10, executionIssue: 21, manifestUrl: url } }).state, "NO_EXECUTION_AUTHORITY");
+});
+
+test("amend propagates an operational gate failure as exit 1, not an authority refusal (#1235 P2)", () => {
+  const h = amendHarness();
+  const r = amend(h, { verdict: { exitCode: 1, message: "gh read failed" } });
+  assert.equal(r.exitCode, 1);
+  assert.notEqual(r.state, "NO_EXECUTION_AUTHORITY");
   assert.equal(h.writes.length, 0);
 });
 
-test("amend corroborates the trigger against durable control state (lifecycle, state, recorded route)", () => {
-  const cases = [
-    ["- **Lifecycle:** BLOCKED\n- **Execution:** #20\n", "OPEN"],
-    ["- **Execution:** #20\n", "OPEN"],
-    ["- **Lifecycle:** READY\n- **Route:** implementation worker\n- **Execution:** #20\n", "OPEN"],
-  ];
-  for (const [control] of cases) {
-    const h = amendHarness();
-    h.store[10].body = control;
-    const r = amend(h);
-    assert.equal(r.state, "NO_EXECUTION_AUTHORITY", control);
-    assert.equal(h.writes.length, 0);
-  }
-  const closed = amendHarness();
-  closed.store[10].state = "CLOSED";
-  assert.equal(amend(closed).state, "NO_EXECUTION_AUTHORITY");
-  const ok = amendHarness();
-  ok.store[10].body = "- **Lifecycle:** EXECUTING\n- **Route:** direct\n- **Execution:** #20\n";
-  assert.equal(amend(ok).state, "AMENDED");
+test("amend re-derives dispatch authority immediately before the write (#1235 P1)", () => {
+  const h = amendHarness();
+  let calls = 0;
+  h.deps.resolveDispatchImpl = () => (++calls === 1 ? DISPATCH : { state: "BLOCKED", controlIssue: 10 });
+  const r = checkAmendThickGrant({ repo: "o/r", controlIssue: 10, executionIssue: 20, founderApprovalRef: REF }, h.deps);
+  assert.equal(r.state, "NO_EXECUTION_AUTHORITY");
+  assert.equal(calls, 2);
+  assert.equal(h.writes.length, 0);
+});
+
+test("default resolver runs the authoritative bootstrap runner and throws on stateless output (#1235 P1)", async () => {
+  const { defaultResolveDispatchVerdict } = await import("./write-thick-grant.mjs");
+  let seen;
+  const v = defaultResolveDispatchVerdict({ repo: "o/r", controlIssue: 10 }, (cmd, args) => {
+    seen = args;
+    return `noise\n${JSON.stringify(DISPATCH)}\n`;
+  });
+  assert.equal(v.state, "READY_TO_DISPATCH");
+  assert.ok(seen[0].endsWith("control-plane-bootstrap.mjs"));
+  assert.deepEqual(seen.slice(1, 4), ["session-entry-gate", "--control-issue", "10"]);
+  assert.throws(() => defaultResolveDispatchVerdict({ controlIssue: 10 }, () => "{}"));
 });

@@ -23,9 +23,13 @@
 // ACTIVE section, a stale base, a conflicting component, an unbounded or mis-attributed path envelope,
 // or an untrusted/malformed approval, and verifies the COMPLETE effective grant set on readback.
 //
+// Dispatch authority is never caller-supplied: the writer re-derives it by running the control-plane
+// gates (ready-dispatch-gate / next-review-transition-gate) against live GitHub state itself and binds
+// the resulting dispatch verdict to the exact control/execution pair (issue #1222 Audit #1234).
+//
 // Usage:
 //   node tools/orchestration/write-thick-grant.mjs --control-issue C --execution-issue E --body-file F [--founder-approval-ref URL]
-//   node tools/orchestration/write-thick-grant.mjs --amend --control-issue C --execution-issue E --founder-approval-ref URL --dispatch-authority '<trigger JSON>'
+//   node tools/orchestration/write-thick-grant.mjs --amend --control-issue C --execution-issue E --founder-approval-ref URL
 //
 // Exit codes: 0 WRITTEN (verified) / ALREADY_ACTIVE; 1 operational failure (args, read, write, readback);
 // 2 REFUSED (durable body left unchanged).
@@ -33,10 +37,12 @@
 // Tests: node --test tools/orchestration/write-thick-grant.test.mjs
 
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
 import { readGithubIssue } from "./github-read.mjs";
-import { resolveRepoIdentity, readExecutionBulletField, parseExecutionPointer, parseControlBullet, isKnownLifecycleValue, isBlockingLifecycleValue, isNoneSentinel } from "./ready-dispatch-gate.mjs";
+import { resolveRepoIdentity, readExecutionBulletField, parseExecutionPointer } from "./ready-dispatch-gate.mjs";
 import { classifyExecutionAuthority } from "./execution-authority-gate.mjs";
 import { parseAuthority, classifyPath, normalizePath, EXECUTOR_SUBSTRATE } from "./executor-substrate-authority.mjs";
 import { findActiveGrantWitness, isCanonicalActiveHeading, parentLoopIdentifiesControl } from "./activate-control-pair.mjs";
@@ -361,39 +367,83 @@ export function composeAmendedBody(live, newEntries) {
   return { ok: true, body };
 }
 
-// Pure. Classifies the structured dispatch trigger through classifyExecutionAuthority (route required for
-// control_plane_dispatch) and binds the classified result to the requested pair. Only dispatch origins that
-// carry the control Issue (and, where the formatter carries it, the execution Issue) can bind.
-export function classifyAmendAuthority(trigger, controlIssue, executionIssue) {
-  const verdict = classifyExecutionAuthority(trigger);
-  if (!verdict.authorized) return { ok: false, reason: `no authorized execution-authority trigger: ${verdict.reason}` };
+// Pure. Derives the execution-authority envelope from a control-plane gate verdict the writer obtained
+// itself (never from a caller-supplied trigger), classifies it through classifyExecutionAuthority and
+// binds it to the requested pair. Only verdicts that authorize a dispatch for exactly control C /
+// execution E bind; every other state (including an already-dispatched or mid-cycle control) yields no
+// envelope, so public control state copied into a hand-built trigger can never authorize the write.
+export function deriveAmendAuthority(verdict, controlIssue, executionIssue) {
   const c = Number(controlIssue);
   const e = Number(executionIssue);
-  if (["control_plane_dispatch", "planning_dispatch", "integration_dispatch"].includes(trigger.origin)) {
-    if (trigger.controlIssue === c && trigger.executionIssue === e) return { ok: true };
-    return { ok: false, reason: `authorized ${trigger.origin} does not name exactly control #${c} / execution #${e}` };
+  if (!verdict || typeof verdict !== "object" || typeof verdict.state !== "string") {
+    return { ok: false, reason: "the control-plane gates produced no dispatch verdict" };
   }
-  if (trigger.origin === "correction_dispatch" && trigger.controlIssue === c) return { ok: true };
-  // A genuinely dispatched plan unit carries only the parent execution Issue; the caller separately
-  // verifies that control C currently points to E, so binding parentExecutionIssue === E is safe.
-  if (trigger.origin === "worker_unit_dispatch" && trigger.parentExecutionIssue === e) return { ok: true };
-  return { ok: false, reason: `origin "${trigger.origin}" cannot be bound to control #${c} / execution #${e}` };
+  let envelope = null;
+  if (verdict.controlIssue === c && verdict.executionIssue === e) {
+    if (verdict.state === "READY_TO_DISPATCH") envelope = { origin: "control_plane_dispatch", controlIssue: c, executionIssue: e, route: verdict.route };
+    else if (verdict.state === "READY_TO_DISPATCH_PLANNING") envelope = { origin: "planning_dispatch", controlIssue: c, executionIssue: e };
+    else if (verdict.state === "READY_TO_DISPATCH_INTEGRATION") envelope = { origin: "integration_dispatch", controlIssue: c, executionIssue: e };
+    else if (verdict.state === "READY_TO_DISPATCH_UNITS") envelope = { origin: "worker_unit_dispatch", parentExecutionIssue: e, unitCommentUrl: verdict.manifestUrl, sharedContractUrl: verdict.manifestUrl };
+  }
+  if (!envelope && verdict.controlIssue === c) {
+    if (verdict.state === "STAGE2_CORRECTION_REQUIRED" && verdict.workIssue === e) envelope = { origin: "correction_dispatch", controlIssue: c, auditIssue: verdict.auditIssue };
+    else if (verdict.state === "STAGE1_CORRECTION_REQUIRED" && verdict.issue === e) envelope = { origin: "correction_dispatch", controlIssue: c, pr: verdict.pr };
+  }
+  if (!envelope) return { ok: false, reason: `control #${c} currently resolves to ${verdict.state}, which does not authorize a dispatch for execution #${e}` };
+  const classified = classifyExecutionAuthority(envelope);
+  if (!classified.authorized) return { ok: false, reason: `no authorized execution-authority trigger: ${classified.reason}` };
+  return { ok: true, envelope };
+}
+
+// Default resolver: obtains the verdict through the freshness-enforcing authoritative runner
+// (control-plane-bootstrap.mjs -> session-entry-gate, issue #877), never by importing checkout-local
+// gate code, so a stale or locally modified checkout cannot mint a dispatch verdict the default-branch
+// control plane would reject. The router composes ready-dispatch-gate and the post-PR transition gate
+// exactly as a session does. Any operational failure (non-zero exit, unparseable output, or a result
+// that carries no verdict state) THROWS, so callers treat it as retryable, never as a refusal.
+export function defaultResolveDispatchVerdict({ repo, controlIssue }, runImpl = execFileSync) {
+  const dir = dirname(fileURLToPath(import.meta.url));
+  const args = [join(dir, "control-plane-bootstrap.mjs"), "session-entry-gate", "--control-issue", String(controlIssue)];
+  if (repo) args.push("--repo", String(repo));
+  const out = runImpl(process.execPath, args, { encoding: "utf8", cwd: dir, maxBuffer: 64 * 1024 * 1024 });
+  const lines = String(out).trim().split(/\r?\n/);
+  const verdict = JSON.parse(lines[lines.length - 1]);
+  if (!verdict || typeof verdict !== "object" || typeof verdict.state !== "string") {
+    throw new Error("the authoritative control-plane runner returned no verdict state");
+  }
+  return verdict;
 }
 
 export function checkAmendThickGrant(
-  { repo, controlIssue, executionIssue, founderApprovalRef, authorityEnvelope },
-  { readIssueImpl = readGithubIssue, ghEditImpl = defaultGhEditThickIssue, readCommentImpl = defaultReadComment, permissionImpl = defaultPermissionFor, runImpl } = {},
+  { repo, controlIssue, executionIssue, founderApprovalRef },
+  { resolveDispatchImpl = defaultResolveDispatchVerdict, readIssueImpl = readGithubIssue, ghEditImpl = defaultGhEditThickIssue, readCommentImpl = defaultReadComment, permissionImpl = defaultPermissionFor, runImpl } = {},
 ) {
   if (!controlIssue) return fail("Missing required arg: --control-issue is required.");
   if (!executionIssue) return fail("Missing required arg: --execution-issue is required.");
   // Execution-authority boundary (AGENTS.md): an approval comment only informs an already-authorized
-  // worker. The caller must supply a structured trigger that classifyExecutionAuthority authorizes AND
-  // that binds exactly this control/execution pair; a hand-typed pair, a comment-shaped trigger, or an
-  // origin carrying no pair (founder_direct, worker_unit_dispatch) never authorizes the write.
-  const authority = classifyAmendAuthority(authorityEnvelope, controlIssue, executionIssue);
-  if (!authority.ok) {
-    return refuse("NO_EXECUTION_AUTHORITY", `${authority.reason}; an approval comment alone never authorizes the write; nothing was written.`);
-  }
+  // worker. Authority is re-derived here from live GitHub state: the control-plane gates must currently
+  // resolve control C to a dispatch verdict naming exactly execution E. Nothing the caller supplies is
+  // trusted, so a shape-valid envelope copied from public control state authorizes nothing.
+  // Returns { failure } for an operational error (retryable, exit 1), { refusal } for a durable
+  // authority refusal (exit 2), or null when the gates currently authorize this dispatch.
+  const resolveAuthority = () => {
+    let verdict;
+    try {
+      verdict = resolveDispatchImpl({ repo, controlIssue: Number(controlIssue) }, runImpl);
+    } catch (err) {
+      return { failure: fail(`could not resolve the current dispatch from the control-plane gates: ${err.message}`) };
+    }
+    if (verdict && typeof verdict === "object" && verdict.exitCode === 1 && typeof verdict.state !== "string") {
+      return { failure: fail(`could not resolve the current dispatch from the control-plane gates: ${verdict.message ?? "operational failure"}`) };
+    }
+    const authority = deriveAmendAuthority(verdict, controlIssue, executionIssue);
+    if (!authority.ok) {
+      return { refusal: refuse("NO_EXECUTION_AUTHORITY", `${authority.reason}; an approval comment alone never authorizes the write; nothing was written.`) };
+    }
+    return null;
+  };
+  const authorityResult = resolveAuthority();
+  if (authorityResult) return authorityResult.failure ?? authorityResult.refusal;
   const urlMatch = typeof founderApprovalRef === "string" ? COMMENT_URL.exec(founderApprovalRef) : null;
   if (!urlMatch) return refuse("BAD_APPROVAL_REF", "--founder-approval-ref must be an https://github.com/<owner>/<repo>/issues/<N>#issuecomment-<id> URL; nothing was written.");
   const c = Number(controlIssue);
@@ -417,22 +467,6 @@ export function checkAmendThickGrant(
     const field = readExecutionBulletField(control.issue.body ?? "");
     const pointer = field.conflict || !field.value ? { ok: false } : parseExecutionPointer(field.value);
     if (!pointer.ok || pointer.issue !== e) return refuse("NOT_SOLE_EXECUTION", `control ${repo}#${c} does not name #${e} as its sole Execution pointer; nothing was written.`);
-    // The trigger is caller-supplied and shape-validated only, so corroborate it against durable control
-    // state: the control must be OPEN in a live, non-blocking Lifecycle, and a control_plane_dispatch route
-    // must equal the Route the control durably records (when one is settled). A fabricated envelope that
-    // does not match the control's own recorded state never authorizes the write.
-    const body = control.issue.body ?? "";
-    const lifecycle = parseControlBullet(body, "Lifecycle");
-    const lifecycleWord = lifecycle ? lifecycle.split(/\s+/)[0].replace(/[^A-Za-z_]/g, "") : "";
-    if (control.issue.state !== "OPEN" || !isKnownLifecycleValue(lifecycleWord) || isBlockingLifecycleValue(lifecycleWord)) {
-      return refuse("NO_EXECUTION_AUTHORITY", `control ${repo}#${c} is not OPEN in a live, non-blocking Lifecycle, so no current dispatch is corroborated; nothing was written.`);
-    }
-    if (authorityEnvelope?.origin === "control_plane_dispatch") {
-      const recorded = parseControlBullet(body, "Route");
-      if (recorded && !isNoneSentinel(recorded) && recorded.trim().toLowerCase() !== String(authorityEnvelope.route).trim().toLowerCase()) {
-        return refuse("NO_EXECUTION_AUTHORITY", `dispatch route does not match the Route recorded on control ${repo}#${c}; nothing was written.`);
-      }
-    }
     return null;
   };
   const verifyApproval = () => {
@@ -494,6 +528,8 @@ export function checkAmendThickGrant(
   if (!verifyEffective(composed.body)) return refuse("COMPOSE_MISMATCH", "composed body would not verify as the exact existing grants plus the approved entries; nothing was written.");
 
   // Tight stale window: re-verify pointer, approval and live bytes immediately before the write.
+  const authorityAgain = resolveAuthority();
+  if (authorityAgain) return authorityAgain.failure ?? authorityAgain.refusal;
   const pointerAgain = checkControlPointer();
   if (pointerAgain) return pointerAgain;
   const approvalAgain = verifyApproval();
@@ -535,7 +571,7 @@ function parseArgs(argv) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  for (const k of args.amend ? ["control-issue", "execution-issue", "founder-approval-ref", "dispatch-authority"] : ["control-issue", "execution-issue", "body-file"]) {
+  for (const k of args.amend ? ["control-issue", "execution-issue", "founder-approval-ref"] : ["control-issue", "execution-issue", "body-file"]) {
     if (!args[k]) {
       console.error(`Missing required arg: --${k} is required.`);
       process.exit(1);
@@ -558,13 +594,6 @@ function main() {
       controlIssue: args["control-issue"],
       executionIssue: args["execution-issue"],
       founderApprovalRef: args["founder-approval-ref"],
-      authorityEnvelope: (() => {
-        try {
-          return JSON.parse(args["dispatch-authority"]);
-        } catch {
-          return null;
-        }
-      })(),
     });
     if (result.exitCode !== 0) {
       console.error(result.message);
