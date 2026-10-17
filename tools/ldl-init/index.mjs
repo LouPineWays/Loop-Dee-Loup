@@ -724,6 +724,12 @@ export const HARD_MODULE_DEPENDENCIES = [
   { dest: "tools/orchestration/write-thick-grant.mjs", dependsOnDest: "tools/orchestration/executor-substrate-authority.mjs" },
   { dest: "tools/orchestration/write-thick-grant.mjs", dependsOnDest: "tools/orchestration/activate-control-pair.mjs" },
   { dest: "tools/orchestration/write-thick-grant.mjs", dependsOnDest: "tools/review-watch/lifecycle-gate.mjs" },
+  // Issue #1222 Audit #1234 correction (P2): write-thick-grant.mjs hard-imports classifyExecutionAuthority
+  // from execution-authority-gate.mjs, and its dispatch resolver loads next-review-transition-gate.mjs
+  // at runtime. A preserved unmanaged copy of either would let install/update report success while the
+  // managed writer fails at load time.
+  { dest: "tools/orchestration/write-thick-grant.mjs", dependsOnDest: "tools/orchestration/execution-authority-gate.mjs" },
+  { dest: "tools/orchestration/write-thick-grant.mjs", dependsOnDest: "tools/orchestration/next-review-transition-gate.mjs" },
   // Issue #1008 Stage 1 correction (P2): ready-dispatch-gate.mjs hard-imports `run` from
   // stage1-gate.mjs for the READY partial-PR-checkpoint recovery.
   { dest: "tools/orchestration/ready-dispatch-gate.mjs", dependsOnDest: "tools/review-watch/stage1-gate.mjs" },
