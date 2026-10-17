@@ -22,15 +22,22 @@ creating an Issue; the command refuses without the flag and changes nothing.
 
 ## Which number to work on
 
-The report ends in one of these states. Only the first means you can start.
+The report ends in exactly one of these states (this table lists every state the command can return). Only the first means you can start.
 
 | State | Meaning | What to do |
 | --- | --- | --- |
 | `CONVERTED_READY` | Pair bound, activated, and a fresh session-entry gate returned `READY_TO_DISPATCH`. | Start a session with `work on #123` (the number you gave, never the new one). |
-| `CONVERTED_PENDING_GRANT` | Pair bound and retained, but an exact executor-substrate grant is proposed and not approved. Not executable. | Approve or decline the grant named in `nextAction`, promote it with `write-thick-grant.mjs`, then re-run the same command. |
-| `BOUND_NOT_ACTIVATED` | Only with `--bind-only`. | Run the `nextAction` activation command. |
-| `PARTIAL_THICK_CREATED`, `CREATE_FAILED`, `STALE_SOURCE`, `BIND_READBACK_*` | An interruption left a partial state; the report names it. | Re-run the same command. It is idempotent. |
-| `UNSUPPORTED_*`, `AMBIGUOUS_CHILDREN`, `WRONG_PARENT`, `NOT_AUTHORIZED` | Refused with a diagnosis; nothing was changed. | Read `message`; fix the named cause. |
+| `CONVERTED_PENDING_GRANT` | Pair bound and retained, and activation stopped only because the thick Issue carries a valid, canonical `PROPOSED` executor-substrate grant (checked by the authority validator, matching the control's pending decision) with no `ACTIVE` grant yet. Not executable. | Approve or decline the grant named in `nextAction`, promote it with `write-thick-grant.mjs`, then re-run the same command. |
+| `CONVERTED_NOT_READY` | Pair bound, but activation or the fresh gate did not return `READY_TO_DISPATCH` (any other blocker, including a malformed grant section). Not executable; exit code 1. | Read `message`, `activationState` and `gateState`; fix the named cause and re-run. |
+| `BOUND_NOT_ACTIVATED` | Only with `--bind-only`: bound and verified, not activated. | Run the `nextAction` activation command. |
+| `DRY_RUN` | Only with `--dry-run`: the plan is printed; nothing was created or changed. | Re-run without `--dry-run` to convert. |
+| `PARTIAL_THICK_CREATED`, `CREATE_FAILED`, `STALE_SOURCE`, `BIND_READBACK_FAILED`, `BIND_READBACK_MISMATCH`, `READ_FAILED`, `NO_REPO` | An interruption or read failure left a partial state or proved nothing; the report names it. | Re-run the same command. It is idempotent. |
+| `NOT_AUTHORIZED`, `BAD_SOURCE`, `BAD_GRANT_PROPOSAL`, `NOT_AN_ISSUE`, `UNSUPPORTED_CLASS`, `UNSUPPORTED_COMPLETED`, `UNSUPPORTED_IN_FLIGHT`, `WRONG_PARENT`, `ROUTE_CHANGE_UNAUTHORIZED` | Refused with a diagnosis (exit code 2); nothing was changed. | Read `message`; fix the named cause. |
+| `AMBIGUOUS_CHILDREN` | Refused (exit code 2). Usually nothing was changed, but if the competing child appeared after the thick Issue was created, that new thick Issue is left behind unbound and the source is not bound. | Read `message`; resolve the competing child, close any stray thick Issue it names, and re-run. |
+
+A `priority:*` label never blocks conversion: the structured `### Priority horizon` section is
+authoritative and the label is used only when no `### Priority horizon` section is written at all; a present but blank or unrecognized
+section is still authoritative and yields no priority rather than falling back to the label.
 
 ## What it creates and changes
 
@@ -64,7 +71,7 @@ founder decision. No grant is ever inferred or activated by the conversion.
 
 - A source that is closed, a pull request, an existing control with no current packet, or already
   a thick packet.
-- A source (or its packet) with a linked PR, a Stage 1 / Stage 2 reference, an audit naming it, or a
+- A source (or its packet) with a linked PR, a Stage 1 / Stage 2 reference, an audit naming it or its execution packet, or a
   mid-cycle or completed lifecycle. Existing PR, review and audit history is never rewritten.
 - Any ambiguity about existing children: several candidates, a similarly titled Issue, an unmarked
   or closed child, a marker with a different parent, or a second current packet.

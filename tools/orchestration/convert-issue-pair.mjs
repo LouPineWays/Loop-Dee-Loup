@@ -62,9 +62,9 @@ import {
 } from "./ready-dispatch-gate.mjs";
 import { validateControlSnapshot } from "./control-field-validator.mjs";
 import { checkWriteControlSnapshot } from "./write-control-snapshot.mjs";
-import { activateControlPair, controlAdvertisesPendingState, parentLoopIdentifiesControl } from "./activate-control-pair.mjs";
+import { activateControlPair, controlAdvertisesPendingState, parentLoopIdentifiesControl, pendingMatchesGrant } from "./activate-control-pair.mjs";
 import { parseAuthority } from "./executor-substrate-authority.mjs";
-import { isKnownAttributionDecoration } from "../review-watch/lifecycle-gate.mjs";
+import { isKnownAttributionDecoration, parseWorkIssueRef } from "../review-watch/lifecycle-gate.mjs";
 
 const DEFAULT_ROUTE = "implementation worker";
 const MID_CYCLE_OR_TERMINAL = new Set(["EXECUTING", "VERIFYING", "REVIEW", "AUDIT", "CORRECTION", "EXECUTION_COMPLETE", "ROUTED", "DONE", "DECOMPOSED", "READY_FOR_PLAN", "PLAN_READY", "BLOCKED", "BLOCKED_FAILURE", "BLOCKED_EXTERNAL"]);
@@ -179,7 +179,8 @@ const parentIs = (body, repo, number) => {
 //                   recoverable child.
 //   conflicts    -- anything else that touches the source: unmarked/closed/other-state children whose
 //                   Parent loop names the source, a marker for this source with a different parent,
-//                   an identically titled Issue, or an audit-shaped Issue naming the source.
+//                   an identically titled Issue, or an audit-shaped Issue naming the source or any
+//                   attributable/bound execution packet.
 export function classifyChildren(issues, { repo, sourceIssue, expectedTitle, boundExecution = null }) {
   const marker = markerFor(repo, sourceIssue).toLowerCase();
   const attributable = [];
@@ -192,7 +193,7 @@ export function classifyChildren(issues, { repo, sourceIssue, expectedTitle, bou
     const namesSource = refs !== null && refs.some((r) => r.number === Number(sourceIssue) && r.repo === String(repo).toLowerCase());
     const marked = body.toLowerCase().includes(marker);
     const sameTitle = expectedTitle && String(issue.title ?? "").trim().toLowerCase() === expectedTitle.toLowerCase();
-    const auditNamesSource = isAuditShapedBody(body) && new RegExp(`(?<![\\w/])#${sourceIssue}\\b`).test(body);
+    const auditNamesSource = isAuditShapedBody(body) && auditNamesIssue(body, sourceIssue);
     const open = String(issue.state ?? "").toUpperCase() === "OPEN";
     if (boundExecution !== null && Number(issue.number) === Number(boundExecution)) continue;
     if (exactParent && marked && open) attributable.push(issue.number);
@@ -209,13 +210,34 @@ export function classifyChildren(issues, { repo, sourceIssue, expectedTitle, bou
       conflicts.push({ number: issue.number, why: why.join(", ") });
     }
   }
+  // An audit-shaped Issue that names a candidate or bound execution packet (not only the source) means
+  // that packet already entered a post-merge audit lifecycle; it must never be bound or reactivated.
+  const candidates = [...attributable, ...(boundExecution !== null ? [Number(boundExecution)] : [])];
+  if (candidates.length > 0) {
+    const seen = new Set(conflicts.map((c) => Number(c.number)));
+    for (const issue of issues) {
+      if (seen.has(Number(issue.number)) || Number(issue.number) === Number(sourceIssue) || candidates.includes(Number(issue.number))) continue;
+      const body = String(issue.body ?? "");
+      if (!isAuditShapedBody(body)) continue;
+      const hit = candidates.filter((c) => auditNamesIssue(body, c));
+      if (hit.length > 0) conflicts.push({ number: issue.number, why: `audit-shaped, names execution packet ${hit.map((c) => "#" + c).join(", ")}` });
+    }
+  }
   return { attributable, conflicts };
 }
 
-// Pure. Source priority -> { priority: "Now"/"Soon"/"Later"/"Wishes"|null, conflict: string|null }.
-// The structured `Priority horizon` section is authoritative (the label is an asynchronous
-// projection of it); when both exist and disagree the evidence is contradictory and the caller
-// must refuse rather than pick the possibly stale label.
+// Pure. True when an audit-shaped body names the Issue: a bare `#N` reference anywhere in the body, or the
+// canonical structured `Work issue` field (any form `parseWorkIssueRef` accepts: `#N`, a full Issue URL, or an
+// unprefixed number) resolving to that Issue.
+function auditNamesIssue(body, issueNumber) {
+  const n = Number(issueNumber);
+  return new RegExp(`(?<![\\w/])#${n}\\b`).test(body) || parseWorkIssueRef(body) === n;
+}
+
+// Pure. Source priority -> { priority: "Now"/"Soon"/"Later"/"Wishes"|null, conflict: null }.
+// The structured `Priority horizon` section is authoritative (the priority:* label is only an
+// asynchronous projection of it, so a disagreeing label is stale); the label is a fallback used
+// only when no horizon section is written at all. `conflict` stays (always null) for result-shape stability.
 export function derivePriority({ labels = [], sections }) {
   const cap = (w) => w[0].toUpperCase() + w.slice(1).toLowerCase();
   const fromLabel = labels.map((l) => String(l).match(/^priority:(now|soon|later|wishes)$/i)).find(Boolean);
@@ -223,10 +245,8 @@ export function derivePriority({ labels = [], sections }) {
   const m = horizon && horizon.trim().match(/^(now|soon|later|wishes)\b/i);
   const label = fromLabel ? cap(fromLabel[1]) : null;
   const structured = m ? cap(m[1]) : null;
-  if (label && structured && label !== structured) {
-    return { priority: null, conflict: `structured Priority horizon is ${structured} but the priority:* label says ${label}` };
-  }
-  return { priority: structured ?? label, conflict: null };
+  // A present-but-unparseable (blank/unrecognized) horizon section is still authoritative: never fall back to the label.
+  return { priority: horizon !== null ? structured : label, conflict: null };
 }
 
 const stripIdeaPrefix = (title) => String(title ?? "").replace(/^\s*\[(?:idea|loop|slice)\]\s*/i, "").trim();
@@ -377,6 +397,38 @@ const defaultListLinkedPrs = ({ repo, issue }) => defaultGhPrList({ repo, execut
 // ---------------------------------------------------------------------------------------------
 // Coordinator (all I/O injected)
 // ---------------------------------------------------------------------------------------------
+
+// Pure. True only for a canonical pending grant: exactly one PROPOSED section on the thick packet whose
+// fenced JSON passes the executor-substrate authority validator, a control advertising a grant-specific
+// pending decision naming exactly those components, and an activation that failed specifically because
+// the packet carries no ACTIVE grant section (not for any other blocker).
+export function isCanonicalPendingGrant({ controlBody, thickBody, activationReason }) {
+  if (!controlAdvertisesPendingState(controlBody)) return false;
+  if (!/carries no ACTIVE grant section/i.test(String(activationReason ?? ""))) return false;
+  const lines = String(thickBody ?? "").split(/\r?\n/);
+  const headings = lines.map((l, i) => (/^#{1,6}\s+/.test(l) ? i : -1)).filter((i) => i >= 0);
+  const starts = headings.filter((i) => /^###\s+PROPOSED executor-substrate grant\b/.test(lines[i]));
+  if (starts.length !== 1) return false;
+  const next = headings.find((i) => i > starts[0]) ?? lines.length;
+  const fence = lines.slice(starts[0] + 1, next).join("\n").match(/```json\s*\n([\s\S]*?)\n```/);
+  if (!fence) return false;
+  let record;
+  try {
+    record = JSON.parse(fence[1]);
+  } catch {
+    return false;
+  }
+  const { grants, problems } = parseAuthority(record);
+  if (problems.length > 0 || grants.size === 0) return false;
+  // Every pending representation (decision, interrupt, blocker, current blocker) must be about this grant.
+  if (!pendingMatchesGrant(controlBody, [...grants.keys()]).ok) return false;
+  const decision = parseControlBullet(controlBody, "Founder decision") ?? "";
+  if (!/executor-substrate component grant/i.test(decision)) return false;
+  const named = decision.match(/\(([^)]*)\)/);
+  if (!named) return false;
+  const listed = new Set(named[1].split(",").map((x) => x.trim()).filter(Boolean));
+  return listed.size === grants.size && [...grants.keys()].every((c) => listed.has(c));
+}
 
 export function convertIssuePair(
   { repo, sourceIssue, founderAuthorized = false, proposedGrant = null, route = null, bindOnly = false, dryRun = false },
@@ -570,9 +622,6 @@ export function convertIssuePair(
       return refuse("AMBIGUOUS_CHILDREN", `A competing child of ${repo}#${n} appeared besides #${executionIssue}: ${all.map((c) => `#${c.number} (${c.why})`).join("; ")}. Failing closed; ${repo}#${n} was not bound.`, { sourceIssue: n, executionIssue });
     }
     const pri = derivePriority({ labels: source.labels, sections: splitSections(source.body) });
-    if (pri.conflict) {
-      return refuse("PRIORITY_CONFLICT", `${pri.conflict}; refusing to guess which is current. Fix one, then re-run. ${repo}#${n} was not bound.`, { sourceIssue: n, executionIssue });
-    }
     const proposed = composeControlBody({
       sourceIssue: n,
       sourceTitle: source.title,
@@ -637,10 +686,7 @@ export function convertIssuePair(
   try {
     const cb = readIssue({ repo, number: n, fields: ["body", "state"] }).body;
     const tb = readIssue({ repo, number: executionIssue, fields: ["body", "state"] }).body;
-    pendingNow =
-      controlAdvertisesPendingState(cb) &&
-      /^###\s+PROPOSED executor-substrate grant\b/m.test(String(tb)) &&
-      /executor-substrate component grant/i.test(parseControlBullet(cb, "Founder decision") ?? "");
+    pendingNow = isCanonicalPendingGrant({ controlBody: cb, thickBody: tb, activationReason: result.errors?.[0] ?? result.message });
   } catch {
     pendingNow = false;
   }
