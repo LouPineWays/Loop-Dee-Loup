@@ -3292,7 +3292,9 @@ export function isKnownAttributionDecoration(requested, returned) {
 // byte-exactness; the requested bytes, including CR/LF, must be preserved verbatim before the block.
 export function isKnownAttributionDecorationExact(requested, returned) {
   const req = requested ?? "";
-  if (req.replace(/\n+$/, "").endsWith(CLAUDE_CODE_ATTRIBUTION_LINE)) return false;
+  // Detection only (Audit #1220): tolerate LF or CRLF spellings of the existing terminal block;
+  // the returned-body comparison below stays byte-exact.
+  if (req.replace(/[\r\n]+$/, "").replace(/\r\n/g, "\n").endsWith(CLAUDE_CODE_ATTRIBUTION_LINE)) return false;
   const expected = `${req}\n\n${CLAUDE_CODE_ATTRIBUTION_LINE}`;
   return returned === expected || returned === `${expected}\n`;
 }
