@@ -97,13 +97,53 @@ export function bindContinuationCommand(command, { env = process.env, root = DEF
 
 // Applies the binding to a verdict object about to be printed. On failure the executable command
 // is withheld (fail closed) and the reason is carried explicitly; `actionEnvelope` is never touched.
+//
+// Issue #1213 (control #1212; intake #1208): the Stage 1 correction verdict's
+// `correctionContinuation.steps` are machine-authored checkout-relative commands too
+// (`pr-head-checkout-preflight.mjs --reserve-from-gate --from-handoff`, `format-dispatch-prompt.mjs
+// --from-handoff`). Executed from a stale checkout they ran that checkout's older formatter (the
+// #1197 `ci-failed` rejection). They are bound by exactly the same rule as `nextCommand`: each step
+// re-enters through the verified runner's bootstrap, in the same order, one command per step; when a
+// runner is claimed but unproven every step is withheld (empty `steps`, explicit reason) so a relative
+// string can never silently regain stale authority. No runner in effect => unchanged (the checkout is
+// itself the authorized control plane).
 export function bindVerdictContinuation(verdict, opts = {}) {
-  if (!verdict || typeof verdict.nextCommand !== "string") return verdict;
-  const res = bindContinuationCommand(verdict.nextCommand, opts);
-  if (!res.ok) {
-    const { nextCommand: _dropped, ...rest } = verdict;
-    return { ...rest, nextCommand: null, continuationBindingError: res.reason };
+  if (!verdict) return verdict;
+  let out = verdict;
+  if (typeof out.nextCommand === "string") {
+    const res = bindContinuationCommand(out.nextCommand, opts);
+    if (!res.ok) {
+      const { nextCommand: _dropped, ...rest } = out;
+      out = { ...rest, nextCommand: null, continuationBindingError: res.reason };
+    } else if (res.bound) {
+      out = { ...out, nextCommand: res.command, continuationBound: true };
+    }
   }
-  if (!res.bound) return verdict;
-  return { ...verdict, nextCommand: res.command, continuationBound: true };
+  return bindCorrectionContinuationSteps(out, opts);
+}
+
+function bindCorrectionContinuationSteps(verdict, opts) {
+  const cc = verdict.correctionContinuation;
+  if (!cc || !Array.isArray(cc.steps) || cc.steps.length === 0) return verdict;
+  const bound = [];
+  let anyBound = false;
+  for (const step of cc.steps) {
+    // A step is exactly one control-plane invocation; a chained or non-string step is never bound
+    // (and never emitted) -- bindContinuationCommand would otherwise accept a `&&` chain.
+    const res =
+      typeof step === "string" && !step.includes("&&")
+        ? bindContinuationCommand(step, opts)
+        : { ok: false, reason: "correction continuation step is not a single control-plane script invocation" };
+    if (!res.ok) {
+      return {
+        ...verdict,
+        correctionContinuation: { ...cc, steps: [], continuationBindingError: res.reason },
+        continuationBindingError: verdict.continuationBindingError ?? res.reason,
+      };
+    }
+    if (res.bound) anyBound = true;
+    bound.push(res.command);
+  }
+  if (!anyBound) return verdict;
+  return { ...verdict, correctionContinuation: { ...cc, steps: bound }, continuationBound: true };
 }

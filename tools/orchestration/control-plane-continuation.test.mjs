@@ -263,3 +263,147 @@ test("malformed bound segments (prefixed/suffixed junk) are rejected by unwrap, 
   // Chained: one malformed segment poisons the whole continuation at bind time.
   assert.equal(bindContinuationCommand(`${good} && ${prefixed}`, { env, root: `/cache/${sha}`, readMarker: () => sha }).ok, false);
 });
+
+// ---------------------------------------------------------------------------------------------
+// Issue #1213 (control #1212; intake #1208): correctionContinuation.steps are bound like nextCommand.
+// ---------------------------------------------------------------------------------------------
+import { getCorrectionContinuation } from "./action-envelope.mjs";
+
+const CORRECTION_VERDICT = {
+  state: "STAGE1_CORRECTION_REQUIRED",
+  correctionReason: "ci-failed",
+  controlIssue: 1197,
+  repo: "o/r",
+};
+const CORRECTION_CANON = getCorrectionContinuation("STAGE1_CORRECTION_REQUIRED", CORRECTION_VERDICT);
+
+// Fixture gate: emits the real getCorrectionContinuation steps through the real binding seam.
+const CORRECTION_GATE =
+  `import { bindVerdictContinuation } from "./control-plane-continuation.mjs";\n` +
+  `const v = { ...${JSON.stringify(CORRECTION_VERDICT)}, correctionContinuation: ${JSON.stringify(CORRECTION_CANON)} };\n` +
+  `console.log(JSON.stringify(bindVerdictContinuation(v)));\n`;
+
+function correctionFixture() {
+  const base = mkdtempSync(join(tmpdir(), "ldl-cont1213-"));
+  const seed = join(base, "seed");
+  mkdirSync(seed);
+  git(seed, "init", "-q", "-b", "main");
+  // The reserved PR-head checkout predates `ci-failed`: its formatter rejects it.
+  write(seed, "tools/orchestration/format-dispatch-prompt.mjs", `console.error("STALE-FORMATTER rejects ci-failed"); process.exit(2);\n`);
+  write(seed, "tools/orchestration/pr-head-checkout-preflight.mjs", `console.log("STALE-PREFLIGHT");\n`);
+  write(seed, "README.md", "x\n");
+  git(seed, "add", "-A");
+  git(seed, "commit", "-q", "-m", "c0");
+  const origin = join(base, "origin.git");
+  git(base, "clone", "-q", "--bare", seed, origin);
+  const stale = join(base, "stale");
+  git(base, "clone", "-q", origin, stale);
+  write(seed, "tools/orchestration/format-dispatch-prompt.mjs", `console.log("CURRENT-FORMATTER args=" + process.argv.slice(2).join(","));\n`);
+  write(seed, "tools/orchestration/pr-head-checkout-preflight.mjs", `console.log("CURRENT-PREFLIGHT args=" + process.argv.slice(2).join(","));\n`);
+  write(seed, "tools/orchestration/session-entry-gate.mjs", CORRECTION_GATE);
+  write(seed, "tools/orchestration/control-plane-freshness.mjs", FRESHNESS_SRC);
+  write(seed, "tools/orchestration/control-plane-bootstrap.mjs", BOOTSTRAP_SRC);
+  write(seed, "tools/orchestration/control-plane-continuation.mjs", CONTINUATION_SRC);
+  git(seed, "add", "-A");
+  git(seed, "commit", "-q", "-m", "c1");
+  git(seed, "push", "-q", origin, "main");
+  return { base, seed, origin, stale, cache: join(base, "cache") };
+}
+
+test("#1213 positive: stale reserved checkout + unrelated dirty files still reserve and format via CURRENT tooling, in order, untouched checkout", () => {
+  const f = correctionFixture();
+  writeFileSync(join(f.stale, "thick-1202-final.md"), "unrelated uncommitted\n");
+  const before = snapshot(f.stale);
+  const verdict = runGateViaBootstrap(f);
+  assert.equal(verdict.continuationBound, true);
+  const steps = verdict.correctionContinuation.steps;
+  assert.equal(steps.length, 2);
+  assert.match(steps[0], /control-plane-bootstrap\.mjs tools\/orchestration\/pr-head-checkout-preflight\.mjs --reserve-from-gate --from-handoff --control-issue 1197$/);
+  assert.match(steps[1], /control-plane-bootstrap\.mjs tools\/orchestration\/format-dispatch-prompt\.mjs --from-handoff --control-issue 1197$/);
+  // Control: the unbound relative formatter from the stale checkout reproduces the #1197 rejection.
+  const relative = spawnSync(process.execPath, ["tools/orchestration/format-dispatch-prompt.mjs", "--from-handoff"], { cwd: f.stale, encoding: "utf8" });
+  assert.match(relative.stderr, /STALE-FORMATTER/);
+  const [reserve, format] = runContinuation(f, steps.join(" && "));
+  assert.match(reserve.stdout, /CURRENT-PREFLIGHT args=--reserve-from-gate,--from-handoff,--control-issue,1197/);
+  assert.equal(format.status, 0, format.stderr);
+  assert.match(format.stdout, /CURRENT-FORMATTER args=--from-handoff,--control-issue,1197/);
+  assert.doesNotMatch(reserve.stdout + format.stdout, /STALE/);
+  assert.equal(snapshot(f.stale), before, "reserved checkout HEAD/index/refs/worktree untouched");
+  // Envelope, identity and note are carried through unchanged.
+  assert.equal(verdict.state, CORRECTION_VERDICT.state);
+  assert.equal(verdict.controlIssue, 1197);
+  assert.equal(verdict.correctionContinuation.transport, CORRECTION_CANON.transport);
+  assert.equal(verdict.correctionContinuation.note, CORRECTION_CANON.note);
+});
+
+test("#1213 negative: runner unavailable after binding fails closed (no stale fallback, no second dispatch output)", () => {
+  const f = correctionFixture();
+  const verdict = runGateViaBootstrap(f);
+  git(f.stale, "remote", "set-url", "origin", join(f.base, "missing.git"));
+  const [reserve, format] = runContinuation(f, verdict.correctionContinuation.steps.join(" && "));
+  for (const r of [reserve, format]) {
+    assert.notEqual(r.status, 0);
+    assert.doesNotMatch(r.stdout, /STALE|CURRENT/);
+  }
+});
+
+test("#1213 unbound form preserved when the checkout is the authorized control plane", () => {
+  const f = correctionFixture();
+  git(f.stale, "pull", "-q", "origin", "main");
+  for (const extra of [["--control-plane-source", "checkout"], []]) {
+    const verdict = runGateViaBootstrap(f, ...extra);
+    assert.deepEqual(verdict.correctionContinuation.steps, CORRECTION_CANON.steps);
+    assert.equal(verdict.continuationBound, undefined);
+  }
+});
+
+test("#1213 bindVerdictContinuation: unproven runner withholds every step; envelope/identity untouched", () => {
+  const sha = "a".repeat(40);
+  const witness = JSON.stringify({ runnerCommit: sha });
+  const verdict = { ...CORRECTION_VERDICT, correctionContinuation: CORRECTION_CANON };
+  const bad = [
+    { env: { LDL_CONTROL_PLANE_RUNNER: "{not json" }, root: "/cache/" + sha, readMarker: () => sha }, // invalid witness
+    { env: { LDL_CONTROL_PLANE_RUNNER: witness }, root: "/cache/" + sha, readMarker: () => "b".repeat(40) }, // untrusted/mismatched runner
+    { env: { LDL_CONTROL_PLANE_RUNNER: witness }, root: "/cache/" + sha, readMarker: () => null }, // ambiguous: no marker
+    { env: { LDL_CONTROL_PLANE_RUNNER: witness }, root: "/c a;che/" + sha, readMarker: () => sha }, // unsafe path
+  ];
+  for (const opts of bad) {
+    const out = bindVerdictContinuation(verdict, opts);
+    assert.deepEqual(out.correctionContinuation.steps, []);
+    assert.equal(typeof out.correctionContinuation.continuationBindingError, "string");
+    assert.equal(typeof out.continuationBindingError, "string");
+    assert.equal(out.continuationBound, undefined);
+    assert.equal(out.state, verdict.state);
+    assert.equal(out.controlIssue, verdict.controlIssue);
+    assert.deepEqual(getActionEnvelope(out.state, out), getActionEnvelope(verdict.state, verdict));
+  }
+  // A foreign/chained/non-string step is never emitted, bound or not.
+  const opts = { env: { LDL_CONTROL_PLANE_RUNNER: witness }, root: "/cache/" + sha, readMarker: () => sha };
+  for (const step of ["node evil.mjs", "node tools/orchestration/a.mjs && node tools/orchestration/b.mjs", 42, "node tools/orchestration/../x.mjs"]) {
+    const out = bindVerdictContinuation({ ...verdict, correctionContinuation: { ...CORRECTION_CANON, steps: [CORRECTION_CANON.steps[0], step] } }, opts);
+    assert.deepEqual(out.correctionContinuation.steps, []);
+  }
+});
+
+test("#1213 bound steps are idempotent, order-preserving, and recognized by the hook as the canonical scripts; closing-reference form binds its single step", () => {
+  const sha = "c".repeat(40);
+  const opts = { env: { LDL_CONTROL_PLANE_RUNNER: JSON.stringify({ runnerCommit: sha }) }, root: "/cache/" + sha, readMarker: () => sha };
+  const once = bindVerdictContinuation({ ...CORRECTION_VERDICT, correctionContinuation: CORRECTION_CANON }, opts);
+  const twice = bindVerdictContinuation(once, opts);
+  assert.deepEqual(twice.correctionContinuation.steps, once.correctionContinuation.steps);
+  assert.deepEqual(
+    once.correctionContinuation.steps.map((s) => invokedGateScriptBasenames(s)),
+    CORRECTION_CANON.steps.map((s) => invokedGateScriptBasenames(s)),
+  );
+  assert.deepEqual(once.correctionContinuation.steps.map((s) => unwrapBoundSegment(s.split(/\s+/)).script), [
+    "tools/orchestration/pr-head-checkout-preflight.mjs",
+    "tools/orchestration/format-dispatch-prompt.mjs",
+  ]);
+  const closing = { ...CORRECTION_VERDICT, correctionReason: "closing-reference" };
+  const c = bindVerdictContinuation({ ...closing, correctionContinuation: getCorrectionContinuation("STAGE1_CORRECTION_REQUIRED", closing) }, opts);
+  assert.equal(c.correctionContinuation.steps.length, 1);
+  assert.match(c.correctionContinuation.steps[0], /control-plane-bootstrap\.mjs tools\/orchestration\/format-dispatch-prompt\.mjs --from-handoff/);
+  // Verdicts without a continuation are returned unchanged.
+  const plain = { state: "STAGE1_REVIEW_REQUESTED" };
+  assert.equal(bindVerdictContinuation(plain, opts), plain);
+});
