@@ -123,9 +123,13 @@ function walk(dir, out = []) {
 //   write-control-snapshot.mjs -- THE approved thin-control writer (validateControlSnapshot first).
 //   lifecycle-gate.mjs         -- rewrites a Stage 2 *Audit* Issue's own `### Verdict` field; an
 //                                 audit record, not parser-sensitive thin-control state.
-//   write-thick-grant.mjs      -- promotes one PROPOSED executor-substrate grant heading to ACTIVE in a
-//                                 thick execution Issue (issue #1215); a single-line heading change with
-//                                 stale-base refusal and independent readback, not thin-control state.
+//   write-thick-grant.mjs      -- two bounded modes on a thick execution Issue's executor-substrate grant,
+//                                 not thin-control state: (1) promotes one PROPOSED grant heading to ACTIVE
+//                                 (issue #1215), a single-line heading change with stale-base refusal and
+//                                 independent readback; (2) `--amend` (issue #1223) appends founder-approved
+//                                 component entries to the existing ACTIVE grant under a fixed-format admin
+//                                 approval comment, revalidated immediately before the write, with readback
+//                                 of the complete amended grant set. Neither mode is a generic body editor.
 // Exactly these three. control-body-write-guard.mjs is deliberately NOT exempt (Audit #801 finding
 // 2): it is scanned like every other production file, with only inert text excluded below.
 const BODY_WRITE_ALLOWLIST = new Set([
